@@ -155,6 +155,15 @@ export class SessionManager {
     return this.store.search(query, limit);
   }
 
+  /**
+   * List recently-touched sessions, newest first. Pass-through to the
+   * underlying store; defaults match the store's defaults. Used by the
+   * `session_list` tool (Phase 7+) and by CLI `aiden sessions`.
+   */
+  listSessions(opts: { limit?: number; orderBy?: 'created' | 'updated' } = {}): SessionRecord[] {
+    return this.store.listSessions(opts);
+  }
+
   // ── Internals ────────────────────────────────────────────────────────
 
   private findByExactTitle(title: string): SessionRecord | null {
