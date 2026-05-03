@@ -49,6 +49,14 @@
     "providers/router.ts",
     "providers/index.ts"
   ],
+  "include": [
+    "core/v4/**/*.ts",
+    "providers/v4/**/*.ts",
+    "cli/v4/**/*.ts",
+    "moat/**/*.ts",
+    "platform/**/*.ts",
+    "tools/v4/**/*.ts"
+  ],
   "exclude": [
     "node_modules",
     "dist",
