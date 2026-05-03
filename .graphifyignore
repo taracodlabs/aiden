@@ -1,0 +1,40 @@
+# Build artifacts
+node_modules/
+dist/
+build/
+out/
+.next/
+aiden-pro-dist/
+native-modules/
+dashboard-next/
+release/
+packaging/
+installer/
+dist-bundle/
+electron/
+workspace-templates/
+scratch/
+packages/
+cloudflare-worker/
+
+# Generated files
+*.generated.ts
+*.generated.js
+*.generated.json
+
+# Graphify itself
+graphify-out/
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Aiden-specific (legacy from v3 experiments)
+workspace/
+*.log

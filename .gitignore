@@ -30,7 +30,9 @@ out/
 workspace/
 config/devos.config.json
 config/hardware.json
-graphify-out/
+# Graphify build artifacts (Option B: commit only GRAPH_REPORT.md)
+graphify-out/*
+!graphify-out/GRAPH_REPORT.md
 
 # ── Claude Code session state ─────────────────────────────────────────────────
 .claude/worktrees/
@@ -157,9 +159,6 @@ docs/test-reports/
 
 # ── Claude Code local settings ────────────────────────────────────────────────
 .claude/settings.json
-
-# ── Graph tool artifacts ──────────────────────────────────────────────────────
-.graphifyignore
 
 # ── Misc stray files ──────────────────────────────────────────────────────────
 FileHandling.java
