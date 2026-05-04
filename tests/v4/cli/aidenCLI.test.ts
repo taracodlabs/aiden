@@ -128,6 +128,26 @@ describe('aiden CLI', () => {
     expect(chat.mock.calls[0][0]).toMatchObject({ yolo: true });
   });
 
+  it('aiden --tui flag flows through to chat hook', async () => {
+    const chat = vi.fn(async () => undefined);
+    const { argv, hooks } = captureMain(['--tui'], { runChatHook: chat });
+    await main(argv, hooks);
+    expect(chat).toHaveBeenCalled();
+    expect(chat.mock.calls[0][0]).toMatchObject({ tui: true });
+  });
+
+  it('aiden tui (subcommand) is no longer registered as a v4.1 placeholder', async () => {
+    // commander with an unknown subcommand still parses successfully when
+    // it falls through the default action (chat). To keep the contract
+    // clear we assert that 'tui' as a positional arg does NOT trigger the
+    // v4.1 deferral message anymore. A typed `aiden tui` token is
+    // interpreted as user input by the default action's chat hook.
+    const chat = vi.fn(async () => undefined);
+    const { argv, hooks, out } = captureMain(['tui'], { runChatHook: chat });
+    await main(argv, hooks);
+    expect(out.join('')).not.toMatch(/deferred to v4\.1/i);
+  });
+
   it('aiden batch prints the v4.1 deferral', async () => {
     const { argv, hooks, out } = captureMain(['batch']);
     await main(argv, hooks);

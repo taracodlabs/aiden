@@ -26,6 +26,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { ChatSession } from './chatSession';
+import { runTuiMode } from './aidenTUI';
 import { Display } from './display';
 import { SkinEngine } from './skinEngine';
 import { CommandRegistry } from './commandRegistry';
@@ -85,7 +86,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .name('aiden')
     .description('Aiden — local-first AI agent')
     .version(VERSION, '-v, --version')
-    .option('--tui', 'TUI mode (deferred to Phase 15)', false)
+    .option('--tui', 'Launch full-screen TUI renderer', false)
     .option('-c, --continue', 'Resume the most recent session')
     .option('-r, --resume <title>', 'Resume a session by id-prefix or partial title')
     .option('--yolo', 'Skip approval prompts (YOLO mode)')
@@ -178,8 +179,8 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       out(`'aiden mcp ${action}' is deferred to v4.1 alongside the gateway.\n`);
     });
 
-  // v4.1 placeholders.
-  for (const cmd of ['batch', 'gateway', 'cron', 'pairing', 'tui', 'update']) {
+  // v4.1 placeholders. (`tui` graduated to a real flag in Phase 15.)
+  for (const cmd of ['batch', 'gateway', 'cron', 'pairing', 'update']) {
     program
       .command(cmd)
       .description(`(deferred to v4.1)`)
@@ -348,7 +349,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
   }
 
   // Boot the chat session.
-  const session = new ChatSession({
+  const sessionOpts = {
     agent,
     display,
     commandRegistry,
@@ -366,9 +367,17 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     initialModelId: modelId,
     resumeSessionId,
     yoloMode: !!cliOpts.yolo,
-  });
+  };
 
-  await session.run();
+  if (cliOpts.tui) {
+    await runTuiMode({
+      sessionOpts: sessionOpts as any,
+      skinName: config.getValue<string>('display.skin', 'default') ?? 'default',
+    });
+  } else {
+    const session = new ChatSession(sessionOpts as any);
+    await session.run();
+  }
   if (mcpClient) await mcpClient.closeAll().catch(() => undefined);
   store.close?.();
 }
