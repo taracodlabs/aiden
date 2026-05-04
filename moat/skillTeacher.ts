@@ -90,6 +90,11 @@ export interface SkillTeacherTraceEntry {
 const MIN_TRACE_LEN = 5;
 /** Min distinct toolsets to qualify a workflow as multi-domain. */
 const MIN_TOOLSETS = 2;
+/** Phase 16b.2: min distinct tool *types* before proposing. Stops "skills-hey"
+ *  from a single-tool greeting trace. */
+const MIN_DISTINCT_TOOL_TYPES = 3;
+/** Phase 16b.2: min user message length before proposing. Skips greetings. */
+const MIN_FIRST_USER_LEN = 20;
 /** Successful uses required before quality flagging kicks in. */
 const QUALITY_MIN_USES = 5;
 /** Below this success rate, the skill gets flagged. */
@@ -181,12 +186,25 @@ export class SkillTeacher {
     if (trace.length < MIN_TRACE_LEN) return null;
     if (trace.some((t) => t.error)) return null;
 
+    // Phase 16b.2: don't propose during the FIRST user turn of a session.
+    // Detected by the message history shape — exactly one user message
+    // means this is turn 1 and most workflows haven't been demonstrated
+    // long enough to deserve a skill yet.
+    const userMessages = messages.filter((m) => m.role === 'user');
+    if (userMessages.length < 2) return null;
+
+    // Phase 16b.2: require workflow diversity by *tool type*, not just
+    // toolset. Five calls all to `web_search` shouldn't qualify.
+    const distinctToolTypes = new Set(trace.map((t) => t.name)).size;
+    if (distinctToolTypes < MIN_DISTINCT_TOOL_TYPES) return null;
+
     const toolsets = this.collectToolsets(trace);
     if (toolsets.size < MIN_TOOLSETS) return null;
 
-    const userMessages = messages.filter((m) => m.role === 'user');
     const firstUser = userMessages[0]?.content ?? '';
     if (!firstUser.trim()) return null;
+    // Phase 16b.2: skip short prompts ("hey", "hi", single-word commands).
+    if (firstUser.trim().length < MIN_FIRST_USER_LEN) return null;
     if (OPT_OUT_RE.test(firstUser)) return null;
     // Also scan all user messages for opt-out (later turn might say it).
     for (const m of userMessages) {

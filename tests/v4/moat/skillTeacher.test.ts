@@ -172,7 +172,10 @@ describe('SkillTeacher.observeTurn — gating', () => {
       { name: 'shell_exec' },
     ]);
     const proposal = await teacher.observeTurn(
-      [userMsg('rename old screenshots to dated names')],
+      [
+        userMsg('rename old screenshots to dated names'),
+        userMsg('continue please'),
+      ],
       t,
     );
     expect(proposal).not.toBeNull();
@@ -190,7 +193,10 @@ describe('SkillTeacher.observeTurn — gating', () => {
       { name: 'memory_add' },
     ]);
     const proposal = await teacher.observeTurn(
-      [userMsg('rename old screenshots to dated names')],
+      [
+        userMsg('rename old screenshots to dated names'),
+        userMsg('looks good, continue'),
+      ],
       t,
     );
     expect(proposal!.proposedName).toMatch(/^[a-z][a-z0-9-]+$/);
@@ -209,10 +215,76 @@ describe('SkillTeacher.observeTurn — gating', () => {
       { name: 'memory_add' },
     ]);
     const proposal = await teacher.observeTurn(
-      [userMsg('research and save findings')],
+      [
+        userMsg('research the topic and save the findings to a note'),
+        userMsg('keep going'),
+      ],
       t,
     );
     expect(proposal!.description).toMatch(/files|web|memory/i);
+  });
+
+  // Phase 16b.2 — additional gating tests
+  it('15. returns null on first turn (only one user message)', async () => {
+    const { teacher } = makeTeacher();
+    const t = trace([
+      { name: 'file_read' },
+      { name: 'file_write' },
+      { name: 'web_search' },
+      { name: 'web_fetch' },
+      { name: 'memory_add' },
+    ]);
+    const proposal = await teacher.observeTurn(
+      [userMsg('rename old screenshots to dated names')],
+      t,
+    );
+    expect(proposal).toBeNull();
+  });
+
+  it('16. returns null when user message is too short (< 20 chars)', async () => {
+    const { teacher } = makeTeacher();
+    const t = trace([
+      { name: 'file_read' },
+      { name: 'file_write' },
+      { name: 'web_search' },
+      { name: 'web_fetch' },
+      { name: 'memory_add' },
+    ]);
+    const proposal = await teacher.observeTurn(
+      [userMsg('hey'), userMsg('go')],
+      t,
+    );
+    expect(proposal).toBeNull();
+  });
+
+  it('17. returns null when distinct tool types < 3 (e.g. all web_search)', async () => {
+    const { teacher } = makeTeacher();
+    const t = trace([
+      { name: 'web_search' },
+      { name: 'web_search' },
+      { name: 'web_fetch' },
+      { name: 'web_search' },
+      { name: 'web_fetch' },
+    ]);
+    // Only 2 distinct tool types (web_search, web_fetch). Even though they
+    // span... well actually they're both 'web' toolset. Build a case with
+    // 2 toolsets but still only 2 distinct names.
+    const t2 = trace([
+      { name: 'web_search' },
+      { name: 'file_read' },
+      { name: 'web_search' },
+      { name: 'file_read' },
+      { name: 'web_search' },
+    ]);
+    void t;
+    const proposal = await teacher.observeTurn(
+      [
+        userMsg('do a fairly long enough request please'),
+        userMsg('continue'),
+      ],
+      t2,
+    );
+    expect(proposal).toBeNull();
   });
 });
 

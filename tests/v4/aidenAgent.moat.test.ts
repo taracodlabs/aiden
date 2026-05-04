@@ -229,8 +229,12 @@ describe('AidenAgent — SkillTeacher wiring', () => {
       resolveToolset: (n) =>
         REGISTRY_HANDLERS.find((h) => h.schema.name === n)?.toolset,
     });
+    // Phase 16b.2: SkillTeacher no longer proposes on the first turn,
+    // so the test history is two user messages — turn 2 is when
+    // proposals can fire.
     const result = await agent.runConversation([
-      userMsg('research and save findings'),
+      userMsg('research the topic and save the findings to a note'),
+      userMsg('continue please'),
     ]);
     expect(result.skillCreated).toBeDefined();
     expect(skillManager.execute).toHaveBeenCalledOnce();
@@ -265,7 +269,10 @@ describe('AidenAgent — SkillTeacher wiring', () => {
       resolveToolset: (n) =>
         REGISTRY_HANDLERS.find((h) => h.schema.name === n)?.toolset,
     });
-    await agent.runConversation([userMsg('research and save findings')]);
+    await agent.runConversation([
+      userMsg('research the topic and save the findings to a note'),
+      userMsg('continue please'),
+    ]);
     expect(promptUser).toHaveBeenCalledOnce();
     expect(skillManager.execute).toHaveBeenCalledOnce();
   });
@@ -306,7 +313,8 @@ describe('AidenAgent — moat composition', () => {
         REGISTRY_HANDLERS.find((h) => h.schema.name === n)?.toolset,
     });
     const result = await agent.runConversation([
-      userMsg('save the file then remember the path'),
+      userMsg('save the file then remember the path for later'),
+      userMsg('keep going please'),
     ]);
     // Honesty: file_write fired → "I saved the file to disk." passes.
     expect(result.finalContent).toBe('I saved the file to disk.');
