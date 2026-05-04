@@ -49,6 +49,8 @@ import { ToolRegistry } from '../../core/v4/toolRegistry';
 import { SkillLoader } from '../../core/v4/skillLoader';
 import { SkillCommands } from '../../core/v4/skillCommands';
 import { AidenAgent } from '../../core/v4/aidenAgent';
+import { PromptBuilder } from '../../core/v4/promptBuilder';
+import { PersonalityManager } from '../../core/v4/personality';
 import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 import { MemoryManager } from '../../core/v4/memoryManager';
 
@@ -564,6 +566,46 @@ export async function buildAgentRuntime(
   const resolveToolset = (name: string) =>
     toolRegistry.get(name)?.toolset;
 
+  // ── Phase 16b.4: assemble system-prompt context ─────────────────────
+  // PromptBuilder needs SOUL.md (read at build time from `paths.soulMd`),
+  // a frozen MemorySnapshot (loaded once at boot — same lifecycle as
+  // Hermes' `_cached_system_prompt`), the active personality overlay, and
+  // a compact skills list. All optional except the SOUL.md path itself.
+  const promptBuilder = new PromptBuilder();
+  const personalityManager = new PersonalityManager({
+    paths,
+    initialCurrent: config.getValue<string>('personality.current', 'default') ?? 'default',
+  });
+  let memorySnapshot;
+  try {
+    memorySnapshot = await memoryManager.loadSnapshot();
+  } catch {
+    memorySnapshot = undefined;
+  }
+  let activeOverlay = '';
+  try {
+    activeOverlay = await personalityManager.getActiveOverlay();
+  } catch {
+    activeOverlay = '';
+  }
+  let skillsList: Array<{ name: string; description: string }> = [];
+  try {
+    const loaded = await skillLoader.list();
+    skillsList = loaded.slice(0, 32).map((s) => ({
+      name: (s as { name: string }).name,
+      description: ((s as { description?: string }).description ?? '').slice(0, 120),
+    }));
+  } catch {
+    skillsList = [];
+  }
+  const promptBuilderOptions = {
+    paths,
+    memorySnapshot,
+    skillsList,
+    personalityOverlay: activeOverlay,
+    modelId,
+  };
+
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
@@ -582,6 +624,9 @@ export async function buildAgentRuntime(
     resolveToolset,
     providerId,
     modelId,
+    // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.
+    promptBuilder,
+    promptBuilderOptions,
   });
 
   // Command registry.
@@ -640,6 +685,7 @@ export async function buildAgentRuntime(
     modelId,
     resumeSessionId,
     fallbackAdapter,
+    personalityManager,
   };
 }
 
@@ -683,6 +729,8 @@ export interface AgentRuntime {
   resumeSessionId: string | undefined;
   /** Phase 16b.1: present when a multi-slot fallback chain is active. */
   fallbackAdapter: FallbackAdapter | null;
+  /** Phase 16b.4: personality overlay manager wired into chatSession + commands. */
+  personalityManager: PersonalityManager;
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
@@ -708,6 +756,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     yoloMode: !!cliOpts.yolo,
     fallbackAdapter: runtime.fallbackAdapter,
     paths: runtime.paths,
+    personalityManager: runtime.personalityManager,
   };
 
   if (cliOpts.tui) {

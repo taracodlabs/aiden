@@ -220,6 +220,49 @@ export class AidenAgent {
     this.provider = adapter;
   }
 
+  /**
+   * Phase 16b.4: drop the cached system prompt so the next `runConversation`
+   * rebuilds it. Used by `/personality` when the active overlay changes —
+   * SOUL.md (slot 1) is identical, but slot 2 needs to swap. Also useful
+   * after editing SOUL.md from outside the REPL.
+   */
+  invalidateSystemPromptCache(): void {
+    this.cachedSystemPrompt = null;
+  }
+
+  /**
+   * Phase 16b.4: replace the personality overlay used in slot 2 of the next
+   * built prompt. Mutates `promptBuilderOptions` in place so the next
+   * `runConversation` rebuild picks up the new body. Returns whether the
+   * overlay actually changed (callers can skip cache invalidation when the
+   * value is identical).
+   */
+  setPersonalityOverlay(overlay: string | undefined): boolean {
+    if (!this.promptBuilderOptions) return false;
+    const prev = this.promptBuilderOptions.personalityOverlay ?? '';
+    const next = overlay ?? '';
+    if (prev === next) return false;
+    this.promptBuilderOptions.personalityOverlay = next;
+    this.cachedSystemPrompt = null;
+    return true;
+  }
+
+  /**
+   * Phase 16b.4: returns the cached system prompt, building it on demand if
+   * `promptBuilder` is wired and the cache is empty. Read-only accessor used
+   * by the `/debug-prompt` slash command — does NOT trigger an LLM call.
+   * Returns `null` when no prompt builder is wired (Phase 12 callers).
+   */
+  async getSystemPromptForDebug(): Promise<string | null> {
+    if (!this.promptBuilder || !this.promptBuilderOptions) return null;
+    if (this.cachedSystemPrompt === null) {
+      this.cachedSystemPrompt = await this.promptBuilder.build(
+        this.promptBuilderOptions,
+      );
+    }
+    return this.cachedSystemPrompt;
+  }
+
   async runConversation(initialMessages: Message[]): Promise<AidenAgentResult> {
     // ── Phase 13: Build (or reuse cached) system prompt at session start ──
     let messages: Message[] = [...initialMessages];
