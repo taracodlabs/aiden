@@ -25,6 +25,7 @@ import type { SkillsHub } from '../../core/v4/skillsHub';
 import type { Message } from '../../providers/v4/types';
 import type { PersonalityManager } from '../../core/v4/personality';
 import type { AidenPaths } from '../../core/v4/paths';
+import type { AidenAgent } from '../../core/v4/aidenAgent';
 
 /**
  * Lightweight session abstraction commands consume. The full chat REPL
@@ -69,6 +70,12 @@ export interface SlashCommandContext {
   fallbackAdapter?: import('../../core/v4/providerFallback').FallbackAdapter | null;
   /** Phase 16b.3: resolved Aiden user-data paths — needed by `/identity` to read SOUL.md. */
   paths?: AidenPaths;
+  /**
+   * Phase 16b.4: live agent reference. Used by `/debug-prompt` (read system
+   * prompt) and by `/personality` (invalidate the prompt cache after a
+   * switch so the next turn picks up the new overlay).
+   */
+  agent?: AidenAgent;
 }
 
 /** Result produced by a command handler. */

@@ -24,6 +24,7 @@ import { clear } from './clear';
 import { quit } from './quit';
 import { providers } from './providers';
 import { identity } from './identity';
+import { debugPrompt } from './debugPrompt';
 
 export {
   help,
@@ -44,6 +45,7 @@ export {
   quit,
   providers,
   identity,
+  debugPrompt,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -54,6 +56,7 @@ export const allCommands: SlashCommand[] = [
   providers,
   personality,
   identity,
+  debugPrompt,
   save,
   title,
   compress,
