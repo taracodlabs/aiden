@@ -24,6 +24,14 @@ Single-loop agent replaces planner+responder split. ONE LLM. Tools called inside
 - Phased delivery. Each phase leaves runnable build. Stop and ask if uncertain.
 - No fabrication. No silent workarounds. Stop and report.
 
+### Hermes-audit-first (standing rule, added Phase 16b.3)
+Before solving any UX, prompt, identity, error-handling, or onboarding problem
+in Aiden, the sub-agent MUST first audit how Hermes solves it
+(path: `C:\Users\shiva\references\hermes-agent`). Output a 1-page audit doc
+under `docs/sprint/` with file refs (`path:line`) and an explicit decision per
+topic — copy / adapt / diverge with reason. Only then write code. The audit
+itself is part of the deliverable; phases that skip it must be redone.
+
 ## Token-efficient working pattern (every phase)
 1. Read previous phase summary: `docs/sprint/phase-N-1-completed.md`
 2. Use `graphify query "..."` BEFORE reading files (200 tokens vs 5000+ for file reads)
