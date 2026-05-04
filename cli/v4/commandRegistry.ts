@@ -64,6 +64,8 @@ export interface SlashCommandContext {
   auxiliaryClient?: AuxiliaryClient;
   skillsHub?: SkillsHub;
   personalityManager?: PersonalityManager;
+  /** Phase 16b.1: present when a multi-slot fallback chain is wired. */
+  fallbackAdapter?: import('../../core/v4/providerFallback').FallbackAdapter | null;
 }
 
 /** Result produced by a command handler. */

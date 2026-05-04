@@ -1,7 +1,7 @@
 /**
- * cli/v4/commands/index.ts — Phase 14b barrel
+ * cli/v4/commands/index.ts — Phase 14b barrel (Phase 16b.1: +/providers)
  *
- * Exports the 16 system slash commands. Phase 14c imports `allCommands`
+ * Exports the system slash commands. Phase 14c imports `allCommands`
  * and registers each on the global CommandRegistry at boot.
  */
 
@@ -22,6 +22,7 @@ import { reasoning } from './reasoning';
 import { verbose } from './verbose';
 import { clear } from './clear';
 import { quit } from './quit';
+import { providers } from './providers';
 
 export {
   help,
@@ -40,13 +41,15 @@ export {
   verbose,
   clear,
   quit,
+  providers,
 };
 
-/** All 16 built-in system commands, in canonical order. */
+/** All built-in system commands, in canonical order. */
 export const allCommands: SlashCommand[] = [
   help,
   tools,
   model,
+  providers,
   personality,
   save,
   title,

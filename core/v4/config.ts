@@ -85,6 +85,9 @@ const KNOWN_KEYS = new Set([
   'display',
   'providers',
   'memory',
+  // Phase 10 introduced the terminal toolset — its config block lands
+  // under the top-level `terminal` key (e.g. terminal.backend = 'auto').
+  'terminal',
 ]);
 
 const ENV_REF_RE = /\$\{([^}]+)\}/g;

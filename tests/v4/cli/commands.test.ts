@@ -57,10 +57,10 @@ function makeCtx(over: Record<string, unknown> = {}) {
 }
 
 describe('barrel exports', () => {
-  it('allCommands has 16 entries with unique names', () => {
-    expect(allCommands.length).toBe(16);
+  it('allCommands has 17 entries with unique names', () => {
+    expect(allCommands.length).toBe(17);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(16);
+    expect(names.size).toBe(17);
   });
 
   it('every command exposes name, description, category', () => {

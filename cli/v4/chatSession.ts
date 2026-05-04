@@ -74,6 +74,9 @@ export interface ChatSessionOptions {
   initialProviderId: string;
   initialModelId: string;
 
+  /** Phase 16b.1: optional FallbackAdapter for /providers diagnostics. */
+  fallbackAdapter?: import('../../core/v4/providerFallback').FallbackAdapter | null;
+
   /** Optional: resume an existing session id. */
   resumeSessionId?: string;
   /** Pre-loaded history when resuming. */
@@ -220,6 +223,7 @@ export class ChatSession implements ChatSessionLike {
             skin: this.opts.skin,
             mcpClient: this.opts.mcpClient,
             auxiliaryClient: this.opts.auxiliaryClient,
+            fallbackAdapter: this.opts.fallbackAdapter ?? null,
           });
           if (result.exit) break;
           if (result.clearHistory) this.history = [];

@@ -70,6 +70,13 @@ import { TirithScanner } from '../../moat/tirithScanner';
 
 import { CredentialResolver } from '../../providers/v4/credentialResolver';
 import { RuntimeResolver } from '../../providers/v4/runtimeResolver';
+import { ChatCompletionsAdapter } from '../../providers/v4/chatCompletionsAdapter';
+import {
+  FallbackAdapter,
+  buildDefaultSlots,
+  type ProviderSlot,
+} from '../../core/v4/providerFallback';
+import { restoreBundledSkillsIfNeeded } from '../../core/v4/skillBundledRestore';
 
 import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
@@ -112,6 +119,43 @@ function coerceMode<T extends string>(
 }
 
 const VERSION = '4.0.0';
+
+/**
+ * Build slots for the runtime FallbackAdapter, putting the user's
+ * configured (providerId, modelId) at the head so it stays primary
+ * even when GROQ_API_KEY etc. happen to be set in the environment.
+ */
+function buildAgentFallbackSlots(
+  primaryAdapter: import('../../providers/v4/types').ProviderAdapter,
+  primaryProviderId: string,
+  primaryModelId: string,
+): ProviderSlot[] {
+  const defaults = buildDefaultSlots({
+    adapterFactory: (cfg) =>
+      new ChatCompletionsAdapter({
+        baseUrl: cfg.baseUrl,
+        apiKey: cfg.apiKey,
+        model: cfg.model,
+        providerName: cfg.providerName,
+      }),
+  });
+  // Synthesise a primary slot that wraps the already-resolved adapter
+  // (so it picks up config.yaml / auth.json overrides the env-var slots
+  // would miss). It always builds — primary credentials were validated
+  // by the resolver already.
+  const primarySlot: ProviderSlot = {
+    id: 'primary',
+    providerId: primaryProviderId,
+    modelId: primaryModelId,
+    keyPresent: true,
+    keyTail: null,
+    build: () => primaryAdapter,
+  };
+  // Filter out env-var slots whose providerId matches the primary AND
+  // whose env-var-derived key would shadow it (avoids double-trying the
+  // same Groq account at slots 0 and 1).
+  return [primarySlot, ...defaults];
+}
 
 export interface MainOptions {
   /** Override for test injection — bypasses real subsystem boot. */
@@ -286,6 +330,10 @@ export async function buildAgentRuntime(
   const paths = opts.pathsOverride ?? resolveAidenPaths();
   await ensureAidenDirsExist(paths);
 
+  // Phase 16b.1: first-run / self-heal copy of bundled skills. No-op
+  // when the user's skills dir is already populated.
+  await restoreBundledSkillsIfNeeded(paths).catch(() => undefined);
+
   const config = new ConfigManager(paths);
   await config.load();
 
@@ -334,6 +382,28 @@ export async function buildAgentRuntime(
       'Run `aiden model` to pick a valid provider, or `aiden doctor`.',
     );
     process.exit(1);
+  }
+
+  // Phase 16b.1: wrap chat_completions providers in a FallbackAdapter so
+  // 429s on Groq slot 1 transparently retry Groq slot 2/3 and Together.
+  // Only activates when there's at least one *additional* slot configured
+  // beyond the primary — otherwise the wrapper would just rethrow.
+  let fallbackAdapter: FallbackAdapter | null = null;
+  if (
+    adapter.apiMode === 'chat_completions' &&
+    (providerId === 'groq' || providerId === 'together')
+  ) {
+    const slots = buildAgentFallbackSlots(adapter, providerId, modelId);
+    const reachable = slots.filter((s) => s.keyPresent);
+    if (reachable.length >= 2) {
+      fallbackAdapter = new FallbackAdapter({
+        apiMode: 'chat_completions',
+        slots,
+        onRateLimit: (slotId) =>
+          display.dim(`(slot ${slotId} rate-limited — falling through)`),
+      });
+      adapter = fallbackAdapter;
+    }
   }
 
   // Tool registry + executor.
@@ -549,6 +619,7 @@ export async function buildAgentRuntime(
     providerId,
     modelId,
     resumeSessionId,
+    fallbackAdapter,
   };
 }
 
@@ -590,6 +661,8 @@ export interface AgentRuntime {
   providerId: string;
   modelId: string;
   resumeSessionId: string | undefined;
+  /** Phase 16b.1: present when a multi-slot fallback chain is active. */
+  fallbackAdapter: FallbackAdapter | null;
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
@@ -613,6 +686,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     initialModelId: runtime.modelId,
     resumeSessionId: runtime.resumeSessionId,
     yoloMode: !!cliOpts.yolo,
+    fallbackAdapter: runtime.fallbackAdapter,
   };
 
   if (cliOpts.tui) {

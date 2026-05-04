@@ -173,4 +173,21 @@ describe('ConfigManager', () => {
     await fs.writeFile(configPath, 'model: [unterminated\n  provider: x', 'utf8');
     await expect(mgr.load()).rejects.toThrow(/config\.yaml/i);
   });
+
+  it('12. (16b.1) `terminal` is a known top-level key and does not warn', async () => {
+    const warns: string[] = [];
+    const spy = vi
+      .spyOn(console, 'warn')
+      .mockImplementation((msg) => warns.push(String(msg)));
+    await fs.writeFile(
+      configPath,
+      ['terminal:', '  backend: auto'].join('\n'),
+      'utf8',
+    );
+    const cfg = await mgr.load();
+    spy.mockRestore();
+    // No "Unknown top-level key 'terminal'" warning should have been emitted.
+    expect(warns.some((w) => w.includes("Unknown top-level key 'terminal'"))).toBe(false);
+    expect(((cfg as any).terminal as { backend: string }).backend).toBe('auto');
+  });
 });
