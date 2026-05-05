@@ -67,7 +67,15 @@ export interface PlannerGuardDecision {
     | 'no_filter'
     | 'rule_match'
     | 'llm_classification'
-    | 'fallback';
+    | 'fallback'
+    /**
+     * Phase 16g: no keyword rule matched — open the inventory rather
+     * than narrow to CORE_TOOL_NAMES. Per
+     * `docs/sprint/hermes-autonomy-audit.md`, Hermes never narrows
+     * per-turn. Restoring full agency for fuzzy multi-step intents
+     * ("play me a song on youtube") that don't match any rule.
+     */
+    | 'no_rule_match_open';
   /** 0–1, only set in llm_classified mode. */
   confidence?: number;
 }
@@ -239,24 +247,21 @@ export class PlannerGuard {
     // Always include skill-activated toolsets.
     for (const t of this.activeToolsets) matchedToolsets.add(t);
 
-    // Empty / no-match user message: return only core tools.
-    // Empty registry is handled by caller.
+    // Phase 16g: no keyword rule matched. Pre-16g this returned only
+    // CORE_TOOL_NAMES (3 tools), which broke fuzzy multi-step intents
+    // like "play me a song on youtube" — the model could not see
+    // browser_navigate / web_search / open_url and had no pathway to
+    // chain. Per docs/sprint/hermes-autonomy-audit.md, Hermes never
+    // narrows per-turn; restoring full agency on fuzzy intents.
+    //
+    // Explicit single-domain intents still narrow correctly because
+    // their keyword rule fires (the path below this block).
     const ruleMatched = matchedToolsets.size > 0;
     if (!ruleMatched) {
-      const selected = allNames.filter((n) => CORE_TOOL_NAMES.has(n));
-      // Edge case: registry has no core tools — return ALL tools (open).
-      // This preserves the "narrow only" contract: never strip everything.
-      if (selected.length === 0) {
-        return {
-          selectedTools: allNames,
-          excludedTools: [],
-          reason: 'no_filter',
-        };
-      }
       return {
-        selectedTools: selected,
-        excludedTools: allNames.filter((n) => !CORE_TOOL_NAMES.has(n)),
-        reason: 'rule_match',
+        selectedTools: allNames,
+        excludedTools: [],
+        reason: 'no_rule_match_open',
       };
     }
 

@@ -125,36 +125,58 @@ describe('PlannerGuard — rule_based', () => {
     expect(decision.selectedTools).toContain('session_search');
   });
 
-  it('6. no rule match returns only core tools', async () => {
+  it('6. no rule match returns full tool inventory (Phase 16g)', async () => {
+    // Phase 16g: pre-16g returned only CORE_TOOL_NAMES (3 tools), which
+    // broke fuzzy multi-step intents like "play me a song on youtube"
+    // — model couldn't see browser/web/shell tools and had no pathway
+    // to chain. Now matches Hermes pattern (no per-turn narrowing on
+    // fuzzy intents).
     const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
     const decision = await guard.decide('hi there friend', []);
-    expect(decision.selectedTools.sort()).toEqual(
-      ['lookup_tool_schema', 'session_search', 'skills_list'].sort(),
-    );
-    // file_read etc. excluded
-    expect(decision.excludedTools).toContain('file_read');
-    expect(decision.excludedTools).toContain('web_search');
-    expect(decision.reason).toBe('rule_match');
+    // ALL registered tools surfaced.
+    expect(decision.selectedTools).toContain('file_read');
+    expect(decision.selectedTools).toContain('web_search');
+    expect(decision.selectedTools).toContain('skills_list');
+    expect(decision.excludedTools).toEqual([]);
+    expect(decision.reason).toBe('no_rule_match_open');
   });
 
   it('7. skill-required toolsets become active after activateToolsets()', async () => {
     const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
-    // First turn: no match → only core.
-    let decision = await guard.decide('hello', []);
-    expect(decision.selectedTools).not.toContain('browser_click');
-    // Skill activation (e.g. user opened a browser-using skill).
+    // Phase 16g: with the open-fallback, "hello" alone returns all
+    // tools — activation is hard to distinguish from open-fallback.
+    // Use a message that triggers a NON-browser rule (memory) so the
+    // narrow path is exercised, then check activation adds browser
+    // tools on top.
     guard.activateToolsets(['browser']);
-    decision = await guard.decide('hello again', []);
+    const decision = await guard.decide('remember this', []);
+    // 'remember' triggers the memory rule → narrow path active.
+    // Activation adds browser to matchedToolsets, so browser tools
+    // are also included alongside the memory tools.
     expect(decision.selectedTools).toContain('browser_click');
-    expect(decision.selectedTools).toContain('browser_screenshot');
+    expect(decision.selectedTools).toContain('memory_add');
+    expect(decision.reason).toBe('rule_match');
   });
 
-  it('8. empty user message returns core tools only', async () => {
+  it('8. empty user message returns full inventory too (Phase 16g)', async () => {
     const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
     const decision = await guard.decide('', []);
-    expect(decision.selectedTools.sort()).toEqual(
-      ['lookup_tool_schema', 'session_search', 'skills_list'].sort(),
-    );
+    // Empty message also has no keyword matches → full inventory.
+    expect(decision.selectedTools).toContain('file_read');
+    expect(decision.selectedTools).toContain('web_search');
+    expect(decision.reason).toBe('no_rule_match_open');
+  });
+
+  it('8a. explicit keyword intent still narrows correctly (Phase 16g)', async () => {
+    // Counter-test: Phase 16g should NOT regress the narrow path. A
+    // message that explicitly mentions one domain still gets narrowed.
+    const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
+    const decision = await guard.decide('search the web for npm news', []);
+    expect(decision.selectedTools).toContain('web_search');
+    // Browser stays excluded because the user said "search the web",
+    // not "open the browser".
+    expect(decision.excludedTools).toContain('browser_click');
+    expect(decision.reason).toBe('rule_match');
   });
 
   it('9. multi-tool message: union of all matched toolsets', async () => {
