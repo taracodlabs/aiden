@@ -112,6 +112,18 @@ This is **net-new design**, not a port. It is also advisory only (no OS-level sa
 3. *Plugin permissions need OS-level sandboxing.* — **Confirmed gap.** v4.0 ships advisory-only permissions (declare + grant + dispatch-time check) — Pro-tier trust UX, not a security boundary. Real sandbox revisited in v4.1.
 4. *Hermes plugin format conflicts with existing skill/tool registrations.* — **No conflict.** Plugins use `ctx.register_tool(handler)` which delegates to existing `ToolRegistry.register()`. Same registry, no adapter layer needed. Skills and plugins are orthogonal: skills are markdown bundles loaded by `skillLoader`; plugins are TS modules loaded by `pluginLoader`. A plugin *can* register skills via `ctx.register_skill(...)` (Phase 17.5 if needed; not blocking Task 2).
 
+## Hermes CDP attach flow (relevant for Phase 17 Task 2)
+
+Hermes already handles the "user already has Chrome running" case correctly. Pattern at `hermes_cli/browser_connect.py:1–139` and `tui_gateway/server.py:5512–5612`:
+
+1. Probe `http://127.0.0.1:9222/json/version` to detect a live CDP endpoint.
+2. If unresponsive, locate a Chrome-family binary (Chrome / Chromium / Brave / Edge — see `_WINDOWS_BIN_NAMES` / `_LINUX_BIN_NAMES`).
+3. Launch a **separate** instance with `--remote-debugging-port=9222 --user-data-dir=<hermes-home>/chrome-debug --no-first-run --no-default-browser-check`. The dedicated `user-data-dir` is the load-bearing piece — it means the user's regular Chrome session is never touched.
+4. On Windows: detach via `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`. POSIX: `start_new_session=True`.
+5. If no Chrome binary found, `manual_chrome_debug_command()` returns the printable command for the user to run themselves.
+
+Aiden Task 2 ports this pattern verbatim — `<aiden-home>/chrome-debug` profile dir, same flag set, same fallback. No divergence.
+
 ## Bundled plugins inventory (Hermes)
 
 For reference (decision-making for v4.x roadmap, not Phase 17 ports):

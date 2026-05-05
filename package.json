@@ -222,6 +222,7 @@
     "better-sqlite3": "^12.9.0",
     "blessed": "^0.1.81",
     "chalk": "^5.6.2",
+    "chrome-remote-interface": "^0.34.0",
     "cors": "^2.8.5",
     "discord.js": "^14.25.1",
     "dockerode": "^4.0.9",

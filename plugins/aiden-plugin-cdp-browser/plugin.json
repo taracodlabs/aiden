@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "name": "aiden-plugin-cdp-browser",
+  "version": "1.0.0",
+  "author": "Shiva Deore",
+  "description": "Real-Chrome control via the Chrome DevTools Protocol — click, extract, eval against the user's browser instead of headless Playwright. Closes the open_url → click-result loop that the v3 browser tools could not (Phase 16h diagnostic).",
+  "kind": "bundled",
+  "tools": ["browser_real_click", "browser_real_extract", "browser_real_eval"],
+  "skills": [],
+  "providers": [],
+  "permissions": ["browser", "subprocess", "network"],
+  "requiresEnv": []
+}
