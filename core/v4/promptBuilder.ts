@@ -129,19 +129,42 @@ export class PromptBuilder {
     }
 
     // ── Slot 3: MEMORY.md ────────────────────────────────────────────
+    // Phase 16e: framing copied/adapted from Hermes
+    // (`tools/memory_tool.py:393-409`). The parenthetical in the header
+    // ("your personal notes") tells the model this is its own working
+    // memory, not transcript snippets — `## Agent memory` alone read as
+    // "previous conversation log" and the model said "I don't have any
+    // information from our previous conversations" even when content was
+    // present. The system note line is borrowed from Hermes's external-
+    // provider context block (`memory_manager.py:184-188`).
     if (opts.memorySnapshot && opts.memorySnapshot.memoryMd.trim()) {
+      const sep = '═'.repeat(51);
       slots.push({
         name: 'memory',
-        content: `## Agent memory\n\n${opts.memorySnapshot.memoryMd.trim()}`,
+        content:
+          `${sep}\nMEMORY (your personal notes)\n${sep}\n` +
+          `[System note: The following are your own notes from prior ` +
+          `interactions. Treat as live working memory, not past ` +
+          `conversation transcript.]\n\n` +
+          opts.memorySnapshot.memoryMd.trim(),
         optional: true,
       });
     }
 
     // ── Slot 4: USER.md ──────────────────────────────────────────────
+    // Same pattern as slot 3 but framed as user identity. "(who the user
+    // is)" matches Hermes verbatim — it's the framing that prevents the
+    // model from treating this as transcript history.
     if (opts.memorySnapshot && opts.memorySnapshot.userMd.trim()) {
+      const sep = '═'.repeat(51);
       slots.push({
         name: 'user',
-        content: `## User profile\n\n${opts.memorySnapshot.userMd.trim()}`,
+        content:
+          `${sep}\nUSER PROFILE (who the user is)\n${sep}\n` +
+          `[System note: The following is what you currently know about ` +
+          `the user. Treat as live identity, not past conversation ` +
+          `transcript.]\n\n` +
+          opts.memorySnapshot.userMd.trim(),
         optional: true,
       });
     }

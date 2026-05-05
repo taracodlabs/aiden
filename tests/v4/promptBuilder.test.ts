@@ -79,6 +79,48 @@ describe('PromptBuilder', () => {
     expect(out).toContain('User prefers concise');
   });
 
+  it('4a. memory section uses Hermes-style identity framing (Phase 16e)', async () => {
+    // Locks the parenthetical phrasing copied from Hermes
+    // (`tools/memory_tool.py:393-409`). Without this framing the model
+    // treats USER.md as past conversation and refuses to surface it
+    // (16d run-1 smoke).
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      memorySnapshot: {
+        memoryMd: 'note A',
+        userMd: 'fact B',
+        loadedAt: Date.now(),
+        isEmpty: false,
+      },
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).toContain('USER PROFILE (who the user is)');
+    expect(out).toContain('MEMORY (your personal notes)');
+    expect(out).toContain('═════');
+  });
+
+  it('4b. memory section includes anti-confusion system note (Phase 16e)', async () => {
+    // Locks the [System note: …] line that Hermes puts on external
+    // provider blocks (`memory_manager.py:184-188`). We apply it to the
+    // built-in MEMORY/USER blocks too because that's where the bug lived.
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      memorySnapshot: {
+        memoryMd: 'agent note',
+        userMd: 'user fact',
+        loadedAt: Date.now(),
+        isEmpty: false,
+      },
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).toMatch(/Treat as live identity, not past conversation/);
+    expect(out).toMatch(/Treat as live working memory, not past conversation/);
+  });
+
   it('5. slots assembled in deterministic order (identity → memory → user → skills → budget → env)', async () => {
     const pb = new PromptBuilder();
     const out = await pb.build({
