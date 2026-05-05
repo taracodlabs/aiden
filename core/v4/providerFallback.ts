@@ -25,6 +25,7 @@ import type {
   ProviderAdapter,
   ProviderCallInput,
   ProviderCallOutput,
+  StreamEvent,
 } from '../../providers/v4/types';
 
 /**
@@ -442,6 +443,175 @@ export class FallbackAdapter implements ProviderAdapter {
     }
     this.lastSuccessfulSlot = result.slotId;
     return result.value;
+  }
+
+  /**
+   * Phase 16c: streaming variant. Mirrors `call()` slot iteration but
+   * relays `StreamEvent`s as the active slot streams. Strategy:
+   *
+   *   - For each slot in fresh-then-cooling order, build the adapter
+   *     and verify it implements `callStream`. If not, fall through to
+   *     non-streaming `.call()` on that slot, wrap the result in a
+   *     synthetic `done` event, and yield it.
+   *   - Begin streaming. If the FIRST awaited iteration throws a
+   *     rate-limit error, treat it like a 429 on the non-streaming path:
+   *     mark the slot, advance to the next slot. No tokens were yielded,
+   *     so no client-visible state is corrupted.
+   *   - If a rate-limit error fires AFTER tokens have already been
+   *     yielded (genuinely mid-stream 429), we re-throw — partial
+   *     duplication is worse UX than a clear failure, per Phase 16c
+   *     audit decision. In practice this is vanishingly rare; Groq's
+   *     proxy closes the SSE without an explicit 429 frame.
+   *   - Non-rate-limit errors propagate immediately whether tokens
+   *     were yielded or not.
+   *
+   * The agent loop only consumes streaming events; it never calls both
+   * `.call` and `.callStream` for the same turn.
+   */
+  async *callStream(
+    input: ProviderCallInput,
+  ): AsyncGenerator<StreamEvent, void, void> {
+    const now = this.nowFn;
+
+    const fresh: ProviderSlot[] = [];
+    const cooling: ProviderSlot[] = [];
+    for (const slot of this.slots) {
+      const until = this.cooldownUntil.get(slot.id) ?? 0;
+      if (until > now()) {
+        cooling.push(slot);
+      } else {
+        fresh.push(slot);
+      }
+    }
+    const ordered = [...fresh, ...cooling];
+
+    let attemptedAny = false;
+    let lastErr: Error | null = null;
+    let lastSlotTried: string | null = null;
+
+    for (const slot of ordered) {
+      const adapter = slot.build();
+      if (!adapter) continue;
+      attemptedAny = true;
+      if (lastSlotTried && lastSlotTried !== slot.id) {
+        this.onFallback?.(lastSlotTried, slot.id);
+      }
+      lastSlotTried = slot.id;
+
+      // Per spec stop condition: if the slot adapter doesn't implement
+      // streaming, fall back to non-streaming on this slot. Wrap the
+      // result in a synthetic stream so the caller sees a consistent
+      // event flow.
+      if (typeof adapter.callStream !== 'function') {
+        try {
+          const out = await adapter.call(input);
+          this.cooldownUntil.delete(slot.id);
+          const s = this.state.get(slot.id);
+          if (s) {
+            s.rateLimited = false;
+            s.cooldownUntil = null;
+            s.successCount += 1;
+          }
+          this.lastSuccessfulSlot = slot.id;
+          yield { type: 'done', output: out };
+          return;
+        } catch (err) {
+          const e = err instanceof Error ? err : new Error(String(err));
+          if (isRateLimitError(e)) {
+            this.markRateLimited(slot.id, e);
+            lastErr = e;
+            continue;
+          }
+          throw e;
+        }
+      }
+
+      // Streaming path. We iterate the generator manually so we can
+      // distinguish "rate-limited before any event" from "rate-limited
+      // after some deltas".
+      let yieldedAny = false;
+      let stream: AsyncGenerator<StreamEvent, void, void>;
+      try {
+        stream = adapter.callStream(input) as AsyncGenerator<
+          StreamEvent,
+          void,
+          void
+        >;
+      } catch (err) {
+        // Synchronous throw before iteration begins — e.g. validation.
+        const e = err instanceof Error ? err : new Error(String(err));
+        if (isRateLimitError(e)) {
+          this.markRateLimited(slot.id, e);
+          lastErr = e;
+          continue;
+        }
+        throw e;
+      }
+
+      try {
+        while (true) {
+          let next: IteratorResult<StreamEvent, void>;
+          try {
+            next = await stream.next();
+          } catch (err) {
+            const e = err instanceof Error ? err : new Error(String(err));
+            if (isRateLimitError(e) && !yieldedAny) {
+              this.markRateLimited(slot.id, e);
+              lastErr = e;
+              break;
+            }
+            throw e;
+          }
+          if (next.done) {
+            // Successful stream completion.
+            this.cooldownUntil.delete(slot.id);
+            const s = this.state.get(slot.id);
+            if (s) {
+              s.rateLimited = false;
+              s.cooldownUntil = null;
+              s.successCount += 1;
+            }
+            this.lastSuccessfulSlot = slot.id;
+            return;
+          }
+          yieldedAny = true;
+          // `next.done === false` narrows `next.value` to StreamEvent.
+          yield next.value as StreamEvent;
+        }
+      } finally {
+        // Defensive: ensure the generator is closed if the caller bailed.
+        try {
+          await stream.return?.();
+        } catch {
+          // ignore
+        }
+      }
+      // Fell through after a 429-before-any-event — try next slot.
+    }
+
+    if (!attemptedAny) {
+      throw new ChainExhaustedError(
+        'No provider slots configured (no API keys found). Set GROQ_API_KEY or TOGETHER_API_KEY.',
+        [],
+      );
+    }
+    throw new ChainExhaustedError(
+      `All provider slots rate-limited (streaming). Last error: ${lastErr?.message ?? 'unknown'}`,
+      this.slots.map((s) => s.id),
+      lastErr ?? undefined,
+    );
+  }
+
+  private markRateLimited(slotId: string, err: Error): void {
+    const s = this.state.get(slotId);
+    if (s) {
+      s.rateLimited = true;
+      s.lastRateLimitAt = this.nowFn();
+      s.cooldownUntil = this.nowFn() + this.cooldownMs;
+      s.rateLimitCount += 1;
+    }
+    this.cooldownUntil.set(slotId, this.nowFn() + this.cooldownMs);
+    this.onRateLimit?.(slotId, err);
   }
 
   /** Diagnostic snapshot for `/providers`. */
