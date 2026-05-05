@@ -521,6 +521,28 @@ export async function buildAgentRuntime(
     display.dim(`[soul] ${soulNotice}`);
   }
 
+  // Phase 20 Task 5: non-blocking npm update check. Fires on a separate
+  // microtask so REPL boot is unaffected. The cache hit path is sub-ms;
+  // the cache miss path is bounded by REGISTRY_TIMEOUT_MS (4 s) and runs
+  // after the prompt is already up. Honors AIDEN_NO_UPDATE_CHECK=1.
+  setImmediate(async () => {
+    try {
+      const { checkForUpdate, formatUpdateLine } = await import(
+        '../../core/v4/update/checkUpdate'
+      );
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const pkg = require('../../package.json') as { version: string };
+      const status = await checkForUpdate({
+        paths,
+        installedVersion: pkg.version,
+      });
+      const line = formatUpdateLine(status);
+      if (line) display.dim(line);
+    } catch {
+      /* silent — update check is best-effort */
+    }
+  });
+
   // ── Phase 9 moat (stateless / wraps memory) ──────────────────────────
   const memoryGuard = new MemoryGuard(memoryManager);
   const ssrfProtection = new SSRFProtection();
