@@ -419,7 +419,14 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     const explainer =
       PRO_EXPLAINERS[provider.id] ??
       'This connects your subscription via OAuth. No API key needed.';
-    display.write(`\n${explainer}\n\n`);
+    display.write(`\n${explainer}\n`);
+    // Phase 18.1: honest beta framing per diagnostic 292c7cd. Some
+    // upstream errors are account-state-specific and have no client-side
+    // fix. We show this every time so a user who hits a wall has clear
+    // remediation: rerun setup with an API-key provider.
+    display.write(
+      'Note: OAuth flows are beta in v4.0. If signin fails, rerun `aiden setup` and pick an API-key provider instead.\n\n',
+    );
 
     const proceed = await prompts.confirm(
       `Continue with ${provider.label}?`,

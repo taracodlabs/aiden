@@ -170,6 +170,13 @@ export const auth: SlashCommand = {
       ctx.display.dim(
         `To use multiple providers, edit ${path.join(ctx.paths.root, 'config.yaml')} directly.`,
       );
+      // Phase 18.1: OAuth providers are beta in v4.0. Some upstream errors
+      // (Anthropic "Missing client_id", OpenAI "Workspaces not found") are
+      // account-state-specific and have no client-side fix.
+      ctx.display.dim(
+        `OAuth in beta — provider-side errors may require account state we cannot detect from this side. ` +
+          `If signin fails, use API key auth instead.`,
+      );
       return {};
     }
 
@@ -207,9 +214,24 @@ export const auth: SlashCommand = {
         const accountSuffix = tokens.account ? ` as ${tokens.account}` : '';
         ctx.display.success(`${providerId} authed${accountSuffix}.`);
       } catch (err) {
-        ctx.display.printError(
-          `${providerId} sign-in failed: ${(err as Error).message}`,
-        );
+        const msg = (err as Error).message ?? String(err);
+        // Phase 18.1: distinguish auth-level failures (bad code, expired)
+        // from upstream provider/account-state failures so the hint is
+        // honest rather than blanket. Auth-level errors keep the existing
+        // /auth login retry guidance the plugin throws (e.g. claude-pro's
+        // 'run /auth login claude-pro to start over'). The 'beta' fallback
+        // hint surfaces for the cloudier cases — 4xx HTTP shape, "client_id"
+        // / "workspace" diagnostics from the provider.
+        const looksUpstream =
+          /HTTP\s4\d\d/i.test(msg) ||
+          /missing client_id/i.test(msg) ||
+          /workspaces? not found/i.test(msg);
+        ctx.display.printError(`${providerId} sign-in failed: ${msg}`);
+        if (looksUpstream) {
+          ctx.display.dim(
+            `OAuth providers are beta in v4.0. If this persists, configure an API-key provider via \`aiden setup\`, or switch with /model.`,
+          );
+        }
       }
       return {};
     }
