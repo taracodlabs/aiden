@@ -29,6 +29,7 @@ import { streaming } from './streaming';
 import { plugins } from './plugins';
 import { auth } from './auth';
 import { license } from './license';
+import { doctor } from './doctor';
 
 export {
   help,
@@ -54,6 +55,7 @@ export {
   plugins,
   auth,
   license,
+  doctor,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -76,6 +78,7 @@ export const allCommands: SlashCommand[] = [
   plugins,
   auth,
   license,
+  doctor,
   reloadMcp,
   reasoning,
   verbose,
