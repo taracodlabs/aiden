@@ -91,7 +91,7 @@ This is **net-new design**, not a port. It is also advisory only (no OS-level sa
 | Manifest schema (name/version/description/author/provides_tools/provides_hooks) | **Copy** | Match Hermes field names verbatim so future tooling/lint can be shared. |
 | Manifest format | **Adapt: JSON** | TS ecosystem default. `plugin.json`. Validate with hand-rolled schema check (no ajv dep — keeps `npm install` lean). |
 | `kind` field | **Adapt: simplify to `standalone` + `bundled`** | v4.0 has no exclusive/platform/backend categories yet. Add later when needed. |
-| `permissions` field | **Diverge: net-new** | Hermes has no equivalent. Add `permissions: ["network","shell","filesystem","subprocess","browser","memory"]`. |
+| `permissions` field | **Diverge: net-new, advisory-only** | Hermes has no permissions field; Aiden adds advisory-only permissions for Pro-tier trust UX, **not as a security boundary**. Manifest validator enforces declared-equals-actual usage; install flow shows user a permission summary; granted set persists. No OS sandbox, no runtime enforcement beyond honest declaration. v4.1 may revisit. Set: `["network","shell","filesystem","subprocess","browser","memory"]`. |
 | `requires_env` | **Copy** | Same semantics. |
 | 4-source discovery | **Adapt to 3** | Bundled (`<package>/plugins/`), user (`paths.pluginsDir`), npm entry-points (via `package.json#aiden.plugin` field). Drop project-local for v4.0 — opens injection vector, low value. |
 | `register(ctx)` entrypoint pattern | **Copy** | TS export: `export function register(ctx: PluginContext): void`. |
@@ -109,7 +109,7 @@ This is **net-new design**, not a port. It is also advisory only (no OS-level sa
 
 1. *Hermes plugin architecture requires a process model Aiden can't match.* — **Resolved.** Hermes is in-process. No separate workers needed. Adopting in-process; document divergence vs. spec since spec already permitted in-process.
 2. *CDP attach to user's real Chrome requires Chrome flags users won't enable.* — **Defer to Task 2**. Plan: ship a Chrome launch helper that starts Chrome with `--remote-debugging-port=9222` on plugin activate; instruct user if helper fails (e.g., Chrome already running without the flag).
-3. *Plugin permissions need OS-level sandboxing.* — **Confirmed gap.** Ship advisory permissions for v4.0 (declare + grant + dispatch-time check), real sandbox in v4.1. Documented above.
+3. *Plugin permissions need OS-level sandboxing.* — **Confirmed gap.** v4.0 ships advisory-only permissions (declare + grant + dispatch-time check) — Pro-tier trust UX, not a security boundary. Real sandbox revisited in v4.1.
 4. *Hermes plugin format conflicts with existing skill/tool registrations.* — **No conflict.** Plugins use `ctx.register_tool(handler)` which delegates to existing `ToolRegistry.register()`. Same registry, no adapter layer needed. Skills and plugins are orthogonal: skills are markdown bundles loaded by `skillLoader`; plugins are TS modules loaded by `pluginLoader`. A plugin *can* register skills via `ctx.register_skill(...)` (Phase 17.5 if needed; not blocking Task 2).
 
 ## Bundled plugins inventory (Hermes)
