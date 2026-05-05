@@ -12,7 +12,29 @@
  * Aiden keeps a separate manager because v4 UX docs treat overlays as a
  * runtime-switchable layer above (not replacing) the SOUL.md identity.
  */
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
+
 import type { SlashCommand } from '../commandRegistry';
+import {
+  createFeatureGate,
+  FEATURE_FLAGS,
+} from '../../../core/v4/license/featureGate';
+
+const STARTER_OVERLAY = (name: string) => `# Personality: ${name}
+
+This overlay layers on top of SOUL.md and shapes Aiden's tone, focus, and
+behaviour for this session. SOUL.md remains the canonical identity layer.
+
+## Voice
+- (describe the speaking style — formal, casual, terse, expansive, ...)
+
+## Focus
+- (which tools / domains this personality emphasises)
+
+## Avoid
+- (what this personality should not do — e.g. small talk during a debugging session)
+`;
 
 export const personality: SlashCommand = {
   name: 'personality',
@@ -26,6 +48,47 @@ export const personality: SlashCommand = {
       return {};
     }
     const target = ctx.rawArgs.trim();
+
+    // ── /personality install <name> ── Pro-gated: scaffold a user overlay
+    if (target.startsWith('install ') || target === 'install') {
+      const arg = target.slice('install'.length).trim();
+      if (!arg) {
+        ctx.display.printError(
+          'Usage: /personality install <name>',
+          'Creates a starter overlay file in your personalities dir.',
+        );
+        return {};
+      }
+      if (!ctx.paths) {
+        ctx.display.warn('Cannot install without resolved paths.');
+        return {};
+      }
+      const gate = createFeatureGate(ctx.paths);
+      const allowed = await gate.isProEnabled(FEATURE_FLAGS.CUSTOM_PERSONALITIES);
+      if (!allowed) {
+        ctx.display.printError(gate.degradationMessage(FEATURE_FLAGS.CUSTOM_PERSONALITIES));
+        return {};
+      }
+      const safeName = arg.replace(/[^a-z0-9-_]/gi, '_').toLowerCase();
+      if (!safeName) {
+        ctx.display.printError('Invalid personality name.');
+        return {};
+      }
+      const overlayFile = path.join(ctx.paths.personalitiesDir, `${safeName}.md`);
+      try {
+        await fs.access(overlayFile);
+        ctx.display.warn(`${safeName}.md already exists — open it to edit.`);
+        ctx.display.dim(`Path: ${overlayFile}`);
+        return {};
+      } catch {
+        // not present — write the starter
+      }
+      await fs.mkdir(ctx.paths.personalitiesDir, { recursive: true });
+      await fs.writeFile(overlayFile, STARTER_OVERLAY(safeName), 'utf8');
+      ctx.display.success(`Created starter overlay at ${overlayFile}`);
+      ctx.display.dim(`Edit the file, then run \`/personality ${safeName}\` to activate.`);
+      return {};
+    }
 
     // ── /personality (no args) ── list + current
     if (!target) {

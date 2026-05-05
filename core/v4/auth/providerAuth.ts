@@ -90,11 +90,30 @@ export interface OAuthProvider {
  * Runtime helper that wraps an OAuthProvider with the tokenStore round-trip
  * and the pre-flight refresh window. /auth and the inference adapter both
  * consume `getAccessToken(paths)` to pull a fresh bearer.
+ *
+ * Phase 20: optional `silentRefreshAllowed` predicate gates the pre-flight
+ * refresh path. When the predicate returns false (free tier), pre-flight
+ * refresh is suppressed — the runtime returns the still-valid token (good
+ * for the next ~5 min) and surfaces a `onRefreshGated` hint so the CLI can
+ * tell the user to run /auth refresh. Hard-expired tokens still refresh
+ * regardless of tier (otherwise free-tier OAuth would stop working
+ * mid-session, which is an unacceptable degradation). This matches the
+ * Phase 20 spec: "Pro users get silent token refresh during inference,
+ * free tier gets explicit /auth refresh" — interpreted as "Pro avoids
+ * the 5-min pre-expiry stutter; free tier sees it once per token."
  */
+export interface SilentRefreshGate {
+  /** Returns true if silent pre-flight refresh is allowed (Pro tier). */
+  allowed(): Promise<boolean>;
+  /** Optional hint surface — called once per gated refresh. */
+  onGated?(providerId: string): void;
+}
+
 export class OAuthProviderRuntime {
   constructor(
     public readonly provider: OAuthProvider,
     private readonly paths: AidenPaths,
+    private readonly silentRefresh?: SilentRefreshGate,
   ) {}
 
   /** Run the provider's login flow and persist the result. */
@@ -108,11 +127,27 @@ export class OAuthProviderRuntime {
     const tokens = await loadTokens(this.paths, this.provider.id);
     if (!tokens) return null;
 
-    const stale =
-      opts.force ||
-      isExpired(tokens) ||
+    const expired = isExpired(tokens);
+    const inPreflightWindow =
       Date.now() + PREFLIGHT_REFRESH_WINDOW_MS >= tokens.expiresAtMs;
+    const stale = opts.force || expired || inPreflightWindow;
     if (!stale) return tokens.accessToken;
+
+    // Phase 20 gate: if this is a *pre-flight* refresh (not yet expired)
+    // and silent refresh is not allowed, surface the hint and return the
+    // still-valid token. Force or hard-expired always refreshes.
+    if (
+      this.silentRefresh &&
+      !opts.force &&
+      !expired &&
+      inPreflightWindow
+    ) {
+      const allowed = await this.silentRefresh.allowed();
+      if (!allowed) {
+        this.silentRefresh.onGated?.(this.provider.id);
+        return tokens.accessToken;
+      }
+    }
 
     if (!tokens.refreshToken) {
       // No refresh token → tell caller to re-login.

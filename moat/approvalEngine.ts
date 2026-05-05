@@ -143,14 +143,46 @@ export function argSignature(
   return `${toolName}::${(primary || JSON.stringify(args)).slice(0, 200)}`;
 }
 
+/**
+ * Phase 20: Pro feature gate that ApprovalEngine consults before batching
+ * consecutive same-signature tool calls into a single prompt. Free tier
+ * sees one prompt per call (current Phase 16f behaviour); Pro tier can
+ * batch via the upcoming N+50 batch-prompt UI. The engine exposes the
+ * gate so the prompt UI can decide which mode to render.
+ *
+ * Kept as an opaque async predicate so the License subsystem owns the
+ * cache lookup — ApprovalEngine never imports `core/v4/license` directly,
+ * preserving the moat → core dependency direction.
+ */
+export interface BatchApprovalGate {
+  /** True when the user has Pro and the multi_tool_approval feature is on. */
+  canBatch(): Promise<boolean>;
+}
+
 export class ApprovalEngine {
   private sessionAllow = new Set<string>();
   private permanentAllow = new Set<string>();
+  private batchGate?: BatchApprovalGate;
 
   constructor(
     private mode: ApprovalMode = 'manual',
     private callbacks: ApprovalCallbacks = {},
   ) {}
+
+  /**
+   * Phase 20 wiring: late-binding installer for the Pro batch-approval
+   * gate. Called by `aidenCLI` after the LicenseClient has loaded its
+   * cache. ApprovalEngine itself never gates on this — UI consumers ask
+   * `getBatchGate()?.canBatch()` and choose batched-vs-per-call rendering.
+   */
+  setBatchGate(gate: BatchApprovalGate | undefined): void {
+    this.batchGate = gate;
+  }
+
+  /** Gate accessor for the prompt UI. May be undefined when not wired. */
+  getBatchGate(): BatchApprovalGate | undefined {
+    return this.batchGate;
+  }
 
   setMode(mode: ApprovalMode): void {
     this.mode = mode;
