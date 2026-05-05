@@ -61,11 +61,53 @@ export const USER_CHAR_LIMIT = 1375;
 /** Hermes uses `\n§\n` between entries; we keep the convention. */
 export const ENTRY_SEPARATOR = '\n§\n';
 
+/**
+ * Phase 16d: subscriber callback fired after each successful memory mutation
+ * (add / replace / remove). Receives the file that changed so listeners can
+ * decide whether they care (e.g. only invalidate slots 3+4 of the system
+ * prompt, not the whole rebuild). Listeners must NOT throw; failures are
+ * swallowed to keep mutation paths safe.
+ */
+export type MemoryMutationListener = (
+  file: MemoryFile,
+  action: 'add' | 'replace' | 'remove',
+) => void;
+
 export class MemoryManager implements MemoryProvider {
   readonly name = 'builtin';
   private writeQueue: Promise<unknown> = Promise.resolve();
+  /**
+   * Phase 16d: registered subscribers fired after each successful mutation.
+   * Used by AidenAgent to drop its cached system prompt so the next turn
+   * sees the fresh MEMORY.md / USER.md content. Failed mutations do NOT
+   * fire listeners — preserves the "stale snapshot stays clean" invariant.
+   */
+  private readonly mutationListeners = new Set<MemoryMutationListener>();
 
   constructor(private readonly paths: AidenPaths) {}
+
+  /**
+   * Phase 16d: subscribe to successful memory mutations. Returns an
+   * unsubscribe function so callers can detach on shutdown / hot-reload.
+   * Multiple subscriptions of the same listener are deduped via Set.
+   */
+  onMutation(listener: MemoryMutationListener): () => void {
+    this.mutationListeners.add(listener);
+    return () => {
+      this.mutationListeners.delete(listener);
+    };
+  }
+
+  /** Phase 16d: internal — fire listeners. Errors are swallowed. */
+  private fireMutation(file: MemoryFile, action: 'add' | 'replace' | 'remove'): void {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener(file, action);
+      } catch {
+        // Listeners must not break the mutation path.
+      }
+    }
+  }
 
   /**
    * Load both files from disk. Returns raw text (not parsed entries) so
@@ -117,6 +159,7 @@ export class MemoryManager implements MemoryProvider {
       }
 
       await atomicWrite(targetPath, projected);
+      this.fireMutation(file, 'add');
       return { ok: true };
     });
   }
@@ -173,6 +216,7 @@ export class MemoryManager implements MemoryProvider {
       }
 
       await atomicWrite(targetPath, projected);
+      this.fireMutation(file, 'replace');
       return { ok: true };
     });
   }
@@ -207,6 +251,7 @@ export class MemoryManager implements MemoryProvider {
       const idx = matchIndices[0];
       const projectedEntries = entries.filter((_, i) => i !== idx);
       await atomicWrite(targetPath, projectedEntries.join(ENTRY_SEPARATOR));
+      this.fireMutation(file, 'remove');
       return { ok: true };
     });
   }

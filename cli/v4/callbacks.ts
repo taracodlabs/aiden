@@ -214,6 +214,17 @@ Reply with ONE word: safe, caution, or dangerous.`;
       this.display.dim(`[budget] ${msg}`);
     }
   };
+
+  /**
+   * Phase 16d: memory refresh sink. Fires once per turn after the agent
+   * rebuilds the system prompt against fresh MEMORY.md / USER.md content.
+   * The "✓ Saved" confirmation that the user sees is rendered separately
+   * by the chat loop right after `memory_add` returns `verified=true` —
+   * this hook is the diagnostic counterpart for verbose mode.
+   */
+  onMemoryRefresh = (which: 'memory' | 'user' | 'both'): void => {
+    this.display.dim(`[memory] refreshed system prompt (${which})`);
+  };
 }
 
 function badgeForTier(tier?: RiskTier): string {

@@ -640,6 +640,22 @@ export async function buildAgentRuntime(
     // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.
     promptBuilder,
     promptBuilderOptions,
+    // Phase 16d: refresh callback feeds the next-turn rebuild path.
+    refreshMemorySnapshot: () => memoryManager.loadSnapshot(),
+    onMemoryRefresh: (which) => {
+      try {
+        callbacks.onMemoryRefresh?.(which);
+      } catch {
+        // diagnostics must not break the loop
+      }
+    },
+  });
+
+  // Phase 16d: wire the dirty-bit signal — every successful memory mutation
+  // flips the agent's flag so the NEXT turn's system prompt reflects the
+  // change. Strategy (b) per docs/sprint/hermes-memory-refresh-audit.md.
+  memoryManager.onMutation((file) => {
+    agent.markMemoryDirty(file === 'user' ? 'user' : 'memory');
   });
 
   // Command registry.

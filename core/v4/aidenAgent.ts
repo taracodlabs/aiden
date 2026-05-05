@@ -50,6 +50,7 @@ import type { PromptBuilder, PromptBuilderOptions } from './promptBuilder';
 import type { ContextCompressor, CompressionResult } from './contextCompressor';
 import type { AuxiliaryClient } from './auxiliaryClient';
 import type { PromptCaching } from './promptCaching';
+import type { MemorySnapshot } from './memoryProvider';
 
 /**
  * Tool executor — runs a single tool call and returns the result.
@@ -128,6 +129,24 @@ export interface AidenAgentOptions {
   iterationBudgetInjection?: boolean;
   /** Phase 13: fired each time the compressor runs successfully. */
   onCompression?: (event: CompressionResult) => void;
+  /**
+   * Phase 16d: callback that returns a fresh `MemorySnapshot` when the
+   * cached system prompt has been invalidated by `markMemoryDirty()`.
+   * Wired by `aidenCLI.ts` to `memoryManager.loadSnapshot()`. When unset,
+   * the agent keeps the original frozen snapshot semantics — the dirty
+   * bit is ignored.
+   *
+   * Strategy (b) per `docs/sprint/hermes-memory-refresh-audit.md`: only
+   * the turn after a memory write pays the rebuild cost; every other turn
+   * still hits the prefix cache cleanly.
+   */
+  refreshMemorySnapshot?: () => Promise<MemorySnapshot>;
+  /**
+   * Phase 16d: fired when the agent rebuilds the cached system prompt
+   * after a memory mutation. Lets the display layer show "memory refreshed"
+   * diagnostics without coupling to the underlying mutation event.
+   */
+  onMemoryRefresh?: (file: 'memory' | 'user' | 'both') => void;
 }
 
 export interface AidenAgentResult {
@@ -208,9 +227,19 @@ export class AidenAgent {
   private readonly modelId: string;
   private readonly iterationBudgetInjection: boolean;
   private readonly onCompression?: AidenAgentOptions['onCompression'];
+  private readonly refreshMemorySnapshot?: AidenAgentOptions['refreshMemorySnapshot'];
+  private readonly onMemoryRefresh?: AidenAgentOptions['onMemoryRefresh'];
   /** Cached system prompt — frozen after first build for session-long prefix cache. */
   private cachedSystemPrompt: string | null = null;
   private compressionEvents = 0;
+  /**
+   * Phase 16d: dirty bit set by `markMemoryDirty()`. The next
+   * `runConversation` turn loads a fresh `MemorySnapshot` via
+   * `refreshMemorySnapshot`, mutates `promptBuilderOptions.memorySnapshot`,
+   * drops `cachedSystemPrompt`, and clears the bit. We track which file
+   * (memory / user / both) so the rebuild diagnostic reflects what changed.
+   */
+  private memoryDirty: 'memory' | 'user' | 'both' | null = null;
 
   constructor(options: AidenAgentOptions) {
     this.provider = options.provider;
@@ -237,6 +266,35 @@ export class AidenAgent {
     this.modelId = options.modelId ?? '';
     this.iterationBudgetInjection = options.iterationBudgetInjection ?? true;
     this.onCompression = options.onCompression;
+    this.refreshMemorySnapshot = options.refreshMemorySnapshot;
+    this.onMemoryRefresh = options.onMemoryRefresh;
+  }
+
+  /**
+   * Phase 16d: mark the cached memory snapshot dirty so the next
+   * `runConversation` turn rebuilds the system prompt against fresh
+   * MEMORY.md / USER.md content. Idempotent — subsequent calls escalate
+   * single-file dirtiness to "both" but never clear the bit (only the
+   * runConversation rebuild path resets it).
+   *
+   * Wired in `aidenCLI.ts`:
+   *   memoryManager.onMutation((file) => agent.markMemoryDirty(file));
+   *
+   * No-op when `refreshMemorySnapshot` is not configured (Phase 12 callers
+   * that don't pass a memory manager keep the frozen-snapshot semantics).
+   */
+  markMemoryDirty(file: 'memory' | 'user'): void {
+    if (!this.refreshMemorySnapshot) return;
+    if (this.memoryDirty === null) {
+      this.memoryDirty = file;
+    } else if (this.memoryDirty !== file) {
+      this.memoryDirty = 'both';
+    }
+  }
+
+  /** Phase 16d test/inspection accessor — returns the current dirty bit. */
+  getMemoryDirtyState(): 'memory' | 'user' | 'both' | null {
+    return this.memoryDirty;
   }
 
   /** Phase 14c: hot-swap the provider adapter (used by /model). */
@@ -292,8 +350,31 @@ export class AidenAgent {
     runOpts: RunConversationOptions = {},
   ): Promise<AidenAgentResult> {
     // ── Phase 13: Build (or reuse cached) system prompt at session start ──
+    // ── Phase 16d: if a memory mutation happened since last turn, drop the
+    //    cache and reload MEMORY.md / USER.md before rebuild. Pays one
+    //    cache-miss per memory write; idle turns still hit the prefix cache.
     let messages: Message[] = [...initialMessages];
     if (this.promptBuilder && this.promptBuilderOptions) {
+      if (this.memoryDirty !== null && this.refreshMemorySnapshot) {
+        try {
+          const fresh = await this.refreshMemorySnapshot();
+          this.promptBuilderOptions.memorySnapshot = fresh;
+          this.cachedSystemPrompt = null;
+          const which = this.memoryDirty;
+          this.memoryDirty = null;
+          try {
+            this.onMemoryRefresh?.(which);
+          } catch {
+            // diagnostic callback must not break the loop
+          }
+        } catch {
+          // Refresh failed (disk error?) — fall through to existing cache
+          // rather than crash the turn. Dirty bit stays set so we retry
+          // next turn. This matches Hermes' "tool responses always show
+          // live state" fallback: if disk read fails, the agent still has
+          // the tool result message from the mutation in its history.
+        }
+      }
       if (this.cachedSystemPrompt === null) {
         this.cachedSystemPrompt = await this.promptBuilder.build(
           this.promptBuilderOptions,

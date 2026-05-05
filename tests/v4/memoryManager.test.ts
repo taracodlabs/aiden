@@ -167,4 +167,62 @@ describe('MemoryManager', () => {
     const raw = await readMemory('memory');
     expect(raw).toBe(['A', 'B'].join(ENTRY_SEPARATOR));
   });
+
+  // ── Phase 16d: mutation listener wiring ─────────────────────────────────
+
+  it('17. onMutation fires after successful add with the right file/action', async () => {
+    const events: Array<{ file: string; action: string }> = [];
+    mgr.onMutation((file, action) => events.push({ file, action }));
+    await mgr.add('memory', 'phase 16d add');
+    await mgr.add('user', 'phase 16d user');
+    expect(events).toEqual([
+      { file: 'memory', action: 'add' },
+      { file: 'user', action: 'add' },
+    ]);
+  });
+
+  it('18. onMutation does NOT fire on failed add (duplicate or capacity)', async () => {
+    await mgr.add('memory', 'I prefer pnpm');
+    const events: Array<{ file: string; action: string }> = [];
+    mgr.onMutation((file, action) => events.push({ file, action }));
+    // Duplicate path
+    const dup = await mgr.add('memory', 'I prefer pnpm');
+    expect(dup.ok).toBe(false);
+    // Capacity path
+    const big = await mgr.add('memory', 'x'.repeat(MEMORY_CHAR_LIMIT + 1));
+    expect(big.ok).toBe(false);
+    expect(events).toEqual([]);
+  });
+
+  it('19. onMutation fires on replace and remove', async () => {
+    await mgr.add('memory', 'one');
+    const events: Array<{ file: string; action: string }> = [];
+    mgr.onMutation((file, action) => events.push({ file, action }));
+    const rRep = await mgr.replace('memory', 'one', 'two');
+    expect(rRep.ok).toBe(true);
+    const rRem = await mgr.remove('memory', 'two');
+    expect(rRem.ok).toBe(true);
+    expect(events).toEqual([
+      { file: 'memory', action: 'replace' },
+      { file: 'memory', action: 'remove' },
+    ]);
+  });
+
+  it('20. onMutation unsubscribe stops further notifications', async () => {
+    const events: string[] = [];
+    const off = mgr.onMutation((_f, action) => events.push(action));
+    await mgr.add('memory', 'first');
+    off();
+    await mgr.add('memory', 'second');
+    expect(events).toEqual(['add']);
+  });
+
+  it('21. listener that throws does not break the mutation path', async () => {
+    mgr.onMutation(() => {
+      throw new Error('boom');
+    });
+    const r = await mgr.add('memory', 'still works');
+    expect(r.ok).toBe(true);
+    expect(await readMemory('memory')).toContain('still works');
+  });
 });

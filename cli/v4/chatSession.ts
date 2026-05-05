@@ -34,6 +34,7 @@ import type { ConfigManager } from '../../core/v4/config';
 import type { PersonalityManager } from '../../core/v4/personality';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
 import type { Message } from '../../providers/v4/types';
+import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
 import {
   enableBracketedPaste,
   disableBracketedPaste,
@@ -309,6 +310,15 @@ export class ChatSession implements ChatSessionLike {
       this.history = result.messages;
       this.totalUsage.inputTokens += result.totalUsage.inputTokens;
       this.totalUsage.outputTokens += result.totalUsage.outputTokens;
+
+      // Phase 16d: surface inline confirmations for verified memory writes.
+      // We MUST gate on verified=true (the post-write read flag from
+      // MemoryGuard) — HonestyEnforcement uses the same flag to catch
+      // fabricated "I remembered X" claims, so showing it without the
+      // verification would be the exact bug we just shipped a fix for.
+      // Unverified writes get a quieter line so the user knows the model
+      // tried but the round-trip didn't confirm.
+      renderMemoryConfirmations(result.toolCallTrace, this.opts.display);
 
       // When streaming was active and emitted the final content already,
       // skip the markdown re-render — we'd otherwise duplicate text.
@@ -587,4 +597,62 @@ function createDefaultPromptApi(): ChatPromptApi {
       }
     },
   };
+}
+
+/**
+ * Phase 16d: render inline confirmation lines for memory mutations the agent
+ * actually executed this turn. Gate strictly on `verified=true` (the post-
+ * write read flag from MemoryGuard) so we never fabricate confirmations for
+ * unverified or errored writes — the same flag HonestyEnforcement uses to
+ * catch fake "I remembered X" claims.
+ *
+ * Exported for tests; called from the chat loop right after `runConversation`
+ * returns.
+ */
+export function renderMemoryConfirmations(
+  trace: HonestyTraceEntry[],
+  display: { success(text: string): void; warn(text: string): void },
+): void {
+  for (const entry of trace) {
+    if (
+      entry.name !== 'memory_add' &&
+      entry.name !== 'memory_replace' &&
+      entry.name !== 'memory_remove'
+    ) {
+      continue;
+    }
+    const file = extractMemoryFile(entry.result);
+    const target = file === 'user' ? 'user profile' : 'memory';
+    const action =
+      entry.name === 'memory_add'
+        ? 'Saved to'
+        : entry.name === 'memory_replace'
+          ? 'Updated'
+          : 'Removed from';
+    if (entry.error) {
+      display.warn(`memory write failed: ${entry.error}`);
+      continue;
+    }
+    if (entry.verified === true) {
+      display.success(`${action} ${target}.`);
+    } else {
+      // Tool ran without throwing but post-write verification didn't confirm.
+      // Be honest: tell the user we tried but couldn't confirm, instead of
+      // claiming success.
+      display.warn(`${action.toLowerCase()} ${target} attempted but not verified.`);
+    }
+  }
+}
+
+/** Pull the `file` field out of a memory tool result, defaulting to 'memory'. */
+function extractMemoryFile(result: unknown): 'memory' | 'user' {
+  if (
+    result &&
+    typeof result === 'object' &&
+    'file' in (result as Record<string, unknown>) &&
+    (result as Record<string, unknown>).file === 'user'
+  ) {
+    return 'user';
+  }
+  return 'memory';
 }
