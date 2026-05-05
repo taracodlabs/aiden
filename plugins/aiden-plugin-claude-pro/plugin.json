@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "name": "aiden-plugin-claude-pro",
+  "version": "1.0.0",
+  "author": "Shiva Deore",
+  "description": "Authenticate with your Claude Pro / Max subscription via OAuth (PKCE). Adds the 'claude-pro' provider to Aiden's catalog so the agent can call Sonnet / Opus through your existing Claude subscription instead of an Anthropic API key.",
+  "kind": "bundled",
+  "tools": [],
+  "skills": [],
+  "providers": ["claude-pro"],
+  "permissions": ["auth-providers", "network"],
+  "requiresEnv": []
+}

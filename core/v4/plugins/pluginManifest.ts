@@ -46,6 +46,11 @@ export const PERMISSION_TYPES = [
   'subprocess',
   'browser',
   'memory',
+  // Phase 18 Task 2: gates `ctx.registerOAuthProvider(...)`. Plugins that
+  // contribute OAuth providers (Claude Pro, ChatGPT Plus, future enterprise
+  // SSO) must declare this so the install summary surfaces the elevated
+  // capability honestly.
+  'auth-providers',
 ] as const;
 
 export type PluginPermission = (typeof PERMISSION_TYPES)[number];

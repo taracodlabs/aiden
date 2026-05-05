@@ -27,6 +27,7 @@ import { pathToFileURL } from 'node:url';
 
 import type { AidenPaths } from '../paths';
 import type { ToolRegistry } from '../toolRegistry';
+import type { OAuthProviderRegistry } from '../auth/providerAuth';
 import {
   PluginContext,
   type PluginContributions,
@@ -70,6 +71,13 @@ export interface PluginLoaderOptions {
    * tests that don't care about permissions).
    */
   evaluatePermissions?: (manifest: PluginManifest) => PermissionEvaluation;
+  /**
+   * Phase 18: when present, plugins that declare the `auth-providers`
+   * permission can register OAuth providers via `ctx.registerOAuthProvider`.
+   * Boot wiring constructs one registry alongside the loader; tests that
+   * don't exercise OAuth can omit this.
+   */
+  oauthRegistry?: OAuthProviderRegistry;
 }
 
 /** Plugin module shape we expect on dynamic import. */
@@ -277,6 +285,7 @@ export class PluginLoader {
       this.opts.toolRegistry,
       this.hooks,
       evaluation.state === 'pending-grant' ? 'pending-grant' : 'granted',
+      this.opts.oauthRegistry,
     );
     const contributions: PluginContributions = ctx.getContributions() as PluginContributions;
 

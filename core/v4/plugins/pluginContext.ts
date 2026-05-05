@@ -26,6 +26,16 @@ import type {
   PluginPermission,
   LifecycleHook,
 } from './pluginManifest';
+import type {
+  OAuthProvider,
+  OAuthProviderRegistry,
+} from '../auth/providerAuth';
+import {
+  runCopyPasteFlow,
+  runDeviceCodeFlow,
+  refreshTokens,
+  generatePkce,
+} from '../auth/oauthFlow';
 
 /**
  * Map a tool category to the permission(s) a plugin must declare to be
@@ -69,26 +79,57 @@ export class PluginContextError extends Error {
 export type ContextPermissionState = 'granted' | 'pending-grant';
 
 /**
+ * Phase 18: helpers exposed to plugin code via `ctx.auth`. Plugins must NOT
+ * reach into `core/v4/auth/*` directly — the package layout differs between
+ * dev (TS source) and runtime (compiled `dist/`), and a future v4.x might
+ * sandbox plugins to a different module graph entirely.
+ *
+ * Tests can substitute mocked helpers via the PluginContext constructor's
+ * `authHelpersOverride`.
+ */
+export interface PluginAuthHelpers {
+  runCopyPasteFlow: typeof runCopyPasteFlow;
+  runDeviceCodeFlow: typeof runDeviceCodeFlow;
+  refreshTokens: typeof refreshTokens;
+  generatePkce: typeof generatePkce;
+}
+
+const DEFAULT_AUTH_HELPERS: PluginAuthHelpers = {
+  runCopyPasteFlow,
+  runDeviceCodeFlow,
+  refreshTokens,
+  generatePkce,
+};
+
+/**
  * Per-plugin context. The plugin manager constructs one of these and
  * passes it to the plugin's exported `register(ctx)` function.
  */
 export class PluginContext {
   readonly manifest: PluginManifest;
+  /** Phase 18: HTTP + PKCE primitives plugins use to implement OAuth flows. */
+  readonly auth: PluginAuthHelpers;
   private readonly toolRegistry: ToolRegistry;
   private readonly hookRegistry: Map<LifecycleHook, Array<() => void | Promise<void>>>;
   private readonly contributions: PluginContributions = { tools: [], hooks: [] };
   private readonly permissionState: ContextPermissionState;
+  private readonly oauthRegistry?: OAuthProviderRegistry;
+  private readonly registeredOAuthProviderIds: string[] = [];
 
   constructor(
     manifest: PluginManifest,
     toolRegistry: ToolRegistry,
     hookRegistry: Map<LifecycleHook, Array<() => void | Promise<void>>>,
     permissionState: ContextPermissionState = 'granted',
+    oauthRegistry?: OAuthProviderRegistry,
+    authHelpersOverride?: PluginAuthHelpers,
   ) {
     this.manifest = manifest;
     this.toolRegistry = toolRegistry;
     this.hookRegistry = hookRegistry;
     this.permissionState = permissionState;
+    this.oauthRegistry = oauthRegistry;
+    this.auth = authHelpersOverride ?? DEFAULT_AUTH_HELPERS;
   }
 
   /** What this plugin has registered so far. Returned by reference; do not mutate. */
@@ -143,6 +184,43 @@ export class PluginContext {
       this.toolRegistry.register(handler);
     }
     this.contributions.tools.push(name);
+  }
+
+  /**
+   * Phase 18: register an OAuth provider (Claude Pro, ChatGPT Plus, ...).
+   *
+   * Validation:
+   * - manifest must declare the `auth-providers` permission
+   * - the runtime must have wired an OAuthProviderRegistry through to this
+   *   plugin context (otherwise the plugin loaded too early in boot — bug
+   *   on the runtime side, not the plugin's, but we still throw so it's
+   *   visible)
+   *
+   * The provider is added to the registry; tokens are NOT issued here —
+   * the user runs `/auth login <provider>` (Task 5) or the setup wizard
+   * (Task 4) to actually authorise.
+   */
+  registerOAuthProvider(provider: OAuthProvider): void {
+    if (!this.manifest.permissions.includes('auth-providers')) {
+      throw new PluginContextError(
+        `plugin "${this.manifest.name}" tried to register OAuth provider ` +
+          `"${provider.id}" but did not declare permission "auth-providers" ` +
+          `in manifest.permissions`,
+      );
+    }
+    if (!this.oauthRegistry) {
+      throw new PluginContextError(
+        `plugin "${this.manifest.name}" tried to register OAuth provider ` +
+          `"${provider.id}" but the runtime has no OAuthProviderRegistry wired in`,
+      );
+    }
+    this.oauthRegistry.register(provider);
+    this.registeredOAuthProviderIds.push(provider.id);
+  }
+
+  /** Read-only list of OAuth provider ids this context registered. Used by /plugins info. */
+  getRegisteredOAuthProviderIds(): readonly string[] {
+    return this.registeredOAuthProviderIds;
   }
 
   /**
