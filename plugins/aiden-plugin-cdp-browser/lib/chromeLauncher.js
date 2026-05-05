@@ -23,11 +23,78 @@ const path = require('node:path');
 const DEFAULT_PORT = 9222;
 
 /**
- * Returns a list of Chrome-family binary candidates ranked by preference.
+ * Returns the full list of Chrome-family paths Aiden checks on the
+ * current platform — UNFILTERED by file existence. Pure function so
+ * Phase 19 cross-platform tests can verify candidate coverage per
+ * platform without spying on fs.statSync. Use `getChromeCandidates()`
+ * (below) for the existence-filtered version.
+ *
+ * @param {NodeJS.Platform} sys — process.platform; defaults to current.
+ * @returns {string[]}
+ */
+function getChromeCandidatePaths(sys = process.platform) {
+  const list = [];
+
+  if (sys === 'darwin') {
+    list.push(
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
+      '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+    );
+    return list;
+  }
+
+  if (sys === 'win32') {
+    const installParts = [
+      ['Google', 'Chrome', 'Application', 'chrome.exe'],
+      ['Chromium', 'Application', 'chrome.exe'],
+      ['BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'],
+      ['Microsoft', 'Edge', 'Application', 'msedge.exe'],
+    ];
+    const bases = [
+      process.env.ProgramFiles,
+      process.env['ProgramFiles(x86)'],
+      process.env.LOCALAPPDATA,
+    ].filter(Boolean);
+    for (const base of bases) {
+      for (const parts of installParts) list.push(path.join(base, ...parts));
+    }
+    return list;
+  }
+
+  // Linux + other POSIX (default)
+  for (const name of [
+    'google-chrome',
+    'google-chrome-stable',
+    'chromium-browser',
+    'chromium',
+    'brave-browser',
+    'microsoft-edge',
+  ]) {
+    list.push(`/usr/bin/${name}`, `/usr/local/bin/${name}`);
+  }
+  // Phase 19: Snap + Flatpak common paths so modern Ubuntu 22.04+
+  // installs (where Chromium ships only as a Snap) and atomic-distro
+  // users (Fedora Silverblue, etc.) get a working Chrome without
+  // manual override. Hermes only checks PATH — Aiden does strict-better.
+  list.push(
+    '/snap/bin/chromium',
+    '/snap/bin/google-chrome',
+    '/var/lib/flatpak/exports/bin/com.google.Chrome',
+    '/var/lib/flatpak/exports/bin/org.chromium.Chromium',
+    `${process.env.HOME ?? ''}/.local/share/flatpak/exports/bin/com.google.Chrome`,
+  );
+  return list;
+}
+
+/**
+ * Returns existence-filtered Chrome candidates on the current platform.
  * Mirrors Hermes get_chrome_debug_candidates() (browser_connect.py:43).
+ * Phase 19: delegates to the pure getChromeCandidatePaths for the list,
+ * then filters by fs.statSync.
  */
 function getChromeCandidates() {
-  const sys = process.platform;
   const candidates = [];
   const seen = new Set();
 
@@ -45,44 +112,7 @@ function getChromeCandidates() {
     }
   };
 
-  if (sys === 'darwin') {
-    add('/Applications/Google Chrome.app/Contents/MacOS/Google Chrome');
-    add('/Applications/Chromium.app/Contents/MacOS/Chromium');
-    add('/Applications/Brave Browser.app/Contents/MacOS/Brave Browser');
-    add('/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge');
-    return candidates;
-  }
-
-  if (sys === 'win32') {
-    const installParts = [
-      ['Google', 'Chrome', 'Application', 'chrome.exe'],
-      ['Chromium', 'Application', 'chrome.exe'],
-      ['BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'],
-      ['Microsoft', 'Edge', 'Application', 'msedge.exe'],
-    ];
-    const bases = [
-      process.env.ProgramFiles,
-      process.env['ProgramFiles(x86)'],
-      process.env.LOCALAPPDATA,
-    ].filter(Boolean);
-    for (const base of bases) {
-      for (const parts of installParts) add(path.join(base, ...parts));
-    }
-    return candidates;
-  }
-
-  // Linux + other POSIX
-  for (const name of [
-    'google-chrome',
-    'google-chrome-stable',
-    'chromium-browser',
-    'chromium',
-    'brave-browser',
-    'microsoft-edge',
-  ]) {
-    add(`/usr/bin/${name}`);
-    add(`/usr/local/bin/${name}`);
-  }
+  for (const candidate of getChromeCandidatePaths()) add(candidate);
   return candidates;
 }
 
@@ -147,7 +177,13 @@ function tryLaunchChromeDebug(port = DEFAULT_PORT, aidenRoot = os.homedir()) {
   if (candidates.length === 0) {
     return {
       launched: false,
-      reason: 'no Chrome-family binary found on PATH or standard install dirs',
+      reason:
+        'no Chrome-family binary found. Install Google Chrome (or Chromium / Brave / Edge) and re-run /plugins grant aiden-plugin-cdp-browser. ' +
+        (process.platform === 'linux'
+          ? 'On Ubuntu: sudo apt install google-chrome-stable. On Snap: sudo snap install chromium.'
+          : process.platform === 'darwin'
+            ? 'On macOS: download from https://www.google.com/chrome/.'
+            : 'On Windows: download from https://www.google.com/chrome/.'),
       manualCommand: null,
     };
   }
@@ -227,6 +263,7 @@ async function ensureCdpReady({
 module.exports = {
   DEFAULT_PORT,
   getChromeCandidates,
+  getChromeCandidatePaths,
   probeCdp,
   chromeDebugDataDir,
   chromeDebugArgs,

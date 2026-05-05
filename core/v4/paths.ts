@@ -102,10 +102,32 @@ export function resolveAidenRoot(opts: ResolveAidenPathsOptions = {}): string {
     case 'darwin':
       return path.join(home, 'Library', 'Application Support', 'aiden');
     case 'linux':
-    default:
-      // Unknown POSIX-likes (freebsd, openbsd, etc.) fall through to ~/.aiden
-      // — same convention Hermes uses.
-      return path.join(home, '.aiden');
+    default: {
+      // Phase 19: honor XDG_CONFIG_HOME on Linux + other POSIX-likes,
+      // default to freedesktop-spec `~/.config/aiden`. Hermes uses
+      // `~/.hermes` flat — Aiden diverges here for XDG compliance
+      // (audit § Path resolution). Migration: if a legacy `~/.aiden`
+      // dir exists and the XDG path doesn't, prefer the legacy dir
+      // so a power user mid-migration is not surprised. AIDEN_HOME
+      // env override above wins regardless.
+      const xdg = process.env.XDG_CONFIG_HOME;
+      const xdgRoot =
+        xdg && xdg.trim().length > 0
+          ? path.join(xdg.trim(), 'aiden')
+          : path.join(home, '.config', 'aiden');
+      const legacyRoot = path.join(home, '.aiden');
+      // Synchronous existence check — this runs at boot, before any
+      // async I/O is set up. fs.existsSync is acceptable here.
+      try {
+        const fsSync = require('node:fs') as typeof import('node:fs');
+        const legacyExists = fsSync.existsSync(legacyRoot);
+        const xdgExists = fsSync.existsSync(xdgRoot);
+        if (legacyExists && !xdgExists) return legacyRoot;
+      } catch {
+        // fs unavailable (vanishingly unlikely) — fall through to XDG.
+      }
+      return xdgRoot;
+    }
   }
 }
 

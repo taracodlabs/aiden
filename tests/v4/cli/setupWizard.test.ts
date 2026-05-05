@@ -95,9 +95,14 @@ describe('SetupWizard', () => {
     expect(await isFreshInstall(paths)).toBe(true);
   });
 
-  it('isFreshInstall returns false when config.yaml exists', async () => {
+  it('isFreshInstall returns false when config.yaml has a providers entry', async () => {
+    // Phase 18 Task 7: isFreshInstall is lenient — empty providers section
+    // also counts as fresh. Test fixture needs a providers entry.
     await fs.mkdir(path.dirname(paths.configYaml), { recursive: true });
-    await fs.writeFile(paths.configYaml, 'model: {}');
+    await fs.writeFile(
+      paths.configYaml,
+      'model: {}\nproviders:\n  groq:\n    apiKey: ${GROQ_API_KEY}\n',
+    );
     expect(await isFreshInstall(paths)).toBe(false);
   });
 
@@ -105,9 +110,13 @@ describe('SetupWizard', () => {
     expect(PROVIDERS).toHaveLength(19);
   });
 
-  it('skips when config exists and force=false', async () => {
+  it('skips when config exists with providers and force=false', async () => {
     await fs.mkdir(path.dirname(paths.configYaml), { recursive: true });
-    await fs.writeFile(paths.configYaml, 'model: {}');
+    // Phase 18 Task 7: providers section needed so isFreshInstall returns false.
+    await fs.writeFile(
+      paths.configYaml,
+      'model: {}\nproviders:\n  groq:\n    apiKey: ${GROQ_API_KEY}\n',
+    );
     const { display } = sinkDisplay();
     const result = await runSetupWizard({
       paths,
@@ -118,27 +127,35 @@ describe('SetupWizard', () => {
     expect(result.skipReason).toMatch(/already exists/);
   });
 
-  it('Pro option [1] short-circuits with v4.1 message', async () => {
+  it('Pro option [1] (Claude Pro) prints OAuth explainer + beta note then waits for confirm', async () => {
+    // Phase 18 Task 4 made these real OAuth flows; Phase 18.1 added the
+    // beta note. With confirm: [false], the user declines and the wizard
+    // returns oauth-skipped.
     const { display, chunks } = sinkDisplay();
     const result = await runSetupWizard({
       paths,
       display,
-      prompts: scriptedPrompts({ choose: [1] }),
+      prompts: scriptedPrompts({ choose: [1], confirm: [false] }),
     });
     expect(result.ran).toBe(false);
-    expect(result.skipReason).toBe('pro-stub');
-    expect(chunks.join('\n')).toMatch(/v4\.1/);
+    expect(result.skipReason).toBe('oauth-skipped');
+    const text = chunks.join('\n');
+    expect(text).toMatch(/Claude Pro/);
+    expect(text).toMatch(/OAuth flows are beta in v4\.0/);
   });
 
-  it('Pro option [2] (ChatGPT Plus) also short-circuits', async () => {
+  it('Pro option [2] (ChatGPT Plus) prints OAuth explainer + beta note then waits for confirm', async () => {
     const { display, chunks } = sinkDisplay();
     const result = await runSetupWizard({
       paths,
       display,
-      prompts: scriptedPrompts({ choose: [2] }),
+      prompts: scriptedPrompts({ choose: [2], confirm: [false] }),
     });
     expect(result.ran).toBe(false);
-    expect(chunks.join('\n')).toMatch(/v4\.1/);
+    expect(result.skipReason).toBe('oauth-skipped');
+    const text = chunks.join('\n');
+    expect(text).toMatch(/ChatGPT Plus/);
+    expect(text).toMatch(/OAuth flows are beta in v4\.0/);
   });
 
   it('API-key provider saves config.yaml + writes .env', async () => {

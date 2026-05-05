@@ -485,7 +485,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
       display.write('\n✓ Smoke test complete — would have saved this config:\n');
       display.write(`${JSON.stringify(config, null, 2)}\n`);
       display.write(
-        `(would have saved tokens to ${paths.root}/auth/${provider.id}.json)\n`,
+        `(would have saved tokens to ${path.join(paths.root, 'auth', `${provider.id}.json`)})\n`,
       );
       return {
         ran: false,
@@ -507,7 +507,9 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         `  Models: ${oauthProvider.defaultModels.join(', ')}\n`,
       );
     }
-    display.write(`  Tokens stored at: ${paths.root}/auth/${provider.id}.json\n`);
+    display.write(
+      `  Tokens stored at: ${path.join(paths.root, 'auth', `${provider.id}.json`)}\n`,
+    );
     display.write(`  Expires: ${expIso}\n`);
     display.write(
       `\nTokens encrypted with a machine-derived key. Protects against casual ` +
