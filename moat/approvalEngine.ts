@@ -64,6 +64,69 @@ export interface ApprovalCallbacks {
   persistAllow?: (toolName: string, argSignature: string) => void;
 }
 
+/**
+ * Phase 16f: built-in low-risk tool list — never prompts, never gated by
+ * smart-mode classifier. These are read-only or read-mostly tools whose
+ * worst case is "exposes information already visible to the user." Same
+ * spirit as Hermes's category=read short-circuit but explicit about which
+ * tools fall under it.
+ *
+ * Adding to this list is a deliberate trust call. Don't add anything
+ * that mutates filesystem, runs shell, or hits arbitrary URLs.
+ */
+export const BUILTIN_SAFE_TOOLS: ReadonlySet<string> = new Set([
+  'file_read',
+  'file_list',
+  'fetch_url',
+  'web_search',
+  'session_search',
+  'memory_add',
+  'memory_replace',
+  'memory_remove',
+  'memory_list',
+  'system_info',
+  'now_playing',
+  'browser_screenshot',
+  'browser_get_url',
+  'open_url', // shell launch to user's default browser — same trust as a link click.
+]);
+
+/**
+ * Phase 16f: domain allowlist for `browser_navigate`. URLs to these
+ * hostnames auto-approve in smart mode; non-allowlisted domains prompt.
+ * Mirrors the built-in tool list philosophy — common dev / docs /
+ * reference sites the user almost certainly trusts at click level.
+ */
+export const BUILTIN_SAFE_DOMAINS: ReadonlySet<string> = new Set([
+  'google.com',
+  'www.google.com',
+  'duckduckgo.com',
+  'wikipedia.org',
+  'en.wikipedia.org',
+  'github.com',
+  'gitlab.com',
+  'stackoverflow.com',
+  'serverfault.com',
+  'superuser.com',
+  'npmjs.com',
+  'www.npmjs.com',
+  'pypi.org',
+  'crates.io',
+  'docs.rs',
+  'developer.mozilla.org',
+  'taracod.com',
+  'www.taracod.com',
+]);
+
+/** Extract a hostname from a URL for safe-domain matching. Lowercased. */
+export function hostnameOf(url: string): string | null {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 /** Stable signature for an approval request (for allowlist matching). */
 export function argSignature(
   toolName: string,
@@ -113,6 +176,38 @@ export class ApprovalEngine {
   }
 
   /**
+   * Phase 16f: pre-load permanent allowlist entries from a persisted file.
+   * `aidenCLI` calls this once at boot with the contents of
+   * `~/.aiden/approvals.json`. The format is `[{tool, signature}]`. Each
+   * entry feeds both `permanentAllow` and `sessionAllow`. Idempotent.
+   */
+  loadPersistentAllowlist(
+    entries: ReadonlyArray<{ tool: string; signature: string }>,
+  ): void {
+    for (const e of entries) {
+      const key = `${e.tool}::${e.signature}`;
+      this.permanentAllow.add(key);
+      this.sessionAllow.add(key);
+    }
+  }
+
+  /**
+   * Phase 16f: built-in policy short-circuit — auto-allow when the tool
+   * name is in `BUILTIN_SAFE_TOOLS` OR when it's a `browser_navigate`
+   * to a `BUILTIN_SAFE_DOMAINS` hostname. Returns true if the call
+   * should auto-allow without prompting. Smart mode only.
+   */
+  private matchesBuiltinSafePolicy(req: ApprovalRequest): boolean {
+    if (BUILTIN_SAFE_TOOLS.has(req.toolName)) return true;
+    if (req.toolName === 'browser_navigate') {
+      const url = (req.args.url as string | undefined) ?? '';
+      const host = hostnameOf(url);
+      if (host && BUILTIN_SAFE_DOMAINS.has(host)) return true;
+    }
+    return false;
+  }
+
+  /**
    * Main entry. Returns `true` to allow, `false` to deny. Read-only
    * categories are always allowed without consulting any callback.
    */
@@ -128,7 +223,7 @@ export class ApprovalEngine {
       return true;
     }
 
-    // Allowlist short-circuit.
+    // Allowlist short-circuit (user-recorded).
     const sig = argSignature(req.toolName, req.args);
     const key = `${req.toolName}::${sig}`;
     if (this.sessionAllow.has(key)) {
@@ -136,9 +231,25 @@ export class ApprovalEngine {
       return true;
     }
 
+    // Phase 16f: in smart mode, consult the built-in policy before any
+    // prompt or LLM call. Built-in safe tools / safe domains short-circuit
+    // here; this is the bulk of the UX win — most calls in a normal
+    // session match one of these patterns and never prompt.
+    if (this.mode === 'smart' && this.matchesBuiltinSafePolicy(req)) {
+      this.callbacks.onDecision?.(req, 'allow');
+      return true;
+    }
+
     if (this.mode === 'smart') {
       // Smart mode: trust the pre-flagged tier, otherwise ask the LLM.
-      let tier: RiskTier = req.riskTier ?? 'safe';
+      // Phase 16f: when neither a pre-flagged tier nor a riskAssess callback
+      // is available, the call did NOT match BUILTIN_SAFE_TOOLS or the
+      // user's recorded allowlist (those short-circuited above). Default
+      // to 'caution' so the user gets a prompt — auto-allowing unflagged
+      // calls under smart mode was the bug that made approvals feel like
+      // they did nothing in 16e (every shell_exec / file_write
+      // auto-approved).
+      let tier: RiskTier = req.riskTier ?? 'caution';
       let rationale: string | undefined;
       if (!req.riskTier && this.callbacks.riskAssess) {
         const assessed = await this.callbacks.riskAssess(req);

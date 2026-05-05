@@ -68,7 +68,10 @@ export const DEFAULT_CONFIG: AidenConfig = {
   },
   agent: {
     max_turns: 90,
-    approval_mode: 'manual',
+    // Phase 16f: 'smart' default short-circuits BUILTIN_SAFE_TOOLS /
+    // BUILTIN_SAFE_DOMAINS and uses the recorded allowlist; only unseen
+    // non-safe calls prompt. Was 'manual' through Phase 16e.
+    approval_mode: 'smart',
   },
   display: {
     skin: 'default',

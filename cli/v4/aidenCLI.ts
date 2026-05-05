@@ -455,10 +455,32 @@ export async function buildAgentRuntime(
   const tirithScanner = new TirithScanner();
 
   // Approval engine.
+  // Phase 16f: default flips manual → smart per the approval-modes audit.
+  // Smart mode short-circuits BUILTIN_SAFE_TOOLS / BUILTIN_SAFE_DOMAINS
+  // and consults the recorded allowlist; only unseen non-safe calls
+  // prompt. Use --yolo / `/yolo` to skip prompts entirely.
   const approvalEngine = new ApprovalEngine(
-    config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'manual'),
+    config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'smart'),
   );
   if (cliOpts.yolo) approvalEngine.setMode('off');
+  // Phase 16f: hydrate persistent allowlist from disk so "Allow always"
+  // choices survive across REPL restarts.
+  try {
+    const raw = require('node:fs').readFileSync(paths.approvalsJson, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      approvalEngine.loadPersistentAllowlist(
+        parsed.filter(
+          (e: any) =>
+            e &&
+            typeof e.tool === 'string' &&
+            typeof e.signature === 'string',
+        ),
+      );
+    }
+  } catch {
+    // Missing or unreadable file is fine — no permanent allowlist yet.
+  }
 
   // Auxiliary client (compression / risk-assessment cheap LLM). Default to
   // the same provider/model as the main loop — the resolver hands the
@@ -479,6 +501,28 @@ export async function buildAgentRuntime(
   approvalEngine['callbacks'] = {
     promptUser: callbacks.promptApproval,
     riskAssess: callbacks.riskAssess,
+    // Phase 16f: append-on-disk for "Allow always" choices. Single-process
+    // REPL — atomic write via tmp-then-rename.
+    persistAllow: (tool: string, signature: string) => {
+      const fs = require('node:fs');
+      let entries: Array<{ tool: string; signature: string }> = [];
+      try {
+        const cur = fs.readFileSync(paths.approvalsJson, 'utf8');
+        const parsed = JSON.parse(cur);
+        if (Array.isArray(parsed)) entries = parsed;
+      } catch {
+        /* fresh file */
+      }
+      // De-dupe: same tool+signature shouldn't appear twice.
+      if (
+        !entries.some((e) => e.tool === tool && e.signature === signature)
+      ) {
+        entries.push({ tool, signature });
+        const tmp = `${paths.approvalsJson}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8');
+        fs.renameSync(tmp, paths.approvalsJson);
+      }
+    },
   } as any;
 
   // MCP setup (best-effort — connection failures are non-fatal).

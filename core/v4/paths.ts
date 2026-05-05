@@ -39,6 +39,8 @@ export interface AidenPaths {
   configYaml: string;
   /** Secret env file (Phase 6+). */
   envFile: string;
+  /** Phase 16f: persistent approval allowlist — `[{tool, signature}]`. */
+  approvalsJson: string;
   /** Identity prompt slot #1 (Phase 9+). */
   soulMd: string;
   /** Agent's curated environment notes (Phase 6+). */
@@ -116,6 +118,7 @@ export function resolveAidenPaths(opts: ResolveAidenPathsOptions = {}): AidenPat
     authJson: path.join(root, 'auth.json'),
     configYaml: path.join(root, 'config.yaml'),
     envFile: path.join(root, '.env'),
+    approvalsJson: path.join(root, 'approvals.json'),
     soulMd: path.join(root, 'SOUL.md'),
     memoryMd: path.join(root, 'memories', 'MEMORY.md'),
     userMd: path.join(root, 'memories', 'USER.md'),

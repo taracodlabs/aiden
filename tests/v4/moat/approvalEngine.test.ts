@@ -160,3 +160,103 @@ describe('ApprovalEngine — off / mode switching', () => {
     expect(a).toBe(b);
   });
 });
+
+describe('ApprovalEngine — Phase 16f built-in safe policy', () => {
+  it('15. smart mode auto-approves BUILTIN_SAFE_TOOLS without prompting', async () => {
+    const promptUser = vi.fn();
+    const onDecision = vi.fn();
+    const eng = new ApprovalEngine('smart', { promptUser, onDecision });
+    const ok = await eng.checkApproval({
+      toolName: 'fetch_url',
+      category: 'network',
+      args: { url: 'https://example.com/api' },
+    });
+    expect(ok).toBe(true);
+    expect(promptUser).not.toHaveBeenCalled();
+    expect(onDecision).toHaveBeenCalledWith(expect.anything(), 'allow');
+  });
+
+  it('16. smart mode auto-approves browser_navigate to allowlisted domains', async () => {
+    const promptUser = vi.fn();
+    const eng = new ApprovalEngine('smart', { promptUser });
+    const ok = await eng.checkApproval({
+      toolName: 'browser_navigate',
+      category: 'browser',
+      args: { url: 'https://github.com/anthropics/anthropic-sdk-typescript' },
+    });
+    expect(ok).toBe(true);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
+  it('17. smart mode prompts for browser_navigate to non-allowlisted domains', async () => {
+    const promptUser = vi.fn(async () => 'deny' as const);
+    const eng = new ApprovalEngine('smart', { promptUser });
+    const ok = await eng.checkApproval({
+      toolName: 'browser_navigate',
+      category: 'browser',
+      args: { url: 'https://random-evil-site.example.com' },
+    });
+    expect(ok).toBe(false);
+    expect(promptUser).toHaveBeenCalledOnce();
+  });
+
+  it('18. smart mode still prompts for non-safe tools', async () => {
+    const promptUser = vi.fn(async () => 'allow' as const);
+    const eng = new ApprovalEngine('smart', { promptUser });
+    await eng.checkApproval({
+      toolName: 'shell_exec',
+      category: 'execute',
+      args: { command: 'ls -la' },
+    });
+    expect(promptUser).toHaveBeenCalledOnce();
+  });
+
+  it('19. manual mode does NOT short-circuit on built-in safe tools', async () => {
+    // The built-in policy is smart-mode-only — manual stays paranoid.
+    const promptUser = vi.fn(async () => 'allow' as const);
+    const eng = new ApprovalEngine('manual', { promptUser });
+    await eng.checkApproval({
+      toolName: 'fetch_url',
+      category: 'network',
+      args: { url: 'https://example.com' },
+    });
+    expect(promptUser).toHaveBeenCalledOnce();
+  });
+
+  it('20. loadPersistentAllowlist hydrates session + permanent allow sets', async () => {
+    const promptUser = vi.fn(async () => 'deny' as const);
+    const eng = new ApprovalEngine('manual', { promptUser });
+    eng.loadPersistentAllowlist([
+      { tool: 'shell_exec', signature: 'shell_exec::pytest' },
+    ]);
+    const ok = await eng.checkApproval({
+      toolName: 'shell_exec',
+      category: 'execute',
+      args: { command: 'pytest' },
+    });
+    expect(ok).toBe(true);
+    expect(promptUser).not.toHaveBeenCalled();
+  });
+
+  it('21. loadPersistentAllowlist survives resetSession (permanent ⊂ session)', async () => {
+    const promptUser = vi.fn(async () => 'deny' as const);
+    const eng = new ApprovalEngine('manual', { promptUser });
+    eng.loadPersistentAllowlist([
+      { tool: 'shell_exec', signature: 'shell_exec::pytest' },
+    ]);
+    eng.resetSession();
+    const ok = await eng.checkApproval({
+      toolName: 'shell_exec',
+      category: 'execute',
+      args: { command: 'pytest' },
+    });
+    expect(ok).toBe(true);
+  });
+
+  it('22. hostnameOf parses URLs correctly and returns null on garbage', async () => {
+    const { hostnameOf } = await import('../../../moat/approvalEngine');
+    expect(hostnameOf('https://www.GitHub.com/foo')).toBe('www.github.com');
+    expect(hostnameOf('not a url')).toBeNull();
+    expect(hostnameOf('')).toBeNull();
+  });
+});
