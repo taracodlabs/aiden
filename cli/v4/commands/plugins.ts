@@ -25,6 +25,7 @@ import {
   readManifest,
   formatInstallSummary,
   saveGrantedPermissions,
+  loadGrantedPermissions,
   GRANTED_FILE,
   type PluginManifest,
 } from '../../../core/v4/plugins';
@@ -252,6 +253,68 @@ export const plugins: SlashCommand = {
       return {};
     }
 
+    // ── grant ─────────────────────────────────────────────────────
+    if (sub === 'grant') {
+      const name = ctx.args[1];
+      if (!name) {
+        ctx.display.printError('Usage: /plugins grant <name>');
+        return {};
+      }
+      const entry = ctx.pluginLoader.getRegistry().get(name);
+      if (!entry) {
+        ctx.display.printError(`Plugin '${name}' is not installed.`);
+        return {};
+      }
+      const dir = entry.manifest.path;
+      if (!dir) {
+        ctx.display.printError(`Cannot resolve plugin directory for ${name}.`);
+        return {};
+      }
+      const previous = await loadGrantedPermissions(dir);
+      const newPerms = entry.manifest.permissions.filter(
+        (p) => !previous.includes(p),
+      );
+
+      ctx.display.info(`--- Permission summary for ${name} ---`);
+      ctx.display.write(formatInstallSummary(entry.manifest) + '\n');
+      if (previous.length > 0) {
+        ctx.display.dim(
+          `Previously granted: ${previous.join(', ') || '(none)'}`,
+        );
+      }
+      if (newPerms.length > 0) {
+        ctx.display.warn(`NEW permissions requested: ${newPerms.join(', ')}`);
+      }
+      ctx.display.write('\n');
+
+      const confirmFn = ctx.confirm ?? (async () => false);
+      const allow = await confirmFn(
+        newPerms.length > 0
+          ? `Grant the listed permissions (including ${newPerms.length} new)? [y/N] `
+          : `Grant the listed permissions? [y/N] `,
+      );
+      if (!allow) {
+        ctx.display.dim('Grant cancelled.');
+        return {};
+      }
+      await saveGrantedPermissions(dir, entry.manifest.permissions);
+      // Reload so the new state takes effect.
+      await ctx.pluginLoader.teardown();
+      await ctx.pluginLoader.discoverAndLoad();
+      const after = ctx.pluginLoader.getRegistry().get(name);
+      if (after?.status === 'loaded') {
+        ctx.display.success(
+          `Granted. ${name} now loaded with ${after.contributions.tools.length} tool(s).`,
+        );
+      } else {
+        ctx.display.warn(
+          `Granted but plugin not in 'loaded' status: ${after?.status ?? 'gone'}` +
+            (after?.error ? ' — ' + after.error : ''),
+        );
+      }
+      return {};
+    }
+
     // ── reload ────────────────────────────────────────────────────
     if (sub === 'reload') {
       // teardown + re-discover. Granted permissions stay because the
@@ -268,7 +331,7 @@ export const plugins: SlashCommand = {
 
     ctx.display.printError(
       `Unknown subcommand: ${sub}`,
-      'Try: /plugins list | info <name> | install <path> | remove <name> | reload',
+      'Try: /plugins list | info <name> | install <path> | grant <name> | remove <name> | reload',
     );
     return {};
   },

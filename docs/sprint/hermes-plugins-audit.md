@@ -84,6 +84,8 @@ This is the **gap** for Aiden Phase 17. Hermes has no declared-capability grants
 
 This is **net-new design**, not a port. It is also advisory only (no OS-level sandbox in v4.0 — flag per stop-condition #3, real sandbox in v4.1).
 
+**Manifest-change re-grant flow (also net-new).** Phase 17 Task 4 adds: when a plugin updates and its `permissions[]` declares more than the persisted granted set, the plugin loads in a `suspended` state and the user must re-grant via `/plugins grant <name>`. Hermes has no equivalent — its trust model is "user opted in via `plugins.enabled` once," with no granular per-permission surface to upgrade. Aiden's diff-on-load is the honest path for a UX-first trust signal.
+
 ## Decisions (per surface): copy / adapt / diverge
 
 | Surface | Decision | Notes |

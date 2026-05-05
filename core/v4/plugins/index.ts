@@ -37,5 +37,10 @@ export {
   loadGrantedPermissions,
   saveGrantedPermissions,
   buildPermissionChecker,
+  evaluatePermissionState,
   formatInstallSummary,
+} from './pluginPermissions';
+export type {
+  PermissionState,
+  PermissionEvaluation,
 } from './pluginPermissions';

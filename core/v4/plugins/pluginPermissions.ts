@@ -74,34 +74,141 @@ export async function saveGrantedPermissions(
 }
 
 /**
- * Build the `isPermissionGranted` hook the loader expects. Caches the
- * grant lookup per plugin path so a single `discoverAndLoad()` doesn't
- * re-read each file once per declared permission.
+ * Permission evaluation outcome. The loader uses this to decide between
+ * the four lifecycle states a plugin can land in:
+ *
+ * - `granted`        — granted set covers every declared permission. Tools
+ *                      execute normally.
+ * - `pending-grant`  — no granted file on disk. First-install case (and
+ *                      first boot for a bundled plugin that has not yet
+ *                      been granted). Tools register but execute returns
+ *                      a "permissions not granted" refusal so the agent
+ *                      learns the tool exists but cannot use it.
+ * - `suspended`      — granted file present but the manifest now declares
+ *                      permissions not in the granted set. Plugin upgrade
+ *                      requested more access; user must re-grant via
+ *                      /plugins grant <name>. Tools NOT registered.
+ * - `granted-with-extra` (informational only — collapsed to `granted` in
+ *                      practice) — granted has more than declared. Treat
+ *                      as granted; no harm done.
+ */
+export type PermissionState =
+  | 'granted'
+  | 'pending-grant'
+  | 'suspended';
+
+export interface PermissionEvaluation {
+  state: PermissionState;
+  /** Permissions declared by the manifest. */
+  declared: PluginPermission[];
+  /** Permissions in the persisted granted file (or [] when missing). */
+  granted: PluginPermission[];
+  /** declared \ granted — the new asks the user has not yet allowed. */
+  missing: PluginPermission[];
+  /** True iff the granted file exists on disk. */
+  grantedFileExists: boolean;
+}
+
+interface FsLikeSync {
+  readFileSync(p: string, enc: string): string;
+  existsSync(p: string): boolean;
+}
+
+/**
+ * Synchronous variant of loadGrantedPermissions for use inside the
+ * loader's permission checker (which the loader calls with a sync API).
+ * Same failure-safe semantics as the async version.
+ */
+function loadGrantedSync(
+  pluginDir: string,
+  fsSync: FsLikeSync,
+): { granted: PluginPermission[]; fileExists: boolean } {
+  const file = path.join(pluginDir, GRANTED_FILE);
+  if (!fsSync.existsSync(file)) {
+    return { granted: [], fileExists: false };
+  }
+  try {
+    const parsed = JSON.parse(fsSync.readFileSync(file, 'utf8')) as Partial<GrantedFileShape>;
+    if (!parsed || !Array.isArray(parsed.granted)) {
+      return { granted: [], fileExists: true };
+    }
+    const granted = parsed.granted.filter(
+      (p): p is PluginPermission =>
+        typeof p === 'string' && (PERMISSION_TYPES as readonly string[]).includes(p),
+    );
+    return { granted, fileExists: true };
+  } catch {
+    return { granted: [], fileExists: true };
+  }
+}
+
+/**
+ * Evaluate a manifest against its persisted granted file. Pure function —
+ * `fsSync` is injected so tests can substitute. Defaults to node:fs.
+ */
+export function evaluatePermissionState(
+  manifest: PluginManifest,
+  fsSync: FsLikeSync = require('node:fs') as FsLikeSync,
+): PermissionEvaluation {
+  if (!manifest.path) {
+    // No path means we can't read a granted file — treat as fresh install.
+    return {
+      state: manifest.permissions.length === 0 ? 'granted' : 'pending-grant',
+      declared: manifest.permissions,
+      granted: [],
+      missing: manifest.permissions,
+      grantedFileExists: false,
+    };
+  }
+  const { granted, fileExists } = loadGrantedSync(manifest.path, fsSync);
+  const grantedSet = new Set(granted);
+  const missing = manifest.permissions.filter((p) => !grantedSet.has(p));
+
+  if (manifest.permissions.length === 0) {
+    return { state: 'granted', declared: [], granted, missing: [], grantedFileExists: fileExists };
+  }
+  if (!fileExists) {
+    return {
+      state: 'pending-grant',
+      declared: manifest.permissions,
+      granted,
+      missing,
+      grantedFileExists: false,
+    };
+  }
+  if (missing.length > 0) {
+    return {
+      state: 'suspended',
+      declared: manifest.permissions,
+      granted,
+      missing,
+      grantedFileExists: true,
+    };
+  }
+  return {
+    state: 'granted',
+    declared: manifest.permissions,
+    granted,
+    missing: [],
+    grantedFileExists: true,
+  };
+}
+
+/**
+ * Per-permission boolean checker — kept for callers that still want
+ * granular access (and to satisfy the original `isPermissionGranted`
+ * loader hook signature). Memoises per plugin path.
  */
 export function buildPermissionChecker(
   cache = new Map<string, Set<string>>(),
+  fsSync: FsLikeSync = require('node:fs') as FsLikeSync,
 ): (manifest: PluginManifest, permission: string) => boolean {
   return (manifest, permission) => {
     if (!manifest.path) return false;
     let grants = cache.get(manifest.path);
     if (!grants) {
-      // Synchronous read — checker is called inside the loader's load
-      // path which is already async, but the loader expects a sync hook.
-      // Use the sync API on first call, then memoise.
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const fsSync = require('node:fs') as typeof import('node:fs');
-        const file = path.join(manifest.path, GRANTED_FILE);
-        const text = fsSync.readFileSync(file, 'utf8');
-        const parsed = JSON.parse(text) as Partial<GrantedFileShape>;
-        grants = new Set(
-          Array.isArray(parsed.granted)
-            ? parsed.granted.filter((p) => typeof p === 'string')
-            : [],
-        );
-      } catch {
-        grants = new Set();
-      }
+      const { granted } = loadGrantedSync(manifest.path, fsSync);
+      grants = new Set(granted);
       cache.set(manifest.path, grants);
     }
     return grants.has(permission);

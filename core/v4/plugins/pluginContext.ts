@@ -61,6 +61,14 @@ export class PluginContextError extends Error {
 }
 
 /**
+ * Permission state passed to PluginContext to drive tool-execute
+ * wrapping. Mirrors `PermissionState` in pluginPermissions.ts but kept
+ * as a string union here so this module does not import the permissions
+ * helper (avoids a circular concern; the loader threads the value in).
+ */
+export type ContextPermissionState = 'granted' | 'pending-grant';
+
+/**
  * Per-plugin context. The plugin manager constructs one of these and
  * passes it to the plugin's exported `register(ctx)` function.
  */
@@ -69,15 +77,18 @@ export class PluginContext {
   private readonly toolRegistry: ToolRegistry;
   private readonly hookRegistry: Map<LifecycleHook, Array<() => void | Promise<void>>>;
   private readonly contributions: PluginContributions = { tools: [], hooks: [] };
+  private readonly permissionState: ContextPermissionState;
 
   constructor(
     manifest: PluginManifest,
     toolRegistry: ToolRegistry,
     hookRegistry: Map<LifecycleHook, Array<() => void | Promise<void>>>,
+    permissionState: ContextPermissionState = 'granted',
   ) {
     this.manifest = manifest;
     this.toolRegistry = toolRegistry;
     this.hookRegistry = hookRegistry;
+    this.permissionState = permissionState;
   }
 
   /** What this plugin has registered so far. Returned by reference; do not mutate. */
@@ -114,7 +125,23 @@ export class PluginContext {
       );
     }
 
-    this.toolRegistry.register(handler);
+    if (this.permissionState === 'pending-grant') {
+      // Wrap execute so the LLM sees the tool but cannot use it. The
+      // refusal points at the exact slash command the user must run —
+      // honest, actionable. Underlying handler.execute is never called.
+      const refusalMessage =
+        `permissions not granted for plugin "${this.manifest.name}". ` +
+        `Run: /plugins grant ${this.manifest.name}`;
+      const wrapped: ToolHandler = {
+        ...handler,
+        async execute() {
+          return { error: refusalMessage };
+        },
+      };
+      this.toolRegistry.register(wrapped);
+    } else {
+      this.toolRegistry.register(handler);
+    }
     this.contributions.tools.push(name);
   }
 

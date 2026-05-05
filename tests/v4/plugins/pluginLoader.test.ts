@@ -152,7 +152,7 @@ describe('PluginLoader.discoverAndLoad', () => {
     expect(found!.manifest.description).toBe('user version');
   });
 
-  it('14. permission denied via isPermissionGranted blocks load', async () => {
+  it('14. evaluatePermissions returning suspended blocks register()', async () => {
     await writePlugin(
       paths.pluginsDir,
       'needs-net',
@@ -162,12 +162,18 @@ describe('PluginLoader.discoverAndLoad', () => {
     const loader = new PluginLoader({
       paths,
       toolRegistry: new ToolRegistry(),
-      isPermissionGranted: () => false,
+      evaluatePermissions: (m) => ({
+        state: 'suspended',
+        declared: m.permissions,
+        granted: [],
+        missing: m.permissions,
+        grantedFileExists: true,
+      }),
     });
     await loader.discoverAndLoad();
     const found = loader.getRegistry().get('needs-net');
-    expect(found?.status).toBe('error');
-    expect(found?.error).toContain('permissions not granted');
+    expect(found?.status).toBe('suspended');
+    expect(found?.missingPermissions).toEqual(['network']);
   });
 });
 

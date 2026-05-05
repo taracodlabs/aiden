@@ -41,6 +41,10 @@ import {
   PluginRegistry,
   type LoadedPlugin,
 } from './pluginRegistry';
+import {
+  evaluatePermissionState,
+  type PermissionEvaluation,
+} from './pluginPermissions';
 
 export interface PluginLoaderOptions {
   paths: AidenPaths;
@@ -57,20 +61,35 @@ export interface PluginLoaderOptions {
    */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
   /**
-   * Permission check hook. Phase 17 Task 4 wires the granted-permission
-   * file into here; until then this is undefined and all permissions
-   * pass. Returning false aborts `register()` for that plugin and
-   * surfaces a "permission not granted" error.
+   * Permission state hook. Replaces the simpler `isPermissionGranted`
+   * boolean check (Task 1) with the richer 3-state evaluation introduced
+   * in Task 4. Caller normally passes `evaluatePermissionState` directly
+   * (or a wrapper that injects a fake fs for tests).
+   *
+   * Default: every plugin evaluates as `granted` (legacy behaviour for
+   * tests that don't care about permissions).
    */
-  isPermissionGranted?: (
-    manifest: PluginManifest,
-    permission: string,
-  ) => boolean;
+  evaluatePermissions?: (manifest: PluginManifest) => PermissionEvaluation;
 }
 
 /** Plugin module shape we expect on dynamic import. */
 interface PluginModule {
   register?: (ctx: PluginContext) => void | Promise<void>;
+}
+
+/**
+ * Permission-evaluation default for callers that don't pass one. Tests
+ * that don't care about permissions (Task 1's loader tests, for example)
+ * stay simple — every plugin is implicitly granted.
+ */
+function defaultGrantedEvaluation(manifest: PluginManifest): PermissionEvaluation {
+  return {
+    state: 'granted',
+    declared: manifest.permissions,
+    granted: manifest.permissions,
+    missing: [],
+    grantedFileExists: false,
+  };
 }
 
 export class PluginLoader {
@@ -224,28 +243,41 @@ export class PluginLoader {
   private async loadOne(manifest: PluginManifest): Promise<void> {
     const log = this.opts.log ?? (() => {});
 
-    // Permission gate — Task 4 wires this. With no hook, every declared
-    // permission is implicitly granted (matches "loaded by default" UX).
-    if (this.opts.isPermissionGranted) {
-      const missing = manifest.permissions.filter(
-        (p) => !this.opts.isPermissionGranted!(manifest, p),
+    // Permission state gate — Task 4. Three outcomes:
+    //
+    //   granted        → register() called normally
+    //   pending-grant  → register() called; PluginContext wraps each
+    //                    tool handler so execute returns a refusal that
+    //                    points at /plugins grant <name>
+    //   suspended      → register() NOT called; plugin recorded with
+    //                    missingPermissions so /plugins info renders the
+    //                    diff and the boot card flags the suspension
+    const evalFn = this.opts.evaluatePermissions ?? defaultGrantedEvaluation;
+    const evaluation = evalFn(manifest);
+
+    if (evaluation.state === 'suspended') {
+      this.registry.upsert({
+        manifest,
+        status: 'suspended',
+        contributions: { tools: [], hooks: [] },
+        error:
+          `plugin upgrade requested new permissions: ${evaluation.missing.join(', ')}. ` +
+          `Run: /plugins grant ${manifest.name}`,
+        missingPermissions: evaluation.missing,
+      });
+      log(
+        'warn',
+        `[plugins] ${manifest.name}: suspended — needs re-grant for: ${evaluation.missing.join(', ')}`,
       );
-      if (missing.length > 0) {
-        this.registry.upsert({
-          manifest,
-          status: 'error',
-          contributions: { tools: [], hooks: [] },
-          error: `permissions not granted: ${missing.join(', ')}`,
-        });
-        log(
-          'warn',
-          `[plugins] ${manifest.name}: permissions not granted: ${missing.join(', ')}`,
-        );
-        return;
-      }
+      return;
     }
 
-    const ctx = new PluginContext(manifest, this.opts.toolRegistry, this.hooks);
+    const ctx = new PluginContext(
+      manifest,
+      this.opts.toolRegistry,
+      this.hooks,
+      evaluation.state === 'pending-grant' ? 'pending-grant' : 'granted',
+    );
     const contributions: PluginContributions = ctx.getContributions() as PluginContributions;
 
     let mod: PluginModule;
@@ -294,14 +326,23 @@ export class PluginLoader {
       return;
     }
 
+    const finalStatus =
+      evaluation.state === 'pending-grant' ? 'pending-grant' : 'loaded';
     this.registry.upsert({
       manifest,
-      status: 'loaded',
+      status: finalStatus,
       contributions: { tools: [...contributions.tools], hooks: [...contributions.hooks] },
+      missingPermissions:
+        evaluation.state === 'pending-grant' ? evaluation.missing : undefined,
+      error:
+        evaluation.state === 'pending-grant'
+          ? `awaiting grant for: ${evaluation.missing.join(', ')}. ` +
+            `Run: /plugins grant ${manifest.name}`
+          : undefined,
     });
     log(
       'info',
-      `[plugins] loaded ${manifest.name} v${manifest.version} (${contributions.tools.length} tool(s))`,
+      `[plugins] ${finalStatus === 'pending-grant' ? 'pending-grant' : 'loaded'} ${manifest.name} v${manifest.version} (${contributions.tools.length} tool(s))`,
     );
   }
 

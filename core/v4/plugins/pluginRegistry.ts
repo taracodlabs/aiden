@@ -15,11 +15,16 @@ import type { PluginContributions } from './pluginContext';
 
 /** Lifecycle state of one plugin. */
 export type PluginStatus =
-  | 'discovered' // manifest parsed, not yet loaded
-  | 'loaded'     // module imported + register() ran successfully
-  | 'activated'  // onActivate fired without error
-  | 'disabled'   // user opt-out via config
-  | 'error';     // any failure during discover/load/activate
+  | 'discovered'      // manifest parsed, not yet loaded
+  | 'loaded'          // module imported + register() ran successfully
+  | 'activated'       // onActivate fired without error
+  | 'disabled'        // user opt-out via config
+  | 'pending-grant'   // Phase 17 Task 4: no granted-permissions file yet
+                      //  → tools registered but execute returns refusal
+  | 'suspended'       // Phase 17 Task 4: manifest declares permissions
+                      //  the granted file does not cover (upgrade case)
+                      //  → tools NOT registered; user must /plugins grant
+  | 'error';          // any failure during discover/load/activate
 
 export interface LoadedPlugin {
   manifest: PluginManifest;
@@ -27,6 +32,13 @@ export interface LoadedPlugin {
   contributions: PluginContributions;
   /** First error message captured during this plugin's lifecycle, if any. */
   error?: string;
+  /**
+   * Permissions declared by the manifest that the persisted granted file
+   * does not cover. Populated for `pending-grant` and `suspended`
+   * statuses; empty otherwise. /plugins commands and the boot card
+   * surface render this directly.
+   */
+  missingPermissions?: string[];
 }
 
 export class PluginRegistry {
@@ -59,6 +71,8 @@ export class PluginRegistry {
       loaded: 0,
       activated: 0,
       disabled: 0,
+      'pending-grant': 0,
+      suspended: 0,
       error: 0,
     };
     for (const p of this.plugins.values()) counts[p.status]++;
