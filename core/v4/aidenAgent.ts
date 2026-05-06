@@ -60,6 +60,11 @@ import type { ContextCompressor, CompressionResult } from './contextCompressor';
 import type { AuxiliaryClient } from './auxiliaryClient';
 import type { PromptCaching } from './promptCaching';
 import type { MemorySnapshot } from './memoryProvider';
+import {
+  SkillEnforcementTracker,
+  extractSkillViewRequiredTools,
+  type SkillEnforcementMetrics,
+} from './agent/skillEnforcement';
 
 /**
  * Tool executor — runs a single tool call and returns the result.
@@ -180,6 +185,15 @@ export interface AidenAgentResult {
   compressionEvents: number;
   /** Phase 13: AuxiliaryClient.getUsage() snapshot at end of run. */
   auxiliaryUsage: Record<string, { inputTokens: number; outputTokens: number; calls: number }>;
+  /**
+   * Phase 23.1: cumulative skill-enforcement counters across the agent's
+   * lifetime (process-scoped). `recovered` = corrective retry produced
+   * the missing tool call; `failed` = retry cap exceeded and the turn
+   * ended with honest failure; `armed` = skills_view returned a non-empty
+   * required_tools at least once. Always present, all zeroes when no
+   * required-tool skill ever fired.
+   */
+  skillEnforcement: { recovered: number; failed: number; armed: number };
 }
 
 /**
@@ -239,6 +253,17 @@ export class AidenAgent {
   /** Cached system prompt — frozen after first build for session-long prefix cache. */
   private cachedSystemPrompt: string | null = null;
   private compressionEvents = 0;
+  /**
+   * Phase 23.1: process-scoped enforcement counters. Lives on the agent
+   * (one per session) because they read from /doctor and would
+   * vanish if scoped to a single user turn. Per-turn state lives on
+   * the SkillEnforcementTracker constructed inside runConversation.
+   */
+  private readonly skillEnforcementMetrics: SkillEnforcementMetrics = {
+    recovered: 0,
+    failed: 0,
+    armed: 0,
+  };
   /**
    * Phase 16d: dirty bit set by `markMemoryDirty()`. The next
    * `runConversation` turn loads a fresh `MemorySnapshot` via
@@ -403,6 +428,11 @@ export class AidenAgent {
     let fallbackActivated = false;
     let finishReason: 'stop' | 'budget_exhausted' | 'error' = 'stop';
     let finalContent = '';
+
+    // Phase 23.1: per-user-turn enforcement state. Tracker is fresh per
+    // call to runConversation; metrics object is shared with the agent
+    // instance so /doctor sees cumulative counts.
+    const enforcement = new SkillEnforcementTracker(this.skillEnforcementMetrics);
     const totalUsage = { inputTokens: 0, outputTokens: 0 };
     const toolCallTrace: HonestyTraceEntry[] = [];
 
@@ -528,6 +558,53 @@ export class AidenAgent {
       // (If finishReason is 'tool_use' but toolCalls is empty, treat as stop —
       // a known provider quirk; logging hook can be wired later.)
       if (!hasToolCalls) {
+        // Phase 23.1: skill-required-tool enforcement. Before letting
+        // the turn end, check whether a skill_view armed a required
+        // sequence and whether every required tool actually fired.
+        // On incomplete-with-retries-available, drop the assistant
+        // message we just appended (so transcripts don't carry the
+        // confabulated summary), inject a corrective system message,
+        // and continue the loop. Mirrors Hermes's incomplete-retry
+        // mechanism (run_agent.py:12966-13022) with a different trigger.
+        const verdict = enforcement.evaluateOnFinal();
+        if (verdict.kind === 'incomplete-can-retry') {
+          messages.pop(); // discard the fabricated final message
+          messages.push({
+            role: 'system',
+            content: enforcement.buildCorrectiveMessage(verdict.missing),
+          });
+          enforcement.incrementRetry();
+          continue;
+        }
+        if (verdict.kind === 'incomplete-cap-exceeded') {
+          const honestPrefix =
+            `[skill-enforcement] failed: required tools missing for ` +
+            `\`${verdict.skillName}\` after ${verdict.cap} retries: ` +
+            `[${verdict.missing.join(', ')}].\n\n`;
+          finalContent = honestPrefix + (output.content ?? '');
+          // Replace the trailing assistant message with the honest
+          // version so transcripts and downstream callers see the
+          // truthful summary, not the confabulated one.
+          const lastIdx = messages.length - 1;
+          if (
+            lastIdx >= 0 &&
+            messages[lastIdx].role === 'assistant'
+          ) {
+            messages[lastIdx] = { role: 'assistant', content: finalContent };
+          }
+          finishReason = 'stop';
+          return await this.finalize({
+            finalContent,
+            messages,
+            turnCount,
+            toolCallCount,
+            fallbackActivated,
+            finishReason,
+            totalUsage,
+            toolCallTrace,
+            aborted: false,
+          });
+        }
         finalContent = output.content ?? '';
         finishReason = 'stop';
         return await this.finalize({
@@ -561,6 +638,18 @@ export class AidenAgent {
         }
 
         this.onToolCall?.(call, 'after', result);
+
+        // Phase 23.1: tracker sees every dispatch (regardless of error).
+        // A failed tool still counts as "called" — the model's job was
+        // to fire the tool; surfacing the error back through tool-result
+        // history is a separate concern.
+        enforcement.recordToolCall(call.name);
+        // If skill_view returned a payload with required_tools, arm the
+        // tracker now so the message-final boundary check has data.
+        const armable = extractSkillViewRequiredTools(call.name, result.result);
+        if (armable) {
+          enforcement.recordSkillView(armable.skillName, armable.requiredTools);
+        }
 
         // Phase 12: append to trace BEFORE tool message goes onto history.
         toolCallTrace.push({
@@ -763,9 +852,20 @@ export class AidenAgent {
       toolCallTrace: args.toolCallTrace,
       compressionEvents: this.compressionEvents,
       auxiliaryUsage: this.auxiliaryClient?.getUsage() ?? {},
+      skillEnforcement: { ...this.skillEnforcementMetrics },
       ...(honestyFindings ? { honestyFindings } : {}),
       ...(skillCreated ? { skillCreated } : {}),
     };
+  }
+
+  /**
+   * Phase 23.1: read-only snapshot of cumulative skill-enforcement
+   * counters since this agent instance was constructed. /doctor reads
+   * this; tests do too. Returns a copy so callers can't mutate the
+   * internal counters.
+   */
+  getSkillEnforcementMetrics(): SkillEnforcementMetrics {
+    return { ...this.skillEnforcementMetrics };
   }
 }
 

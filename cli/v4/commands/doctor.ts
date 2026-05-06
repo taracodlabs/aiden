@@ -37,6 +37,16 @@ export const doctor: SlashCommand = {
     // adapter and the same renderer can be reused by `aiden doctor`
     // CLI in a future polish pass.
     ctx.display.write(renderHealthBox(report, ctx.display) + '\n');
+    // Phase 23.1: surface session-scoped skill-enforcement counters.
+    // Lives only on the live agent (process-scoped, no persistence) so
+    // `aiden doctor` CLI subcommand correctly omits this — the
+    // counters would always be zero there.
+    if (ctx.agent) {
+      const m = ctx.agent.getSkillEnforcementMetrics();
+      ctx.display.write(
+        `[skill-enforcement] armed=${m.armed} recovered=${m.recovered} failed=${m.failed} (session)\n`,
+      );
+    }
     return {};
   },
 };

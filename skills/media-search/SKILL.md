@@ -6,6 +6,7 @@ version: 1.0.0
 origin: aiden
 license: Apache-2.0
 tags: music, video, youtube, play, song, listen, media, autoplay
+required_tools: [web_search, open_url]
 ---
 
 # Media Search & Play

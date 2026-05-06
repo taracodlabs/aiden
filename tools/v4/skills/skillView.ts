@@ -72,6 +72,15 @@ export const skillViewTool: ToolHandler = {
     if (!skill) {
       return { success: false, error: `Skill not found: ${name}` };
     }
+    // Phase 23.1: surface required_tools so the agent loop's skill-
+    // enforcement guard can arm without re-parsing the SKILL.md body.
+    // Absent/empty = no enforcement, no behavior change for legacy skills.
+    const requiredToolsRaw = skill.frontmatter.required_tools;
+    const requiredTools = Array.isArray(requiredToolsRaw)
+      ? requiredToolsRaw
+          .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+          .map((t) => t.trim())
+      : [];
     return {
       success: true,
       name: skill.frontmatter.name,
@@ -82,6 +91,7 @@ export const skillViewTool: ToolHandler = {
         skill.frontmatter.metadata?.aiden?.category,
       content: skill.rawText,
       filePath: skill.filePath,
+      requiredTools,
     };
   },
 };
