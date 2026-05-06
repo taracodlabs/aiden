@@ -180,6 +180,41 @@ Set `AIDEN_HEADLESS=true` to suppress the Electron GUI when running the packaged
 
 ---
 
+## Known Limitations (v4.0.0)
+
+We're shipping honest. Things that work, things that don't:
+
+**Tested and working:**
+
+- Windows 10/11 native (primary platform, full QA)
+- Linux via WSL2 (cross-platform paths verified)
+- Together AI (default provider, fast)
+- ChatGPT Plus OAuth (verified end-to-end with Codex backend)
+
+**Untested at launch:**
+
+- macOS native — best-effort, may need user reports
+- Linux distributions beyond Ubuntu (Snap/Flatpak Chrome detection)
+- Claude Pro OAuth — routing layer fixed, upstream untested
+
+**Beta features:**
+
+- OAuth providers — provider-side gates may apply, use API keys as fallback
+- Auto-update — notifies on outdated version, doesn't auto-install
+
+**Coming in v4.1:**
+
+- Cron + scheduled tasks
+- Messaging gateway (Telegram, Discord, Slack)
+- Voice mode
+- Subagent delegation
+- ACP integration (VSCode, Zed, JetBrains)
+- 18+ items in [v4.1-roadmap.md](docs/v4.1-roadmap.md)
+
+Found a bug? Report at https://github.com/taracodlabs/Aiden-v4/issues with output of `aiden doctor` for fast triage.
+
+---
+
 ## Getting Started
 
 Once Aiden is running, type these in the chat prompt:
