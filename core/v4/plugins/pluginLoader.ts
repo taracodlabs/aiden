@@ -400,7 +400,18 @@ export class PluginLoader {
 
     // Use file:// URL so node treats this as a path (works for CJS and ESM).
     const url = pathToFileURL(entry).href;
-    const imported = (await import(url)) as PluginModule & { default?: PluginModule };
+    // tsc with module:commonjs rewrites `await import(url)` into
+    // `require(url)`, which rejects file:// URLs with MODULE_NOT_FOUND.
+    // Wrap the dynamic import in `new Function` so the compiler can't see
+    // it; at runtime this is a real ESM dynamic import that resolves both
+    // CJS and ESM plugin entrypoints.
+    const dynamicImport = new Function(
+      'specifier',
+      'return import(specifier)',
+    ) as (s: string) => Promise<unknown>;
+    const imported = (await dynamicImport(url)) as PluginModule & {
+      default?: PluginModule;
+    };
     // Some plugins export `register` as default; accept either shape.
     if (typeof imported.register === 'function') return imported;
     if (imported.default && typeof imported.default.register === 'function') {
