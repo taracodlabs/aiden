@@ -59,11 +59,16 @@ describe('MemoryManager', () => {
     expect(await readMemory('memory')).toContain('first note');
   });
 
-  it('4. add rejects substring duplicates', async () => {
+  it('4. add no-ops on substring duplicates (ok=true with deduped flag, no disk change)', async () => {
     await mgr.add('memory', 'I prefer pnpm over npm');
+    const before = await readMemory('memory');
+    // Phase 21 #2: substring-duplicate is a successful no-op — the
+    // post-write state already matches user intent, so we don't churn
+    // the disk and we don't surface a "verified=false" warning.
     const r = await mgr.add('memory', 'pnpm over npm');
-    expect(r.ok).toBe(false);
-    expect(r.reason).toMatch(/duplicate/i);
+    expect(r.ok).toBe(true);
+    expect(r.deduped).toBe(true);
+    expect(await readMemory('memory')).toBe(before);
   });
 
   it('5. add enforces MEMORY.md capacity (2200 chars)', async () => {
@@ -181,14 +186,17 @@ describe('MemoryManager', () => {
     ]);
   });
 
-  it('18. onMutation does NOT fire on failed add (duplicate or capacity)', async () => {
+  it('18. onMutation does NOT fire on no-op add (duplicate) or failed add (capacity)', async () => {
     await mgr.add('memory', 'I prefer pnpm');
     const events: Array<{ file: string; action: string }> = [];
     mgr.onMutation((file, action) => events.push({ file, action }));
-    // Duplicate path
+    // Phase 21 #2: duplicate is now ok=true with deduped flag (intent
+    // satisfied — content is already in the file) but onMutation must
+    // still NOT fire because the disk wasn't actually touched.
     const dup = await mgr.add('memory', 'I prefer pnpm');
-    expect(dup.ok).toBe(false);
-    // Capacity path
+    expect(dup.ok).toBe(true);
+    expect(dup.deduped).toBe(true);
+    // Capacity path stays a hard failure.
     const big = await mgr.add('memory', 'x'.repeat(MEMORY_CHAR_LIMIT + 1));
     expect(big.ok).toBe(false);
     expect(events).toEqual([]);

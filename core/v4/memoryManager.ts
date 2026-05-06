@@ -49,6 +49,14 @@ export type MemoryFile = 'memory' | 'user';
 export interface MutationResult {
   ok: boolean;
   reason?: string;
+  /**
+   * Phase 21 #2: true when add() detected the content was already present
+   * (substring duplicate). The disk wasn't touched but the user's intent —
+   * "make sure X is recorded" — is satisfied, so callers (MemoryGuard,
+   * /memory display) treat this as success rather than a verification
+   * failure. onMutation does NOT fire when this is set.
+   */
+  deduped?: boolean;
 }
 
 /**
@@ -138,15 +146,16 @@ export class MemoryManager implements MemoryProvider {
 
       // Substring-duplicate detection: if the new note is already a
       // sub-string of any existing entry (or vice-versa for trivial cases),
-      // reject as duplicate.
+      // skip the disk write but treat as success — the post-write state
+      // (content present in file) matches the caller's intent. Phase 21
+      // #2: this used to return ok=false, which surfaced as a spurious
+      // "attempted but not verified" warning when the model re-issued
+      // the same memory_add inside one turn.
       const isDuplicate = entries.some(
         (e) => e === trimmed || e.includes(trimmed),
       );
       if (isDuplicate) {
-        return {
-          ok: false,
-          reason: 'Duplicate: content already present in this file.',
-        };
+        return { ok: true, deduped: true };
       }
 
       const next = [...entries, trimmed];
