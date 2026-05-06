@@ -241,6 +241,7 @@
     "chrome-remote-interface": "^0.34.0",
     "commander": "^5.1.0",
     "cors": "^2.8.5",
+    "croner": "^10.0.1",
     "discord.js": "^14.25.1",
     "dockerode": "^4.0.9",
     "dotenv": "^17.3.1",

@@ -3,106 +3,193 @@
 // Copyright (c) 2026 Shiva Deore. All rights reserved.
 // ============================================================
 //
-// core/cronManager.ts — Lightweight scheduled task engine.
+// core/cronManager.ts — scheduled task engine.
 //
-// Supports natural-language schedules: "every 5 minutes", "hourly", "daily".
-// Jobs are persisted to ~/.aiden/cron_jobs.json and restored on startup.
-// Uses setInterval — no external cron dependency required.
+// Public API (kept stable): createJob, listJobs, getJob,
+// pauseJob, resumeJob, deleteJob, triggerJob, parseSchedule,
+// loadJobs.
+//
+// Capabilities:
+//   - "every N minutes/hours/days", "hourly", "daily", "30m"
+//   - 5-field cron expressions ("0 9 * * *", "*/30 * * * *")
+//   - One-shot ISO timestamps ("2026-02-03T14:00")
+// Persistence:
+//   - ~/.aiden/cron_jobs.json — atomic temp-then-rename + fsync,
+//     guarded by a per-path mutex. cron_jobs.json never observed
+//     in a half-written state, even if the process is killed
+//     mid-write.
+// Scheduling:
+//   - lastRun-anchored chained setTimeout (no setInterval drift).
+//     Each fire schedules the next from `lastRun + intervalMs`,
+//     so a process restart resumes the cadence from where it
+//     left off. Stale anchors (lastRun + interval < now) fire
+//     immediately, then the regular cadence resumes.
+// Per-run logs:
+//   - ~/.aiden/cron-logs/<job-id>.log gets a full STARTED /
+//     output / DONE block per fire. cron_jobs.json carries a
+//     4 KB summary on the job record.
 
 import * as fs   from 'fs'
 import * as path from 'path'
 import * as os   from 'os'
 
+import { writeJsonAtomic }                     from './v4/cron/atomicWrite'
+import {
+  parseSchedule, ScheduleSpec,
+  computeFirstFire, computeNextFire,
+} from './v4/cron/scheduleParser'
+import { captureRun, RunResult }               from './v4/cron/outputCapture'
+
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+export type CronKind = 'interval' | 'cron' | 'oneshot'
+
 export interface CronJob {
-  id:          string
-  description: string
-  schedule:    string          // human-readable schedule string
-  intervalMs:  number          // resolved interval in milliseconds
-  action:      string          // shell command to execute
-  enabled:     boolean
-  createdAt:   string
-  lastRun?:    string
-  nextRun?:    string
-  runCount:    number
+  id:           string
+  description:  string
+  schedule:     string          // human/canonical display string
+  kind:         CronKind
+  intervalMs?:  number          // when kind === 'interval'
+  cronExpr?:    string          // when kind === 'cron'
+  oneshotIso?:  string          // when kind === 'oneshot'
+  action:       string          // shell command to execute
+  enabled:      boolean
+  createdAt:    string
+  lastRun?:     string
+  lastResult?:  RunResult
+  lastOutput?:  string          // truncated to 4 KB
+  nextRun?:     string
+  runCount:     number
 }
 
-// ── In-memory registry ────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────────────
 
-const jobs:   Map<string, CronJob>                         = new Map()
-const timers: Map<string, ReturnType<typeof setInterval>>  = new Map()
-let   jobSeq = 1
-
-// ── Persistence ───────────────────────────────────────────────────────────────
+const jobs:    Map<string, CronJob>                       = new Map()
+const timers:  Map<string, ReturnType<typeof setTimeout>> = new Map()
+let   jobSeq                                              = 1
+let   pendingSave: Promise<void>                          = Promise.resolve()
 
 const DATA_DIR  = path.join(os.homedir(), '.aiden')
 const DATA_FILE = path.join(DATA_DIR, 'cron_jobs.json')
+const LOGS_DIR  = path.join(DATA_DIR, 'cron-logs')
+
+// Re-export so callers can keep `import { parseSchedule } from './cronManager'`.
+export { parseSchedule } from './v4/cron/scheduleParser'
+
+// ── Persistence ───────────────────────────────────────────────────────────────
 
 function save(): void {
-  try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true })
-    fs.writeFileSync(DATA_FILE, JSON.stringify(Array.from(jobs.values()), null, 2), 'utf8')
-  } catch { /* silent */ }
+  // Fire-and-forget, but chain off the previous save so writes serialise.
+  pendingSave = pendingSave.catch(() => undefined).then(() =>
+    writeJsonAtomic(DATA_FILE, Array.from(jobs.values())),
+  )
+}
+
+// Test/shutdown hook — drain any queued writes.
+export async function awaitPendingSaves(): Promise<void> {
+  await pendingSave
 }
 
 export function loadJobs(): void {
   try {
     if (!fs.existsSync(DATA_FILE)) return
-    const data: CronJob[] = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'))
-    for (const job of data) {
+    const data: unknown = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'))
+    if (!Array.isArray(data)) return
+    for (const raw of data) {
+      const job = migrateJob(raw)
+      if (!job) continue
       jobs.set(job.id, job)
       const num = parseInt(job.id, 10)
       if (!isNaN(num) && num >= jobSeq) jobSeq = num + 1
       if (job.enabled) _scheduleJob(job)
     }
-  } catch { /* silent */ }
+  } catch { /* corrupt file → start with empty registry */ }
 }
 
-// ── Schedule parser ───────────────────────────────────────────────────────────
-// Parses: "every N seconds/minutes/hours/days", "hourly", "daily", numeric ms
-
-export function parseSchedule(schedule: string): number {
-  const s = schedule.trim().toLowerCase()
-
-  const match = s.match(/every\s+(\d+)\s+(second|seconds|minute|minutes|hour|hours|day|days)/)
-  if (match) {
-    const n = parseInt(match[1], 10)
-    const unit = match[2].replace(/s$/, '')
-    if (unit === 'second') return n * 1000
-    if (unit === 'minute') return n * 60_000
-    if (unit === 'hour')   return n * 3_600_000
-    if (unit === 'day')    return n * 86_400_000
+function migrateJob(raw: any): CronJob | null {
+  if (!raw || typeof raw !== 'object' || !raw.id) return null
+  // Old shape (pre-Phase-24.1) had no `kind`; everything was an interval.
+  if (!raw.kind) {
+    raw.kind = raw.cronExpr ? 'cron'
+             : raw.oneshotIso ? 'oneshot'
+             : 'interval'
   }
-  if (s === 'every minute') return 60_000
-  if (s === 'hourly')       return 3_600_000
-  if (s === 'daily')        return 86_400_000
-
-  // Numeric ms fallback
-  const ms = parseInt(s, 10)
-  if (!isNaN(ms) && ms > 0) return ms
-
-  return 3_600_000  // default: 1 hour
+  return raw as CronJob
 }
 
-// ── Internal scheduler ────────────────────────────────────────────────────────
+// ── Scheduling ────────────────────────────────────────────────────────────────
 
 function _scheduleJob(job: CronJob): void {
-  if (timers.has(job.id)) return   // already scheduled
+  if (timers.has(job.id)) return  // already armed
+  if (!job.enabled) return
 
-  const handle = setInterval(async () => {
+  const target = computeNextFire(job)
+  if (!target) {
+    // Nothing to fire (e.g. completed one-shot). Make sure no stale timer.
+    return
+  }
+
+  const delay = Math.max(0, target.getTime() - Date.now())
+  job.nextRun = new Date(Date.now() + delay).toISOString()
+  jobs.set(job.id, { ...job })
+  save()
+
+  const handle = setTimeout(async () => {
+    timers.delete(job.id)
     try {
-      const { executeTool } = await import('./toolRegistry')
-      job.lastRun  = new Date().toISOString()
-      job.nextRun  = new Date(Date.now() + job.intervalMs).toISOString()
-      job.runCount++
-      jobs.set(job.id, { ...job })
-      save()
-      await executeTool('shell_exec', { command: job.action }, 0)
-    } catch { /* silent — job errors should not crash the process */ }
-  }, job.intervalMs)
+      await _fireJob(job.id)
+    } catch { /* errors already captured into the run log */ }
 
-  // Allow Node.js to exit even if jobs are pending
+    const fresh = jobs.get(job.id)
+    if (!fresh) return
+    if (fresh.kind === 'oneshot') {
+      fresh.enabled = false
+      jobs.set(fresh.id, { ...fresh })
+      save()
+      return
+    }
+    if (fresh.enabled) _scheduleJob(fresh)
+  }, delay)
+
   if (typeof (handle as any).unref === 'function') (handle as any).unref()
   timers.set(job.id, handle)
+}
+
+async function _fireJob(id: string): Promise<void> {
+  const job = jobs.get(id)
+  if (!job) return
+
+  const startedMs = Date.now()
+  const cap = await captureRun(
+    job.id,
+    job.description || job.id,
+    LOGS_DIR,
+    async () => {
+      try {
+        const { executeTool } = await import('./toolRegistry')
+        const r = await executeTool('shell_exec', { command: job.action }, 0)
+        const text   = typeof r === 'string' ? r : ((r as any)?.output ?? JSON.stringify(r))
+        const failed = (r as any)?.success === false
+        return { output: String(text ?? ''), failed }
+      } catch (e: any) {
+        return { output: e?.stack ?? e?.message ?? String(e), failed: true }
+      }
+    },
+  )
+
+  const fresh = jobs.get(id)
+  if (!fresh) return
+  fresh.lastRun    = new Date(startedMs).toISOString()
+  fresh.lastResult = cap.result
+  fresh.lastOutput = cap.output
+  fresh.runCount   = (fresh.runCount ?? 0) + 1
+  jobs.set(fresh.id, { ...fresh })
+  save()
+}
+
+function clearTimer(id: string): void {
+  const h = timers.get(id)
+  if (h) { clearTimeout(h); timers.delete(id) }
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
@@ -112,22 +199,34 @@ export function createJob(
   schedule:    string,
   action:      string,
 ): CronJob {
-  const intervalMs = parseSchedule(schedule)
+  const spec = parseSchedule(schedule)
+  const id   = String(jobSeq++)
+
   const job: CronJob = {
-    id:          String(jobSeq++),
+    id,
     description,
-    schedule,
-    intervalMs,
+    schedule:   spec.display,
+    kind:       spec.kind,
     action,
-    enabled:     true,
-    createdAt:   new Date().toISOString(),
-    nextRun:     new Date(Date.now() + intervalMs).toISOString(),
-    runCount:    0,
+    enabled:    true,
+    createdAt:  new Date().toISOString(),
+    runCount:   0,
+    ...attachKindFields(spec),
   }
-  jobs.set(job.id, job)
+
+  const first = computeFirstFire(job)
+  if (first) job.nextRun = first.toISOString()
+
+  jobs.set(id, job)
   _scheduleJob(job)
   save()
   return job
+}
+
+function attachKindFields(spec: ScheduleSpec): Partial<CronJob> {
+  if (spec.kind === 'interval') return { intervalMs: spec.intervalMs }
+  if (spec.kind === 'cron')     return { cronExpr:   spec.cronExpr   }
+  return                              { oneshotIso: spec.runAtIso   }
 }
 
 export function listJobs(): CronJob[] {
@@ -142,8 +241,7 @@ export function pauseJob(id: string): boolean {
   const job = jobs.get(id)
   if (!job) return false
   job.enabled = false
-  const handle = timers.get(id)
-  if (handle) { clearInterval(handle); timers.delete(id) }
+  clearTimer(id)
   jobs.set(id, { ...job })
   save()
   return true
@@ -153,7 +251,6 @@ export function resumeJob(id: string): boolean {
   const job = jobs.get(id)
   if (!job) return false
   job.enabled = true
-  job.nextRun = new Date(Date.now() + job.intervalMs).toISOString()
   jobs.set(id, { ...job })
   _scheduleJob(job)
   save()
@@ -162,8 +259,7 @@ export function resumeJob(id: string): boolean {
 
 export function deleteJob(id: string): boolean {
   if (!jobs.has(id)) return false
-  const handle = timers.get(id)
-  if (handle) { clearInterval(handle); timers.delete(id) }
+  clearTimer(id)
   jobs.delete(id)
   save()
   return true
@@ -172,15 +268,30 @@ export function deleteJob(id: string): boolean {
 export async function triggerJob(id: string): Promise<boolean> {
   const job = jobs.get(id)
   if (!job) return false
-  try {
-    const { executeTool } = await import('./toolRegistry')
-    job.lastRun  = new Date().toISOString()
-    job.runCount++
-    jobs.set(id, { ...job })
+  // A manual trigger should not double-fire alongside a pending timer; we
+  // cancel and re-arm after the run so the cadence anchors on the fresh
+  // lastRun set by _fireJob.
+  clearTimer(id)
+  await _fireJob(id)
+  const fresh = jobs.get(id)
+  if (fresh && fresh.enabled && fresh.kind !== 'oneshot') _scheduleJob(fresh)
+  if (fresh && fresh.kind === 'oneshot') {
+    fresh.enabled = false
+    jobs.set(fresh.id, { ...fresh })
     save()
-    await executeTool('shell_exec', { command: job.action }, 0)
-    return true
-  } catch {
-    return false
   }
+  return true
+}
+
+// ── Test hook ─────────────────────────────────────────────────────────────────
+//
+// Tests need to reset module state between cases. Production code never
+// reaches for this — it lives behind a name that signals "for tests" so
+// nobody depends on it accidentally.
+
+export function __resetForTests(): void {
+  for (const id of timers.keys()) clearTimer(id)
+  jobs.clear()
+  jobSeq = 1
+  pendingSave = Promise.resolve()
 }
