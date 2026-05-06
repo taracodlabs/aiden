@@ -1,7 +1,7 @@
 {
   "name": "securityheaders",
   "version": "1.0.0",
-  "description": "Audit HTTP security headers for any URL and receive a grade (A+ to F) with specific recommendations for missing headers",
+  "description": "HTTP security header audit (A+ to F) with fix recommendations",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

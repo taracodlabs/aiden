@@ -1,7 +1,7 @@
 {
   "name": "nse-delivery",
   "version": "1.0.0",
-  "description": "Fetch NSE delivery percentage data to identify stocks with high delivery volume — a signal of genuine buying interest vs intraday noise",
+  "description": "NSE delivery % data — surface stocks with high genuine buying",
   "author": "local",
   "license": "MIT",
   "tools": [],

@@ -1,7 +1,7 @@
 {
   "name": "explainshell",
   "version": "1.0.0",
-  "description": "Break down shell commands and one-liners into plain-English explanations — powered by explainshell.com",
+  "description": "Explain shell commands in plain English (explainshell.com)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

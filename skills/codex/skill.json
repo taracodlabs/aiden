@@ -1,7 +1,7 @@
 {
   "name": "codex",
   "version": "1.0.0",
-  "description": "Delegate coding tasks to OpenAI Codex CLI for automated code generation, editing, and explanation",
+  "description": "Delegate coding tasks to OpenAI Codex CLI",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

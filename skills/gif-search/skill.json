@@ -1,7 +1,7 @@
 {
   "name": "gif-search",
   "version": "1.0.1",
-  "description": "Search and fetch GIFs from Tenor using the public API with curl or PowerShell — requires a free Tenor API key",
+  "description": "Search and fetch Tenor GIFs (free Tenor API key required)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

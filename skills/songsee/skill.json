@@ -1,7 +1,7 @@
 {
   "name": "songsee",
   "version": "1.0.0",
-  "description": "Visualize audio files as mel spectrograms, chromagrams, and MFCC plots using Python librosa",
+  "description": "Visualize audio as mel spectrograms, chromagrams, MFCC (librosa)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

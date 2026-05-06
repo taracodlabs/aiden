@@ -1,7 +1,7 @@
 {
   "name": "virustotal",
   "version": "1.0.0",
-  "description": "Check file hashes, URLs, domains, and IP addresses against 70+ antivirus engines and threat intelligence feeds via VirusTotal",
+  "description": "VirusTotal: check file/URL/domain/IP against 70+ AV engines",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

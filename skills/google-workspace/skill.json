@@ -1,7 +1,7 @@
 {
   "name": "google-workspace",
   "version": "1.0.0",
-  "description": "Interact with Gmail, Google Calendar, Drive, Sheets, and Docs via the Google API with service account or OAuth credentials",
+  "description": "Gmail, Calendar, Drive, Sheets, Docs via Google API (SA / OAuth)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

@@ -1,7 +1,7 @@
 {
   "name": "pokemon-player",
   "version": "1.0.0",
-  "description": "Run and automate Pokémon games using headless emulation, RAM state reading, and programmatic button inputs",
+  "description": "Automate Pokémon games via headless emulation + RAM reading",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

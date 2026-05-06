@@ -1,7 +1,7 @@
 {
   "name": "openhue",
   "version": "1.0.0",
-  "description": "Control Philips Hue smart lights using the OpenHue CLI and local Hue Bridge REST API",
+  "description": "Control Philips Hue lights via OpenHue CLI + Hue Bridge API",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

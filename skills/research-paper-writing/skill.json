@@ -1,7 +1,7 @@
 {
   "name": "research-paper-writing",
   "version": "1.0.0",
-  "description": "Structured pipeline for writing ML and AI research papers — from literature review to LaTeX submission",
+  "description": "Pipeline for ML/AI research papers — lit review to LaTeX submission",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

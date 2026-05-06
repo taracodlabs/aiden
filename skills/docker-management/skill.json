@@ -1,7 +1,7 @@
 {
   "name": "docker-management",
   "version": "1.0.0",
-  "description": "Manage Docker containers, images, volumes, and networks via the Docker CLI and Dockerode API",
+  "description": "Docker containers, images, volumes, networks (CLI + Dockerode)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

@@ -1,7 +1,7 @@
 {
   "name": "nse-options",
   "version": "1.0.0",
-  "description": "Fetch NSE options chain data, analyze OI buildup, PCR ratio, max pain, and IV for Nifty and BankNifty",
+  "description": "NSE options chain: OI buildup, PCR, max pain, IV (Nifty/BankNifty)",
   "author": "local",
   "license": "MIT",
   "tools": [],

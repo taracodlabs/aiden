@@ -1,7 +1,7 @@
 {
   "name": "jupyter-live-kernel",
   "version": "1.0.0",
-  "description": "Execute code in a stateful Jupyter kernel session, maintaining variables across cells using hamelnb or jupyter CLI",
+  "description": "Stateful Jupyter kernel — variables persist across cells (hamelnb)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

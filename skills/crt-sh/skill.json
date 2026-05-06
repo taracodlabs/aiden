@@ -1,7 +1,7 @@
 {
   "name": "crt-sh",
   "version": "1.0.0",
-  "description": "Search certificate transparency logs to enumerate subdomains and TLS certificates for any domain — no API key required",
+  "description": "Enumerate subdomains and TLS certs via CT logs (no API key needed)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

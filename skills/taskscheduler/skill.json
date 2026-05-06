@@ -1,7 +1,7 @@
 {
   "name": "taskscheduler",
   "version": "1.0.0",
-  "description": "Create, list, enable, disable, and delete Windows Task Scheduler jobs using PowerShell ScheduledTasks module",
+  "description": "Windows Task Scheduler: create, list, enable, disable, delete (PS)",
   "author": "local",
   "license": "MIT",
   "tools": [],

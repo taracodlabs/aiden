@@ -1,7 +1,7 @@
 {
   "name": "nse-scanner",
   "version": "1.0.0",
-  "description": "Scan NSE (National Stock Exchange India) for top gainers, losers, volume surges, and 52-week highs/lows using NSE public APIs",
+  "description": "NSE scans: top gainers/losers, volume surges, 52w highs/lows",
   "author": "local",
   "license": "MIT",
   "tools": [],

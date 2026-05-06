@@ -1,7 +1,7 @@
 {
   "name": "p5js",
   "version": "1.0.0",
-  "description": "Create generative visual art and interactive sketches using p5.js, rendered as self-contained HTML files",
+  "description": "Generative visual art and sketches in p5.js (self-contained HTML)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

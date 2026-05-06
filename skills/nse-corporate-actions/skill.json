@@ -1,7 +1,7 @@
 {
   "name": "nse-corporate-actions",
   "version": "1.0.0",
-  "description": "Fetch NSE corporate actions — dividends, bonus issues, stock splits, rights issues, and buybacks for any listed stock",
+  "description": "NSE corp actions: dividends, bonus, splits, rights, buybacks",
   "author": "local",
   "license": "MIT",
   "tools": [],

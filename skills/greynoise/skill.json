@@ -1,7 +1,7 @@
 {
   "name": "greynoise",
   "version": "1.0.0",
-  "description": "Classify IP addresses as internet scanners (benign/malicious) or targeted attackers — filters noise from security alerts",
+  "description": "Classify IPs as scanners or targeted attackers — filter alert noise",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

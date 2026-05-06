@@ -1,7 +1,7 @@
 {
   "name": "ocr-and-documents",
   "version": "1.0.0",
-  "description": "Extract text from PDFs, images, scans, and Word documents using Python libraries and CLI tools",
+  "description": "Extract text from PDFs, images, scans, Word docs (Python)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

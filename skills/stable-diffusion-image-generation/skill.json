@@ -1,7 +1,7 @@
 {
   "name": "stable-diffusion-image-generation",
   "version": "1.0.0",
-  "description": "Generate images using Stable Diffusion via HuggingFace Diffusers library locally or via API",
+  "description": "Generate images via Stable Diffusion (HuggingFace Diffusers, local/API)",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

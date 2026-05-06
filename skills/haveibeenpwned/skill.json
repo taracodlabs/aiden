@@ -1,7 +1,7 @@
 {
   "name": "haveibeenpwned",
   "version": "1.0.0",
-  "description": "Check if an email address or username appears in known data breaches using the Have I Been Pwned v3 API",
+  "description": "Check email/username against HIBP v3 breach database",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

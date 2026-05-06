@@ -1,7 +1,7 @@
 {
   "name": "obsidian",
   "version": "1.0.0",
-  "description": "Read, search, and create notes in Obsidian vaults using file system operations and CLI tools",
+  "description": "Read, search, and create notes in Obsidian vaults",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

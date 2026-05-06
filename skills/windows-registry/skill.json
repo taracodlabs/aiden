@@ -1,7 +1,7 @@
 {
   "name": "windows-registry",
   "version": "1.0.0",
-  "description": "Read, write, and query Windows Registry keys and values via PowerShell Registry provider",
+  "description": "Read, write, query Windows Registry via PowerShell provider",
   "author": "local",
   "license": "MIT",
   "tools": [],

@@ -1,7 +1,7 @@
 {
   "name": "claude-code",
   "version": "1.0.0",
-  "description": "Delegate complex coding and file-editing tasks to Anthropic Claude Code CLI for deep agentic coding sessions",
+  "description": "Delegate coding and file edits to Anthropic Claude Code CLI",
   "author": "aiden",
   "license": "MIT",
   "tools": [],

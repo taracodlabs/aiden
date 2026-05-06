@@ -1,7 +1,7 @@
 {
   "name": "upstox",
   "version": "1.0.0",
-  "description": "Interact with Upstox API v2 — fetch portfolio, live market data, place orders, and check P&L for Indian equity and F&O markets",
+  "description": "Upstox API v2: portfolio, market data, orders, P&L (Indian F&O)",
   "author": "local",
   "license": "MIT",
   "tools": [],
