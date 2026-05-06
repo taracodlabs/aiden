@@ -42,7 +42,8 @@ describe('runModelPicker', () => {
   });
 
   it('returns null on ambiguous bare model', async () => {
-    // claude-opus-4-7 is served by both anthropic and claude_subscription.
+    // claude-opus-4-7 is served by both anthropic and claude-pro
+    // (Phase 21 #5: canonical OAuth ID — legacy claude_subscription removed).
     const result = await runModelPicker({
       resolver: realResolver(),
       spec: 'claude-opus-4-7',
@@ -58,14 +59,15 @@ describe('runModelPicker', () => {
     expect(result).toBeNull();
   });
 
-  it('interactive picker shows all 21 providers when no tier filter', async () => {
+  it('interactive picker shows all 19 providers when no tier filter', async () => {
     const select = vi.fn(async (opts: any) => {
       // First call = provider, second call = model
       if (opts.message.startsWith('Select provider')) {
-        // Verify all are presented. Phase 18 added claude-pro + chatgpt-plus
-        // (real OAuth providers) alongside the legacy claude_subscription /
-        // chatgpt_subscription stubs.
-        expect(opts.choices.length).toBe(21);
+        // Phase 21 #5 unification: removed the two legacy snake_case
+        // OAuth stubs (claude_subscription, chatgpt_subscription) so the
+        // picker now exposes ONE entry per OAuth service: the canonical
+        // claude-pro and chatgpt-plus IDs. 21 providers → 19.
+        expect(opts.choices.length).toBe(19);
         return 'groq';
       }
       return 'llama-3.3-70b-versatile';

@@ -65,48 +65,23 @@ export interface ProviderRegistryEntry {
 }
 
 /**
- * The 19 supported providers. Order is roughly menu-presentation order
+ * The supported providers. Order is roughly menu-presentation order
  * (subscription tiers first, then flagship paid, then free, then local).
+ *
+ * Phase 21 #5 unification: ONE registry entry per OAuth service. The
+ * legacy `claude_subscription` / `chatgpt_subscription` snake_case stubs
+ * (Phase 5, no OAuth wiring) have been removed. Hermes pattern: one
+ * canonical provider name per service. Sources (claude_code, hermes_pkce,
+ * device_code, etc.) seed credentials INTO that single entry — they
+ * never appear as parallel registry rows.
+ *
+ * Canonical IDs match the plugin manifests, the setup wizard, the /auth
+ * slash command, and the tokenStore filename. Inference-time credential
+ * lookup is `runtimeResolver.resolveCredentials → entry.oauth.providerId
+ * → tokenStore` — one path, no fallback to a deprecated auth.json.
  */
 export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
-  // ─── Subscription / OAuth ────────────────────────────────────────────────
-  claude_subscription: {
-    id: 'claude_subscription',
-    displayName: 'Claude Pro/Max subscription',
-    apiMode: 'anthropic_messages',
-    baseUrl: 'https://api.anthropic.com',
-    apiKeyEnvVar: null,
-    description: 'Use your Claude Pro or Max subscription via OAuth (no API charges).',
-    tier: 'subscription',
-    hasFreeTier: false,
-    docsUrl: 'https://docs.anthropic.com/',
-    supportsToolCalling: true,
-    modelIds: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001'],
-  },
-  chatgpt_subscription: {
-    id: 'chatgpt_subscription',
-    displayName: 'ChatGPT Plus subscription',
-    apiMode: 'codex_responses',
-    baseUrl: 'https://api.openai.com/v1',
-    apiKeyEnvVar: null,
-    description: 'Use your ChatGPT Plus subscription via OAuth (no API charges).',
-    tier: 'subscription',
-    hasFreeTier: false,
-    docsUrl: 'https://platform.openai.com/docs/',
-    supportsToolCalling: true,
-    modelIds: ['gpt-5-codex'],
-  },
-  // ─── Phase 18 OAuth providers (wired through tokenStore) ─────────────────
-  // The two entries below are the real, working OAuth providers introduced
-  // in Phase 18. The setup wizard, /auth slash command, and the bundled
-  // plugins all use these IDs (`claude-pro`, `chatgpt-plus`) — kebab-case,
-  // matching the plugin manifest names.
-  //
-  // The legacy `claude_subscription` / `chatgpt_subscription` entries above
-  // are Phase 5 stubs (no OAuth wiring, snake_case IDs). They remain in the
-  // registry to avoid breaking existing tests + docs but are not selectable
-  // through the wizard. Plan to remove in a v4.x cleanup once the rename is
-  // safe across tests.
+  // ─── Subscription / OAuth (Phase 18 tokenStore-wired) ────────────────────
   'claude-pro': {
     id: 'claude-pro',
     displayName: 'Claude Pro / Max (OAuth)',
@@ -119,7 +94,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     hasFreeTier: false,
     docsUrl: 'https://docs.anthropic.com/',
     supportsToolCalling: true,
-    modelIds: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+    modelIds: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   },
   'chatgpt-plus': {
     id: 'chatgpt-plus',
@@ -135,7 +110,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     hasFreeTier: false,
     docsUrl: 'https://platform.openai.com/docs/',
     supportsToolCalling: true,
-    modelIds: ['gpt-5', 'gpt-5-mini'],
+    modelIds: ['gpt-5', 'gpt-5-mini', 'gpt-5-codex'],
   },
   nous_portal: {
     id: 'nous_portal',

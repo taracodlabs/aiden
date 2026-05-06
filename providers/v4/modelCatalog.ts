@@ -18,8 +18,11 @@
  *   - Where pricing is uncertain or rapidly changing (e.g. preview models,
  *     subscription-only access, custom endpoints) we leave `pricing`
  *     undefined rather than fabricate. The picker handles both cases.
- *   - Subscription-tier rows (claude_subscription, chatgpt_subscription)
- *     never carry pricing — the user pays Anthropic / OpenAI a flat fee.
+ *   - Subscription-tier rows (claude-pro, chatgpt-plus) never carry
+ *     pricing — the user pays Anthropic / OpenAI a flat fee. Legacy
+ *     `claude_subscription` / `chatgpt_subscription` rows were removed
+ *     in Phase 21 #5 (Hermes one-name-per-service unification); their
+ *     models migrated under canonical IDs below.
  */
 
 export interface ModelEntry {
@@ -47,73 +50,7 @@ export interface ModelEntry {
 }
 
 export const MODEL_CATALOG: ModelEntry[] = [
-  // ─── claude_subscription ─────────────────────────────────────────────────
-  {
-    id: 'claude-opus-4-7',
-    displayName: 'Claude Opus 4.7',
-    providerId: 'claude_subscription',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: true,
-    isDefault: true,
-    tier: 'flagship',
-    notes: 'Subscription only — no per-token charges.',
-  },
-  {
-    id: 'claude-opus-4-6',
-    displayName: 'Claude Opus 4.6',
-    providerId: 'claude_subscription',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: true,
-    isDefault: false,
-    tier: 'flagship',
-  },
-  {
-    id: 'claude-sonnet-4-6',
-    displayName: 'Claude Sonnet 4.6',
-    providerId: 'claude_subscription',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: true,
-    isDefault: false,
-    tier: 'standard',
-  },
-  {
-    id: 'claude-haiku-4-5-20251001',
-    displayName: 'Claude Haiku 4.5',
-    providerId: 'claude_subscription',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: false,
-    isDefault: false,
-    tier: 'small',
-  },
-
-  // ─── chatgpt_subscription ────────────────────────────────────────────────
-  {
-    id: 'gpt-5-codex',
-    displayName: 'GPT-5 Codex',
-    providerId: 'chatgpt_subscription',
-    contextLength: 272_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: true,
-    isDefault: true,
-    tier: 'flagship',
-    notes: 'Subscription only — accessed via ChatGPT Plus OAuth.',
-  },
-
-  // ─── claude-pro (Phase 18 OAuth) ─────────────────────────────────────────
+  // ─── claude-pro (Phase 18 OAuth, canonical) ──────────────────────────────
   {
     id: 'claude-opus-4-7',
     displayName: 'Claude Opus 4.7',
@@ -126,6 +63,18 @@ export const MODEL_CATALOG: ModelEntry[] = [
     isDefault: true,
     tier: 'flagship',
     notes: 'Routed through Claude Pro/Max OAuth — no per-token charges.',
+  },
+  {
+    id: 'claude-opus-4-6',
+    displayName: 'Claude Opus 4.6',
+    providerId: 'claude-pro',
+    contextLength: 200_000,
+    maxOutputTokens: 32_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    isDefault: false,
+    tier: 'flagship',
   },
   {
     id: 'claude-sonnet-4-6',
@@ -177,6 +126,19 @@ export const MODEL_CATALOG: ModelEntry[] = [
     supportsReasoning: true,
     isDefault: false,
     tier: 'small',
+  },
+  {
+    id: 'gpt-5-codex',
+    displayName: 'GPT-5 Codex',
+    providerId: 'chatgpt-plus',
+    contextLength: 272_000,
+    maxOutputTokens: 32_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    isDefault: false,
+    tier: 'flagship',
+    notes: 'Coding-tuned variant — accessed via ChatGPT Plus OAuth.',
   },
 
   // ─── nous_portal ─────────────────────────────────────────────────────────

@@ -283,9 +283,13 @@ export class RuntimeResolver {
         }
       } catch (err) {
         // No usable auth.json entry — surface a clearer error for OAuth-only
-        // providers (claude_subscription, chatgpt_subscription) and fall
-        // through for paid providers that still might succeed via a missing
-        // env var (handled by the missingKeyError below).
+        // providers and fall through for paid providers that still might
+        // succeed via a missing env var (handled by the missingKeyError
+        // below). Phase 21 #5: canonical OAuth providers (claude-pro,
+        // chatgpt-plus) hit the entry.oauth fast-path above, so this
+        // legacy branch only fires for raw anthropic_messages/codex_responses
+        // entries that lack oauth.providerId — i.e. nothing in the live
+        // registry today, kept as a safety net for custom-config providers.
         if (entry.apiKeyEnvVar === null) {
           throw new ProviderError(
             `OAuth credentials missing or expired for ${entry.id}: ${

@@ -36,12 +36,14 @@ describe('MODEL_CATALOG', () => {
   });
 
   it('findProvidersForModelId surfaces all providers serving a bare model id', () => {
-    // claude-opus-4-7 is offered by both anthropic and claude_subscription.
+    // Phase 21 #5: claude-opus-4-7 is offered by both anthropic and the
+    // canonical OAuth provider claude-pro (legacy claude_subscription
+    // removed under the one-name-per-service unification).
     const opusServers = findProvidersForModelId('claude-opus-4-7');
     expect(opusServers.length).toBeGreaterThanOrEqual(2);
     const providers = new Set(opusServers.map((m) => m.providerId));
     expect(providers.has('anthropic')).toBe(true);
-    expect(providers.has('claude_subscription')).toBe(true);
+    expect(providers.has('claude-pro')).toBe(true);
 
     // A unique-to-one-provider model returns exactly one match.
     const uniques = findProvidersForModelId('llama-3.3-70b-versatile');

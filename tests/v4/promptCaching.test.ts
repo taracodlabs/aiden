@@ -7,7 +7,9 @@ describe('PromptCaching', () => {
 
   it('1. isSupported returns true for anthropic', () => {
     expect(pc.isSupported('anthropic', 'claude-opus-4-7')).toBe(true);
-    expect(pc.isSupported('claude_subscription', 'claude-opus-4-7')).toBe(true);
+    // Phase 21 #5: canonical OAuth ID is claude-pro (legacy
+    // claude_subscription removed in the routing unification).
+    expect(pc.isSupported('claude-pro', 'claude-opus-4-7')).toBe(true);
   });
 
   it('2. isSupported returns false for non-anthropic', () => {

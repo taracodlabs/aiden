@@ -189,8 +189,13 @@ describe('RuntimeResolver.resolve', () => {
     }));
     credResolver.setRefreshHook(refreshHook);
     const resolver = new RuntimeResolver(credResolver);
+    // Phase 21 #5: legacy `claude_subscription` removed. Use `anthropic`
+    // (apiMode anthropic_messages, no oauth.providerId) to exercise the
+    // same credentialResolver/auth.json fallback path the legacy stub
+    // hit. The path remains as a safety net for custom-config providers.
+    delete process.env.ANTHROPIC_API_KEY;
     const resolution = await resolver.describe({
-      providerId: 'claude_subscription',
+      providerId: 'anthropic',
       modelId: 'claude-opus-4-7',
     });
     expect(refreshHook).toHaveBeenCalled();
