@@ -592,22 +592,25 @@ export class CodexResponsesAdapter implements ProviderAdapter {
   }
 
   /**
-   * Phase 21 #6c — drain the Codex Responses-API SSE stream into a
-   * single ResponsesAPIResponse aggregate. The Codex backend rejects
-   * `stream: false` outright; we always set stream: true and collect
-   * frames here so the rest of the adapter is shape-agnostic.
+   * Phase 21 #6c — drain the Codex Responses-API SSE stream.
    *
-   * Aggregation strategy mirrors the OpenAI Responses streaming spec:
-   *   - `response.created`     → seed the response shape
-   *   - `response.output_item.added` / `done` → append to `output[]`
-   *   - `response.output_text.delta` → concat into the matching message
-   *      item's text content
-   *   - `response.completed`   → authoritative final shape; if present,
-   *      use its `response` field verbatim and discard our local accum
-   *   - `response.failed`      → throw so the retry path fires
+   * Phase 21 #6d — three-stage recovery, ported verbatim from Hermes
+   * `run_agent.py:_run_codex_stream` lines 5895-5917. The Codex backend
+   * (chatgpt.com/backend-api/codex) regularly emits `response.completed`
+   * with an EMPTY `output[]` array even when items were streamed via
+   * `response.output_item.done` or rendered as `output_text.delta`. We
+   * must NOT trust `completed.response.output` blindly — instead:
    *
-   * Unknown event types are ignored (forward-compat with future
-   * incremental events the OpenAI team adds).
+   *   1. If `response.completed.response.output` is non-empty → use it.
+   *   2. Else if `output_item.done` events were collected → use them.
+   *   3. Else if `output_text.delta` accumulated → synthesize one
+   *      assistant message item from the joined text.
+   *   4. Else → return empty (caller throws "no output items").
+   *
+   * Set AIDEN_DEBUG_CODEX=1 to log every event type seen — useful when
+   * a future Codex backend adds new event types we haven't accounted
+   * for. Per Hermes "treat provider adapters as hostile boundaries" —
+   * we log unknowns rather than silently drop.
    */
   private async collectStreamedResponse(
     response: Response,
@@ -618,11 +621,20 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         this.providerName,
       );
     }
+    const debug = process.env.AIDEN_DEBUG_CODEX === '1';
     const aggregate: ResponsesAPIResponse = { output: [], status: undefined };
+    // Hermes parity: track collected `output_item.done` items separately
+    // from the in-progress aggregate so backfill can use them when
+    // `completed.response.output` is empty.
+    const collectedItems: ResponsesOutputItem[] = [];
     // Per-item-id text buffer — `output_text.delta` events reference
     // an item_id that matches an earlier `output_item.added`.
     const textBuffers = new Map<string, string>();
+    // Joined text deltas across all items (Hermes `_codex_streamed_text_parts`).
+    const textParts: string[] = [];
+    let hasToolCalls = false;
     let final: ResponsesAPIResponse | null = null;
+    let terminalEvent: string | null = null; // 'completed' | 'incomplete' | 'failed'
 
     for await (const payload of parseSseStream(response.body)) {
       let event: {
@@ -636,14 +648,30 @@ export class CodexResponsesAdapter implements ProviderAdapter {
       try {
         event = JSON.parse(payload);
       } catch {
+        if (debug) {
+          // eslint-disable-next-line no-console
+          console.warn(`[codex-debug] unparseable SSE payload: ${payload.slice(0, 200)}`);
+        }
         continue;
       }
       const t = event.type ?? '';
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.warn(`[codex-debug] event=${t}`);
+      }
+
       if (t === 'response.completed' && event.response) {
         final = event.response;
-        // Apply any accumulated text deltas in case `completed` arrived
-        // before a delta we already saw — defensive.
+        terminalEvent = 'completed';
         applyTextBuffers(final, textBuffers);
+        continue;
+      }
+      if (t === 'response.incomplete') {
+        // Hermes treats incomplete as a recoverable terminal — proceed
+        // to backfill rather than throwing.
+        final = event.response ?? null;
+        terminalEvent = 'incomplete';
+        if (final) applyTextBuffers(final, textBuffers);
         continue;
       }
       if (t === 'response.failed' || t === 'response.error') {
@@ -654,7 +682,6 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         );
       }
       if (t === 'response.created' && event.response) {
-        // Seed status/usage/output from the initial response object.
         Object.assign(aggregate, event.response);
         if (!Array.isArray(aggregate.output)) aggregate.output = [];
         continue;
@@ -662,31 +689,94 @@ export class CodexResponsesAdapter implements ProviderAdapter {
       if (t === 'response.output_item.added' && event.item) {
         if (!Array.isArray(aggregate.output)) aggregate.output = [];
         aggregate.output.push(event.item);
+        if ((event.item as { type?: string }).type === 'function_call') {
+          hasToolCalls = true;
+        }
         continue;
       }
       if (t === 'response.output_item.done' && event.item) {
-        // Replace any in-progress copy of the same id.
         if (!Array.isArray(aggregate.output)) aggregate.output = [];
         const idx = aggregate.output.findIndex(
           (o) => (o as { id?: string }).id === (event.item as { id?: string }).id,
         );
         if (idx >= 0) aggregate.output[idx] = event.item;
         else aggregate.output.push(event.item);
+        // Hermes parity: collectedItems is the backfill source of truth.
+        collectedItems.push(event.item);
+        if ((event.item as { type?: string }).type === 'function_call') {
+          hasToolCalls = true;
+        }
         continue;
       }
       if (t === 'response.output_text.delta' && typeof event.delta === 'string') {
         const id = event.item_id ?? '';
         textBuffers.set(id, (textBuffers.get(id) ?? '') + event.delta);
+        textParts.push(event.delta);
         continue;
       }
-      // All other event types (output_text.done, content_part.added,
-      // refusal, audio, etc.) are ignored — `response.completed` carries
-      // the authoritative final shape.
+      // Hermes parity: any event_type containing `function_call`
+      // signals tool-call mode; suppress synthesis from text deltas.
+      if (t.includes('function_call')) {
+        hasToolCalls = true;
+        continue;
+      }
+      // All other events (reasoning.delta, output_text.done,
+      // content_part.added, refusal, audio, ...) — log when debug is
+      // on, otherwise quietly accept. Unknown types must NOT throw —
+      // forward-compat with future Codex SSE additions.
+      if (debug && t.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`[codex-debug] unhandled event type: ${t}`);
+      }
     }
 
-    if (final) return final;
-    applyTextBuffers(aggregate, textBuffers);
-    return aggregate;
+    // ─── Three-stage recovery (Hermes run_agent.py:5895-5917) ───
+    const result: ResponsesAPIResponse = final ?? aggregate;
+    const out = Array.isArray(result.output) ? result.output : [];
+
+    // Stage 1: trust completed.output if non-empty.
+    if (out.length > 0) return result;
+
+    // Stage 2: backfill from collected output_item.done events.
+    if (collectedItems.length > 0) {
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[codex-debug] backfilled ${collectedItems.length} output_item.done events into empty completed.output`,
+        );
+      }
+      return { ...result, output: collectedItems };
+    }
+
+    // Stage 3: synthesize a single assistant message from joined deltas.
+    if (textParts.length > 0 && !hasToolCalls) {
+      const assembled = textParts.join('');
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[codex-debug] synthesized 1 message item from ${textParts.length} deltas (${assembled.length} chars)`,
+        );
+      }
+      return {
+        ...result,
+        output: [
+          {
+            type: 'message',
+            role: 'assistant',
+            status: 'completed',
+            content: [{ type: 'output_text', text: assembled }],
+          } as ResponsesOutputItem,
+        ],
+      };
+    }
+
+    // Genuine empty — caller's parseResponse() throws the existing
+    // "no output items" error. Honest framing: if we got here with
+    // terminalEvent='incomplete', surface that.
+    if (terminalEvent === 'incomplete') {
+      result.status = result.status ?? 'incomplete';
+    }
+    return result;
   }
 
   private async fetchWithTimeout(
