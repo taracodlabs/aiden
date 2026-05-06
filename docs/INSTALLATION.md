@@ -1,5 +1,30 @@
 # Installing Aiden
 
+## Get Started in 2 Minutes
+
+```bash
+# 1. Install
+npm install -g aiden
+
+# 2. Setup (~30 seconds)
+aiden setup
+# Pick "Together AI" when prompted, paste API key from together.ai
+
+# 3. Run
+aiden
+
+# 4. Try something
+> play me a popular song
+```
+
+That's it. You should hear music in your browser within 90 seconds of step 1.
+
+For OAuth providers (ChatGPT Plus, Claude Pro), see [OAuth Setup](#oauth-setup) below. For advanced configuration, see [Advanced Setup](#advanced-setup) below.
+
+---
+
+## Advanced Setup
+
 Aiden ships as an npm package. **Node 20.x or 22.x** (LTS) is required on every platform.
 
 ```bash
