@@ -1,28 +1,35 @@
 {
   "name": "aiden-runtime",
-  "version": "4.0.0-beta.1",
+  "version": "4.0.0",
   "publishConfig": {
-    "access": "public",
-    "tag": "beta"
+    "access": "public"
   },
-  "description": "Autonomous AI Operating System — Local, Private, Free. Runs on your machine with Ollama.",
-  "author": "Taracod <hello@taracod.com>",
+  "description": "Local-first AI agent for Windows/WSL/Linux. Autonomous tool chaining across 14+ providers, offline via Ollama.",
+  "author": "Shiva Deore (Taracod) <hello@taracod.com>",
   "license": "AGPL-3.0-only",
+  "homepage": "https://aiden.taracod.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/taracodlabs/Aiden-v4.git"
+  },
+  "bugs": {
+    "url": "https://github.com/taracodlabs/Aiden-v4/issues"
+  },
   "keywords": [
     "ai",
+    "ai-agent",
     "autonomous-agent",
-    "agent",
-    "personal-ai",
+    "local-first",
+    "windows",
+    "cli",
     "ollama",
-    "local-ai",
-    "devos",
-    "llm",
-    "ai-os",
+    "personal-ai",
+    "offline-ai",
     "self-hosted-ai",
+    "llm",
+    "agent",
     "open-source-ai",
-    "mistral",
-    "qwen",
-    "builder"
+    "tool-use"
   ],
   "engines": {
     "node": ">=18"
@@ -31,7 +38,7 @@
     "devos-ai": "./dist/bin/npx-init.js",
     "aiden": "./dist/cli/v4/aidenCLI.js"
   },
-  "main": "./dist/index.js",
+  "main": "./dist/cli/v4/aidenCLI.js",
   "files": [
     "dist/",
     "config/",
