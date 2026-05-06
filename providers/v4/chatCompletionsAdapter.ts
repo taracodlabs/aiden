@@ -261,6 +261,69 @@ export function parseLegacyFunctionSyntax(
 }
 
 /**
+ * Phase 21 #4 — Hermes/Qwen `<tool_call>...</tool_call>` extraction.
+ *
+ * Direct port of Hermes `environments/tool_call_parsers/hermes_parser.py`
+ * (commit synced 2026-05). Together's Qwen3-Instruct intermittently emits
+ * `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` inside
+ * `message.content` of a 200-OK response — bypassing the OpenAI
+ * tool_calls envelope entirely. Without this extraction the raw tag text
+ * leaks to the user (Phase 21 #4 user report).
+ *
+ * Strategy mirrors Hermes exactly:
+ *   1. Skip when `<tool_call>` is not in the text — fast no-op.
+ *   2. Match closed `<tool_call>X</tool_call>` AND unclosed `<tool_call>X`
+ *      (truncated generation) via the same compiled regex.
+ *   3. Each match: JSON-parse the body, require `name` key, build a
+ *      synthetic ToolCallRequest. Skip silently on JSON-parse error.
+ *   4. Visible content = everything before the first `<tool_call>` tag.
+ *
+ * Returns null when no tool calls were extracted — caller falls through.
+ *
+ * Exposed at module scope for unit tests and for the streaming
+ * finaliser to share the same logic.
+ */
+const HERMES_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>|<tool_call>\s*([\s\S]*)/g;
+
+export function extractHermesToolCalls(text: string | null | undefined): {
+  content: string | null;
+  toolCalls: ToolCallRequest[];
+} | null {
+  if (!text || !text.includes('<tool_call>')) return null;
+  HERMES_TOOL_CALL_RE.lastIndex = 0;
+  const calls: ToolCallRequest[] = [];
+  let match: RegExpExecArray | null;
+  let counter = 0;
+  while ((match = HERMES_TOOL_CALL_RE.exec(text)) !== null) {
+    const rawJson = (match[1] ?? match[2] ?? '').trim();
+    if (!rawJson) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(rawJson);
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+    const tc = parsed as { name?: unknown; arguments?: unknown };
+    if (typeof tc.name !== 'string' || tc.name.length === 0) continue;
+    const args =
+      tc.arguments && typeof tc.arguments === 'object' && !Array.isArray(tc.arguments)
+        ? (tc.arguments as Record<string, unknown>)
+        : {};
+    counter += 1;
+    calls.push({
+      id: `tc-hermes-${counter}-${Date.now().toString(36)}`,
+      name: tc.name,
+      arguments: args,
+    });
+  }
+  if (calls.length === 0) return null;
+  const firstTag = text.indexOf('<tool_call>');
+  const visible = firstTag > 0 ? text.slice(0, firstTag).trim() : '';
+  return { content: visible.length > 0 ? visible : null, toolCalls: calls };
+}
+
+/**
  * Phase 16c: parse an SSE byte stream from /v1/chat/completions into
  * `data: <json>` payloads. Yields raw JSON-string payloads only — caller
  * is responsible for `JSON.parse` + chunk shape validation, since
@@ -700,11 +763,24 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         break;
     }
 
-    const fullContent = contentParts.length > 0 ? contentParts.join('') : null;
+    let fullContent = contentParts.length > 0 ? contentParts.join('') : null;
+    let finalToolCalls = toolCalls;
+    let finalFinish = mappedFinish;
+    // Phase 21 #4: same Hermes/Qwen `<tool_call>` extraction the
+    // non-streaming path applies. Stream of bare `<tool_call>` tags
+    // ended in contentParts; the OpenAI envelope was empty.
+    if (toolCalls.length === 0 && typeof fullContent === 'string') {
+      const extracted = extractHermesToolCalls(fullContent);
+      if (extracted) {
+        fullContent = extracted.content;
+        finalToolCalls = extracted.toolCalls;
+        finalFinish = 'tool_use';
+      }
+    }
     const output: ProviderCallOutput = {
       content: fullContent,
-      toolCalls,
-      finishReason: mappedFinish,
+      toolCalls: finalToolCalls,
+      finishReason: finalFinish,
       usage: {
         inputTokens: usage?.prompt_tokens ?? 0,
         outputTokens: usage?.completion_tokens ?? 0,
@@ -840,11 +916,27 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         break;
     }
 
+    // Phase 21 #4: when the OpenAI tool_calls envelope is empty AND the
+    // content carries Hermes/Qwen `<tool_call>...</tool_call>` tags,
+    // extract them client-side. Otherwise the raw tags leak to the user.
+    // Direct port of Hermes hermes_parser.py — see hermes-toolcall-leak-audit.md.
+    let visibleContent: string | null = message.content ?? null;
+    let effectiveToolCalls = toolCalls;
+    let effectiveFinish = finishReason;
+    if (toolCalls.length === 0 && typeof visibleContent === 'string') {
+      const extracted = extractHermesToolCalls(visibleContent);
+      if (extracted) {
+        visibleContent = extracted.content;
+        effectiveToolCalls = extracted.toolCalls;
+        effectiveFinish = 'tool_use';
+      }
+    }
+
     const usage = json.usage ?? {};
     return {
-      content: message.content ?? null,
-      toolCalls,
-      finishReason,
+      content: visibleContent,
+      toolCalls: effectiveToolCalls,
+      finishReason: effectiveFinish,
       usage: {
         inputTokens: usage.prompt_tokens ?? 0,
         outputTokens: usage.completion_tokens ?? 0,
