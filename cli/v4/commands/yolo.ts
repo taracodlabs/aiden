@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * cli/v4/commands/yolo.ts — Phase 14b
  *
  * `/yolo` — toggle Phase 9's ApprovalEngine between `off` and the previous

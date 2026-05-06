@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/skills/skillsList.ts — `skills_list` tool.
  *
  * Progressive-disclosure level 0: agent sees name + description for

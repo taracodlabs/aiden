@@ -1,4 +1,13 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ *
+ * Portions adapted from NousResearch/hermes-agent (MIT).
+ * Original copyright (c) NousResearch.
+ */
+/**
  * providers/v4/anthropicAdapter.ts — Aiden v4.0.0
  *
  * Adapter for Anthropic's native /v1/messages wire format.

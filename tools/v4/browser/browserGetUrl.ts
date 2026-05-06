@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/browser/browserGetUrl.ts — `browser_get_url` wrapper.
  *
  * Returns the URL of the current Playwright page. Cheap; the agent

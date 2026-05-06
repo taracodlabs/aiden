@@ -1,4 +1,13 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ *
+ * Portions adapted from NousResearch/hermes-agent (MIT).
+ * Original copyright (c) NousResearch.
+ */
+/**
  * core/v4/promptBuilder.ts — Aiden v4.0.0 (Phase 13)
  *
  * Slot-ordered system-prompt assembler, frozen at session start.

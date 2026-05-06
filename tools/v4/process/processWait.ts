@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/process/processWait.ts — `process_wait` wrapper.
  *
  * Block until a background process exits, with optional timeout.

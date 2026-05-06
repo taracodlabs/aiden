@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * providers/v4/types.ts — Aiden v4.0.0
  *
  * Provider abstraction contracts. Every adapter (anthropic, chat_completions,

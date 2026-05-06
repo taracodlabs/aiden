@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * cli/v4/commands/debugPrompt.ts — Phase 16b.4
  *
  * `/debug-prompt` — dump the EXACT system message the agent will send to the

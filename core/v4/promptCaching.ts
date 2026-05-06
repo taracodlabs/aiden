@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * core/v4/promptCaching.ts — Aiden v4.0.0 (Phase 13)
  *
  * Anthropic prefix-cache breakpoint manager. We attach `cache_control`

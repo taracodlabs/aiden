@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/sessions/sessionSearch.ts — `session_search` wrapper.
  *
  * NEW IN V4: surfaces FTS5 keyword search across all stored

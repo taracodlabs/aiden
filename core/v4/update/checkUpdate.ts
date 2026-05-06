@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * core/v4/update/checkUpdate.ts — Aiden v4.0.0 (Phase 20)
  *
  * Background "is there a newer aiden on npm?" check that prints a single

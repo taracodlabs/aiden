@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * providers/v4/modelSwitch.ts — Aiden v4.0.0
  *
  * Shared `/model` pipeline used by the CLI (Phase 13) and the future

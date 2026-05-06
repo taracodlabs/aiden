@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * cli/v4/setupWizard.ts — Aiden v4.0.0 (Phase 14a)
  *
  * First-run setup wizard. Auto-fires on fresh install (no config.yaml).

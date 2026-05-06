@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/memory/memoryAdd.ts — `memory_add` wrapper.
  *
  * Append an entry to MEMORY.md or USER.md. Calls through MemoryGuard

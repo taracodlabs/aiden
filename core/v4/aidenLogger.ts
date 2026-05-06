@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * core/v4/aidenLogger.ts — Aiden v4.0.0 (Phase 16b.2)
  *
  * Thin file-only logger for diagnostics that must NOT leak into the

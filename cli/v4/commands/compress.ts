@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * cli/v4/commands/compress.ts — Phase 14b
  *
  * `/compress` — force-runs Phase 13's ContextCompressor on the active

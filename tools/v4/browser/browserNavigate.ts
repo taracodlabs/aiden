@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/browser/browserNavigate.ts — `browser_navigate` wrapper.
  *
  * Wraps `pwNavigate` from the v3 playwright bridge. Mutates because

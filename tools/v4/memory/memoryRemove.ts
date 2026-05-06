@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/memory/memoryRemove.ts — `memory_remove` wrapper.
  *
  * Delete an entry from MEMORY.md or USER.md by substring match.

@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * core/v4/mcp/filters.ts — Aiden v4.0.0 (Phase 11)
  *
  * Tool include/exclude filtering for MCP servers. Glob is intentionally

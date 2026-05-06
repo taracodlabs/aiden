@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/files/fileCopy.ts — `file_copy` wrapper.
  *
  * Copy a file or directory tree. Creates parent dirs at the

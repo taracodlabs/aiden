@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * cli/v4/commands/tools.ts — Phase 14b
  * Lists tools registered with ToolRegistry, grouped by toolset.
  */

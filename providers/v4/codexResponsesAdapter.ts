@@ -1,4 +1,13 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ *
+ * Portions adapted from NousResearch/hermes-agent (MIT).
+ * Original copyright (c) NousResearch.
+ */
+/**
  * providers/v4/codexResponsesAdapter.ts — Aiden v4.0.0
  *
  * Adapter for OpenAI's /v1/responses (Codex) wire format.

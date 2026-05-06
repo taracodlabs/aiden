@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * tools/v4/web/deepResearch.ts — `deep_research` wrapper.
  *
  * Three-pass research using v3's `deepResearch` fallback chain.

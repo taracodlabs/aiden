@@ -1,4 +1,10 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
  * cli/v4/commands/index.ts — Phase 14b barrel (Phase 16b.1: +/providers)
  *
  * Exports the system slash commands. Phase 14c imports `allCommands`

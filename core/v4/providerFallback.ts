@@ -1,4 +1,13 @@
 /**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ *
+ * Portions adapted from NousResearch/hermes-agent (MIT).
+ * Original copyright (c) NousResearch.
+ */
+/**
  * core/v4/providerFallback.ts — Aiden v4.0.0 (Phase 16b.1)
  *
  * Shared provider fallback chain. Used by both:
