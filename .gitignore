@@ -163,3 +163,6 @@ docs/test-reports/
 # ── Misc stray files ──────────────────────────────────────────────────────────
 FileHandling.java
 "UsersshivaDownloads 2/"
+
+# ── Personal reference material (Hermes audit notes, etc.) ───────────────────
+docs/sprint/_internal/
