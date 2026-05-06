@@ -131,6 +131,14 @@ export class ChatSession implements ChatSessionLike {
   private startedAt = Date.now();
   private queuedSystemPrompts: string[] = [];
   private modelMetadata: ModelMetadata;
+  /**
+   * Phase 22 Task 4: status-bar right-most segment state. `'ready'`
+   * when idle; `'generating'` while a turn is in flight (rendered as
+   * `⏵ <duration>`). `'exec'` / `'approve'` / `'retry'` are wired up
+   * in Group C as /doctor + approval boxing lands; the field is
+   * here so the status formatter can render them today.
+   */
+  private statusState: StatusState = { kind: 'ready' };
 
   constructor(private opts: ChatSessionOptions) {
     this.currentProviderId = opts.initialProviderId;
@@ -286,6 +294,9 @@ export class ChatSession implements ChatSessionLike {
 
   // ── Inner: a single agent turn ─────────────────────────────────────
   private async runAgentTurn(userInput: string): Promise<void> {
+    // Phase 22 Task 4: status bar reflects the live phase. Set on
+    // entry, cleared in both success and error paths below.
+    this.setStatusState({ kind: 'generating', sinceMs: Date.now() });
     const userMsg: Message = { role: 'user', content: userInput };
 
     // Apply any queued system prompts (from skill slash commands) by
@@ -370,6 +381,7 @@ export class ChatSession implements ChatSessionLike {
         );
       }
 
+      this.setStatusState({ kind: 'ready' });
       this.renderStatusLine();
     } catch (err) {
       stopSpinnerOnce();
@@ -379,6 +391,7 @@ export class ChatSession implements ChatSessionLike {
         msg,
         'Run `/model` to switch providers or `aiden doctor` to diagnose.',
       );
+      this.setStatusState({ kind: 'ready' });
     }
   }
 
@@ -470,6 +483,11 @@ export class ChatSession implements ChatSessionLike {
     this.opts.display.write('\n');
   }
 
+  /** Phase 22 Task 4: state transitions for the right-most segment. */
+  setStatusState(state: StatusState): void {
+    this.statusState = state;
+  }
+
   // ── Status line ────────────────────────────────────────────────────
   renderStatusLine(): void {
     const provider = this.currentProviderId;
@@ -483,20 +501,19 @@ export class ChatSession implements ChatSessionLike {
     }
     const usedTokens = this.modelMetadata.estimateMessageTokens(this.history);
     const maxTokens = limits.contextLength;
-    const ctxPercent = Math.min(100, Math.round((usedTokens / maxTokens) * 100));
-    const bar = renderProgressBar(usedTokens, maxTokens, STATUS_BAR_WIDTH);
-
     const turn = this.history.filter((m) => m.role === 'assistant').length;
-    const maxTurns = 90;
 
-    const ageMs = Date.now() - this.startedAt;
-    const age = formatDuration(ageMs);
-
-    const line =
-      `$ ${provider}:${model}  ` +
-      `ctx ${formatTokens(usedTokens)}/${formatTokens(maxTokens)} ${bar} ${ctxPercent}%  ` +
-      `budget ${turn}/${maxTurns}  ${age}`;
-    this.opts.display.dim(line);
+    const line = formatStatusLine({
+      provider,
+      model,
+      usedTokens,
+      maxTokens,
+      turn,
+      maxTurns: 90,
+      state: this.statusState,
+      display: this.opts.display,
+    });
+    this.opts.display.write(line + '\n');
   }
 
   // ── Input ──────────────────────────────────────────────────────────
@@ -577,6 +594,111 @@ export class ChatSession implements ChatSessionLike {
  * the boot card, and have something specific to type within seconds.
  */
 export const BOOT_TRY_HINT = `Try: 'play me a popular song'  or  'list my Downloads'`;
+
+/**
+ * Phase 22 Task 4 — discriminated union for the status bar's
+ * right-most "current state" segment. Tagged so the formatter can
+ * pick the glyph + colour without a string-match.
+ *
+ * - `ready`      idle, awaiting user input
+ * - `generating` model is producing tokens; sinceMs starts the elapsed
+ * - `exec`       a tool is executing (Group C wires this)
+ * - `approve`    awaiting an approval prompt (Group C wires this)
+ * - `retry`      rate-limited, retryUntilMs is the absolute deadline
+ */
+export type StatusState =
+  | { kind: 'ready' }
+  | { kind: 'generating'; sinceMs: number }
+  | { kind: 'exec' }
+  | { kind: 'approve' }
+  | { kind: 'retry'; retryUntilMs: number };
+
+/**
+ * Format the status bar's right-most state segment text + colour kind.
+ * Pure — `now` is injectable for tests.
+ */
+export function formatStatusState(
+  state: StatusState,
+  now: number = Date.now(),
+): { text: string; colour: 'brand' | 'muted' | 'warn' } {
+  switch (state.kind) {
+    case 'generating': {
+      const ms = Math.max(0, now - state.sinceMs);
+      return { text: `⏵ ${formatDuration(ms)}`, colour: 'brand' };
+    }
+    case 'exec':
+      return { text: '▶ exec', colour: 'brand' };
+    case 'approve':
+      return { text: '⊕ approve', colour: 'warn' };
+    case 'retry': {
+      const remainingMs = Math.max(0, state.retryUntilMs - now);
+      const sec = Math.ceil(remainingMs / 1000);
+      return { text: `⚠ retry ${sec}s`, colour: 'warn' };
+    }
+    case 'ready':
+    default:
+      return { text: 'ready', colour: 'muted' };
+  }
+}
+
+/**
+ * Render a 10-character progress bar coloured per the Phase 22 palette
+ * — filled cells in brand orange, empty cells in soft cyan. Returns
+ * the bar with surrounding `[` / `]` delimiters in muted.
+ */
+export function renderColouredProgressBar(
+  used: number,
+  max: number,
+  width: number,
+  display: Display,
+): string {
+  if (max <= 0) return display.muted('[' + '░'.repeat(width) + ']');
+  const ratio = Math.max(0, Math.min(1, used / max));
+  const filled = Math.round(ratio * width);
+  return (
+    display.muted('[') +
+    display.brand('▓'.repeat(filled)) +
+    display.muted('░'.repeat(width - filled)) +
+    display.muted(']')
+  );
+}
+
+export interface StatusLineArgs {
+  provider: string;
+  model: string;
+  usedTokens: number;
+  maxTokens: number;
+  turn: number;
+  maxTurns: number;
+  state: StatusState;
+  display: Display;
+  /** Test seam — defaults to Date.now(). */
+  now?: number;
+}
+
+/**
+ * Phase 22 Task 4 status bar: vertical-bar separators, soft-cyan
+ * labels and separator, brand progress fill, semantic state colour.
+ *
+ *   <provider>:<model> │ ctx U/M [bar] N% │ budget T/MT │ <state>
+ */
+export function formatStatusLine(args: StatusLineArgs): string {
+  const { provider, model, usedTokens, maxTokens, turn, maxTurns, state, display } = args;
+  const ctxPercent = maxTokens > 0
+    ? Math.min(100, Math.round((usedTokens / maxTokens) * 100))
+    : 0;
+  const bar = renderColouredProgressBar(usedTokens, maxTokens, STATUS_BAR_WIDTH, display);
+  const sep = display.muted(' │ ');
+  const ctxSegment =
+    display.muted('ctx ') +
+    `${formatTokens(usedTokens)}/${formatTokens(maxTokens)} ` +
+    bar +
+    ` ${ctxPercent}%`;
+  const budgetSegment = display.muted('budget ') + `${turn}/${maxTurns}`;
+  const stateInfo = formatStatusState(state, args.now);
+  const stateSegment = display.paint(stateInfo.text, stateInfo.colour);
+  return `${provider}:${model}${sep}${ctxSegment}${sep}${budgetSegment}${sep}${stateSegment}`;
+}
 
 function boxTop(width: number): string {
   return '╭' + '─'.repeat(width) + '╮';

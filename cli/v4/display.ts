@@ -234,6 +234,26 @@ export class Display {
     return this.skin.applyColors(text, 'brand');
   }
 
+  /**
+   * Wrap `text` with the active skin's muted colour (soft cyan #6FB3D2
+   * in the default skin) and return the string. Companion to `brand` —
+   * use when composing partially-coloured lines like the status bar
+   * where some segments are coloured separately. `dim()` writes a full
+   * line; `muted()` returns a fragment.
+   */
+  muted(text: string): string {
+    return this.skin.applyColors(text, 'muted');
+  }
+
+  /**
+   * Wrap `text` with a semantic colour and return the string. Used by
+   * the status bar's right-most state segment (ready/generating/exec/
+   * approve/retry) where each state has a distinct colour.
+   */
+  paint(text: string, kind: 'brand' | 'success' | 'warn' | 'error' | 'muted'): string {
+    return this.skin.applyColors(text, kind);
+  }
+
   /** Horizontal rule for grouping CLI output. */
   line(width = 60): void {
     const ch = this.skin.getActive().glyphs?.bullet === '*' ? '-' : '─';

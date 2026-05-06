@@ -251,11 +251,14 @@ describe('ChatSession.run', () => {
       }),
     );
     await session.run();
-    // Status line uses our format: "$ groq:llama-... ctx ...".
+    // Phase 22 Task 4: status line dropped the leading "$ " prefix
+    // and switched to vertical-bar separators between segments.
     const text = out.join('');
-    expect(text).toMatch(/\$ groq:llama-3\.3-70b-versatile/);
+    expect(text).toMatch(/groq:llama-3\.3-70b-versatile/);
     expect(text).toMatch(/ctx \d/);
     expect(text).toMatch(/budget \d+\/90/);
+    expect(text).toMatch(/ │ /); // separator present
+    expect(text).toMatch(/ready/); // right-most state segment
   });
 
   it('intercepts slash commands before the agent', async () => {
