@@ -65,6 +65,20 @@ describe('open_url — execute() validation surface', () => {
     expect(r.error).toMatch(/Invalid URL/);
   });
 
+  it('source uses shell:false for the launcher spawn (DEP0190)', async () => {
+    // Phase 22 Task 9: explicit cmd.exe invocation makes shell:true
+    // redundant on Windows AND tripped Node 22's deprecation. Source
+    // assertion is the cheapest way to pin this without firing a real
+    // browser-launching spawn from the test runner.
+    const fs = await import('node:fs/promises');
+    const src = await fs.readFile(
+      new URL('../../../tools/v4/web/openUrl.ts', import.meta.url),
+      'utf8',
+    );
+    expect(src).toContain('shell: false');
+    expect(src).not.toMatch(/shell:\s*process\.platform\s*===\s*['"]win32['"]/);
+  });
+
   it('returns success: false for missing/empty url arg', async () => {
     const r = (await openUrlTool.execute({}, {} as any)) as any;
     expect(r.success).toBe(false);

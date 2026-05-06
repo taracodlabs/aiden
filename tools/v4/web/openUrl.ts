@@ -93,9 +93,12 @@ export const openUrlTool: ToolHandler = {
         const child = spawn(cmd, spawnArgs, {
           detached: true,
           stdio: 'ignore',
-          // Windows: shell is needed for `start`; macOS/Linux call the
-          // launcher binary directly.
-          shell: process.platform === 'win32',
+          // Phase 22 Task 9 (DEP0190 fix): we already invoke `cmd.exe`
+          // explicitly on Windows for the `start ""` builtin; shell:true
+          // was redundant and tripped Node 22's deprecation warning.
+          // macOS/Linux call the launcher binary (`open` / `xdg-open`)
+          // directly. shell:false everywhere now.
+          shell: false,
           windowsHide: false,
         });
         child.on('error', (err) => {

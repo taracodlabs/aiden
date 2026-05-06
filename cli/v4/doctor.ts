@@ -21,7 +21,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { resolveAidenPaths, type AidenPaths } from '../../core/v4/paths';
 import { LicenseClient, hasLicense } from '../../core/v4/license';
 import { checkForUpdate } from '../../core/v4/update/checkUpdate';
@@ -76,31 +76,125 @@ async function withTimeout<T>(p: Promise<T>, ms: number, fallback: T): Promise<T
 }
 
 /**
+ * Resolve a Windows binary name (`npx`, `python`, `docker`, ...) to its
+ * absolute on-disk path, honouring PATHEXT (`.cmd`, `.exe`, `.bat`,
+ * `.ps1`, ...). Result cached per session so repeated /doctor runs
+ * don't re-scan PATH for every probe.
+ *
+ * Phase 22 Task 9 (DEP0190 fix) — replaces the prior
+ * `spawn(name, args, { shell: true })` pattern that Node 22 deprecates.
+ * After resolution we spawn the absolute path with `shell: false` so
+ * the deprecation warning disappears AND we keep Phase 20.2's
+ * .cmd-shim coverage.
+ *
+ * Returns the original name unchanged on POSIX (bare-name lookup via
+ * `execvp` already handles shebangs) and on Windows when `where` fails
+ * (the eventual `spawn` will produce its own ENOENT and the check
+ * surfaces a clear "binary not found" result rather than crashing).
+ */
+const _binaryResolutionCache = new Map<string, string>();
+export function resolveBinaryPath(
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+  whereImpl: (n: string) => string | null = defaultWhere,
+): string {
+  if (platform !== 'win32') return name;
+  if (path.isAbsolute(name)) return name;
+  const cached = _binaryResolutionCache.get(name);
+  if (cached) return cached;
+  const resolved = whereImpl(name);
+  if (resolved) {
+    _binaryResolutionCache.set(name, resolved);
+    return resolved;
+  }
+  return name;
+}
+
+/**
+ * Windows `where` can list multiple candidates per binary — for npm
+ * shims it commonly returns the extensionless POSIX shebang variant
+ * first (e.g. `D:\Program Files\nodejs\npx`) followed by `npx.cmd`.
+ * Node's `spawn` with `shell: false` cannot execute the
+ * extensionless one on Windows; pick the first PATHEXT-executable
+ * match instead.
+ */
+const WINDOWS_EXEC_EXTS = ['.cmd', '.exe', '.bat', '.ps1', '.com'];
+
+function defaultWhere(name: string): string | null {
+  try {
+    const lines = execFileSync('where', [name], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      windowsHide: true,
+    })
+      .toString('utf8')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+    if (lines.length === 0) return null;
+    const exec = lines.find((l) => {
+      const ext = path.extname(l).toLowerCase();
+      return WINDOWS_EXEC_EXTS.includes(ext);
+    });
+    return exec ?? lines[0];
+  } catch {
+    return null;
+  }
+}
+
+/** Test-only — drop the cached resolutions between specs. */
+export function _resetBinaryResolutionCacheForTests(): void {
+  _binaryResolutionCache.clear();
+}
+
+/**
+ * Build a (cmd, args) tuple to spawn with `shell: false` for the
+ * given binary name on the current platform.
+ *
+ * The Node 18.20+ CVE-2024-27980 fix refuses to spawn `.bat`/`.cmd`
+ * files directly with `shell: false` (they would otherwise execute
+ * via cmd.exe, which is a shell-injection vector). We side-step by
+ * invoking `cmd.exe /c <resolved> <args...>` ourselves — cmd.exe is
+ * a .exe and runs cleanly with `shell: false`. Since /doctor's args
+ * are hardcoded `--version` strings, cmd.exe's arg interpretation is
+ * not a concern.
+ *
+ * For .exe targets we spawn directly. POSIX is unchanged.
+ */
+export function buildProbeInvocation(
+  bin: string,
+  args: string[],
+): { cmd: string; args: string[] } {
+  const resolved = resolveBinaryPath(bin);
+  if (process.platform === 'win32') {
+    const ext = path.extname(resolved).toLowerCase();
+    if (ext === '.cmd' || ext === '.bat') {
+      return { cmd: 'cmd.exe', args: ['/c', resolved, ...args] };
+    }
+  }
+  return { cmd: resolved, args };
+}
+
+/**
  * Run a binary with --version and resolve true on exit code 0.
  *
- * Phase 20.2 — `shell: true` on Windows so npm shims (`npx.cmd`,
- * `npm.cmd`, `tsc.cmd`, ...) get resolved via cmd.exe's pathext lookup.
- * Without it, Node's `spawn` only finds bare `.exe` files on Windows
- * and reports `npx not found` even when `npx --version` works fine in
- * the user's shell. POSIX is unchanged — bare-name resolution there
- * already covers shebangs.
- *
- * Args are hardcoded to `--version` everywhere this helper is called,
- * so cmd.exe arg-interpretation is not a concern (no user input flows
- * through the shell).
+ * Phase 22 Task 9 — `shell: false` everywhere. `buildProbeInvocation`
+ * routes `.cmd`/`.bat` through `cmd.exe /c` so Node 18.20+'s
+ * CVE-2024-27980 lockout doesn't reject them, while still avoiding
+ * the DEP0190 warning that `shell: true` triggers. Args are
+ * hardcoded `--version` at every call site; no user input.
  */
 function probeBinary(
   bin: string,
   args: string[],
   spawnImpl: typeof spawn,
 ): Promise<{ ok: boolean; stdout: string }> {
-  const useShell = process.platform === 'win32';
+  const inv = buildProbeInvocation(bin, args);
   return new Promise((resolve) => {
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawnImpl(bin, args, {
+      child = spawnImpl(inv.cmd, inv.args, {
         stdio: ['ignore', 'pipe', 'pipe'],
-        shell: useShell,
+        shell: false,
       });
     } catch {
       resolve({ ok: false, stdout: '' });
