@@ -36,6 +36,7 @@ import { plugins } from './plugins';
 import { auth } from './auth';
 import { license } from './license';
 import { doctor } from './doctor';
+import { cron } from './cron';
 
 export {
   help,
@@ -62,6 +63,7 @@ export {
   auth,
   license,
   doctor,
+  cron,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -85,6 +87,7 @@ export const allCommands: SlashCommand[] = [
   auth,
   license,
   doctor,
+  cron,
   reloadMcp,
   reasoning,
   verbose,
