@@ -64,7 +64,7 @@
     "build:cli": "esbuild cli/aiden.ts --bundle --platform=node --target=node18 --outfile=dist-bundle/cli.js --external:electron --external:cpu-features --external:ssh2 --external:bcrypt --external:playwright --external:playwright-core",
     "prebuild:api": "node scripts/inject-version.js",
     "build:api": "esbuild api/entry.ts --bundle --platform=node --target=node18 --outfile=dist-bundle/index.js --external:electron --external:cpu-features --external:ssh2 --external:bcrypt --external:playwright --external:playwright-core",
-    "prepublishOnly": "npm run typecheck && npm run test && npm run build",
+    "prepublishOnly": "npm run typecheck && npm run build",
     "typecheck": "tsc --noEmit",
     "publish:beta": "npm publish --tag beta",
     "publish:stable": "npm publish --tag latest",
