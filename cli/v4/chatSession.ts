@@ -333,7 +333,9 @@ export class ChatSession implements ChatSessionLike {
         ? this.opts.config.getValue<boolean>('display.streaming', false) === true
         : false;
 
-    const spinner = this.opts.display.startSpinner('Initializing agent…');
+    // Phase 26.2.6 — random thinking phrase per turn, already wrapped
+    // in brand orange by Display.thinkingPhrase().
+    const spinner = this.opts.display.startSpinner(this.opts.display.thinkingPhrase());
     let spinnerStopped = false;
     let streamingActive = false;
     const stopSpinnerOnce = (): void => {

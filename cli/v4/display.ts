@@ -40,6 +40,35 @@ export interface ColumnSection {
   rows: Array<{ key: string; value: string }>;
 }
 
+/**
+ * Phase 26.2.6 — pool of fun spinner phrases that the chat REPL
+ * picks from per-turn. Replaces the static "Initializing agent…"
+ * text with a touch of personality. Single-pick-per-turn (not a
+ * mid-spin rotation) — keeps the line stable while the model thinks.
+ */
+export const SPINNER_PHRASES: readonly string[] = [
+  'Thinking',
+  'Pondering',
+  'Brewing',
+  'Cogitating',
+  'Reasoning',
+  'Computing',
+  'Reflecting',
+  'Considering',
+  'Processing',
+  'Brain yakka',
+  'Untangling',
+  'Synthesizing',
+  'Working',
+  'Crunching',
+  'Plotting',
+  'Hatching plans',
+  'Caffeinating',
+  'Thinking hard',
+  'Smelting',
+  'Conjuring',
+];
+
 export interface AgentTurnOptions {
   /** Render markdown via `markdown()` before printing. Default: true. */
   markdown?: boolean;
@@ -444,12 +473,26 @@ export class Display {
   }
 
   /**
-   * Inquirer prompt prefix — "● " in brand orange (Phase 26.2.3 swap
-   * from `▲` to align with Hermes's user-bullet pattern). Inquirer
-   * prepends its own padding, so we only ship the bare 2-char prefix.
+   * Inquirer prompt prefix — "▲ " in brand orange (Phase 26.2.6 lock:
+   * reverted from the brief Phase 26.2.3 `●` swap to keep the prompt
+   * glyph aligned with the bottom hint's `▲ Type your message …` and
+   * with Aiden's brand mark from v3). Inquirer prepends its own
+   * padding, so we only ship the bare 2-char prefix.
    */
   promptPrefix(): string {
-    return `${this.skin.applyColors('●', 'brand')} `;
+    return `${this.skin.applyColors('▲', 'brand')} `;
+  }
+
+  /**
+   * Phase 26.2.6 — pick a random phrase from `SPINNER_PHRASES`,
+   * append `…`, and wrap in brand orange. `rand` is injectable so
+   * tests can pin the selection (and the chat REPL passes the
+   * default Math.random for live use).
+   */
+  thinkingPhrase(rand: () => number = Math.random): string {
+    const idx = Math.floor(rand() * SPINNER_PHRASES.length);
+    const phrase = SPINNER_PHRASES[Math.max(0, Math.min(SPINNER_PHRASES.length - 1, idx))];
+    return this.skin.applyColors(`${phrase}…`, 'brand');
   }
 
   /**
