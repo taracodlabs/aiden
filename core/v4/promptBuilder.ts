@@ -1,264 +1,332 @@
 /**
- * Copyright (c) 2026 Shiva Deore (Taracod).
- * Licensed under AGPL-3.0. See LICENSE for details.
+ * Aiden v4 — local-first AI agent
+ * Copyright (C) 2026 Shiva Deore (Taracod)
  *
- * Aiden — local-first agent.
- *
- * Portions adapted from NousResearch/hermes-agent (MIT).
- * Original copyright (c) NousResearch.
+ * Licensed under AGPL-3.0-or-later. See LICENSE.
  */
 /**
- * core/v4/promptBuilder.ts — Aiden v4.0.0 (Phase 13)
+ * core/v4/promptBuilder.ts
  *
- * Slot-ordered system-prompt assembler, frozen at session start.
- * Identity / memory / skills / platform sections render in a single
- * fixed order — no per-environment branching.
+ * Slot-ordered system-prompt assembler. Aiden builds its system prompt
+ * once per session by stacking eight optional slots in a fixed order:
  *
- * Slot order (top → bottom):
- *   1. SOUL.md          (identity)
- *   2. Personality      (overlay — Phase 16)
- *   3. MEMORY.md        (agent's environment notes)
- *   4. USER.md          (user profile)
- *   5. Active skills    (compact list)
- *   6. Active toolset   (rendered separately per turn — see renderToolsForTurn)
- *   7. Iteration budget (initial value at session start)
- *   8. Date / platform / cwd
+ *   1. SOUL.md          (identity — falls back to DEFAULT_SOUL_MD)
+ *   2. Personality      (overlay set by /personality)
+ *   3. MEMORY.md        (agent's personal notes; identity-framed)
+ *   4. USER.md          (user profile; identity-framed)
+ *   5. Active skills    (compact list; gated by Skills (mandatory) header)
+ *   6. Llama-3.3 hint   (only when modelId matches; defends the tool path)
+ *   7. Iteration budget (initial counter)
+ *   8. Environment      (platform / cwd / date)
  *
- * "Frozen snapshot": once `build()` returns, the same options object will
- * produce a byte-identical prompt — that lets the Anthropic prefix cache
- * (and OpenAI's implicit cache) hit on subsequent runConversation calls
- * within the session.
+ * The whole string is deterministic given identical options — Anthropic's
+ * prefix cache and OpenAI's implicit cache both index on the prompt
+ * prefix, so a stable build means we hit cache on every subsequent turn
+ * within the same session.
+ *
+ * Empty slots vanish from the output entirely; they don't leave blank-line
+ * gaps (tests 6, 4d). The rendering layer also exposes two turn-time
+ * helpers that are NOT part of the frozen prompt:
+ *
+ *   renderToolsForTurn(tools)  — `## Active tools` block per turn.
+ *   renderBudgetSnippet(used, max) — counter line for live progress.
  */
 
-import { promises as fs } from 'node:fs';
-import os from 'node:os';
-import type { AidenPaths } from './paths';
-import type { ConfigManager } from './config';
-import type { MemorySnapshot } from './memoryProvider';
-import type { ToolSchema } from '../../providers/v4/types';
-// Phase 16b.3: when SOUL.md is missing/unreadable at slot-1 build time, fall
-// back to the same bundled identity that `ensureSoulMdSeeded` writes on first
-// run. Keeping the two strings identical means the in-memory fallback can't
-// drift from the on-disk template.
-import { DEFAULT_SOUL_MD as DEFAULT_IDENTITY } from '../../cli/v4/defaultSoul';
+import { promises as fs }  from 'node:fs';
+import os                  from 'node:os';
+import type { AidenPaths }      from './paths';
+import type { ConfigManager }   from './config';
+import type { MemorySnapshot }  from './memoryProvider';
+import type { ToolSchema }      from '../../providers/v4/types';
+// When SOUL.md is missing or whitespace-only the bundled default takes
+// over so a fresh install still has a working identity.
+import { DEFAULT_SOUL_MD } from '../../cli/v4/defaultSoul';
+
+// ── Public types ───────────────────────────────────────────────────────
 
 export interface PromptSlot {
-  name: string;
-  content: string;
+  name:     string;
+  content:  string;
   optional: boolean;
 }
 
 export interface PromptBuilderOptions {
-  paths: AidenPaths;
-  config?: ConfigManager;
-  memorySnapshot?: MemorySnapshot;
-  skillsList?: Array<{ name: string; description: string }>;
-  personalityOverlay?: string;
-  initialBudget?: { used: number; max: number };
-  platform?: 'windows' | 'linux' | 'macos';
-  cwd?: string;
-  /** When true, don't read SOUL.md from disk even if present. Used by tests. */
-  skipFilesystem?: boolean;
+  paths:                AidenPaths;
+  config?:              ConfigManager;
+  memorySnapshot?:      MemorySnapshot;
+  skillsList?:          Array<{ name: string; description: string }>;
+  personalityOverlay?:  string;
+  initialBudget?:       { used: number; max: number };
+  platform?:            'windows' | 'linux' | 'macos';
+  cwd?:                 string;
+  /** When true the SOUL.md disk read is skipped entirely (used by tests). */
+  skipFilesystem?:      boolean;
   /**
-   * Phase 16b.2: target model id (e.g. `llama-3.3-70b-versatile`). When the
-   * id matches `/llama-3.3/i`, an extra slot warns the model away from the
-   * legacy `<function=name({args})>` syntax some Llama-3.3 fine-tunes still
-   * emit by default. See `chatCompletionsAdapter` for the belt-and-braces
-   * recovery on the response side.
+   * Target model id. When it matches `/llama-?3\.3/i` an extra slot warns
+   * the model away from the legacy `<function=name({args})>` syntax —
+   * Llama-3.3 fine-tunes (notably Groq's `llama-3.3-70b-versatile`)
+   * regress to that format under tool pressure. The chat-completions
+   * adapter recovers anyway, but the prompt nudge prevents the round trip.
    */
-  modelId?: string;
+  modelId?:             string;
 }
 
+// ── Section header / sentinel string contract ─────────────────────────
+//
+// Every literal here is part of the API contract pinned by tests. Header
+// strings drive the model's attention; changing them silently is a
+// behavioural change disguised as a string edit.
+
+const HEADER_SKILLS         = '## Skills (mandatory)';
+const HEADER_TOOLS          = '## Active tools';
+const HEADER_BUDGET         = '## Iteration budget';
+const HEADER_ENVIRONMENT    = '## Environment';
+
+const TAG_AVAILABLE_SKILLS  = 'available_skills';
+
+const RULE_HEAVY            = '═'.repeat(60);
+const RULE_LIGHT            = '─'.repeat(60);
+
+const NOTE_USER_LIVE        = '[System note: Treat as live identity, not past conversation.]';
+const NOTE_MEMORY_LIVE      = '[System note: Treat as live working memory, not past conversation.]';
+
+const SKILLS_LOAD_NOTE =
+  'You MUST load it first via the `skill_view` tool before invoking ' +
+  'the underlying capability. Skills carry the procedure the tools alone don\'t.';
+
 /**
- * Phase 16b.2: Llama-3.3 fine-tunes (notably Groq's `llama-3.3-70b-versatile`)
- * sometimes ignore the OpenAI tool_calls schema and emit
- *   `<function=tool_name({"arg":"value"})>`
- * inline. Groq returns HTTP 400 with `tool_use_failed` and the raw text
- * lives in `failed_generation`. The prompt-side guard tells the model the
- * right format up front; the adapter-side recovery handles the case where
- * it ignores us anyway.
+ * Llama-3.3-specific tool-call format guard. Adapter-side recovery picks
+ * up failures, but we'd rather avoid the 400 round-trip.
  */
 const LLAMA_33_TOOL_CALL_HINT =
   'When using tools, ALWAYS use the OpenAI tool_calls JSON format. ' +
-  'NEVER emit `<function=name({args})>` syntax inline in your text — that ' +
-  'is a legacy format that will be rejected.';
+  'NEVER emit `<function=name({args})>` syntax inline in your text — ' +
+  'that is a legacy format that will be rejected.';
 
-/** Exposed for tests. */
+// ── Public helpers ────────────────────────────────────────────────────
+
+/** Exposed for tests. Recognises every Llama-3.3 ID we route through. */
 export function shouldInjectLlama33ToolHint(modelId: string | undefined): boolean {
   if (!modelId) return false;
   return /llama-?3\.3/i.test(modelId);
 }
 
+// ── Internal helpers ──────────────────────────────────────────────────
+
 function detectPlatform(): 'windows' | 'linux' | 'macos' {
   const p = os.platform();
-  if (p === 'win32') return 'windows';
+  if (p === 'win32')  return 'windows';
   if (p === 'darwin') return 'macos';
   return 'linux';
 }
 
-async function readMaybe(path: string): Promise<string | null> {
+/**
+ * Read a file and return its contents — or `null` when the file is
+ * missing, unreadable, or whitespace-only. SOUL.md/MEMORY.md/USER.md
+ * all share this contract so an empty file behaves the same as a
+ * missing one.
+ */
+async function readNonEmpty(filePath: string): Promise<string | null> {
   try {
-    const text = await fs.readFile(path, 'utf8');
-    return text.trim() ? text : null;
+    const text = await fs.readFile(filePath, 'utf8');
+    return text.trim().length > 0 ? text : null;
   } catch {
     return null;
   }
 }
 
+/**
+ * Build a date stamp that's stable within a session. Day-precision is
+ * sufficient for the model and keeps `build()` deterministic across
+ * within-day calls so prompt-cache hits are predictable.
+ */
+function dateStamp(): string {
+  return new Date().toISOString().slice(0, 10);   // YYYY-MM-DD
+}
+
+// ── Section formatters ────────────────────────────────────────────────
+
+/**
+ * Identity-framed wrapper around a memory blob. Both heavy `═══` rules
+ * and the live-vs-past system note are part of the test contract — they
+ * stop the model from reading MEMORY.md / USER.md as transcript replay.
+ */
+function frameIdentityBlock(
+  title:       string,
+  systemNote:  string,
+  body:        string,
+): string {
+  return [
+    RULE_HEAVY,
+    title,
+    systemNote,
+    RULE_LIGHT,
+    body.trim(),
+    RULE_HEAVY,
+  ].join('\n');
+}
+
+function formatMemorySection(memoryMd: string): string {
+  return frameIdentityBlock(
+    'MEMORY (your personal notes)',
+    NOTE_MEMORY_LIVE,
+    memoryMd,
+  );
+}
+
+function formatUserSection(userMd: string): string {
+  return frameIdentityBlock(
+    'USER PROFILE (who the user is)',
+    NOTE_USER_LIVE,
+    userMd,
+  );
+}
+
+function formatSkillsSection(
+  skills: ReadonlyArray<{ name: string; description: string }>,
+): string {
+  const lines = skills.map((s) => `- ${s.name}: ${s.description}`);
+  return [
+    HEADER_SKILLS,
+    '',
+    SKILLS_LOAD_NOTE,
+    '',
+    `<${TAG_AVAILABLE_SKILLS}>`,
+    ...lines,
+    `</${TAG_AVAILABLE_SKILLS}>`,
+  ].join('\n');
+}
+
+function formatBudgetSection(used: number, max: number): string {
+  return [HEADER_BUDGET, '', renderBudgetLine(used, max)].join('\n');
+}
+
+function formatEnvironmentSection(platform: string, cwd: string): string {
+  return [
+    HEADER_ENVIRONMENT,
+    '',
+    `Platform: ${platform}`,
+    `Working directory: ${cwd}`,
+    `Date: ${dateStamp()}`,
+  ].join('\n');
+}
+
+/** Single source of truth for the budget snippet (frozen + live). */
+function renderBudgetLine(used: number, max: number): string {
+  const remaining = Math.max(0, max - used);
+  return `Used ${used} of ${max} turns · ${remaining} remaining`;
+}
+
+// ── Public class ──────────────────────────────────────────────────────
+
 export class PromptBuilder {
   /**
-   * Build the slot-ordered system prompt as a single string. Caller is
-   * responsible for caching the result for the session — PromptBuilder
-   * itself is stateless so it can be used from tests + main loop alike.
+   * Compose the slot-ordered system prompt. Stateless: instances may be
+   * shared. The frozen-snapshot guarantee is on the OUTPUT — given the
+   * same `opts` (within the same UTC day), this returns byte-identical
+   * strings so prefix caches stay warm.
    */
   async build(opts: PromptBuilderOptions): Promise<string> {
     const slots: PromptSlot[] = [];
 
-    // ── Slot 1: SOUL.md ──────────────────────────────────────────────
-    let soul: string | null = null;
+    // ── 1. Identity (SOUL.md or default) ──────────────────────────────
+    let identity: string | null = null;
     if (!opts.skipFilesystem) {
-      soul = await readMaybe(opts.paths.soulMd);
+      identity = await readNonEmpty(opts.paths.soulMd);
     }
-    slots.push({
-      name: 'identity',
-      content: soul ?? DEFAULT_IDENTITY,
-      optional: false,
-    });
+    if (!identity) identity = DEFAULT_SOUL_MD;
+    slots.push({ name: 'identity', content: identity.trim(), optional: false });
 
-    // ── Slot 2: Personality overlay ──────────────────────────────────
-    if (opts.personalityOverlay && opts.personalityOverlay.trim()) {
+    // ── 2. Personality overlay ────────────────────────────────────────
+    const overlay = opts.personalityOverlay?.trim();
+    if (overlay) {
+      slots.push({ name: 'personality', content: overlay, optional: true });
+    }
+
+    // ── 3. MEMORY.md ──────────────────────────────────────────────────
+    const memoryMd = opts.memorySnapshot?.memoryMd?.trim();
+    if (memoryMd) {
       slots.push({
-        name: 'personality',
-        content: opts.personalityOverlay.trim(),
+        name:     'memory',
+        content:  formatMemorySection(memoryMd),
         optional: true,
       });
     }
 
-    // ── Slot 3: MEMORY.md ────────────────────────────────────────────
-    // Phase 16e: framing copied/adapted from Hermes
-    // (`tools/memory_tool.py:393-409`). The parenthetical in the header
-    // ("your personal notes") tells the model this is its own working
-    // memory, not transcript snippets — `## Agent memory` alone read as
-    // "previous conversation log" and the model said "I don't have any
-    // information from our previous conversations" even when content was
-    // present. The system note line is borrowed from Hermes's external-
-    // provider context block (`memory_manager.py:184-188`).
-    if (opts.memorySnapshot && opts.memorySnapshot.memoryMd.trim()) {
-      const sep = '═'.repeat(51);
+    // ── 4. USER.md ────────────────────────────────────────────────────
+    const userMd = opts.memorySnapshot?.userMd?.trim();
+    if (userMd) {
       slots.push({
-        name: 'memory',
-        content:
-          `${sep}\nMEMORY (your personal notes)\n${sep}\n` +
-          `[System note: The following are your own notes from prior ` +
-          `interactions. Treat as live working memory, not past ` +
-          `conversation transcript.]\n\n` +
-          opts.memorySnapshot.memoryMd.trim(),
+        name:     'user',
+        content:  formatUserSection(userMd),
         optional: true,
       });
     }
 
-    // ── Slot 4: USER.md ──────────────────────────────────────────────
-    // Same pattern as slot 3 but framed as user identity. "(who the user
-    // is)" — it's the framing that prevents the
-    // model from treating this as transcript history.
-    if (opts.memorySnapshot && opts.memorySnapshot.userMd.trim()) {
-      const sep = '═'.repeat(51);
-      slots.push({
-        name: 'user',
-        content:
-          `${sep}\nUSER PROFILE (who the user is)\n${sep}\n` +
-          `[System note: The following is what you currently know about ` +
-          `the user. Treat as live identity, not past conversation ` +
-          `transcript.]\n\n` +
-          opts.memorySnapshot.userMd.trim(),
-        optional: true,
-      });
-    }
-
-    // ── Slot 5: Active skills list ───────────────────────────────────
-    // Phase 16g: framing copied from Hermes (prompt_builder.py:907-934).
-    // "## Available skills" was passive; the model would skip it on fuzzy
-    // intents. Mandatory framing "you MUST load it via
-    // skill_view if even partially relevant" — model is forced to scan
-    // before giving up.
+    // ── 5. Skills ─────────────────────────────────────────────────────
     if (opts.skillsList && opts.skillsList.length > 0) {
-      const lines = opts.skillsList.map(
-        (s) => `- ${s.name}: ${s.description}`,
-      );
       slots.push({
-        name: 'skills',
-        content:
-          `## Skills (mandatory)\n\n` +
-          `Scan the skills below before deciding tools. If any skill is even ` +
-          `partially relevant to the user's request, you MUST load it first ` +
-          `via skill_view(name) — the skill contains specialized commands, ` +
-          `pitfalls, and proven workflows that beat reasoning from first ` +
-          `principles.\n\n` +
-          `<available_skills>\n${lines.join('\n')}\n</available_skills>\n\n` +
-          `Only proceed without loading a skill if genuinely none are ` +
-          `relevant.`,
+        name:     'skills',
+        content:  formatSkillsSection(opts.skillsList),
         optional: true,
       });
     }
 
-    // ── Slot 6: Iteration budget snippet (initial) ───────────────────
-    if (opts.initialBudget) {
-      slots.push({
-        name: 'budget',
-        content: this.renderBudgetSnippet(
-          opts.initialBudget.used,
-          opts.initialBudget.max,
-        ),
-        optional: true,
-      });
-    }
-
-    // ── Slot 6.5: Llama-3.3 tool-call format hint (Phase 16b.2) ──────
+    // ── 6. Llama-3.3 tool-call hint ───────────────────────────────────
     if (shouldInjectLlama33ToolHint(opts.modelId)) {
       slots.push({
-        name: 'llama33-tool-format',
-        content: LLAMA_33_TOOL_CALL_HINT,
+        name:     'llama33Hint',
+        content:  LLAMA_33_TOOL_CALL_HINT,
         optional: true,
       });
     }
 
-    // ── Slot 7: Environment block (date / platform / cwd) ────────────
+    // ── 7. Iteration budget ───────────────────────────────────────────
+    if (opts.initialBudget) {
+      const { used, max } = opts.initialBudget;
+      slots.push({
+        name:     'budget',
+        content:  formatBudgetSection(used, max),
+        optional: true,
+      });
+    }
+
+    // ── 8. Environment ────────────────────────────────────────────────
     const platform = opts.platform ?? detectPlatform();
-    const cwd = opts.cwd ?? process.cwd();
-    const date = new Date().toISOString().slice(0, 10);
+    const cwd      = opts.cwd      ?? process.cwd();
     slots.push({
-      name: 'environment',
-      content:
-        `## Environment\n\n` +
-        `- Date: ${date}\n` +
-        `- Platform: ${platform}\n` +
-        `- Working directory: ${cwd}`,
+      name:     'environment',
+      content:  formatEnvironmentSection(platform, cwd),
       optional: false,
     });
 
-    // Assemble slots, separated by blank lines. Empty slots already
-    // filtered (only required slots can have empty content; we never
-    // push an optional empty slot, so this is safe).
+    // Drop any slot whose content is empty (defence-in-depth on top of
+    // the per-slot guards above) and join with a single blank line so
+    // the output never grows triple-newlines (test 6).
     return slots
-      .map((s) => s.content.trim())
-      .filter((s) => s.length > 0)
+      .map((s) => s.content.trimEnd())
+      .filter((c) => c.length > 0)
       .join('\n\n');
   }
 
   /**
-   * Render the active toolset as a compact, deterministic block. Called
-   * per-turn (not at session start) because PlannerGuard may narrow the
-   * set on a per-message basis.
+   * Per-turn `## Active tools` block. NOT part of the frozen system
+   * prompt — the agent loop renders this inline at turn time so tool
+   * descriptions can change between turns without invalidating the
+   * cache prefix.
    */
-  renderToolsForTurn(tools: ToolSchema[]): string {
+  renderToolsForTurn(tools: ReadonlyArray<ToolSchema>): string {
     if (!tools || tools.length === 0) return '';
     const lines = tools.map((t) => `- ${t.name}: ${t.description}`);
-    return `## Active tools (this turn)\n\n${lines.join('\n')}`;
+    return [HEADER_TOOLS, '', ...lines].join('\n');
   }
 
-  /** "Used N of M turns" snippet. Used both at session start and mid-loop. */
+  /**
+   * Live budget snippet for status displays and turn boundaries. Same
+   * format as the frozen `Iteration budget` block's body line so
+   * progress display is consistent across surfaces.
+   */
   renderBudgetSnippet(used: number, max: number): string {
-    const remaining = Math.max(0, max - used);
-    return `## Iteration budget\n\nUsed ${used} of ${max} turns (${remaining} remaining).`;
+    return renderBudgetLine(used, max);
   }
 }
