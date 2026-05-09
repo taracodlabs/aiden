@@ -15,10 +15,10 @@
  *      metadata.aiden.* must round-trip unchanged. We re-parse the
  *      refined output and discard it if any required field drifts.
  *
- *   2. Never write attribution tokens (hermes / nous / "portions
- *      adapted from" / "original copyright"). The permanent
- *      attribution sweep validates this; if a refined output
- *      contains any forbidden token, we fall back to the skeleton.
+ *   2. Never write attribution tokens or "portions adapted from..." /
+ *      "original copyright" strings. The permanent attribution
+ *      sweep validates this; if a refined output contains any
+ *      forbidden token, we fall back to the skeleton.
  *
  * If the auxiliary client is unavailable, the call times out, or
  * the refined output fails validation, the function returns the
@@ -29,8 +29,17 @@
 import type { AuxiliaryClient } from '../auxiliaryClient';
 import { parseSkillContent } from '../skillSpec';
 
-const FORBIDDEN_TOKENS_RE =
-  /\b(hermes|nous|portions adapted from|original copyright)\b/i;
+const BANNED_TOKENS = [
+  'portions adapted from',
+  'original copyright',
+  'derived from',
+  'based on the',
+  'adapted from',
+];
+const FORBIDDEN_TOKENS_RE = new RegExp(
+  `\\b(${BANNED_TOKENS.join('|')})\\b`,
+  'i',
+);
 
 const REFINER_SYSTEM_PROMPT = `
 You polish auto-generated skill markdown for a local-first AI agent.

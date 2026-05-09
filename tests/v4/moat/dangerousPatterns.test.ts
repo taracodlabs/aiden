@@ -76,7 +76,7 @@ describe('dangerousPatterns — individual detections', () => {
 
   it('13. catches pkill aiden (self-termination)', () => {
     expect(classifyCommand('pkill -9 aiden').tier).toBe('dangerous');
-    expect(classifyCommand('killall hermes-gateway').tier).toBe('dangerous');
+    expect(classifyCommand('killall aiden-gateway').tier).toBe('dangerous');
   });
 
   it('14. catches PowerShell Invoke-Expression', () => {

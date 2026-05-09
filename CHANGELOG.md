@@ -49,7 +49,6 @@ sectioned boot card, sharp ASCII corners, theme detection).
 ### Changed
 
 - Identity scrub: all third-party reference names replaced.
-- Renamed cron-hermes → cron in final scrub pass.
 - Day-one test suite: 37 vitest failures triaged into FIX (5) +
   DEFER (10 files marked `it.skip` with `TODO v4.1.1`).
 

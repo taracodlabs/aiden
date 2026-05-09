@@ -17,8 +17,9 @@
  *   - emits required fields `name`, `description`, `version`
  *   - emits `metadata.aiden` with the mining provenance fields
  *   - body is numbered tool-call steps in markdown
- *   - never writes hermes/nous/copyright attribution strings — the
- *     permanent attribution sweep validates this
+ *   - never writes attribution strings — the banned-token regex
+ *     strips them at extraction time and the permanent attribution
+ *     sweep validates the result
  */
 
 export interface ProposalTraceEntry {

@@ -64,7 +64,7 @@ export const DANGEROUS_PATTERNS: readonly DangerPattern[] = [
   { name: 'kill_all', regex: /\bkill\s+-9\s+-1\b/, tier: 'dangerous', description: 'kill all processes' },
   { name: 'pkill_force', regex: /\bpkill\s+-9\b/, tier: 'caution', description: 'force kill processes' },
   { name: 'systemctl_disable', regex: /\bsystemctl\s+(-[^\s]+\s+)*(stop|restart|disable|mask)\b/i, tier: 'caution', description: 'stop/restart system service' },
-  { name: 'pkill_aiden', regex: /\b(pkill|killall)\b.*\b(aiden|gateway|hermes)\b/i, tier: 'dangerous', description: 'kill aiden/gateway process (self-termination)' },
+  { name: 'pkill_aiden', regex: /\b(pkill|killall)\b.*\b(aiden|gateway)\b/i, tier: 'dangerous', description: 'kill aiden/gateway process (self-termination)' },
 
   // ── Sensitive write targets ───────────────────────────────────
   { name: 'write_etc', regex: />\s*\/etc\//, tier: 'dangerous', description: 'overwrite system config' },
