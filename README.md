@@ -104,7 +104,8 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
   <a href="https://aiden.taracod.com"><b>Website</b></a> &nbsp;·&nbsp;
   <a href="https://aiden.taracod.com/contact"><b>Contact</b></a> &nbsp;·&nbsp;
   <a href="https://discord.gg/gMZ3hUnQTm"><b>Discord</b></a> &nbsp;·&nbsp;
-  <a href="https://github.com/taracodlabs/aiden-releases/releases/latest"><b>Download</b></a>
+  <a href="https://github.com/taracodlabs/aiden-releases/releases/latest"><b>Download</b></a> &nbsp;·&nbsp;
+  <a href="https://amzn.to/4tpiXwM"><b>Book</b></a>
 </p>
 
 ---
