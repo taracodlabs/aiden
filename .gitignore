@@ -30,9 +30,12 @@ out/
 workspace/
 config/devos.config.json
 config/hardware.json
-# Graphify build artifacts (Option B: commit only GRAPH_REPORT.md)
-graphify-out/*
-!graphify-out/GRAPH_REPORT.md
+# Graphify build artifacts — fully ignored. The graphify post-commit
+# hook auto-regenerates GRAPH_REPORT.md every commit, which was
+# causing rebases to abort with dirty-tree errors. Regenerate locally
+# on demand via `python3 -c "from graphify.watch import _rebuild_code; ..."`
+# (see CLAUDE.md). Not source of truth, not shipped to users.
+graphify-out/
 
 # ── Claude Code session state ─────────────────────────────────────────────────
 .claude/worktrees/

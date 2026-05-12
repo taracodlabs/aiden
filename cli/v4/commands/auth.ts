@@ -97,9 +97,12 @@ function renderStatus(
   ctx.display.write(`  state: ${stateLabel}\n`);
   if (tokens.account) ctx.display.write(`  account: ${tokens.account}\n`);
   ctx.display.write(`  ${formatRelativeExpiry(tokens.expiresAtMs)}\n`);
-  if (tokens.models?.length) {
-    ctx.display.write(`  models: ${tokens.models.join(', ')}\n`);
-  }
+  // Post-v4.1.1 cleanup: don't render `models:` — the stored list is
+  // captured at OAuth mint time and never refreshed, so it goes stale
+  // when the provider rotates its model catalog (e.g. OpenAI retired
+  // gpt-5 / gpt-5-mini in Feb 2026). The live model list lives in
+  // /model picker → providerCatalog.ts. /auth status is for AUTH
+  // state, not catalog state.
   if (ctx.paths) {
     ctx.display.dim(
       `  file: ${path.join(ctx.paths.root, 'auth', `${providerId}.json`)}`,

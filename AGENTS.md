@@ -90,14 +90,14 @@ happened on this turn.
 
 Multi-layer:
 
-- `MEMORY.md` — declarative facts the user has confirmed
+- `MEMORY_INDEX.md` — declarative facts the user has confirmed
 - `USER.md` — user identity, preferences, projects (re-read every turn)
 - `SOUL.md` — Aiden's identity (re-read every turn)
 - `LESSONS.md` — failure trace, written by the learning-memory module
 - conversation / session / workspace memory — per-context history
 - semantic memory — BM25 + embeddings over the recall layers
 
-Dirty-bit invalidation: when a tool writes to `MEMORY.md` or `USER.md`,
+Dirty-bit invalidation: when a tool writes to `MEMORY_INDEX.md` or `USER.md`,
 the agent calls `markMemoryDirty()`. The next turn rebuilds the system
 prompt from disk; subsequent turns use the cached prompt until the bit
 flips again.
@@ -124,7 +124,7 @@ flips again.
   second, the user only sees the final answer.
 - Surface every failure with the tool, provider, retry count, fallback
   chain, error, and next step. No silent swallowing.
-- Refresh `MEMORY.md` / `USER.md` / `SOUL.md` mid-session when the user
+- Refresh `MEMORY_INDEX.md` / `USER.md` / `SOUL.md` mid-session when the user
   edits them — no restart required.
 - Write a new skill when a multi-step success qualifies (tier-3 propose
   or tier-4 auto, depending on `skill_teacher_tier` in config).

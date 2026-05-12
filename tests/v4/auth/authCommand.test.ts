@@ -124,7 +124,11 @@ describe('/auth status', () => {
     expect(text).toContain('shiva@example.com');
     expect(text).toMatch(/expires in \d+ (minute|minutes|hour|hours)/);
     expect(text).toContain('state: authed');
-    expect(text).toContain('claude-opus-4-7');
+    // Post-v4.1.1 cleanup: /auth status no longer renders the stored
+    // `tokens.models` list — it goes stale when providers rotate their
+    // catalog. Current model list lives in /model. We assert the model
+    // id is NOT in the output to lock in the new behavior.
+    expect(text).not.toContain('claude-opus-4-7');
   });
 
   it('50. status flags tokens within the 5-min preflight window as "expiring soon"', async () => {

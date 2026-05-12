@@ -13,7 +13,7 @@
 
 Autonomous AI Engine
 
-72 skills · 42 tools · 19 providers · 9 channels · AGPL-3.0
+72 skills · 45 tools · 19 providers · 9 channels · AGPL-3.0
 
 Windows · Linux · WSL · macOS (API Mode)
 
@@ -98,7 +98,7 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
 <p align="center">
   <img src="https://img.shields.io/badge/providers-19-f97316?style=for-the-badge" alt="19 providers" />
   <img src="https://img.shields.io/badge/skills-68-43853d?style=for-the-badge" alt="68 skills" />
-  <img src="https://img.shields.io/badge/tools-42-blueviolet?style=for-the-badge" alt="42 tools" />
+  <img src="https://img.shields.io/badge/tools-45-blueviolet?style=for-the-badge" alt="45 tools" />
   <img src="https://img.shields.io/badge/channels-9-5865f2?style=for-the-badge" alt="9 channels" />
   <img src="https://img.shields.io/badge/offline-Ollama-22c55e?style=for-the-badge" alt="offline" />
   <img src="https://img.shields.io/badge/OAuth-Claude%20Pro%20%2B%20ChatGPT%20Plus-9333ea?style=for-the-badge" alt="OAuth subscriptions" />
@@ -139,7 +139,7 @@ Most AI agents answer questions. Aiden runs work end-to-end on your machine.
 - **Automates any browser** — 10 Playwright-driven tools (navigate, click, type, fill, scroll, extract, screenshot, get-url, close, captcha-check)
 - **Self-healing provider routing** — 6-slot fallback chain (`together → groq × 4`) advances slots in under a second on rate-limit
 - **OAuth subscription routing** — sign in with Claude Pro or ChatGPT Plus; queries route to your subscription quota, not pay-as-you-go
-- **Persistent memory** — `MEMORY.md`, `USER.md`, `SOUL.md`, plus semantic recall and a `LESSONS.md` failure log that grows every session
+- **Persistent memory** — `MEMORY_INDEX.md`, `USER.md`, `SOUL.md`, plus semantic recall and a `LESSONS.md` failure log that grows every session
 - **Lives where you do** — identity files re-read every turn; edit `USER.md` mid-conversation and the change lands within one reply
 - **One command to start** — `npx aiden-runtime` installs, configures, and runs everything
 - **Honest failures** — every tool error names the tool, provider, retry count, fallback chain, error, and next step. No silent swallowing.
@@ -448,7 +448,7 @@ Multi-layer memory visualised — every conversation, task, and learned pattern 
 | **Inference & providers** | 19 providers including Anthropic, OpenAI, Groq (4-slot fallback), Together, Gemini, NVIDIA NIM, OpenRouter, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, custom OpenAI-compatible endpoints, and **Ollama** for fully offline. OAuth subscription routing for Claude Pro and ChatGPT Plus. |
 | **42 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops (read, list, write, patch, delete, move, copy), process control (spawn, kill, list, log-read, wait), shell exec, code execution, system info, MCP bridge, memory add/replace/remove, session list/search, skill view/list/manage. |
 | **68 bundled skills** | Composable workflows each with a `SKILL.md` prompt, optional helper scripts, and tool requirements. Includes: GitHub PR/issue workflows, NSE / Upstox / Zerodha trading, Censys / Shodan / VirusTotal lookups, Windows Defender / Task Scheduler, Docker management, YouTube content tools, ASCII art, and more. |
-| **6-layer memory** | `MEMORY.md` (declarative facts), conversation/session/workspace memory, semantic search (BM25 + embeddings), learning memory (`LESSONS.md`), structured user profile. Dirty-bit invalidation rebuilds the prompt when files change mid-session. |
+| **6-layer memory** | `MEMORY_INDEX.md` (declarative facts), conversation/session/workspace memory, semantic search (BM25 + embeddings), learning memory (`LESSONS.md`), structured user profile. Dirty-bit invalidation rebuilds the prompt when files change mid-session. |
 | **Voice** | Edge TTS / Windows SAPI text-to-speech, speech-to-text helpers. |
 | **Channel adapters** | Discord, Slack, Telegram, WhatsApp, Email (IMAP+SMTP), Webhook, Twilio SMS, iMessage (macOS), Signal — any channel triggers the same agent loop. |
 | **Computer use** | Screenshot capture, screen-state vision loop, browser automation. Mouse/keyboard automation partial. |
@@ -490,7 +490,7 @@ User input (any channel)
        ▼
   ┌─────────────────────────────────────┐
   │  Memory                             │
-  │  MEMORY.md · USER.md · SOUL.md      │
+  │  MEMORY_INDEX.md · USER.md · SOUL.md │
   │  conversation · session · workspace │
   │  semantic (BM25 + embeddings)       │
   │  learning (LESSONS.md)              │

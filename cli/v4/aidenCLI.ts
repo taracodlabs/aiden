@@ -165,7 +165,11 @@ function coerceMode<T extends string>(
   return fallback;
 }
 
-const VERSION = '4.0.0';
+// Post-v4.1.1 cleanup: read VERSION from the auto-generated source-of-
+// truth (scripts/inject-version.js writes it from package.json on every
+// prebuild hook). Previous hardcoded '4.0.0' string had been stale since
+// v4.0.1 and made `aiden --version` lie.
+import { VERSION } from '../../core/version';
 
 // Phase 16c.2: env-source tracking lives in `cli/v4/envSources.ts` so
 // `commands/providers.ts` can import getEnvSource without circular deps.
