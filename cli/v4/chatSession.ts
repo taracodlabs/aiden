@@ -29,6 +29,11 @@ import type {
   SlashCommand,
 } from './commandRegistry';
 import { uiIconsEnabled, isNoUiMode } from './uiBuild';
+import {
+  shouldAutoSummarize,
+  memoryGrewBetween,
+  SESSION_SUMMARY_MIN_TURNS,
+} from './sessionSummaryGate';
 import aidenPrompt, { type SlashCommandLite } from './aidenPrompt';
 import { appendHistory, loadRecent } from './historyStore';
 import type { CliCallbacks } from './callbacks';
@@ -373,7 +378,7 @@ export class ChatSession implements ChatSessionLike {
           });
           if (result.exit) {
             // Phase v4.1.2 alive-core: auto-trigger session_summary on
-            // /quit when the session was substantive (>5 user turns).
+            // /quit when the session was substantive (≥3 user turns).
             // SIGINT and crash paths intentionally skip this — they
             // bypass the slash-command handler entirely (signal handler
             // at line 274 calls process.exit(0) directly).
@@ -398,31 +403,105 @@ export class ChatSession implements ChatSessionLike {
 
   // ── Inner: a single agent turn ─────────────────────────────────────
   /**
-   * Phase v4.1.2 alive-core: auto-trigger `session_summary` on /quit
-   * when the session was substantive (>5 user turns). The synthetic
-   * prompt asks the model to craft five bullets and call the tool.
+   * Phase v4.1.2 alive-core (refined v4.1.2-followup-2): auto-trigger
+   * `session_summary` on /quit when the session was substantive
+   * (≥3 user turns). The synthetic prompt forces the model to call
+   * the tool — prose-only responses are not acceptable.
    *
-   * Best-effort: any failure (provider down, approval denial, tool
-   * error) is logged dimly and /quit proceeds normally. SIGINT path
-   * skips this method entirely because the signal handler does
-   * process.exit(0) before this slash-command branch runs.
+   * Every non-success path is logged explicitly so users always know
+   * what happened:
+   *   - threshold-skip → log: "session too short, skipping summary"
+   *   - unconfigured-skip → log: "no provider, skipping summary"
+   *   - tool-not-called (model returned prose) → log a clear warning
+   *   - tool-errored (throw) → log the error verbatim
+   *   - tool-succeeded → log the absolute MEMORY.md path
+   *
+   * Post-run verification: compare MEMORY.md size+mtime before vs
+   * after the synthetic turn. If unchanged, the model didn't actually
+   * fire the tool and the user gets a "run /session-summary manually
+   * next time" hint.
+   *
+   * SIGINT and crash paths skip this method entirely because the
+   * signal handler does process.exit(0) before this slash-command
+   * branch runs.
    */
   private async maybeAutoSummarize(): Promise<void> {
     const userTurns = this.history.filter((m) => m.role === 'user').length;
-    if (userTurns <= 5) return;          // session too short to summarise
-    if (this.opts.unconfigured)  return; // no provider available
+    const memoryPath = this.opts.paths?.memoryMd;
+
+    const gate = shouldAutoSummarize({
+      userTurns,
+      unconfigured: !!this.opts.unconfigured,
+      memoryPath,
+    });
+    if (gate.fire === false) {
+      switch (gate.reason) {
+        case 'short':
+          this.opts.display.dim(
+            `Skipping session summary — only ${userTurns} user turn(s), need ${SESSION_SUMMARY_MIN_TURNS}+.`,
+          );
+          return;
+        case 'unconfigured':
+          this.opts.display.dim(
+            'Skipping session summary — no provider configured.',
+          );
+          return;
+        case 'no-paths':
+          this.opts.display.dim(
+            'Skipping session summary — no aiden paths wired (test mode?).',
+          );
+          return;
+      }
+    }
+
+    // Snapshot MEMORY.md state before the synthetic turn so we can
+    // detect whether the agent actually wrote anything. Missing file
+    // is treated as size=0 / mtime=0; equal-to-before-after after the
+    // turn → same outcome (warn the user).
+    const before = await this.snapshotMemoryStat(memoryPath);
+
+    this.opts.display.dim(`Saving session summary to ${memoryPath}…`);
     try {
-      this.opts.display.dim('Saving session summary to MEMORY.md…');
       await this.runAgentTurn(
-        'Before we end this session, call the `session_summary` tool with ' +
-        'exactly five concise bullets covering what we worked on, decisions ' +
-        'made, files changed, problems solved, and any open items. Use ' +
-        'trigger: "auto-quit". Don\'t write any prose after the tool call.',
+        'This session is ending. You MUST call the session_summary tool ' +
+        'NOW with trigger=\'auto-quit\' and a bullets array of exactly 5 ' +
+        'concise items covering what we worked on, decisions made, files ' +
+        'changed, problems solved, and open items. Do not respond with ' +
+        'prose. Do not explain. Do not ask for confirmation. Call the ' +
+        'tool immediately — the user will not see your text, only the ' +
+        'tool call matters.',
       );
     } catch (err) {
-      this.opts.display.dim(
-        `Session summary skipped: ${(err as Error).message}`,
+      this.opts.display.warn(
+        `Session summary failed: ${(err as Error).message}`,
       );
+      return;
+    }
+
+    const after = await this.snapshotMemoryStat(memoryPath);
+    const grew = memoryGrewBetween(before, after);
+    if (grew) {
+      this.opts.display.dim(`Session summary saved to ${memoryPath}`);
+    } else {
+      this.opts.display.warn(
+        'Session summary tool was not called (model responded with prose ' +
+        `instead of firing the tool). MEMORY.md unchanged at: ${memoryPath}`,
+      );
+    }
+  }
+
+  /**
+   * Read MEMORY.md size + mtime for the pre/post-write comparison in
+   * `maybeAutoSummarize`. Missing file is normalised to zeros so the
+   * "did MEMORY.md grow" comparison is well-defined even on fresh installs.
+   */
+  private async snapshotMemoryStat(p: string): Promise<{ size: number; mtime: number }> {
+    try {
+      const { promises: fsPromises } = await import('node:fs');
+      const stat = await fsPromises.stat(p);
+      return { size: stat.size, mtime: stat.mtimeMs };
+    } catch {
+      return { size: 0, mtime: 0 };
     }
   }
 
