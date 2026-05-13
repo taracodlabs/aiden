@@ -77,6 +77,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   status: 'System',
   show: 'System',
   history: 'System',
+  // Phase v4.1.2-update — npm self-update for the running install.
+  update: 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

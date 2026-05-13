@@ -44,6 +44,7 @@ import { status } from './status';
 import { show } from './show';
 import { history } from './history';
 import { reloadSoul } from './reloadSoul';
+import { update } from './update';
 
 export {
   help,
@@ -78,6 +79,7 @@ export {
   show,
   history,
   reloadSoul,
+  update,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -112,6 +114,10 @@ export const allCommands: SlashCommand[] = [
   reloadMcp,
   reasoning,
   verbose,
+  // Phase v4.1.2-update: /update + /update install — fresh registry
+  // probe + shared executeInstall executor (also wired into
+  // aiden_self_update tool for natural-language requests).
+  update,
   clear,
   quit,
 ];

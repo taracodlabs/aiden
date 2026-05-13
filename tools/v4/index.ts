@@ -68,6 +68,9 @@ import { appLaunchTool } from './system/appLaunch';
 import { appCloseTool } from './system/appClose';
 import { clipboardReadTool } from './system/clipboardRead';
 import { clipboardWriteTool } from './system/clipboardWrite';
+// Phase v4.1.2-update — natural-language self-update entry point.
+// Routes through the same shared executeInstall executor as `/update install`.
+import { aidenSelfUpdateTool } from './system/aidenSelfUpdate';
 
 import { shellExecTool } from './terminal/shellExec';
 import { executeCodeTool } from './executeCode';
@@ -214,6 +217,11 @@ export function registerWriteTools(registry: ToolRegistry): void {
   // Phase 10: skill_manage — mutating, also goes through the approval
   // engine. skills_list / skill_view stay in registerReadOnlyTools.
   registry.register(skillManageTool);
+
+  // Phase v4.1.2-update: natural-language entry to the same install
+  // executor that /update install uses. Two-step confirmation gate
+  // (confirm:false → status; confirm:true → install).
+  registry.register(aidenSelfUpdateTool);
 
   // Phase v4.1.2-followup-3 — computer-control mutating tools. All
   // route through the approval engine like every other write.
