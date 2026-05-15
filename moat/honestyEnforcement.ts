@@ -84,7 +84,8 @@ export interface HonestyTraceEntry {
   error?: string;
   /**
    * v4.2 Phase 1 — per-tool verifier classification of this result.
-   * Populated only when AIDEN_TCE=1 (and a verification didn't throw).
+   * Populated only when TCE is enabled (default ON as of v4.2
+   * Phase 6; opt-out via `AIDEN_TCE=0`) and the verifier didn't throw.
    * Honesty itself does NOT consume this field; it's surfaced here so
    * downstream callers (chatSession, loopTrace, future RecoveryReport)
    * get the verification inline with the rest of the trace entry.
@@ -102,7 +103,8 @@ export interface HonestyTraceEntry {
   };
   /**
    * v4.2 Phase 2 — failure classification (WHY the verifier said !ok).
-   * Populated only when AIDEN_TCE=1 AND verification.ok === false.
+   * Populated only when TCE is enabled (default ON; opt-out via
+   * `AIDEN_TCE=0`) AND verification.ok === false.
    * Honesty itself does NOT consume this field; it surfaces here so
    * Phase 3's RecoveryReport can render structured guidance, and so
    * chatSession / loopTrace get a complete trace entry.

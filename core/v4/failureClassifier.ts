@@ -47,8 +47,9 @@
  * Skips entirely when `verification.ok === true` — saves cycles on
  * successful calls.
  *
- * Gated by AIDEN_TCE=1 — same flag as Phase 1 verifier + TurnState.
- * Default OFF produces zero behavioral change.
+ * Gated by the same TCE flag as Phase 1 verifier + TurnState (default
+ * ON as of v4.2 Phase 6; opt-out via `AIDEN_TCE=0`). When disabled,
+ * the classifier is never invoked from the agent loop.
  */
 
 import type { ToolCallResult } from '../../providers/v4/types';

@@ -143,6 +143,7 @@ Most AI agents answer questions. Aiden runs work end-to-end on your machine.
 - **Lives where you do** — identity files re-read every turn; edit `USER.md` mid-conversation and the change lands within one reply
 - **One command to start** — `npx aiden-runtime` installs, configures, and runs everything
 - **Honest failures** — every tool error names the tool, provider, retry count, fallback chain, error, and next step. No silent swallowing.
+- **Self-recovery from tool loops** — the agent detects when a tool is failing repeatedly (timeout, auth, permission, dependency-missing, hallucination, and 5 more failure categories), classifies the cause, and rolls back to a clean baseline so it can retry with a different approach. Active by default; set `AIDEN_TCE=0` to disable.
 - **Plugin extension** — drop a plugin into `<aiden-home>/plugins/` and call `ctx.commandRegistry.register()` to add slash commands without touching core
 - **Open source** — AGPL-3.0 core, Apache-2.0 skills. Read every line, modify anything, contribute back.
 

@@ -33,7 +33,11 @@ describe('TurnState (v4.1.6 spike)', () => {
     delete process.env.AIDEN_TCE;
   });
 
-  it('disabled by default: all calls return allow, no side effects', () => {
+  it('opt-out via AIDEN_TCE=0: all calls return allow, no side effects', () => {
+    // v4.2 Phase 6 — TCE is ON by default; opt-out is strict
+    // `AIDEN_TCE=0`. This test asserts the opt-out path: explicit
+    // `=0` disables the tracer entirely, every call returns allow.
+    process.env.AIDEN_TCE = '0';
     const ts = new TurnState();
     expect(ts.isEnabled()).toBe(false);
     for (let i = 0; i < 30; i += 1) {
@@ -45,6 +49,19 @@ describe('TurnState (v4.1.6 spike)', () => {
     expect(snap.enabled).toBe(false);
     expect(snap.stage).toBe('none');
     expect(snap.recoveryEvents).toHaveLength(0);
+  });
+
+  it('v4.2 Phase 6 — default ON: TCE active when env var unset', () => {
+    // New default-on sentinel. Constructed with no opts and no env
+    // var → isEnabled() must be true. Asserts the Phase 6 flip.
+    delete process.env.AIDEN_TCE;
+    const ts = new TurnState();
+    expect(ts.isEnabled()).toBe(true);
+    // Tracer actually fires — record a call, snapshot should reflect it.
+    ts.recordToolCall('skill_view', { name: 'demo' });
+    const snap = ts.getDiagnosticSnapshot();
+    expect(snap.enabled).toBe(true);
+    expect(snap.toolCalls).toHaveLength(1);
   });
 
   it('enabled via env var: hint stage fires at signature-streak 5', () => {
@@ -288,7 +305,10 @@ describe('TurnState (v4.1.6 spike)', () => {
   });
 
   it('disabled tracer: getDiagnosticSnapshot still works (returns disabled state)', () => {
-    const ts = new TurnState();
+    // v4.2 Phase 6 — default ON requires explicit opt-out for this
+    // assertion to hold. Use the constructor `enabled: false` override
+    // so the test stays env-var-independent.
+    const ts = new TurnState({ enabled: false });
     const snap = ts.getDiagnosticSnapshot();
     expect(snap.enabled).toBe(false);
     expect(snap.stage).toBe('none');

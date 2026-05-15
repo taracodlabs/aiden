@@ -31,8 +31,10 @@
  * - Built-in per-tool verifiers for 5 high-signal tools where the
  *   default envelope inspection isn't sufficient: `shell_exec`,
  *   `web_search`, `file_write`, `file_read`, `web_fetch`.
- * - Behind the `AIDEN_TCE=1` gate — same flag as TurnState. When
- *   disabled, the agent skips verifier construction entirely.
+ * - Behind the same gate as TurnState (default ON; opt-out via
+ *   `AIDEN_TCE=0`). When disabled, the agent skips verifier
+ *   classification — the registry is still constructed (cheap) but
+ *   `resolve()` is never called inside the gated branch.
  *
  * Out of scope (deferred phases):
  * - Phase 2 — typed failure reason taxonomy (timeout / auth /
@@ -87,7 +89,7 @@ export type VerifierFn = (
 
 /**
  * Per-tool override registry with a default-fallback resolver. Cheap
- * to construct; safe to keep instantiated even when AIDEN_TCE=0
+ * to construct; safe to keep instantiated even when TCE is disabled
  * because nothing runs unless `resolve(...)` is called by the agent
  * loop (which itself is gated).
  */

@@ -60,8 +60,11 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
     delete process.env.AIDEN_TCE;
   });
 
-  it('default off: zero recovery — loop runs until mock terminates', async () => {
-    delete process.env.AIDEN_TCE; // explicit
+  it('opt-out via AIDEN_TCE=0: zero recovery — loop runs until mock terminates', async () => {
+    // v4.2 Phase 6 — TCE is ON by default; explicit `=0` opts out
+    // and produces the pre-v4.2 behavior asserted below. Renamed
+    // from "default off" to reflect the new semantics.
+    process.env.AIDEN_TCE = '0';
     const provider = new LoopingMockProvider({
       mode:       'same-signature',
       loopTool:   'skill_view',
@@ -83,6 +86,30 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
       (m) => m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[tce]'),
     );
     expect(tceMsgs).toHaveLength(0);
+  });
+
+  it('v4.2 Phase 6 — default ON: TCE active when env var unset', async () => {
+    // Default-on sentinel for Phase 6 flip. With no env var set,
+    // TCE should be active — a same-signature loop should reach
+    // the HINT stage at iteration 5 (signature streak threshold).
+    delete process.env.AIDEN_TCE;
+    const provider = new LoopingMockProvider({
+      mode:       'same-signature',
+      loopTool:   'skill_view',
+      loopCount:  15,
+    });
+    const agent = new AidenAgent({
+      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+    });
+    const result = await agent.runConversation(
+      [{ role: 'user', content: 'analyse stocks' }] as Message[],
+    );
+    // With TCE on, at least one [tce] corrective system message
+    // must have landed in history (HINT at signature streak 5).
+    const tceMsgs = result.messages.filter(
+      (m) => m.role === 'system' && typeof m.content === 'string' && m.content.startsWith('[tce]'),
+    );
+    expect(tceMsgs.length).toBeGreaterThanOrEqual(1);
   });
 
   it('flag on, mock doesn\'t loop: no recovery fires (false-positive guard)', async () => {

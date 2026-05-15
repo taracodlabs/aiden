@@ -8,8 +8,9 @@
  * core/v4/turnState.ts — v4.1.6 spike: Task Completion Engine (TCE)
  * loop detection + recovery controller.
  *
- * One TurnState instance lives per `runConversation` call. Default OFF
- * via `AIDEN_TCE` env var — zero behavioral change when unset.
+ * One TurnState instance lives per `runConversation` call. **Default
+ * ON** as of v4.2 Phase 6 — set `AIDEN_TCE=0` to disable. Zero
+ * behavioral change vs v4.1.6 when disabled.
  *
  * Concept: per-turn state object that the agent loop consults after
  * each tool dispatch. Tracks how often the model is repeating itself
@@ -196,7 +197,10 @@ export interface TurnStateDiagnosticSnapshot {
 export interface TurnStateOptions {
   /**
    * Override the env-var gate. Default: read `process.env.AIDEN_TCE`
-   * at construct time; `'1'` enables, anything else disables.
+   * at construct time; **TCE is ON by default** as of v4.2 Phase 6.
+   * Set `AIDEN_TCE=0` to disable. Any other value (unset, `'1'`,
+   * `''`, junk) enables TCE — the strict-`'0'` opt-out semantic
+   * keeps the contract unambiguous.
    */
   enabled?:                  boolean;
   /** Signature-streak threshold for HINT stage. Default 5. */
@@ -286,8 +290,13 @@ export class TurnState {
   private checkpoints:                Checkpoint[] = [];
 
   constructor(opts: TurnStateOptions = {}) {
+    // v4.2 Phase 6 — TCE is ON by default. Strict `'0'` opt-out
+    // semantic: env var must be literally the string `'0'` to
+    // disable; everything else (unset, `'1'`, empty string, junk)
+    // enables. The opts.enabled override still wins when explicitly
+    // passed by callers (test fixtures, embedded usage).
     this.enabled =
-      opts.enabled ?? (process.env.AIDEN_TCE === '1');
+      opts.enabled ?? (process.env.AIDEN_TCE !== '0');
     this.hintConsec      = opts.hintConsecThreshold     ?? 5;
     this.cooldownConsec  = opts.cooldownConsecThreshold ?? 8;
     this.surfaceConsec   = opts.surfaceConsecThreshold  ?? 11;
@@ -310,7 +319,7 @@ export class TurnState {
    *
    * When `enabled === false`, returns `{kind: 'allow'}` immediately
    * without any state mutation — guarantees zero behavioral change
-   * when AIDEN_TCE is unset.
+   * when TCE is opted out via `AIDEN_TCE=0`.
    *
    * v4.2 Phase 1 — optional `verification` argument lets the verifier
    * layer feed its classification into the controller. When provided
@@ -514,7 +523,8 @@ export class TurnState {
    * the array reference is new — items are treated as immutable
    * Message objects downstream).
    *
-   * No-op when disabled (AIDEN_TCE=0) OR when `checkpointDepth === 0`.
+   * No-op when TCE is disabled (opt-out via `AIDEN_TCE=0`) OR when
+   * `checkpointDepth === 0`.
    * Ring-buffer rolls over once depth is exceeded.
    */
   captureCheckpoint(messages: ReadonlyArray<Message>, iteration: number): void {

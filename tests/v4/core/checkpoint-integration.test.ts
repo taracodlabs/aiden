@@ -48,8 +48,9 @@ describe('v4.2 Phase 4 — checkpoint / restore integration', () => {
   beforeEach(() => { delete process.env.AIDEN_TCE; });
   afterEach(()  => { delete process.env.AIDEN_TCE; });
 
-  it('AIDEN_TCE=0 default: no checkpoints captured (regression sentinel)', async () => {
-    delete process.env.AIDEN_TCE;
+  it('AIDEN_TCE=0 opt-out: no checkpoints captured (regression sentinel)', async () => {
+    // v4.2 Phase 6 — TCE is ON by default; explicit `=0` opts out.
+    process.env.AIDEN_TCE = '0';
     const provider = new LoopingMockProvider({
       mode: 'same-name-diff-args', loopTool: 'shell_exec', loopCount: 4,
     });
@@ -65,6 +66,31 @@ describe('v4.2 Phase 4 — checkpoint / restore integration', () => {
              m.content.startsWith('[tce]'),
     );
     expect(tceMsgs).toHaveLength(0);
+  });
+
+  it('v4.2 Phase 6 — default ON (env unset): rollback fires on cooldown threshold', async () => {
+    // Default-on sentinel for Phase 6 flip. With no env var set,
+    // TCE is active — a long same-name loop should trigger
+    // cooldown_with_rollback (consecName threshold = 8). Use the
+    // neutral STUB_EXECUTOR so verifier classifies every call as ok
+    // and the consecName counter is the only signal that fires.
+    delete process.env.AIDEN_TCE;
+    const provider = new LoopingMockProvider({
+      mode: 'same-name-diff-args', loopTool: 'shell_exec', loopCount: 9,
+      honorCooldown: true,
+    });
+    const agent = new AidenAgent({
+      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      resolveMutates: mkResolveMutates([]),
+    });
+    const result = await agent.runConversation(
+      [{ role: 'user', content: 'try' }] as Message[],
+    );
+    const rollbackMsgs = result.messages.filter(
+      (m) => m.role === 'system' && typeof m.content === 'string' &&
+             m.content.startsWith('[tce]') && m.content.includes('Rolled back'),
+    );
+    expect(rollbackMsgs.length).toBeGreaterThanOrEqual(1);
   });
 
   it('AIDEN_TCE=1 + all-read-only iterations + cooldown threshold → rollback fires', async () => {

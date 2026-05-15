@@ -69,11 +69,13 @@ import type { ContextCompressor, CompressionResult } from './contextCompressor';
 import type { AuxiliaryClient } from './auxiliaryClient';
 import type { PromptCaching } from './promptCaching';
 // v4.1.6 spike — Task Completion Engine (TCE) per-turn loop detector
-// + recovery controller. Default OFF via AIDEN_TCE env var; zero
+// + recovery controller. Default ON as of v4.2 Phase 6 — set
+// AIDEN_TCE=0 to disable. Zero
 // behavioral change when unset. See core/v4/turnState.ts.
 import { TurnState, type RecoveryDecision } from './turnState';
-// v4.2 Phase 1 — per-tool result verifier. Same AIDEN_TCE gate as
-// TurnState; classification feeds the recovery controller.
+// v4.2 Phase 1 — per-tool result verifier. Same TCE gate as
+// TurnState (default ON, opt-out via AIDEN_TCE=0); classification
+// feeds the recovery controller.
 import {
   buildDefaultRegistry,
   type VerificationResult,
@@ -87,8 +89,8 @@ import {
 // v4.2 Phase 3 — structured RecoveryReport. Built ONLY when the
 // recovery controller's surface stage fires (tool_loop); enriches the
 // existing surface card with summary + category breakdown + dominant
-// guidance. Implicitly gated by AIDEN_TCE=1 (surface only reachable
-// when TurnState is enabled).
+// guidance. Implicitly gated by TCE being enabled (surface only
+// reachable when TurnState is enabled — default ON as of Phase 6).
 import {
   buildRecoveryReport,
   enrichCardWithReport,
@@ -99,7 +101,8 @@ import {
 // looping tool started failing, so the model retries from a clean
 // baseline. Hard-blocked on iterations containing mutating tools
 // (never claim to undo executed side effects). All-no-op when
-// AIDEN_TCE=0 — capture / mark / find / restore all short-circuit.
+// TCE is opted out via AIDEN_TCE=0 — capture / mark / find /
+// restore all short-circuit.
 import { buildRollbackMessage } from './checkpoint';
 import type { MemorySnapshot } from './memoryProvider';
 import {
@@ -912,8 +915,10 @@ export class AidenAgent {
     let   finishReason: 'stop' | 'budget_exhausted' | 'error' | 'tool_loop' = 'stop';
     let   finalContent      = '';
     // v4.1.6 spike (TCE) — per-turn loop detection + recovery state.
-    // Default OFF via AIDEN_TCE env var; zero behavioural change when
-    // unset (TurnState.recordToolCall short-circuits with `allow`).
+    // Default ON as of v4.2 Phase 6 — set AIDEN_TCE=0 to disable.
+    // When disabled, TurnState.recordToolCall short-circuits with
+    // `{kind: 'allow'}` and the entire v4.2 recovery surface stays
+    // dormant (zero behavioural change vs v4.1.6).
     const turnState = new TurnState();
     // v4.2 Phase 1 — per-tool verifier registry. Constructed
     // unconditionally (cheap, no side effects) but only used to
@@ -1003,7 +1008,7 @@ export class AidenAgent {
       // assert the post-rollback messages array contains zero orphan
       // assistant tool_calls — this position is part of the contract.
       //
-      // No-op when AIDEN_TCE=0 or checkpointDepth=0.
+      // No-op when TCE is disabled (AIDEN_TCE=0) or checkpointDepth=0.
       turnState.captureCheckpoint(messages, turnCount);
 
       // ── Append assistant message ──────────────────────────────────────
@@ -1281,7 +1286,8 @@ export class AidenAgent {
         // structured RecoveryReport. Pure synthesis from TurnState's
         // diagnostic snapshot + first-user-message goal + duration.
         // Implicit gating: this branch is only reachable when
-        // TurnState is enabled, so AIDEN_TCE=0 never builds a report.
+        // TurnState is enabled, so AIDEN_TCE=0 (opt-out) never
+        // builds a report.
         if (surfaceDecision.surfaceCard) {
           const report = buildRecoveryReport({
             snapshot:   turnState.getDiagnosticSnapshot(),

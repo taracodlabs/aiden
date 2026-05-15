@@ -32,8 +32,9 @@ describe('TurnState — Phase 4 ring buffer', () => {
   beforeEach(() => { process.env.AIDEN_TCE = '1'; });
   afterEach(()  => { delete process.env.AIDEN_TCE; });
 
-  it('captureCheckpoint short-circuits when AIDEN_TCE=0 (regression sentinel)', () => {
-    delete process.env.AIDEN_TCE;
+  it('captureCheckpoint short-circuits when AIDEN_TCE=0 (opt-out regression sentinel)', () => {
+    // v4.2 Phase 6 — TCE is ON by default; explicit `=0` opts out.
+    process.env.AIDEN_TCE = '0';
     const ts = new TurnState();
     expect(ts.isEnabled()).toBe(false);
     ts.captureCheckpoint([mkMsg('user', 'hi')], 0);
@@ -94,8 +95,8 @@ describe('TurnState — Phase 4 mutation flagging', () => {
     }
   });
 
-  it('mark is no-op when AIDEN_TCE=0', () => {
-    delete process.env.AIDEN_TCE;
+  it('mark is no-op when AIDEN_TCE=0 (opt-out)', () => {
+    process.env.AIDEN_TCE = '0';
     const ts = new TurnState();
     ts.markMutationOnLiveCheckpoint('file_write');
     expect(ts.getCheckpoints()).toHaveLength(0);
@@ -134,8 +135,8 @@ describe('TurnState — Phase 4 findRestorableCheckpoint', () => {
     expect(ts.findRestorableCheckpoint()).toBeNull();
   });
 
-  it('returns null when disabled', () => {
-    delete process.env.AIDEN_TCE;
+  it('returns null when disabled (opt-out via AIDEN_TCE=0)', () => {
+    process.env.AIDEN_TCE = '0';
     const ts = new TurnState();
     expect(ts.findRestorableCheckpoint()).toBeNull();
   });
@@ -209,12 +210,12 @@ describe('TurnState — Phase 4 restoreInternalsFrom', () => {
     expect(ts.getCheckpoints()).toHaveLength(0);
   });
 
-  it('no-op when AIDEN_TCE=0', () => {
+  it('no-op when disabled (opt-out via AIDEN_TCE=0)', () => {
     const liveTs = new TurnState();
     liveTs.captureCheckpoint([mkMsg('user', 'a')], 0);
     const cp = liveTs.getCheckpoints()[0];
 
-    delete process.env.AIDEN_TCE;
+    process.env.AIDEN_TCE = '0';
     const ts = new TurnState();
     // Set state visible via snapshot — restoreInternalsFrom should not touch it.
     ts.restoreInternalsFrom(cp);
@@ -245,8 +246,8 @@ describe('TurnState — Phase 4 reapplyCooldown', () => {
     expect(ts.getDiagnosticSnapshot().stage).toBe('surfaced');
   });
 
-  it('no-op when AIDEN_TCE=0', () => {
-    delete process.env.AIDEN_TCE;
+  it('no-op when disabled (opt-out via AIDEN_TCE=0)', () => {
+    process.env.AIDEN_TCE = '0';
     const ts = new TurnState();
     ts.reapplyCooldown('shell_exec');
     expect(ts.getCooledDownTools()).toHaveLength(0);

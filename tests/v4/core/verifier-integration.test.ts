@@ -64,8 +64,10 @@ describe('v4.2 Phase 1 — verifier + TCE integration', () => {
   beforeEach(() => { delete process.env.AIDEN_TCE; });
   afterEach(()  => { delete process.env.AIDEN_TCE; });
 
-  it('AIDEN_TCE=0 default: verifier records nothing, no recovery fires', async () => {
-    delete process.env.AIDEN_TCE;
+  it('AIDEN_TCE=0 opt-out: verifier records nothing, no recovery fires', async () => {
+    // v4.2 Phase 6 — TCE is ON by default; explicit `=0` opts out.
+    // Renamed from "default off" to reflect the new semantics.
+    process.env.AIDEN_TCE = '0';
     const provider = new LoopingMockProvider({
       mode: 'same-signature', loopTool: 'shell_exec', loopCount: 5,
     });
@@ -87,6 +89,27 @@ describe('v4.2 Phase 1 — verifier + TCE integration', () => {
       (m) => m.role === 'system' && typeof m.content === 'string' && m.content.includes('[tce]'),
     );
     expect(systemMsgs).toHaveLength(0);
+  });
+
+  it('v4.2 Phase 6 — default ON (env unset): verifier records every call', async () => {
+    // Default-on sentinel. No env var → TCE active → verifier
+    // classifies every tool call. Failing executor → every entry
+    // gets a `failed` verification.
+    delete process.env.AIDEN_TCE;
+    const provider = new LoopingMockProvider({
+      mode: 'same-name-diff-args', loopTool: 'shell_exec', loopCount: 3,
+    });
+    const agent = new AidenAgent({
+      provider, tools: STUB_TOOLS, toolExecutor: FAILING_EXECUTOR, maxTurns: 10,
+    });
+    const result = await agent.runConversation(
+      [{ role: 'user', content: 'try' }] as Message[],
+    );
+    expect(result.toolCallTrace.length).toBeGreaterThan(0);
+    for (const entry of result.toolCallTrace) {
+      expect(entry.verification).toBeDefined();
+      expect(entry.verification!.ok).toBe(false);
+    }
   });
 
   it('AIDEN_TCE=1 + failing executor: HINT fires at consecFailed=3 (faster than consecSignature=5)', async () => {

@@ -55,8 +55,9 @@ describe('v4.2 Phase 2 — classifier integration', () => {
   beforeEach(() => { delete process.env.AIDEN_TCE; });
   afterEach(()  => { delete process.env.AIDEN_TCE; });
 
-  it('AIDEN_TCE=0 default: zero classification surface on trace', async () => {
-    delete process.env.AIDEN_TCE;
+  it('AIDEN_TCE=0 opt-out: zero classification surface on trace', async () => {
+    // v4.2 Phase 6 — TCE is ON by default; explicit `=0` opts out.
+    process.env.AIDEN_TCE = '0';
     const provider = new LoopingMockProvider({
       mode: 'same-name-diff-args', loopTool: 'file_read', loopCount: 4,
     });
@@ -69,6 +70,28 @@ describe('v4.2 Phase 2 — classifier integration', () => {
     for (const entry of result.toolCallTrace) {
       expect(entry.classification).toBeUndefined();
       expect(entry.verification).toBeUndefined();
+    }
+  });
+
+  it('v4.2 Phase 6 — default ON (env unset): classifier categorises failed entries', async () => {
+    // Default-on sentinel. No env var → TCE active → classifier
+    // fires on every verifier-failed call. permissionExecutor
+    // returns `success: false` with the canonical access-denied
+    // string, which the default classifier maps to `permission`.
+    delete process.env.AIDEN_TCE;
+    const provider = new LoopingMockProvider({
+      mode: 'same-name-diff-args', loopTool: 'file_read', loopCount: 3,
+    });
+    const agent = new AidenAgent({
+      provider, tools: STUB_TOOLS, toolExecutor: permissionExecutor(), maxTurns: 10,
+    });
+    const result = await agent.runConversation(
+      [{ role: 'user', content: 'try' }] as Message[],
+    );
+    expect(result.toolCallTrace.length).toBeGreaterThan(0);
+    for (const entry of result.toolCallTrace) {
+      expect(entry.classification).toBeDefined();
+      expect(entry.classification!.category).toBe('permission');
     }
   });
 
