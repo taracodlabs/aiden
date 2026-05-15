@@ -100,6 +100,33 @@ export interface HonestyTraceEntry {
     reason?:     string;
     suggestion?: string;
   };
+  /**
+   * v4.2 Phase 2 — failure classification (WHY the verifier said !ok).
+   * Populated only when AIDEN_TCE=1 AND verification.ok === false.
+   * Honesty itself does NOT consume this field; it surfaces here so
+   * Phase 3's RecoveryReport can render structured guidance, and so
+   * chatSession / loopTrace get a complete trace entry.
+   *
+   * Import-cycle note: declared structurally to avoid pulling
+   * `core/v4/failureClassifier` into a moat-layer module. Shape MUST
+   * stay in lockstep with `ClassificationResult` in
+   * core/v4/failureClassifier.ts.
+   */
+  classification?: {
+    category:    'timeout' | 'auth' | 'hallucination' | 'network'
+               | 'permission' | 'rate_limit' | 'invalid_input'
+               | 'dependency_missing' | 'not_found' | 'other';
+    confidence:  number;
+    reason?:     string;
+    recoverable: boolean;
+    recoveryHint?: {
+      action: 'retry' | 'retry_with_backoff' | 'rotate_credential'
+            | 'install_dependency' | 'request_user_action'
+            | 'surface_to_user';
+      detail?: string;
+    };
+    matchedPattern?: string;
+  };
 }
 
 /**

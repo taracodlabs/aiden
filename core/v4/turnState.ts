@@ -56,6 +56,7 @@
 import crypto from 'node:crypto';
 
 import type { VerificationResult } from './verifier';
+import type { ClassificationResult } from './failureClassifier';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -137,6 +138,14 @@ export interface TurnStateDiagnosticSnapshot {
    * verification was passed to `recordToolCall`.
    */
   verifications:     ReadonlyArray<{ name: string; verification: VerificationResult; ts: number }>;
+  /**
+   * v4.2 Phase 2 — per-call WHY-classification of failures. Only
+   * populated for calls where a classification was passed to
+   * `recordToolCall` (i.e. verifier said `!ok` AND classifier ran).
+   * Phase 2 records-only; Phase 3+ acts on these to build a
+   * RecoveryReport.
+   */
+  classifications:   ReadonlyArray<{ name: string; classification: ClassificationResult; ts: number }>;
   thresholds: {
     hintConsec:      number;
     cooldownConsec:  number;
@@ -210,6 +219,15 @@ export class TurnState {
   private verifications:              Array<{
     name: string; verification: VerificationResult; ts: number;
   }> = [];
+  /**
+   * v4.2 Phase 2 — append-only classification log. Only populated
+   * when a classifier was supplied to `recordToolCall(...)` AND the
+   * verifier marked the call as `!ok`. Semantically clean — no
+   * `undefined` placeholders for ok calls.
+   */
+  private classifications:            Array<{
+    name: string; classification: ClassificationResult; ts: number;
+  }> = [];
 
   constructor(opts: TurnStateOptions = {}) {
     this.enabled =
@@ -239,11 +257,16 @@ export class TurnState {
    * and `!verification.ok`, the `consecFailed` counter increments;
    * when `verification.ok`, it resets. Callers that don't pass a
    * verification get the original v4.1.6 behavior unchanged.
+   *
+   * v4.2 Phase 2 — optional `classification` argument records WHY a
+   * call failed. Phase 2 only logs it (for Phase 3's RecoveryReport
+   * to consume); no counter or recovery action fires off classification.
    */
   recordToolCall(
     name: string,
     args: unknown,
     verification?: VerificationResult,
+    classification?: ClassificationResult | null,
   ): RecoveryDecision {
     if (!this.enabled) {
       return { kind: 'allow', consecutive: 0 };
@@ -289,6 +312,12 @@ export class TurnState {
       // Name change with no verification — reset the failed counter
       // to keep it semantically aligned with `consecName`.
       this.consecFailed = { name: null, count: 0 };
+    }
+
+    // v4.2 Phase 2 — record-only. Classifier output lands here for
+    // Phase 3 to consume; no recovery action fires off this in Phase 2.
+    if (classification) {
+      this.classifications.push({ name, classification, ts });
     }
 
     // Track which distinct tools have run in this turn (for surface
@@ -412,6 +441,7 @@ export class TurnState {
       successfulTools: [...this.successfulTools],
       recoveryEvents:  [...this.recoveryEvents],
       verifications:   [...this.verifications],
+      classifications: [...this.classifications],
       thresholds: {
         hintConsec:      this.hintConsec,
         cooldownConsec:  this.cooldownConsec,

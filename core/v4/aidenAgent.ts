@@ -78,6 +78,12 @@ import {
   buildDefaultRegistry,
   type VerificationResult,
 } from './verifier';
+// v4.2 Phase 2 — tool-failure WHY-classifier. Runs after the verifier
+// when verification.ok === false. Records-only; Phase 3 will act.
+import {
+  buildDefaultClassifier,
+  type ClassificationResult,
+} from './failureClassifier';
 import type { MemorySnapshot } from './memoryProvider';
 import {
   SkillEnforcementTracker,
@@ -880,6 +886,10 @@ export class AidenAgent {
     // classify tool outcomes when TCE is enabled; verification args
     // are passed to TurnState only inside the gated branch below.
     const verifierRegistry = buildDefaultRegistry();
+    // v4.2 Phase 2 — per-tool failure classifier. Same gating as
+    // the verifier; only runs when verification.ok === false. Phase 2
+    // records-only — Phase 3 wires recovery actions off the category.
+    const failureClassifier = buildDefaultClassifier();
     let toolLoopCard: AidenAgentResult['toolLoopCard'] = undefined;
 
     while (true) {
@@ -1044,6 +1054,7 @@ export class AidenAgent {
         // falls back to the heuristic default. Synchronous + pure;
         // no network, no side effects.
         let verification: VerificationResult | undefined;
+        let classification: ClassificationResult | null = null;
         if (turnState.isEnabled()) {
           try {
             verification = verifierRegistry.resolve(call.name)(
@@ -1052,6 +1063,19 @@ export class AidenAgent {
           } catch {
             // Defensive — a buggy verifier never breaks the agent loop.
             verification = undefined;
+          }
+          // v4.2 Phase 2 — classify WHY when the verifier said !ok.
+          // classify(...) returns null for ok results, so happy-path
+          // calls incur zero classifier work.
+          if (verification && !verification.ok) {
+            try {
+              classification = failureClassifier.classify(
+                verification, call.name, call.arguments, result,
+              );
+            } catch {
+              // Defensive — a buggy classifier never breaks the loop.
+              classification = null;
+            }
           }
         }
         toolCallTrace.push({
@@ -1063,6 +1087,10 @@ export class AidenAgent {
           // entry for downstream callers (chatSession, loopTrace,
           // future RecoveryReport). Undefined when TCE is off.
           verification,
+          // v4.2 Phase 2 — classification surfaces alongside verification.
+          // Undefined for verifier-ok calls (classifier skips them) and
+          // when TCE is off.
+          classification: classification ?? undefined,
         });
         fullTrace.push({ name: call.name, args: call.arguments });
         // URL ledger ingest — extracts ids from result body for next turn.
@@ -1087,8 +1115,10 @@ export class AidenAgent {
         // v4.2 Phase 1 — pass the verifier outcome so TurnState's
         // consecFailed counter can fast-fail on demonstrably failing
         // tool calls before the slower signature/name counters fire.
+        // v4.2 Phase 2 — also pass the classification so TurnState
+        // records the WHY for Phase 3's RecoveryReport.
         const recovery = turnState.recordToolCall(
-          call.name, call.arguments, verification,
+          call.name, call.arguments, verification, classification,
         );
         if (recovery.kind === 'hint' && recovery.hintMessage) {
           // Stage 1: append a corrective system message so the model
