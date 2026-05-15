@@ -72,6 +72,12 @@ import type { PromptCaching } from './promptCaching';
 // + recovery controller. Default OFF via AIDEN_TCE env var; zero
 // behavioral change when unset. See core/v4/turnState.ts.
 import { TurnState, type RecoveryDecision } from './turnState';
+// v4.2 Phase 1 — per-tool result verifier. Same AIDEN_TCE gate as
+// TurnState; classification feeds the recovery controller.
+import {
+  buildDefaultRegistry,
+  type VerificationResult,
+} from './verifier';
 import type { MemorySnapshot } from './memoryProvider';
 import {
   SkillEnforcementTracker,
@@ -869,6 +875,11 @@ export class AidenAgent {
     // Default OFF via AIDEN_TCE env var; zero behavioural change when
     // unset (TurnState.recordToolCall short-circuits with `allow`).
     const turnState = new TurnState();
+    // v4.2 Phase 1 — per-tool verifier registry. Constructed
+    // unconditionally (cheap, no side effects) but only used to
+    // classify tool outcomes when TCE is enabled; verification args
+    // are passed to TurnState only inside the gated branch below.
+    const verifierRegistry = buildDefaultRegistry();
     let toolLoopCard: AidenAgentResult['toolLoopCard'] = undefined;
 
     while (true) {
@@ -1028,11 +1039,30 @@ export class AidenAgent {
           };
         }
         toolCallCount += 1;
+        // v4.2 Phase 1 — verifier classification. Runs only when TCE
+        // is enabled; the registry resolves a per-tool verifier or
+        // falls back to the heuristic default. Synchronous + pure;
+        // no network, no side effects.
+        let verification: VerificationResult | undefined;
+        if (turnState.isEnabled()) {
+          try {
+            verification = verifierRegistry.resolve(call.name)(
+              call.name, call.arguments, result,
+            );
+          } catch {
+            // Defensive — a buggy verifier never breaks the agent loop.
+            verification = undefined;
+          }
+        }
         toolCallTrace.push({
           name:     call.name,
           result:   result.result,
           error:    result.error,
           verified: this.resolveVerifiedFlag?.(result),
+          // v4.2 Phase 1 — verification surfaces alongside the trace
+          // entry for downstream callers (chatSession, loopTrace,
+          // future RecoveryReport). Undefined when TCE is off.
+          verification,
         });
         fullTrace.push({ name: call.name, args: call.arguments });
         // URL ledger ingest — extracts ids from result body for next turn.
@@ -1054,7 +1084,12 @@ export class AidenAgent {
         // v4.1.6 spike (TCE) — after the tool result lands in the
         // message history, consult the recovery controller. Returns
         // `allow` immediately when TCE disabled (zero overhead).
-        const recovery = turnState.recordToolCall(call.name, call.arguments);
+        // v4.2 Phase 1 — pass the verifier outcome so TurnState's
+        // consecFailed counter can fast-fail on demonstrably failing
+        // tool calls before the slower signature/name counters fire.
+        const recovery = turnState.recordToolCall(
+          call.name, call.arguments, verification,
+        );
         if (recovery.kind === 'hint' && recovery.hintMessage) {
           // Stage 1: append a corrective system message so the model
           // sees it on the next provider call. Same pattern as the

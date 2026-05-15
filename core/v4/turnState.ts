@@ -55,6 +55,8 @@
 
 import crypto from 'node:crypto';
 
+import type { VerificationResult } from './verifier';
+
 // ── Public types ────────────────────────────────────────────────────────────
 
 /** A single recorded tool call within the current turn. */
@@ -118,15 +120,30 @@ export interface TurnStateDiagnosticSnapshot {
   stage:             RecoveryStage;
   consecName:        { name: string | null; count: number };
   consecSignature:   { signature: string | null; count: number };
+  /**
+   * v4.2 Phase 1 — name-keyed consecutive-failure counter, driven by
+   * verifier classifications. Resets on tool-name change OR on a
+   * verified-ok call. Fires the HINT stage faster than `consecName`
+   * when calls are demonstrably failing.
+   */
+  consecFailed:      { name: string | null; count: number };
   cooledDownTools:   Array<{ name: string; iterationsRemaining: number }>;
   toolCalls:         ReadonlyArray<CapturedCall>;
   successfulTools:   ReadonlyArray<string>;  // distinct names that ran without surfacing
   recoveryEvents:    ReadonlyArray<RecoveryEvent>;
+  /**
+   * v4.2 Phase 1 — per-call verifier outcomes. Parallel to `toolCalls`
+   * (same length, same order) but only populated for calls where a
+   * verification was passed to `recordToolCall`.
+   */
+  verifications:     ReadonlyArray<{ name: string; verification: VerificationResult; ts: number }>;
   thresholds: {
     hintConsec:      number;
     cooldownConsec:  number;
     surfaceConsec:   number;
     cooldownIters:   number;
+    /** v4.2 Phase 1 — verifier-driven fast-fail threshold. Default 3. */
+    failedConsec:    number;
   };
 }
 
@@ -145,6 +162,13 @@ export interface TurnStateOptions {
   surfaceConsecThreshold?:   number;
   /** Iterations a cooled-down tool stays excluded. Default 3. */
   cooldownIterations?:       number;
+  /**
+   * v4.2 Phase 1 — verifier-driven HINT threshold. When ≥ N consecutive
+   * calls of the same tool name verify as `!ok`, fire a HINT regardless
+   * of where `consecSignature` sits. Default 3 (one flaky failure plus
+   * a retry plus a third confirmation that it's not flakiness).
+   */
+  failedConsecThreshold?:    number;
 }
 
 // ── Implementation ──────────────────────────────────────────────────────────
@@ -155,6 +179,7 @@ export class TurnState {
   private readonly cooldownConsec:    number;
   private readonly surfaceConsec:     number;
   private readonly cooldownIters:     number;
+  private readonly failedConsec:      number;
 
   private stage:                      RecoveryStage = 'none';
   private toolCalls:                  CapturedCall[] = [];
@@ -165,9 +190,26 @@ export class TurnState {
     { name: null, count: 0 };
   private consecSignature:            { signature: string | null; count: number } =
     { signature: null, count: 0 };
+  /**
+   * v4.2 Phase 1 — verifier-driven failure streak. Resets on tool
+   * name change OR on a verified-ok call. Independent of the other
+   * two streaks because a failing tool isn't necessarily called with
+   * identical args (model often varies args between retries).
+   */
+  private consecFailed:               { name: string | null; count: number } =
+    { name: null, count: 0 };
 
   private cooledDownTools:            Map<string, number> = new Map();
   private recoveryEvents:             RecoveryEvent[] = [];
+  /**
+   * v4.2 Phase 1 — append-only verifier log, parallel to `toolCalls`.
+   * Only entries whose `recordToolCall(...)` was given a verification
+   * argument land here; this keeps the array semantically clean for
+   * downstream callers (no `undefined` placeholders).
+   */
+  private verifications:              Array<{
+    name: string; verification: VerificationResult; ts: number;
+  }> = [];
 
   constructor(opts: TurnStateOptions = {}) {
     this.enabled =
@@ -176,6 +218,7 @@ export class TurnState {
     this.cooldownConsec  = opts.cooldownConsecThreshold ?? 8;
     this.surfaceConsec   = opts.surfaceConsecThreshold  ?? 11;
     this.cooldownIters   = opts.cooldownIterations      ?? 3;
+    this.failedConsec    = opts.failedConsecThreshold   ?? 3;
   }
 
   isEnabled(): boolean {
@@ -183,15 +226,25 @@ export class TurnState {
   }
 
   /**
-   * Called after each tool's executor resolves. Updates the two
-   * streak counters, decides which recovery action (if any) applies,
-   * and returns the decision for the agent loop to act on.
+   * Called after each tool's executor resolves. Updates the streak
+   * counters, decides which recovery action (if any) applies, and
+   * returns the decision for the agent loop to act on.
    *
    * When `enabled === false`, returns `{kind: 'allow'}` immediately
    * without any state mutation — guarantees zero behavioral change
    * when AIDEN_TCE is unset.
+   *
+   * v4.2 Phase 1 — optional `verification` argument lets the verifier
+   * layer feed its classification into the controller. When provided
+   * and `!verification.ok`, the `consecFailed` counter increments;
+   * when `verification.ok`, it resets. Callers that don't pass a
+   * verification get the original v4.1.6 behavior unchanged.
    */
-  recordToolCall(name: string, args: unknown): RecoveryDecision {
+  recordToolCall(
+    name: string,
+    args: unknown,
+    verification?: VerificationResult,
+  ): RecoveryDecision {
     if (!this.enabled) {
       return { kind: 'allow', consecutive: 0 };
     }
@@ -214,6 +267,28 @@ export class TurnState {
       this.consecSignature.count += 1;
     } else {
       this.consecSignature = { signature, count: 1 };
+    }
+
+    // v4.2 Phase 1 — update verifier-driven failure streak. Reset on
+    // name change OR on a verified-ok call; increment on verified-fail.
+    // Calls without a verification leave the counter untouched (so a
+    // mid-turn migration from un-verified to verified callers doesn't
+    // produce spurious resets).
+    if (verification) {
+      this.verifications.push({ name, verification, ts });
+      if (verification.ok) {
+        this.consecFailed = { name, count: 0 };
+      } else {
+        if (this.consecFailed.name === name) {
+          this.consecFailed.count += 1;
+        } else {
+          this.consecFailed = { name, count: 1 };
+        }
+      }
+    } else if (this.consecFailed.name !== name) {
+      // Name change with no verification — reset the failed counter
+      // to keep it semantically aligned with `consecName`.
+      this.consecFailed = { name: null, count: 0 };
     }
 
     // Track which distinct tools have run in this turn (for surface
@@ -254,6 +329,26 @@ export class TurnState {
         cooldownMessage: buildCooldownMessage(name, this.cooldownIters),
       };
       this.recoveryEvents.push({ stage: 'cooldown', toolName: name, count: this.consecName.count, ts });
+      return decision;
+    }
+
+    // v4.2 Phase 1 — verifier-driven HINT. Fires faster than the
+    // signature-based hint when the verifier flags consecutive
+    // failures. Distinct hint message so the model sees a different
+    // corrective signal ("you're failing" vs "you're repeating").
+    if (
+      this.stage === 'none' &&
+      this.consecFailed.name === name &&
+      this.consecFailed.count >= this.failedConsec
+    ) {
+      this.stage = 'hinted';
+      const decision: RecoveryDecision = {
+        kind:        'hint',
+        toolName:    name,
+        consecutive: this.consecFailed.count,
+        hintMessage: buildFailedHintMessage(name, this.consecFailed.count, verification),
+      };
+      this.recoveryEvents.push({ stage: 'hinted', toolName: name, count: this.consecFailed.count, ts });
       return decision;
     }
 
@@ -309,17 +404,20 @@ export class TurnState {
       stage:           this.stage,
       consecName:      { ...this.consecName },
       consecSignature: { ...this.consecSignature },
+      consecFailed:    { ...this.consecFailed },
       cooledDownTools: [...this.cooledDownTools.entries()].map(
         ([name, iterationsRemaining]) => ({ name, iterationsRemaining }),
       ),
       toolCalls:       [...this.toolCalls],
       successfulTools: [...this.successfulTools],
       recoveryEvents:  [...this.recoveryEvents],
+      verifications:   [...this.verifications],
       thresholds: {
         hintConsec:      this.hintConsec,
         cooldownConsec:  this.cooldownConsec,
         surfaceConsec:   this.surfaceConsec,
         cooldownIters:   this.cooldownIters,
+        failedConsec:    this.failedConsec,
       },
     };
   }
@@ -389,6 +487,26 @@ function buildHintMessage(toolName: string, count: number): string {
     `[tce] You've called \`${toolName}\` ${count} times in a row with the same arguments. ` +
     `This looks like a loop. Reconsider your approach — try a different tool, change the arguments, ` +
     `or answer with what you know if no tool will make progress.`
+  );
+}
+
+/**
+ * v4.2 Phase 1 — verifier-driven hint. Different framing from the
+ * signature-based hint: this one says "your call is failing" rather
+ * than "your call is repeating", which is the more accurate diagnosis
+ * when the failure streak triggers.
+ */
+function buildFailedHintMessage(
+  toolName: string,
+  count: number,
+  verification?: VerificationResult,
+): string {
+  const reason = verification?.reason ? ` Latest reason: "${verification.reason}".` : '';
+  const suggestion = verification?.suggestion ? ` ${verification.suggestion}` : '';
+  return (
+    `[tce] \`${toolName}\` has failed ${count} times in a row.${reason} ` +
+    `Stop retrying it unchanged — change the arguments, switch to a different tool, ` +
+    `or answer with what you have if no tool can make progress.${suggestion}`
   );
 }
 

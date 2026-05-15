@@ -82,6 +82,24 @@ export interface HonestyTraceEntry {
   verified?: boolean;
   /** Set when the tool errored (would never satisfy a positive claim). */
   error?: string;
+  /**
+   * v4.2 Phase 1 — per-tool verifier classification of this result.
+   * Populated only when AIDEN_TCE=1 (and a verification didn't throw).
+   * Honesty itself does NOT consume this field; it's surfaced here so
+   * downstream callers (chatSession, loopTrace, future RecoveryReport)
+   * get the verification inline with the rest of the trace entry.
+   *
+   * Import-cycle note: declared as a structural type to avoid pulling
+   * `core/v4/verifier` into a moat-layer module. Shape MUST stay in
+   * lockstep with `VerificationResult` in core/v4/verifier.ts.
+   */
+  verification?: {
+    ok:          boolean;
+    confidence:  number;
+    code:        'ok' | 'failed' | 'no_progress' | 'low_signal' | 'unknown';
+    reason?:     string;
+    suggestion?: string;
+  };
 }
 
 /**
