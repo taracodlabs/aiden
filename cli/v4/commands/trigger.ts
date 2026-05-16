@@ -22,16 +22,19 @@
  */
 
 import path from 'node:path';
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import {
   daemonDbPath,
   openDaemonDb,
   parseFileWatcherSpec,
   DEFAULT_FILE_WATCHER_SPEC,
+  parseWebhookSpec,
+  DEFAULT_WEBHOOK_SPEC,
   createTriggerBus,
+  getDaemonConfig,
 } from '../../../core/v4/daemon';
 import { resolveAidenRoot } from '../../../core/v4/paths';
-import type { ReconcilePolicy, FileEventType } from '../../../core/v4/daemon';
+import type { ReconcilePolicy, FileEventType, WebhookHmacFormat } from '../../../core/v4/daemon';
 
 export interface TriggerCliOptions {
   writeOut?: (s: string) => void;
@@ -78,8 +81,11 @@ export async function runTriggerSubcommand(
   switch (action) {
     case 'add': {
       const kind = args[0];
+      if (kind === 'webhook') {
+        return runAddWebhook(db, argv, out, err);
+      }
       if (kind !== 'file') {
-        err(`trigger add: only 'file' supported in Phase 2 (got: ${kind ?? '<none>'})\n`);
+        err(`trigger add: 'file' or 'webhook' kind required (got: ${kind ?? '<none>'})\n`);
         return 2;
       }
       const a = argv as unknown as AddFileTriggerArgs;
@@ -191,4 +197,76 @@ export async function runTriggerSubcommand(
       err('Actions: add, list, show <id>, remove <id>, enable <id>, disable <id>, test <id>\n');
       return 2;
   }
+}
+
+// ── v4.5 Phase 3 — webhook trigger add ─────────────────────────────────────
+
+interface AddWebhookTriggerArgs {
+  name?:               string;
+  hmac?:               string;          // 'github' | 'gitlab' | 'generic'
+  secret?:             string;          // user-supplied; else auto-generated
+  rateLimit?:          number;
+  maxBodyBytes?:       number;
+  idempotencyTtlMs?:   number;
+  events?:             string[];
+  deliverOnly?:        boolean;
+  promptTemplate?:     string;
+  disabled?:           boolean;
+}
+
+function runAddWebhook(
+  db:   ReturnType<typeof openDaemonDb>,
+  argv: Record<string, unknown>,
+  out:  (s: string) => void,
+  err:  (s: string) => void,
+): number {
+  const a = argv as unknown as AddWebhookTriggerArgs;
+  if (!a.name) {
+    err('trigger add webhook: --name required\n');
+    return 2;
+  }
+  // Generate the secret if the user didn't supply one — 32 bytes
+  // base64url-encoded (43-character URL-safe string).
+  const secret = a.secret && a.secret.length > 0
+    ? a.secret
+    : randomBytes(32).toString('base64url');
+  const spec = parseWebhookSpec({
+    name:             a.name,
+    secret,
+    hmacFormat:       (a.hmac as WebhookHmacFormat | undefined) ?? DEFAULT_WEBHOOK_SPEC.hmacFormat,
+    allowedEvents:    a.events,
+    rateLimit:        { perMinute: a.rateLimit ?? DEFAULT_WEBHOOK_SPEC.rateLimit.perMinute },
+    maxBodyBytes:     a.maxBodyBytes     ?? DEFAULT_WEBHOOK_SPEC.maxBodyBytes,
+    idempotencyTtlMs: a.idempotencyTtlMs ?? DEFAULT_WEBHOOK_SPEC.idempotencyTtlMs,
+    deliverOnly:      a.deliverOnly === true,
+    promptTemplate:   a.promptTemplate,
+    publicBound:      false,
+  });
+  const id = randomUUID();
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO triggers
+       (id, source, name, spec_json, enabled, prompt_template, deliver_only,
+        created_at, updated_at)
+     VALUES (?, 'webhook', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    a.name,
+    JSON.stringify(spec),
+    a.disabled ? 0 : 1,
+    spec.promptTemplate ?? null,
+    spec.deliverOnly ? 1 : 0,
+    now,
+    now,
+  );
+  const cfg = getDaemonConfig();
+  const host = process.env.AIDEN_DAEMON_BIND ?? '127.0.0.1';
+  out(`trigger added: ${id} (${a.name})\n`);
+  out(`webhook url:   http://${host}:${cfg.port}/api/triggers/webhook/${id}\n`);
+  out(`hmac format:   ${spec.hmacFormat}\n`);
+  out(`rate limit:    ${spec.rateLimit.perMinute}/min\n`);
+  out(`secret:        ${secret}\n`);
+  out(`⚠ Save this secret now — it cannot be retrieved later.\n`);
+  out(`Restart the daemon to activate the route.\n`);
+  return 0;
 }

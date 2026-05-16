@@ -415,25 +415,39 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('--polling', 'Force polling mode (network FS / WSL bind mount).')
     .option('--prompt-template <text>', 'Phase 5 — agent prompt template.')
     .option('--disabled', 'Create trigger in disabled state.')
+    // v4.5 Phase 3 — webhook-specific options.
+    .option('--hmac <format>', 'Webhook HMAC format: github | gitlab | generic (default generic).')
+    .option('--secret <s>', 'Webhook secret. Auto-generated when omitted.')
+    .option('--rate-limit <n>', 'Webhook requests/min (default 30).', (v: string) => Number.parseInt(v, 10))
+    .option('--max-body-bytes <n>', 'Webhook max body cap (default 1048576).', (v: string) => Number.parseInt(v, 10))
+    .option('--idempotency-ttl-ms <n>', 'Webhook idempotency TTL (default 3600000).', (v: string) => Number.parseInt(v, 10))
+    .option('--deliver-only', 'Phase 3 stub: accept + log; Phase 5 will dispatch via channel.')
     .action(async (action: string, posArgs: string[] | undefined, cmd: Command) => {
       const { runTriggerSubcommand } = await import('./commands/trigger');
       const cliOpts = cmd.opts() as Record<string, unknown>;
       const argv = {
-        name:           cliOpts.name as string | undefined,
-        paths:          cliOpts.path as string[] | undefined,
-        include:        cliOpts.include as string[] | undefined,
-        exclude:        cliOpts.exclude as string[] | undefined,
-        events:         cliOpts.event as string[] | undefined,
-        debounceMs:     cliOpts.debounceMs as number | undefined,
-        settleMs:       cliOpts.settleMs as number | undefined,
-        maxSettleMs:    cliOpts.maxSettleMs as number | undefined,
-        maxQueueDepth:  cliOpts.maxQueueDepth as number | undefined,
-        noIgnoreTemp:   cliOpts.ignoreTemp === false,
-        contentHash:    cliOpts.contentHash === true,
-        reconcile:      cliOpts.reconcile as string | undefined,
-        polling:        cliOpts.polling === true,
-        promptTemplate: cliOpts.promptTemplate as string | undefined,
-        disabled:       cliOpts.disabled === true,
+        name:             cliOpts.name as string | undefined,
+        paths:            cliOpts.path as string[] | undefined,
+        include:          cliOpts.include as string[] | undefined,
+        exclude:          cliOpts.exclude as string[] | undefined,
+        events:           cliOpts.event as string[] | undefined,
+        debounceMs:       cliOpts.debounceMs as number | undefined,
+        settleMs:         cliOpts.settleMs as number | undefined,
+        maxSettleMs:      cliOpts.maxSettleMs as number | undefined,
+        maxQueueDepth:    cliOpts.maxQueueDepth as number | undefined,
+        noIgnoreTemp:     cliOpts.ignoreTemp === false,
+        contentHash:      cliOpts.contentHash === true,
+        reconcile:        cliOpts.reconcile as string | undefined,
+        polling:          cliOpts.polling === true,
+        promptTemplate:   cliOpts.promptTemplate as string | undefined,
+        disabled:         cliOpts.disabled === true,
+        // v4.5 Phase 3 — webhook options.
+        hmac:             cliOpts.hmac as string | undefined,
+        secret:           cliOpts.secret as string | undefined,
+        rateLimit:        cliOpts.rateLimit as number | undefined,
+        maxBodyBytes:     cliOpts.maxBodyBytes as number | undefined,
+        idempotencyTtlMs: cliOpts.idempotencyTtlMs as number | undefined,
+        deliverOnly:      cliOpts.deliverOnly === true,
       };
       const code = await runTriggerSubcommand(action, posArgs ?? [], argv, {
         writeOut: opts.writeOut,

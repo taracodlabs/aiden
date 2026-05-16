@@ -55,6 +55,19 @@ export function openDaemonDb(dbPath: string): Db {
   db.pragma('busy_timeout = 5000');
   runMigrations(db);
   _open.set(dbPath, db);
+  // v4.5 Phase 3 — daemon.db stores webhook secrets (raw, required
+  // for HMAC computation). Lock the file mode to user-only on POSIX
+  // so a co-tenant on the same machine can't read the secrets out.
+  // On Windows the file already lives in user-private
+  // %LOCALAPPDATA%; chmod is a no-op there (Node ignores Unix bits).
+  // Idempotent — safe to call on every boot.
+  if (dbPath !== ':memory:' && process.platform !== 'win32') {
+    try { fs.chmodSync(dbPath, 0o600); } catch { /* best-effort */ }
+    // WAL/SHM siblings receive identical protection.
+    for (const ext of ['-wal', '-shm']) {
+      try { fs.chmodSync(dbPath + ext, 0o600); } catch { /* may not exist yet */ }
+    }
+  }
   return db;
 }
 

@@ -158,6 +158,45 @@ export {
   computeFileKey,
 } from './triggers/fsIdentity';
 
+// ── v4.5 Phase 3 — webhook trigger ───────────────────────────────────────
+export {
+  mountWebhookRoutes,
+  assertSafeBind,
+} from './triggers/webhook';
+export type {
+  WebhookRouteStats,
+  MountedWebhookRoutes,
+  MountWebhookRoutesOptions,
+} from './triggers/webhook';
+export {
+  parseWebhookSpec,
+  DEFAULT_WEBHOOK_SPEC,
+  INSECURE_NO_AUTH,
+} from './triggers/webhookSpec';
+export type {
+  WebhookSpec,
+  WebhookHmacFormat,
+} from './triggers/webhookSpec';
+export {
+  verifyWebhookSignature,
+  deriveEventName,
+} from './triggers/webhookVerifier';
+export {
+  createRateLimiter,
+} from './triggers/webhookRateLimit';
+export type { RateLimiter } from './triggers/webhookRateLimit';
+export {
+  deriveIdempotencyKey,
+} from './triggers/webhookIdempotency';
+export {
+  createWebhookDeliveriesStore,
+} from './triggers/webhookDeliveriesStore';
+export type {
+  WebhookDelivery,
+  WebhookDeliveriesStore,
+  RecordDeliveryInput,
+} from './triggers/webhookDeliveriesStore';
+
 export {
   startEventLoopLagSampler,
   stopEventLoopLagSampler,

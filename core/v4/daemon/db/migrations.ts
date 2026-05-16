@@ -181,9 +181,36 @@ interface Migration {
   sql:     string;
 }
 
+// v4.5 Phase 3 — webhook_deliveries log.
+const V3_SQL = `
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  route_id            TEXT    NOT NULL,
+  delivery_id         TEXT,
+  signature_verified  INTEGER NOT NULL,
+  status_code         INTEGER NOT NULL,
+  response_body       TEXT,
+  client_ip           TEXT,
+  headers_json        TEXT,
+  body_hash           TEXT    NOT NULL,
+  received_at         INTEGER NOT NULL,
+  processed_at        INTEGER,
+  trigger_event_id    INTEGER,
+  FOREIGN KEY (route_id)         REFERENCES triggers(id)        ON DELETE CASCADE,
+  FOREIGN KEY (trigger_event_id) REFERENCES trigger_events(id)  ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_route_time
+  ON webhook_deliveries(route_id, received_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webhook_deliveries_delivery
+  ON webhook_deliveries(route_id, delivery_id) WHERE delivery_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received
+  ON webhook_deliveries(received_at);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',           sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',   sql: V2_SQL },
+  { version: 3, name: 'phase 3 — webhook deliveries log',      sql: V3_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

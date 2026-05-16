@@ -63,6 +63,9 @@ import type { FileWatcherHandle } from './triggers/fileWatcher';
 import { reconcileFileWatcher } from './triggers/reconcile';
 import { parseFileWatcherSpec } from './triggers/fileWatcherSpec';
 import type { TriggerRowSql } from './db/schema/v1.spec';
+// v4.5 Phase 3 — webhook trigger.
+import { mountWebhookRoutes, assertSafeBind } from './triggers/webhook';
+import type { MountedWebhookRoutes } from './triggers/webhook';
 import { pwClose } from '../../playwrightBridge';
 import { VERSION } from '../../version';
 
@@ -88,6 +91,8 @@ export interface DaemonBootstrapHandle {
   httpServer:        http.Server | null;
   /** v4.5 Phase 2 — active file watcher handles. */
   fileWatchers:      ReadonlyArray<FileWatcherHandle>;
+  /** v4.5 Phase 3 — webhook route mount (null when no app available). */
+  webhookRoutes:     MountedWebhookRoutes | null;
 }
 
 const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
@@ -105,6 +110,7 @@ const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
   markerPath:            null,
   httpServer:            null,
   fileWatchers:          Object.freeze([] as FileWatcherHandle[]),
+  webhookRoutes:         null,
 });
 
 // Process-wide singleton — the second call returns the same handle.
@@ -216,10 +222,42 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       instanceTracker:  tracker,
       version:          VERSION,
     });
+
+    // v4.5 Phase 3 — webhook routes mount on the same Express app.
+    // Single dispatch endpoint POST /api/triggers/webhook/:id resolves
+    // routes at request time, so no per-route Express handler bloat.
+    const webhookRoutes = mountWebhookRoutes({
+      app,
+      db,
+      triggerBus,
+      idempotencyStore,
+      resourceRegistry,
+      log,
+    });
+
+    // v4.5 Phase 3 — bind safety check. When AIDEN_DAEMON_BIND opts
+    // into a non-loopback interface, require AIDEN_API_KEY + refuse
+    // INSECURE_NO_AUTH webhook routes. Runs BEFORE the listener binds.
+    const bindHost = process.env.AIDEN_DAEMON_BIND ?? '127.0.0.1';
+    try {
+      assertSafeBind({
+        bindHost,
+        apiKeyConfigured: typeof process.env.AIDEN_API_KEY === 'string' && process.env.AIDEN_API_KEY.length > 0,
+        db,
+        log,
+      });
+    } catch (e) {
+      // Refuse to bring up the HTTP listener but DO keep the foundation
+      // running (file watchers, daemon db, instance tracker) so the
+      // operator can see status via the daemon-already-running guard.
+      log('error', '[daemon] refusing to start HTTP listener due to bind-safety check failure');
+      throw e;
+    }
+
     if (ownsHttpServer) {
       httpServer = http.createServer(app);
-      httpServer.listen(cfg.port, '127.0.0.1', () => {
-        log('info', `[daemon] http server listening on http://127.0.0.1:${cfg.port}`);
+      httpServer.listen(cfg.port, bindHost, () => {
+        log('info', `[daemon] http server listening on http://${bindHost}:${cfg.port}`);
       });
       httpServer.on('error', (err: NodeJS.ErrnoException) => {
         if (err.code === 'EADDRINUSE') {
@@ -229,6 +267,25 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
         }
       });
     }
+
+    // v4.5 Phase 3 — webhook deliveries retention sweep. Runs once on
+    // boot then every 24h. Configurable via env (default 7 days).
+    const retentionDays = (() => {
+      const raw = process.env.AIDEN_DAEMON_WEBHOOK_RETENTION_DAYS;
+      const n = raw ? Number.parseInt(raw, 10) : NaN;
+      return Number.isFinite(n) && n > 0 ? n : 7;
+    })();
+    try {
+      const swept = webhookRoutes.sweepDeliveries(retentionDays);
+      if (swept.deleted > 0) {
+        log('info', `[webhook] retention sweep: deleted ${swept.deleted} delivery rows older than ${retentionDays}d`);
+      }
+    } catch { /* best-effort */ }
+    const retentionTimer = setInterval(() => {
+      try { webhookRoutes.sweepDeliveries(retentionDays); }
+      catch { /* never let sweep crash */ }
+    }, 24 * 60 * 60 * 1000);
+    if (typeof retentionTimer.unref === 'function') retentionTimer.unref();
 
     // Drain context — same shape api/server.ts wires.
     const getDrainCtx = () => ({
@@ -316,6 +373,7 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       markerPath,
       httpServer,
       fileWatchers,
+      webhookRoutes,
     };
     return _singleton;
   } catch (e) {
