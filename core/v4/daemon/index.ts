@@ -197,6 +197,65 @@ export type {
   RecordDeliveryInput,
 } from './triggers/webhookDeliveriesStore';
 
+// ── v4.5 Phase 4a — email IMAP trigger ───────────────────────────────────
+export {
+  createEmailTrigger,
+} from './triggers/email';
+export type {
+  EmailTriggerHandle,
+  EmailStats,
+} from './triggers/email';
+export {
+  parseEmailSpec,
+  DEFAULT_EMAIL_SPEC,
+  DEFAULT_IMAP,
+} from './triggers/email/emailSpec';
+export type {
+  EmailSpec,
+  EmailImapConfig,
+  AttachmentPolicy,
+} from './triggers/email/emailSpec';
+export {
+  isAutomatedSender,
+  NOREPLY_PATTERNS,
+  AUTOMATED_HEADERS,
+} from './triggers/email/automatedSender';
+export {
+  compileSenderAllowlist,
+} from './triggers/email/allowlist';
+export type { SenderAllowlist } from './triggers/email/allowlist';
+export {
+  createSeenUids,
+  DEFAULT_MAX_SEEN_UIDS,
+} from './triggers/email/seenUids';
+export type { SeenUids } from './triggers/email/seenUids';
+export {
+  createEmailSeenStore,
+} from './triggers/email/emailSeenStore';
+export type {
+  EmailSeen,
+  EmailSeenStore,
+  EmailSeenStatus,
+  RecordEmailSeenInput,
+} from './triggers/email/emailSeenStore';
+export {
+  extractEmailBody,
+} from './triggers/email/bodyExtractor';
+export type {
+  ExtractedBody,
+  AttachmentMetadata,
+} from './triggers/email/bodyExtractor';
+export {
+  createImapConnection,
+  nextBackoffMs,
+  BACKOFF_CONSTANTS,
+} from './triggers/email/imapConnection';
+export type {
+  ImapConnection,
+  ImapConfig,
+  RawMessage,
+} from './triggers/email/imapConnection';
+
 export {
   startEventLoopLagSampler,
   stopEventLoopLagSampler,

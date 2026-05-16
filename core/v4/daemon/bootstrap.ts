@@ -66,6 +66,11 @@ import type { TriggerRowSql } from './db/schema/v1.spec';
 // v4.5 Phase 3 — webhook trigger.
 import { mountWebhookRoutes, assertSafeBind } from './triggers/webhook';
 import type { MountedWebhookRoutes } from './triggers/webhook';
+// v4.5 Phase 4a — email trigger.
+import { createEmailTrigger } from './triggers/email';
+import type { EmailTriggerHandle } from './triggers/email';
+import { parseEmailSpec } from './triggers/email/emailSpec';
+import { createEmailSeenStore } from './triggers/email/emailSeenStore';
 import { pwClose } from '../../playwrightBridge';
 import { VERSION } from '../../version';
 
@@ -93,6 +98,8 @@ export interface DaemonBootstrapHandle {
   fileWatchers:      ReadonlyArray<FileWatcherHandle>;
   /** v4.5 Phase 3 — webhook route mount (null when no app available). */
   webhookRoutes:     MountedWebhookRoutes | null;
+  /** v4.5 Phase 4a — active email trigger handles. */
+  emailTriggers:     ReadonlyArray<EmailTriggerHandle>;
 }
 
 const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
@@ -111,6 +118,7 @@ const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
   httpServer:            null,
   fileWatchers:          Object.freeze([] as FileWatcherHandle[]),
   webhookRoutes:         null,
+  emailTriggers:         Object.freeze([] as EmailTriggerHandle[]),
 });
 
 // Process-wide singleton — the second call returns the same handle.
@@ -367,6 +375,57 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       log('error', `[file-watcher] trigger registry scan failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
+    // ── v4.5 Phase 4a — load enabled email-IMAP triggers ─────────────────
+    const emailTriggers: EmailTriggerHandle[] = [];
+    try {
+      const seenStore = createEmailSeenStore({ db });
+      const rows = db
+        .prepare(
+          `SELECT * FROM triggers WHERE source = 'email' AND enabled = 1 ORDER BY name`,
+        )
+        .all() as TriggerRowSql[];
+      for (const t of rows) {
+        try {
+          const spec = parseEmailSpec(t.spec_json);
+          const handle = createEmailTrigger({
+            watcherId:      t.id,
+            spec,
+            triggerBus,
+            emailSeenStore: seenStore,
+            db,
+            registry:       resourceRegistry,
+            log,
+          });
+          emailTriggers.push(handle);
+          log('info', `[email] active: ${t.name} (${t.id}) host=${spec.imap.host} mailbox=${spec.mailbox}`);
+        } catch (e) {
+          log('error', `[email] failed to start ${t.name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      if (rows.length === 0) {
+        log('info', '[email] no email triggers registered');
+      }
+      // Retention sweep on boot (and every 24h via unref'd interval).
+      const retentionDays = (() => {
+        const raw = process.env.AIDEN_DAEMON_EMAIL_RETENTION_DAYS;
+        const n = raw ? Number.parseInt(raw, 10) : NaN;
+        return Number.isFinite(n) && n > 0 ? n : 30;
+      })();
+      try {
+        const swept = seenStore.sweep(retentionDays);
+        if (swept.deleted > 0) {
+          log('info', `[email] retention sweep: deleted ${swept.deleted} email_seen rows older than ${retentionDays}d`);
+        }
+      } catch { /* best-effort */ }
+      const emailRetTimer = setInterval(() => {
+        try { seenStore.sweep(retentionDays); }
+        catch { /* never let sweep crash */ }
+      }, 24 * 60 * 60 * 1000);
+      if (typeof emailRetTimer.unref === 'function') emailRetTimer.unref();
+    } catch (e) {
+      log('error', `[email] trigger registry scan failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     _singleton = {
       active:                true,
       instanceId:            tracker.instanceId,
@@ -383,6 +442,7 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       httpServer,
       fileWatchers,
       webhookRoutes,
+      emailTriggers,
     };
     return _singleton;
   } catch (e) {

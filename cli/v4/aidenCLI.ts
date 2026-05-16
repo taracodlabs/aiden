@@ -451,6 +451,18 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('--max-body-bytes <n>', 'Webhook max body cap (default 1048576).', (v: string) => Number.parseInt(v, 10))
     .option('--idempotency-ttl-ms <n>', 'Webhook idempotency TTL (default 3600000).', (v: string) => Number.parseInt(v, 10))
     .option('--deliver-only', 'Phase 3 stub: accept + log; Phase 5 will dispatch via channel.')
+    // v4.5 Phase 4a — email IMAP options.
+    .option('--host <host>', 'IMAP host (for add email).')
+    .option('--port <n>', 'IMAP port (default 993).', (v: string) => Number.parseInt(v, 10))
+    .option('--user <addr>', 'IMAP user / email address (for add email).')
+    .option('--password <pwd>', 'IMAP password (for add email).')
+    .option('--no-tls', 'Disable TLS (for add email; default is TLS on).')
+    .option('--mailbox <name>', 'IMAP mailbox (default INBOX).')
+    .option('--poll-ms <n>', 'Email poll interval ms (default 15000).', (v: string) => Number.parseInt(v, 10))
+    .option('--allow-sender <addr-or-glob>', 'Allowed sender pattern (repeatable, REQUIRED for email).', collectArray, [])
+    .option('--allow-subject <regex>', 'Allowed subject regex (repeatable).', collectArray, [])
+    .option('--attachment-policy <policy>', 'skip | inline-text | save-to-tmp (default skip).')
+    .option('--no-validate', 'Skip IMAP pre-flight connectivity check.')
     .action(async (action: string, posArgs: string[] | undefined, cmd: Command) => {
       const { runTriggerSubcommand } = await import('./commands/trigger');
       const cliOpts = cmd.opts() as Record<string, unknown>;
@@ -477,6 +489,18 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         maxBodyBytes:     cliOpts.maxBodyBytes as number | undefined,
         idempotencyTtlMs: cliOpts.idempotencyTtlMs as number | undefined,
         deliverOnly:      cliOpts.deliverOnly === true,
+        // v4.5 Phase 4a — email options.
+        host:             cliOpts.host as string | undefined,
+        port:             cliOpts.port as number | undefined,
+        user:             cliOpts.user as string | undefined,
+        password:         cliOpts.password as string | undefined,
+        noTls:            cliOpts.tls === false,
+        mailbox:          cliOpts.mailbox as string | undefined,
+        pollMs:           cliOpts.pollMs as number | undefined,
+        allowSenders:     (cliOpts.allowSender as string[] | undefined) ?? [],
+        allowSubjects:    (cliOpts.allowSubject as string[] | undefined) ?? [],
+        attachmentPolicy: cliOpts.attachmentPolicy as string | undefined,
+        noValidate:       cliOpts.validate === false,
       };
       const code = await runTriggerSubcommand(action, posArgs ?? [], argv, {
         writeOut: opts.writeOut,

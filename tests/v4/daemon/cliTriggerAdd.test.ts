@@ -129,16 +129,17 @@ describe('runTriggerSubcommand — add webhook', () => {
 });
 
 describe('runTriggerSubcommand — unknown kind', () => {
-  it('errors with 2', async () => {
+  it('errors with 2 on unsupported kind (e.g. schedule reserved for Phase 5)', async () => {
     const o = out();
     const e = out();
     const code = await runTriggerSubcommand(
-      'add', ['email'],
+      'add', ['schedule'],
       { name: 'x' },
       { writeOut: o.write, writeErr: e.write },
     );
     expect(code).toBe(2);
-    expect(e.lines.join('')).toMatch(/file.*or.*webhook/i);
+    // Error mentions the supported kinds.
+    expect(e.lines.join('')).toMatch(/file.*webhook.*email|kind required/i);
   });
 });
 

@@ -207,10 +207,37 @@ CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received
   ON webhook_deliveries(received_at);
 `;
 
+// v4.5 Phase 4a — email_seen forensic table.
+const V4_SQL = `
+CREATE TABLE IF NOT EXISTS email_seen (
+  id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+  route_id            TEXT    NOT NULL,
+  mailbox             TEXT    NOT NULL,
+  uid_validity        INTEGER NOT NULL,
+  uid                 INTEGER NOT NULL,
+  message_id          TEXT,
+  from_address        TEXT,
+  subject             TEXT,
+  received_at         INTEGER NOT NULL,
+  processed_at        INTEGER,
+  trigger_event_id    INTEGER,
+  status              TEXT    NOT NULL,
+  FOREIGN KEY (route_id)         REFERENCES triggers(id)        ON DELETE CASCADE,
+  FOREIGN KEY (trigger_event_id) REFERENCES trigger_events(id)  ON DELETE SET NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_email_seen_route_uid
+  ON email_seen(route_id, uid_validity, uid);
+CREATE INDEX IF NOT EXISTS idx_email_seen_received
+  ON email_seen(received_at);
+CREATE INDEX IF NOT EXISTS idx_email_seen_message_id
+  ON email_seen(message_id) WHERE message_id IS NOT NULL;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',           sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',   sql: V2_SQL },
   { version: 3, name: 'phase 3 — webhook deliveries log',      sql: V3_SQL },
+  { version: 4, name: 'phase 4a — email seen forensic table',  sql: V4_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

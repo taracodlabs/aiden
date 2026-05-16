@@ -30,11 +30,20 @@ import {
   DEFAULT_FILE_WATCHER_SPEC,
   parseWebhookSpec,
   DEFAULT_WEBHOOK_SPEC,
+  parseEmailSpec,
+  DEFAULT_EMAIL_SPEC,
+  DEFAULT_IMAP,
+  createImapConnection,
   createTriggerBus,
   getDaemonConfig,
 } from '../../../core/v4/daemon';
 import { resolveAidenRoot } from '../../../core/v4/paths';
-import type { ReconcilePolicy, FileEventType, WebhookHmacFormat } from '../../../core/v4/daemon';
+import type {
+  ReconcilePolicy,
+  FileEventType,
+  WebhookHmacFormat,
+  AttachmentPolicy,
+} from '../../../core/v4/daemon';
 
 export interface TriggerCliOptions {
   writeOut?: (s: string) => void;
@@ -84,8 +93,11 @@ export async function runTriggerSubcommand(
       if (kind === 'webhook') {
         return runAddWebhook(db, argv, out, err);
       }
+      if (kind === 'email') {
+        return runAddEmail(db, argv, out, err);
+      }
       if (kind !== 'file') {
-        err(`trigger add: 'file' or 'webhook' kind required (got: ${kind ?? '<none>'})\n`);
+        err(`trigger add: 'file', 'webhook', or 'email' kind required (got: ${kind ?? '<none>'})\n`);
         return 2;
       }
       const a = argv as unknown as AddFileTriggerArgs;
@@ -268,5 +280,133 @@ function runAddWebhook(
   out(`secret:        ${secret}\n`);
   out(`⚠ Save this secret now — it cannot be retrieved later.\n`);
   out(`Restart the daemon to activate the route.\n`);
+  return 0;
+}
+
+// ── v4.5 Phase 4a — email trigger add ──────────────────────────────────────
+
+interface AddEmailTriggerArgs {
+  name?:             string;
+  host?:             string;
+  port?:             number;
+  user?:             string;
+  password?:         string;
+  noTls?:            boolean;
+  mailbox?:          string;
+  pollMs?:           number;
+  allowSenders?:     string[];
+  allowSubjects?:    string[];
+  maxBodyBytes?:     number;
+  attachmentPolicy?: string;
+  deliverOnly?:      boolean;
+  promptTemplate?:   string;
+  disabled?:         boolean;
+  noValidate?:       boolean;
+}
+
+async function runAddEmail(
+  db:   ReturnType<typeof openDaemonDb>,
+  argv: Record<string, unknown>,
+  out:  (s: string) => void,
+  err:  (s: string) => void,
+): Promise<number> {
+  const a = argv as unknown as AddEmailTriggerArgs;
+  if (!a.name) {
+    err('trigger add email: --label required\n');
+    return 2;
+  }
+  if (!a.host)     { err('trigger add email: --host required\n');     return 2; }
+  if (!a.user)     { err('trigger add email: --user required\n');     return 2; }
+  if (!a.password) { err('trigger add email: --password required\n'); return 2; }
+  if (!a.allowSenders || a.allowSenders.length === 0) {
+    err(
+      'trigger add email: at least one --allow-sender required.\n' +
+      '  Examples: --allow-sender "user@example.com"\n' +
+      '            --allow-sender "*@taracod.com"\n',
+    );
+    return 2;
+  }
+
+  // Build + validate the spec (this also compile-checks subject regexes).
+  let spec;
+  try {
+    spec = parseEmailSpec({
+      name:           a.name,
+      imap: {
+        host:           a.host,
+        port:           a.port ?? DEFAULT_IMAP.port,
+        user:           a.user,
+        password:       a.password,
+        tls:            a.noTls ? false : DEFAULT_IMAP.tls,
+        authTimeoutMs:  DEFAULT_IMAP.authTimeoutMs,
+      },
+      mailbox:                a.mailbox       ?? DEFAULT_EMAIL_SPEC.mailbox,
+      pollIntervalMs:         a.pollMs        ?? DEFAULT_EMAIL_SPEC.pollIntervalMs,
+      allowedSenders:         a.allowSenders,
+      allowedSubjectPatterns: a.allowSubjects,
+      maxBodyBytes:           a.maxBodyBytes  ?? DEFAULT_EMAIL_SPEC.maxBodyBytes,
+      promptTemplate:         a.promptTemplate,
+      deliverOnly:            a.deliverOnly === true,
+      attachmentPolicy:       (a.attachmentPolicy as AttachmentPolicy | undefined) ?? DEFAULT_EMAIL_SPEC.attachmentPolicy,
+    });
+  } catch (e) {
+    err(`trigger add email: ${e instanceof Error ? e.message : String(e)}\n`);
+    return 2;
+  }
+
+  // Q-P4-5 default: validate at add-time. Opt out with --no-validate.
+  if (!a.noValidate) {
+    out('Validating IMAP connectivity ...\n');
+    const conn = createImapConnection({
+      config: spec.imap,
+      log:    (level, msg) => { if (level === 'error') err(msg + '\n'); },
+    });
+    try {
+      await conn.connect();
+      try { await conn.openMailbox(spec.mailbox); }
+      catch (e) {
+        err(`IMAP connectivity validated, but mailbox open failed: ${e instanceof Error ? e.message : String(e)}\n`);
+        await conn.disconnect();
+        return 1;
+      }
+      await conn.disconnect();
+      out('  ✓ connected, authenticated, mailbox opened\n');
+    } catch (e) {
+      err(`IMAP connection failed: ${e instanceof Error ? e.message : String(e)}\n`);
+      err('Use --no-validate to skip the pre-flight check and add the trigger anyway.\n');
+      return 1;
+    }
+  } else {
+    out('Skipping IMAP connectivity validation (--no-validate).\n');
+  }
+
+  const id = randomUUID();
+  const now = Date.now();
+  db.prepare(
+    `INSERT INTO triggers
+       (id, source, name, spec_json, enabled, prompt_template, deliver_only,
+        created_at, updated_at)
+     VALUES (?, 'email', ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    id,
+    a.name,
+    JSON.stringify(spec),
+    a.disabled ? 0 : 1,
+    spec.promptTemplate ?? null,
+    spec.deliverOnly ? 1 : 0,
+    now,
+    now,
+  );
+  out(`trigger added: ${id} (${a.name})\n`);
+  out(`imap host:     ${spec.imap.host}:${spec.imap.port}${spec.imap.tls ? ' (TLS)' : ''}\n`);
+  out(`mailbox:       ${spec.mailbox}\n`);
+  out(`poll interval: ${spec.pollIntervalMs}ms\n`);
+  out(`allow-senders: ${spec.allowedSenders.join(', ')}\n`);
+  out(`⚠ Password stored in plaintext in daemon.db (chmod 600 on POSIX,\n`);
+  out(`  user-private on Windows). Encryption-at-rest is deferred to v4.6+.\n`);
+  out(`Restart the daemon to activate the trigger.\n`);
+  // Note: runAddEmail returns a Promise<number>, so the outer switch must
+  // await it. (Already handled — runTriggerSubcommand is async.)
+  void randomBytes;  // imported but only used by webhook helper
   return 0;
 }
