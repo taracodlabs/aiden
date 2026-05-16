@@ -372,3 +372,168 @@ describe('defaultClassifier — confidence scoring', () => {
     expect(c.confidence).toBeLessThanOrEqual(0.5);
   });
 });
+
+// ── v4.4 Phase 5 — sandboxViolationClassifier ─────────────────────────────
+
+import {
+  sandboxViolationClassifier,
+  shellExecClassifierWithSandbox,
+  fileReadClassifierWithSandbox,
+} from '../../../core/v4/failureClassifier';
+
+function mkFsViolationResult(code: string, opts: {
+  matched_policy?: string;
+  requested_path?: string;
+  resolved_path?: string;
+} = {}): ToolCallResult {
+  return mkResult({
+    result: {
+      success: false,
+      error: 'Sandbox blocked',
+      sandbox_violation: {
+        code,
+        matched_policy: opts.matched_policy ?? '',
+        requested_path: opts.requested_path ?? '',
+        resolved_path:  opts.resolved_path  ?? '',
+        retryable: false,
+        category: 'sandbox_violation',
+      },
+    },
+  });
+}
+
+describe('sandboxViolationClassifier — Phase 2 FS violation envelopes', () => {
+  it('categorizes fs.write_outside_allowlist correctly', () => {
+    const r = mkFsViolationResult('fs.write_outside_allowlist', {
+      requested_path: '/opt/x.txt',
+      resolved_path:  '/opt/x.txt',
+    });
+    const c = sandboxViolationClassifier(mkFailed('Sandbox blocked'), 'file_write', { path: '/opt/x.txt' }, r);
+    expect(c.category).toBe('sandbox_violation');
+    expect(c.confidence).toBeGreaterThanOrEqual(0.9);
+    expect(c.recoverable).toBe(false);
+    expect(c.matchedPattern).toBe('fs.write_outside_allowlist');
+    expect(c.sandboxViolation?.code).toBe('fs.write_outside_allowlist');
+    expect(c.recoveryHint?.action).toBe('request_user_action');
+    expect(c.recoveryHint?.detail).toMatch(/AIDEN_SANDBOX_ALLOW/);
+  });
+
+  it('categorizes fs.sensitive_path with deny-cannot-override hint', () => {
+    const r = mkFsViolationResult('fs.sensitive_path', {
+      matched_policy: '/etc',
+      resolved_path: '/etc/passwd',
+    });
+    const c = sandboxViolationClassifier(mkFailed('Sandbox blocked'), 'file_read', { path: '/etc/passwd' }, r);
+    expect(c.category).toBe('sandbox_violation');
+    expect(c.recoverable).toBe(false);
+    expect(c.recoveryHint?.detail).toMatch(/cannot be allowlisted/i);
+    expect(c.recoveryHint?.detail).toMatch(/AIDEN_SANDBOX=0/);
+  });
+
+  it('categorizes fs.symlink_escape', () => {
+    const r = mkFsViolationResult('fs.symlink_escape', { resolved_path: '/outside' });
+    const c = sandboxViolationClassifier(mkFailed('Sandbox blocked'), 'file_write', {}, r);
+    expect(c.matchedPattern).toBe('fs.symlink_escape');
+    expect(c.recoveryHint?.detail).toMatch(/symlink/i);
+  });
+
+  it('categorizes fs.path_traversal', () => {
+    const r = mkFsViolationResult('fs.path_traversal');
+    const c = sandboxViolationClassifier(mkFailed('Sandbox blocked'), 'file_write', {}, r);
+    expect(c.matchedPattern).toBe('fs.path_traversal');
+    expect(c.recoveryHint?.detail).toMatch(/absolute path/i);
+  });
+
+  it('categorizes fs.read_denied', () => {
+    const r = mkFsViolationResult('fs.read_denied', { matched_policy: '/etc' });
+    const c = sandboxViolationClassifier(mkFailed('Sandbox blocked'), 'file_read', {}, r);
+    expect(c.matchedPattern).toBe('fs.read_denied');
+  });
+
+  it('falls through to default when no sandbox envelope present', () => {
+    const r = mkResult({ result: { success: false, error: 'ENOENT' } });
+    const c = sandboxViolationClassifier(mkFailed('ENOENT: no such file'), 'file_write', {}, r);
+    expect(c.category).not.toBe('sandbox_violation');
+  });
+
+  it('ignores malformed envelope (wrong category)', () => {
+    const r = mkResult({ result: { success: false, sandbox_violation: { category: 'other', code: 'x' } } });
+    const c = sandboxViolationClassifier(mkFailed('err'), 'file_write', {}, r);
+    expect(c.category).not.toBe('sandbox_violation');
+  });
+});
+
+describe('sandboxViolationClassifier — Phase 3 docker-start failure', () => {
+  it('shell_exec stderr "Sandbox: failed to start container" → sandbox_violation', () => {
+    const r = mkResult({
+      result: {
+        exitCode: -1,
+        stdout: '',
+        stderr: 'Sandbox: failed to start container: docker run timed out',
+        backend: 'docker',
+      },
+    });
+    const c = sandboxViolationClassifier(mkFailed('failed'), 'shell_exec', {}, r);
+    expect(c.category).toBe('sandbox_violation');
+    expect(c.matchedPattern).toBe('docker_unavailable');
+    expect(c.recoverable).toBe(true);
+    expect(c.recoveryHint?.action).toBe('install_dependency');
+  });
+
+  it('non-shell tool stderr same message: no special handling', () => {
+    const r = mkResult({
+      result: { success: false, stderr: 'Sandbox: failed to start container' },
+    });
+    const c = sandboxViolationClassifier(mkFailed('failed'), 'file_write', {}, r);
+    expect(c.category).not.toBe('sandbox_violation');
+  });
+});
+
+describe('shellExecClassifierWithSandbox', () => {
+  it('sandbox envelope wins over default exit-code logic', () => {
+    const r = mkFsViolationResult('fs.write_outside_allowlist');
+    const c = shellExecClassifierWithSandbox(mkFailed('blocked'), 'shell_exec', {}, r);
+    expect(c.category).toBe('sandbox_violation');
+  });
+
+  it('falls through to shellExecClassifier when no sandbox envelope', () => {
+    const r = mkResult({ result: { exitCode: 124, stdout: '', stderr: '', backend: 'local' } });
+    const c = shellExecClassifierWithSandbox(mkFailed('timed out'), 'shell_exec', {}, r);
+    expect(c.category).toBe('timeout');
+  });
+});
+
+describe('fileReadClassifierWithSandbox', () => {
+  it('sandbox envelope wins over hallucination heuristic', () => {
+    const r = mkFsViolationResult('fs.sensitive_path', { matched_policy: '/etc' });
+    const c = fileReadClassifierWithSandbox(mkFailed('ENOENT'), 'file_read', { path: '/etc/passwd' }, r);
+    expect(c.category).toBe('sandbox_violation');
+  });
+
+  it('falls through to fileReadClassifier when no envelope', () => {
+    const r = mkResult({ result: { success: false, error: 'ENOENT' } });
+    const c = fileReadClassifierWithSandbox(mkFailed('ENOENT: no such file'), 'file_read', { path: '/zzz/missing' }, r);
+    expect(c.category).not.toBe('sandbox_violation');
+  });
+});
+
+describe('buildDefaultClassifier — Phase 5 registrations', () => {
+  it('registers sandbox-aware classifiers for all file_* tools + shell_exec', () => {
+    const reg = buildDefaultClassifier();
+    expect(reg.hasOverride('shell_exec')).toBe(true);
+    expect(reg.hasOverride('file_read')).toBe(true);
+    expect(reg.hasOverride('file_list')).toBe(true);
+    expect(reg.hasOverride('file_write')).toBe(true);
+    expect(reg.hasOverride('file_patch')).toBe(true);
+    expect(reg.hasOverride('file_copy')).toBe(true);
+    expect(reg.hasOverride('file_move')).toBe(true);
+    expect(reg.hasOverride('file_delete')).toBe(true);
+  });
+
+  it('file_write with sandbox envelope flows through the registered classifier', () => {
+    const reg = buildDefaultClassifier();
+    const r = mkFsViolationResult('fs.write_outside_allowlist', { resolved_path: '/opt/y.txt' });
+    const c = reg.classify(mkFailed('blocked'), 'file_write', {}, r);
+    expect(c?.category).toBe('sandbox_violation');
+  });
+});

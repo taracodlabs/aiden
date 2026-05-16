@@ -107,13 +107,14 @@ describe('extractGoal', () => {
   });
 });
 
-// ── guidanceFor (all 12 categories — extended v4.3 Phase 5) ───────────────
+// ── guidanceFor (all 13 categories — extended v4.4 Phase 5) ───────────────
 
-describe('guidanceFor — all 12 categories', () => {
+describe('guidanceFor — all 13 categories', () => {
   const cats: FailureCategory[] = [
     'timeout', 'auth', 'hallucination', 'network', 'permission',
     'rate_limit', 'invalid_input', 'dependency_missing', 'not_found',
     'stale_ref', 'manual_blocker',                          // v4.3 Phase 5
+    'sandbox_violation',                                    // v4.4 Phase 5
     'other',
   ];
   for (const cat of cats) {
@@ -379,5 +380,136 @@ describe('enrichCardWithReport', () => {
       failureBreakdown: {},
     }));
     expect(out.failuresByCategory).toEqual([]);
+  });
+});
+
+// ── v4.4 Phase 5 — sandboxContext ──────────────────────────────────────────
+
+describe('buildRecoveryReport — sandboxContext (Phase 5)', () => {
+  function mkSandboxClassification(opts: {
+    name?: string;
+    code: string;
+    matchedPolicy?: string;
+    requestedPath?: string;
+    resolvedPath?: string;
+  }) {
+    return {
+      name: opts.name ?? 'file_write',
+      classification: {
+        category:    'sandbox_violation' as const,
+        confidence:  0.95,
+        reason:      `${opts.code} matched`,
+        recoverable: false,
+        recoveryHint: {
+          action: 'request_user_action' as const,
+          detail: `Add to allowlist: AIDEN_SANDBOX_ALLOW=/some/path`,
+        },
+        matchedPattern: opts.code,
+        sandboxViolation: {
+          code:          opts.code,
+          matchedPolicy: opts.matchedPolicy ?? '',
+          requestedPath: opts.requestedPath ?? '',
+          resolvedPath:  opts.resolvedPath  ?? '',
+        },
+      },
+    };
+  }
+
+  it('absent when no sandbox_violation in classifications', () => {
+    const snap = mkSnapshot({
+      classifications: [{
+        name: 'shell_exec',
+        classification: {
+          category: 'timeout', confidence: 1.0, recoverable: true,
+          recoveryHint: { action: 'retry_with_backoff' },
+        },
+      }],
+    });
+    const r = buildRecoveryReport({ snapshot: snap, goal: 'g', exitReason: 'verifier_signal', durationMs: 0 });
+    expect(r.sandboxContext).toBeUndefined();
+  });
+
+  it('present when at least one sandbox_violation fired', () => {
+    const snap = mkSnapshot({
+      classifications: [mkSandboxClassification({
+        code: 'fs.write_outside_allowlist',
+        requestedPath: '/opt/foo.txt',
+        resolvedPath:  '/opt/foo.txt',
+      })],
+    });
+    const r = buildRecoveryReport({ snapshot: snap, goal: 'g', exitReason: 'verifier_signal', durationMs: 0 });
+    expect(r.sandboxContext).toBeDefined();
+    expect(r.sandboxContext!.violationCount).toBe(1);
+    expect(r.sandboxContext!.fsViolations).toBe(1);
+    expect(r.sandboxContext!.shellViolations).toBe(0);
+    expect(r.sandboxContext!.lastCode).toBe('fs.write_outside_allowlist');
+  });
+
+  it('FS vs shell breakdown', () => {
+    const snap = mkSnapshot({
+      classifications: [
+        mkSandboxClassification({ code: 'fs.write_outside_allowlist' }),
+        mkSandboxClassification({ code: 'fs.sensitive_path' }),
+        mkSandboxClassification({ name: 'shell_exec', code: 'docker_unavailable' }),
+      ],
+    });
+    const r = buildRecoveryReport({ snapshot: snap, goal: 'g', exitReason: 'verifier_signal', durationMs: 0 });
+    expect(r.sandboxContext!.fsViolations).toBe(2);
+    expect(r.sandboxContext!.shellViolations).toBe(1);
+    expect(r.sandboxContext!.violationCount).toBe(3);
+  });
+
+  it('lastCode + lastMatched + lastRequested come from the most recent entry', () => {
+    const snap = mkSnapshot({
+      classifications: [
+        mkSandboxClassification({ code: 'fs.write_outside_allowlist', resolvedPath: '/a' }),
+        mkSandboxClassification({
+          code: 'fs.sensitive_path',
+          matchedPolicy: '/etc',
+          requestedPath: '/etc/passwd',
+        }),
+      ],
+    });
+    const r = buildRecoveryReport({ snapshot: snap, goal: 'g', exitReason: 'verifier_signal', durationMs: 0 });
+    expect(r.sandboxContext!.lastCode).toBe('fs.sensitive_path');
+    expect(r.sandboxContext!.lastMatched).toBe('/etc');
+    expect(r.sandboxContext!.lastRequested).toBe('/etc/passwd');
+  });
+
+  it('suggestedEnv comes from the last recoveryHint.detail', () => {
+    const snap = mkSnapshot({
+      classifications: [mkSandboxClassification({ code: 'fs.write_outside_allowlist' })],
+    });
+    const r = buildRecoveryReport({ snapshot: snap, goal: 'g', exitReason: 'verifier_signal', durationMs: 0 });
+    expect(r.sandboxContext!.suggestedEnv).toMatch(/AIDEN_SANDBOX_ALLOW/);
+  });
+
+  it('synthesizeGuidance picks sandbox_violation when it dominates', () => {
+    const snap = mkSnapshot({
+      classifications: [
+        mkSandboxClassification({ code: 'fs.write_outside_allowlist' }),
+        mkSandboxClassification({ code: 'fs.sensitive_path' }),
+      ],
+    });
+    const r = buildRecoveryReport({ snapshot: snap, goal: 'g', exitReason: 'verifier_signal', durationMs: 0 });
+    expect(r.guidance).toMatch(/sandbox/i);
+  });
+
+  it('enrichCardWithReport surfaces sandboxContext string', () => {
+    const snap = mkSnapshot({
+      classifications: [mkSandboxClassification({
+        code: 'fs.write_outside_allowlist',
+        resolvedPath: '/opt/foo.txt',
+      })],
+    });
+    const report = buildRecoveryReport({ snapshot: snap, goal: 'g', exitReason: 'verifier_signal', durationMs: 0 });
+    const card = enrichCardWithReport({
+      title: 't', canStill: [], cannotReliably: [], fix: '',
+    }, report);
+    expect(card.sandboxContext).toBeDefined();
+    expect(card.sandboxContext).toMatch(/Sandbox:/);
+    expect(card.sandboxContext).toMatch(/1 blocked/);
+    expect(card.sandboxContext).toMatch(/fs\.write_outside_allowlist/);
+    expect(card.sandboxContext).toMatch(/AIDEN_SANDBOX_ALLOW/);
   });
 });

@@ -115,13 +115,15 @@ export interface HonestyTraceEntry {
    * core/v4/failureClassifier.ts.
    */
   classification?: {
-    // v4.3 Phase 5 added 'stale_ref' + 'manual_blocker' to the
-    // canonical FailureCategory enum. Mirror stays in lockstep with
-    // `FailureCategory` in core/v4/failureClassifier.ts.
+    // v4.3 Phase 5 added 'stale_ref' + 'manual_blocker'.
+    // v4.4 Phase 5 added 'sandbox_violation'.
+    // Mirror stays in lockstep with `FailureCategory` in
+    // core/v4/failureClassifier.ts.
     category:    'timeout' | 'auth' | 'hallucination' | 'network'
                | 'permission' | 'rate_limit' | 'invalid_input'
                | 'dependency_missing' | 'not_found'
-               | 'stale_ref' | 'manual_blocker' | 'other';
+               | 'stale_ref' | 'manual_blocker'
+               | 'sandbox_violation' | 'other';
     confidence:  number;
     reason?:     string;
     recoverable: boolean;

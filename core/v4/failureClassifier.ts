@@ -83,6 +83,7 @@ export type FailureCategory =
   | 'not_found'
   | 'stale_ref'         // v4.3 Phase 5 — DOM changed between snapshot+action; Phase 2 already retried unsuccessfully
   | 'manual_blocker'    // v4.3 Phase 5 — login/2FA/captcha/verification/consent (Phase 3); needs human action
+  | 'sandbox_violation' // v4.4 Phase 5 — Phase 2 fs.* policy refusal OR Phase 3 docker-start failure; not retryable, needs env-var override
   | 'other';
 
 /** Output of `classify(...)`. */
@@ -106,6 +107,19 @@ export interface ClassificationResult {
   };
   /** Substring/pattern that matched — useful for diagnostics + tests. */
   matchedPattern?: string;
+  /**
+   * v4.4 Phase 5 — populated by `sandboxViolationClassifier` with
+   * the raw envelope fields from the tool result. Used by
+   * `buildRecoveryReport` to build `sandboxContext` without
+   * re-parsing tool result envelopes. Absent for all other
+   * classifications.
+   */
+  sandboxViolation?: {
+    code:          string;
+    matchedPolicy: string;
+    requestedPath: string;
+    resolvedPath:  string;
+  };
 }
 
 /**
@@ -654,16 +668,193 @@ export const browserNavigateClassifier: ClassifierFn = (verification, toolName, 
   return defaultClassifier(verification, toolName, args, result);
 };
 
+// ── v4.4 Phase 5 — sandbox classifier ──────────────────────────────────────
+
+/** Shape of the violation envelope produced by Phase 2 file tools. */
+interface SandboxViolationEnvelope {
+  code:           string;
+  matched_policy: string;
+  requested_path: string;
+  resolved_path:  string;
+  retryable:      false;
+  category:       'sandbox_violation';
+}
+
+/**
+ * Read the `sandbox_violation` envelope from a tool result. Returns
+ * null when absent or malformed.
+ *
+ * Phase 2 file tools attach this on `result.result.sandbox_violation`
+ * alongside `success: false`. Phase 3's shell-exec docker-start
+ * failure surfaces a different shape — handled separately below.
+ */
+function readSandboxViolation(result: ToolCallResult): SandboxViolationEnvelope | null {
+  const inner = result.result;
+  if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return null;
+  const env = (inner as { sandbox_violation?: unknown }).sandbox_violation;
+  if (!env || typeof env !== 'object' || Array.isArray(env)) return null;
+  const e = env as Record<string, unknown>;
+  if (e.category !== 'sandbox_violation') return null;
+  if (typeof e.code !== 'string') return null;
+  return {
+    code:           e.code,
+    matched_policy: typeof e.matched_policy === 'string' ? e.matched_policy : '',
+    requested_path: typeof e.requested_path === 'string' ? e.requested_path : '',
+    resolved_path:  typeof e.resolved_path  === 'string' ? e.resolved_path  : '',
+    retryable:      false,
+    category:       'sandbox_violation',
+  };
+}
+
+/**
+ * Produce a concrete, user-actionable override suggestion from a
+ * violation envelope. Code-specific because the action differs: a
+ * write-outside-allowlist needs an `AIDEN_SANDBOX_ALLOW=...` extension,
+ * a denylist hit cannot be overridden, a symlink-escape needs the
+ * real path used directly.
+ */
+function suggestOverride(env: SandboxViolationEnvelope): string {
+  switch (env.code) {
+    case 'fs.write_outside_allowlist': {
+      // The requested path is the agent-supplied string; the resolved
+      // path is the real path. Suggest the directory that contains it
+      // — most likely what the user wants to allowlist.
+      const target = env.resolved_path || env.requested_path;
+      const lastSep = target.lastIndexOf('/') >= 0
+        ? target.lastIndexOf('/')
+        : target.lastIndexOf('\\');
+      const dir = lastSep > 0 ? target.slice(0, lastSep) : target;
+      return dir
+        ? `Add to allowlist: AIDEN_SANDBOX_ALLOW=${dir}`
+        : 'Add the target directory to AIDEN_SANDBOX_ALLOW';
+    }
+    case 'fs.sensitive_path':
+      return `Sandbox refuses ${env.matched_policy || env.resolved_path} for safety. ` +
+             'This path is on the denylist and cannot be allowlisted. ' +
+             'Use a different path, or set AIDEN_SANDBOX=0 to disable the sandbox entirely (not recommended).';
+    case 'fs.symlink_escape':
+      return 'The path contains a symlink that resolves outside the sandbox. ' +
+             'Use the real path directly, or extend AIDEN_SANDBOX_ALLOW to cover the symlink target.';
+    case 'fs.path_traversal':
+      return 'Path contains `..` segments that escape the working directory. Use an absolute path.';
+    case 'fs.read_denied':
+      return `Sandbox refuses read of ${env.matched_policy || env.resolved_path}.`;
+    default:
+      return env.matched_policy
+        ? `Sandbox blocked by policy: ${env.matched_policy}`
+        : 'Sandbox blocked this operation.';
+  }
+}
+
+/**
+ * Unified classifier for tools that go through the v4.4 sandbox
+ * preflight: 5 write-side file tools + 2 read-side file tools +
+ * shell_exec. Detects:
+ *   1. The Phase 2 `sandbox_violation` envelope (file tools, all
+ *      five fs.* codes)
+ *   2. Phase 3 docker-start failure surfaced via shell_exec's
+ *      "Sandbox: failed to start container" stderr — categorized as
+ *      sandbox_violation with the install_dependency recovery hint
+ *
+ * Sandbox refusals are NEVER retryable (retryable:false) — the
+ * policy will reject the same input next call. The agent should
+ * surface the suggested env-var override to the user instead.
+ *
+ * Falls through to `defaultClassifier` (or a wrapped per-tool
+ * classifier) when no sandbox envelope is present — keeping the
+ * non-sandboxed path zero-cost.
+ */
+export const sandboxViolationClassifier: ClassifierFn = (verification, toolName, args, result) => {
+  const env = readSandboxViolation(result);
+  if (env) {
+    return {
+      category:    'sandbox_violation',
+      confidence:  0.95,
+      reason:      `${env.code}${env.matched_policy ? ` matched ${env.matched_policy}` : ''}`,
+      recoverable: false,
+      recoveryHint: {
+        action: 'request_user_action',
+        detail: suggestOverride(env),
+      },
+      matchedPattern: env.code,
+      sandboxViolation: {
+        code:          env.code,
+        matchedPolicy: env.matched_policy,
+        requestedPath: env.requested_path,
+        resolvedPath:  env.resolved_path,
+      },
+    };
+  }
+  // Phase 3 docker-start failure path (shell_exec only).
+  if (toolName === 'shell_exec') {
+    const r = result.result;
+    if (r && typeof r === 'object' && !Array.isArray(r)) {
+      const stderr = (r as { stderr?: unknown }).stderr;
+      if (typeof stderr === 'string' && /Sandbox: failed to start container/.test(stderr)) {
+        return {
+          category:    'sandbox_violation',
+          confidence:  0.9,
+          reason:      'docker container failed to start',
+          recoverable: true,
+          recoveryHint: {
+            action: 'install_dependency',
+            detail: 'Start Docker and retry, or set AIDEN_SANDBOX=0 to disable the sandbox.',
+          },
+          matchedPattern: 'docker_unavailable',
+        };
+      }
+    }
+  }
+  return defaultClassifier(verification, toolName, args, result);
+};
+
+/**
+ * Wraps `shellExecClassifier` so the sandbox envelope check fires
+ * BEFORE the existing dangerous-pattern / exit-code logic. Sandbox
+ * refusal beats every other shell-exec failure mode — the policy
+ * was the proximate cause and the actionable fix.
+ */
+export const shellExecClassifierWithSandbox: ClassifierFn = (verification, toolName, args, result) => {
+  const sb = sandboxViolationClassifier(verification, toolName, args, result);
+  if (sb.category === 'sandbox_violation') return sb;
+  return shellExecClassifier(verification, toolName, args, result);
+};
+
+/**
+ * Wraps `fileReadClassifier` so denylist hits on read are categorized
+ * as sandbox_violation instead of the generic "not_found / permission"
+ * default. file_read is the only read-side tool with an existing
+ * override; file_list falls through to the unified classifier.
+ */
+export const fileReadClassifierWithSandbox: ClassifierFn = (verification, toolName, args, result) => {
+  const sb = sandboxViolationClassifier(verification, toolName, args, result);
+  if (sb.category === 'sandbox_violation') return sb;
+  return fileReadClassifier(verification, toolName, args, result);
+};
+
 // ── Factory ────────────────────────────────────────────────────────────────
 
 export function buildDefaultClassifier(): FailureClassifier {
   const reg = new FailureClassifier();
-  reg.register('shell_exec', shellExecClassifier);
+  // v4.4 Phase 5 — sandbox envelope check fires first for shell_exec
+  // + the file tools. Falls through to the existing per-tool
+  // classifier when no envelope is present (AIDEN_SANDBOX=0 → no
+  // envelopes → zero-cost passthrough).
+  reg.register('shell_exec', shellExecClassifierWithSandbox);
   reg.register('web_search', webSearchClassifier);
   reg.register('web_fetch',  webFetchClassifier);
   reg.register('fetch_page', webFetchClassifier);
   reg.register('web_page',   webFetchClassifier);
-  reg.register('file_read',  fileReadClassifier);
+  reg.register('file_read',  fileReadClassifierWithSandbox);
+  // v4.4 Phase 5 — sandbox-aware classifiers for the file tools that
+  // didn't previously have overrides. Use the unified classifier
+  // directly since none of them have prior bespoke logic.
+  reg.register('file_list',   sandboxViolationClassifier);
+  reg.register('file_write',  sandboxViolationClassifier);
+  reg.register('file_patch',  sandboxViolationClassifier);
+  reg.register('file_copy',   sandboxViolationClassifier);
+  reg.register('file_move',   sandboxViolationClassifier);
+  reg.register('file_delete', sandboxViolationClassifier);
   // v4.3 Phase 5 — browser-tool overrides that read the
   // BrowserState sidecars (staleRefRetry from Phase 2, blocker from
   // Phase 3). Fall through to defaultClassifier when sidecars are

@@ -142,6 +142,15 @@ export interface CapabilityCardData {
    * is off OR when no browser activity occurred this turn.
    */
   browserContext?: string;
+  /**
+   * v4.4 Phase 5 — optional one-line sandbox context summary. Populated
+   * by `enrichCardWithReport` from a RecoveryReport's `sandboxContext`
+   * field (violation count, FS-vs-shell split, last matched code,
+   * auto-derived AIDEN_SANDBOX_ALLOW suggestion). Renderer prints as a
+   * muted "Sandbox:" line right below `browserContext`; absent when
+   * AIDEN_SANDBOX is off OR when no sandbox violation occurred this turn.
+   */
+  sandboxContext?: string;
 }
 
 export interface ToolCallResult {

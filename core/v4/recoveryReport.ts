@@ -105,6 +105,32 @@ export interface RecoveryReport {
     /** Stale-ref retry attempts that fired during the turn. */
     staleRefRetries: number;
   };
+  /**
+   * v4.4 Phase 5 — sandbox-specific context populated when any
+   * classification this turn has category `sandbox_violation`.
+   * Surfaces violation counts, the most-recent matched policy, and
+   * an auto-derived env-var override suggestion so the user can
+   * widen the allowlist (or disable the sandbox) with one copy-paste.
+   *
+   * Absent when no sandbox violation fired this turn — keeping the
+   * common path clean. Mirrors `browserContext` shape and lifecycle.
+   */
+  sandboxContext?: {
+    /** Total `sandbox_violation` classifications this turn. */
+    violationCount:  number;
+    /** Filesystem violations (codes starting with `fs.`). */
+    fsViolations:    number;
+    /** Shell violations (e.g. `docker_unavailable`). */
+    shellViolations: number;
+    /** Most recent violation code. */
+    lastCode:        string;
+    /** Most recent matched policy (allowlist/denylist entry or ''). */
+    lastMatched:     string;
+    /** Most recent requested path (file violations only). */
+    lastRequested?:  string;
+    /** Auto-derived env-var override suggestion. */
+    suggestedEnv?:   string;
+  };
 }
 
 /**
@@ -188,6 +214,8 @@ const GUIDANCE_BY_CATEGORY: Record<FailureCategory, string> = {
     'The page changed between snapshot and action. The observer already attempted resnapshot+retry once — re-read the visible state and try a different selector or approach.',
   manual_blocker:
     'The site requires a human action (login, 2FA, captcha, or verification). Surface this to the user and wait — do not retry automatically.',
+  sandbox_violation:
+    'Aiden\'s execution sandbox refused this operation. Surface the matched policy to the user and either widen the allowlist via AIDEN_SANDBOX_ALLOW=path1:path2 or disable the sandbox with AIDEN_SANDBOX=0 (not recommended). Denylist matches cannot be overridden — they signal sensitive paths the user explicitly wants protected.',
   other:
     'The tool failed for an unclassified reason. Inspect the trace for details before retrying.',
 };
@@ -282,6 +310,13 @@ export function buildRecoveryReport(
     snapshot,
   );
 
+  // ── v4.4 Phase 5 — sandboxContext enrichment ────────────────────────────
+  // Populated when any classification this turn has category
+  // `sandbox_violation`. The classifier (Phase 5) attaches the raw
+  // envelope to ClassificationResult.sandboxViolation, so we don't
+  // re-parse tool results here.
+  const sandboxContext = buildSandboxContext(snapshot);
+
   return {
     goal,
     exitReason,
@@ -293,7 +328,52 @@ export function buildRecoveryReport(
     recoveryStages,
     guidance,
     ...(browserContext ? { browserContext } : {}),
+    ...(sandboxContext ? { sandboxContext } : {}),
   };
+}
+
+/**
+ * v4.4 Phase 5 — build the `sandboxContext` sidecar from the turn's
+ * classifications. Returns null when no `sandbox_violation` fired
+ * (the common path).
+ *
+ * Aggregates FS vs shell violation counts (FS = code starts with
+ * `fs.`; shell = anything else under the sandbox_violation category)
+ * and surfaces the most recent envelope's matched policy +
+ * auto-derived override suggestion.
+ */
+function buildSandboxContext(
+  snapshot: TurnStateDiagnosticSnapshot,
+): NonNullable<RecoveryReport['sandboxContext']> | null {
+  const violations = snapshot.classifications.filter(
+    (c) => c.classification.category === 'sandbox_violation',
+  );
+  if (violations.length === 0) return null;
+  const last = violations[violations.length - 1].classification;
+  const lastCode = last.matchedPattern ?? last.sandboxViolation?.code ?? '';
+  let fsViolations    = 0;
+  let shellViolations = 0;
+  for (const v of violations) {
+    const code = v.classification.matchedPattern
+      ?? v.classification.sandboxViolation?.code
+      ?? '';
+    if (code.startsWith('fs.')) fsViolations += 1;
+    else                        shellViolations += 1;
+  }
+  const ctx: NonNullable<RecoveryReport['sandboxContext']> = {
+    violationCount: violations.length,
+    fsViolations,
+    shellViolations,
+    lastCode,
+    lastMatched:    last.sandboxViolation?.matchedPolicy ?? '',
+  };
+  if (last.sandboxViolation?.requestedPath) {
+    ctx.lastRequested = last.sandboxViolation.requestedPath;
+  }
+  if (last.recoveryHint?.detail) {
+    ctx.suggestedEnv = last.recoveryHint.detail;
+  }
+  return ctx;
 }
 
 /**
@@ -354,6 +434,7 @@ function synthesizeGuidance(
     'stale_ref',          // v4.3 Phase 5 — auto-recoverable via wait+retry
     'hallucination', 'dependency_missing',
     'manual_blocker',     // v4.3 Phase 5 — requires human action; semi-blocking
+    'sandbox_violation',  // v4.4 Phase 5 — env-var override is the specific user action
     'permission', 'auth', 'other',
   ];
   const rank = (c: FailureCategory): number => {
@@ -399,6 +480,13 @@ export function enrichCardWithReport(
   const browserContext = report.browserContext
     ? buildBrowserContextLine(report.browserContext)
     : undefined;
+  // v4.4 Phase 5 — sandbox-context inline row. Present when the
+  // report carries sandboxContext (any sandbox_violation this turn).
+  // Renderer surfaces this as another muted line right below
+  // browserContext (or whatHappened when no browser activity).
+  const sandboxContext = report.sandboxContext
+    ? buildSandboxContextLine(report.sandboxContext)
+    : undefined;
   return {
     title:           base.title,
     canStill:        base.canStill,
@@ -407,6 +495,7 @@ export function enrichCardWithReport(
     whatHappened,
     failuresByCategory,
     ...(browserContext ? { browserContext } : {}),
+    ...(sandboxContext ? { sandboxContext } : {}),
   };
 }
 
@@ -436,6 +525,27 @@ function buildBrowserContextLine(
   return parts.length > 0 ? `Browser: ${parts.join(' · ')}` : '';
 }
 
+/**
+ * v4.4 Phase 5 — format the sandboxContext fields into a compact
+ * single-line summary for the recovery card. Mirrors
+ * `buildBrowserContextLine` shape. Returns empty string when no
+ * signal worth surfacing.
+ */
+function buildSandboxContextLine(
+  ctx: NonNullable<RecoveryReport['sandboxContext']>,
+): string {
+  const parts: string[] = [];
+  parts.push(`${ctx.violationCount} blocked`);
+  if (ctx.fsViolations > 0 && ctx.shellViolations > 0) {
+    parts.push(`${ctx.fsViolations} fs · ${ctx.shellViolations} shell`);
+  } else if (ctx.shellViolations > 0) {
+    parts.push(`${ctx.shellViolations} shell`);
+  }
+  if (ctx.lastCode) parts.push(`last: ${ctx.lastCode}`);
+  if (ctx.suggestedEnv) parts.push(`try: ${ctx.suggestedEnv}`);
+  return parts.length > 0 ? `Sandbox: ${parts.join(' · ')}` : '';
+}
+
 function buildWhatHappenedLine(report: RecoveryReport): string {
   const { attempts, durationMs } = report;
   const dur = (durationMs / 1000).toFixed(1);
@@ -460,6 +570,7 @@ function buildFailuresPills(
     'stale_ref',          // v4.3 Phase 5 — auto-recoverable via wait+retry
     'hallucination', 'dependency_missing',
     'manual_blocker',     // v4.3 Phase 5 — requires human action; semi-blocking
+    'sandbox_violation',  // v4.4 Phase 5 — env-var override is the specific user action
     'permission', 'auth', 'other',
   ];
   const rank = (c: FailureCategory): number => {
