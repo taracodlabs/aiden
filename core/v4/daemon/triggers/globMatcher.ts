@@ -53,6 +53,28 @@ export interface GlobMatcherOptions {
   ignoreTemp?:   boolean;                 // default true
 }
 
+/**
+ * Normalize a glob pattern so it matches absolute paths sensibly.
+ *
+ * The user mental model is "`*.txt` matches `.txt` files anywhere",
+ * but picomatch's `*` does NOT span path separators — so a bare
+ * basename glob like `*.txt` never matches `/some/dir/foo.txt`.
+ *
+ * Rule: if a pattern doesn't already begin with double-star,
+ * a leading slash, a Windows drive letter (`C:`), or contain a
+ * `/` directory separator, treat it as a basename pattern and
+ * prepend a depth-spanning prefix so it matches at any depth.
+ * Patterns that already express locality (containing `/` or
+ * starting with double-star) are left alone.
+ */
+export function normalizeGlobPattern(pat: string): string {
+  if (pat.startsWith('**')) return pat;
+  if (pat.startsWith('/')) return pat;
+  if (/^[A-Za-z]:/.test(pat)) return pat;          // absolute Windows path
+  if (pat.includes('/')) return pat;
+  return '**/' + pat;
+}
+
 export function compileGlobMatcher(opts: GlobMatcherOptions): GlobMatcher {
   const include = opts.includeGlobs && opts.includeGlobs.length > 0
     ? opts.includeGlobs
@@ -62,8 +84,9 @@ export function compileGlobMatcher(opts: GlobMatcherOptions): GlobMatcher {
     ...(opts.ignoreTemp !== false ? DEFAULT_IGNORE_PATTERNS : []),
   ];
   const opt = { dot: true, nocase: process.platform === 'win32' };
-  const includeFns = include.map((p) => picomatch(p, opt));
-  const excludeFns = exclude.map((p) => picomatch(p, opt));
+  const compile = (p: string): (s: string) => boolean => picomatch(normalizeGlobPattern(p), opt);
+  const includeFns = include.map(compile);
+  const excludeFns = exclude.map(compile);
 
   return {
     match(absPath: string): boolean {

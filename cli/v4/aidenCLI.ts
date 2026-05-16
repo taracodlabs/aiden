@@ -237,6 +237,17 @@ export interface MainOptions {
   writeOut?: (text: string) => void;
 }
 
+/**
+ * Commander 5.x option-value collector. Use with `.option('--flag <v>',
+ * '...', collectArray, [])` so repeated `--flag a --flag b` produces
+ * `['a','b']` instead of `'b'`. Commander 5 does NOT support the
+ * `<x...>` variadic syntax on options (only positional args).
+ */
+function collectArray(value: string, previous: string[] | undefined): string[] {
+  if (!Array.isArray(previous)) return [value];
+  return previous.concat([value]);
+}
+
 export async function main(argv: string[], opts: MainOptions = {}): Promise<number> {
   // v4.5 Phase 1 — daemon foundation bootstrap. Gated by AIDEN_DAEMON=1;
   // a NOOP when unset/=0. Idempotent — calling from both api/server.ts
@@ -400,11 +411,18 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   program
     .command('trigger <action> [args...]')
     .description('Manage daemon triggers. Actions: add, list, show, remove, enable, disable, test.')
-    .option('--name <name>', 'Trigger name (for add).')
-    .option('--path <paths...>', 'Path(s) to watch (for add file). Repeatable.')
-    .option('--include <globs...>', 'Include glob patterns. Repeatable.')
-    .option('--exclude <globs...>', 'Exclude glob patterns. Repeatable.')
-    .option('--event <events...>', 'Event types: add|change|unlink. Repeatable.')
+    // Commander 5.x stores option values directly on the Command
+    // instance, so `--name` would clobber Command.prototype.name().
+    // Use `--label` instead; we map to the internal `name` arg below.
+    .option('--label <label>', 'Trigger label/name (for add).')
+    // Commander 5.x does NOT support `<x...>` variadic syntax on
+    // OPTIONS (only on positional args) — repeating overwrites
+    // instead of appending. Use an explicit collector so multiple
+    // --path / --include / --exclude / --event flags accumulate.
+    .option('--path <path>', 'Path to watch (for add file). Repeatable.', collectArray, [])
+    .option('--include <glob>', 'Include glob pattern. Repeatable.', collectArray, [])
+    .option('--exclude <glob>', 'Exclude glob pattern. Repeatable.', collectArray, [])
+    .option('--event <type>', 'Event type: add|change|unlink. Repeatable.', collectArray, [])
     .option('--debounce-ms <n>', 'Per-path debounce in ms (default 750).', (v: string) => Number.parseInt(v, 10))
     .option('--settle-ms <n>', 'Stable-stat settle in ms (default 1000).', (v: string) => Number.parseInt(v, 10))
     .option('--max-settle-ms <n>', 'Max settle time before giving up (default 30000).', (v: string) => Number.parseInt(v, 10))
@@ -426,7 +444,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { runTriggerSubcommand } = await import('./commands/trigger');
       const cliOpts = cmd.opts() as Record<string, unknown>;
       const argv = {
-        name:             cliOpts.name as string | undefined,
+        name:             cliOpts.label as string | undefined,
         paths:            cliOpts.path as string[] | undefined,
         include:          cliOpts.include as string[] | undefined,
         exclude:          cliOpts.exclude as string[] | undefined,
