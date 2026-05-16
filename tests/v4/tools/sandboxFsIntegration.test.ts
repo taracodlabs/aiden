@@ -77,27 +77,40 @@ afterEach(async () => {
   _resetSandboxConfigForTests();
 });
 
-describe('sandbox disabled (default) — behavior unchanged', () => {
-  it('file_write succeeds under tmpdir without AIDEN_SANDBOX', async () => {
-    const r = (await fileWriteTool.execute(
-      { path: path.join(tmp, 'a.txt'), content: 'hi' },
-      ctx,
-    )) as ToolResult;
-    expect(r.success).toBe(true);
-    expect(r.sandbox_violation).toBeUndefined();
+describe('sandbox disabled via AIDEN_SANDBOX=0 — opt-out path', () => {
+  // v4.4 Phase 6 — sandbox is on by default. These tests assert the
+  // explicit opt-out (`AIDEN_SANDBOX=0`) restores pre-v4.4 behavior.
+  function withSandboxDisabled<T>(fn: () => Promise<T> | T): Promise<T> {
+    const prev = process.env.AIDEN_SANDBOX;
+    process.env.AIDEN_SANDBOX = '0';
+    _resetSandboxConfigForTests();
+    return Promise.resolve().then(fn).finally(() => {
+      if (prev === undefined) delete process.env.AIDEN_SANDBOX;
+      else process.env.AIDEN_SANDBOX = prev;
+      _resetSandboxConfigForTests();
+    });
+  }
+
+  it('file_write succeeds under tmpdir with AIDEN_SANDBOX=0', async () => {
+    await withSandboxDisabled(async () => {
+      const r = (await fileWriteTool.execute(
+        { path: path.join(tmp, 'a.txt'), content: 'hi' },
+        ctx,
+      )) as ToolResult;
+      expect(r.success).toBe(true);
+      expect(r.sandbox_violation).toBeUndefined();
+    });
   });
 
-  it('file_read of /etc/hosts NOT short-circuited when sandbox disabled', async () => {
-    // We don't actually read /etc/hosts — just that the preflight is a no-op.
-    // Sandbox-off path: existing isProtectedPath / DENY_PATTERNS guard kicks in
-    // for credential paths, but a non-credential outside path passes preflight.
-    const r = (await fileReadTool.execute(
-      { path: '/opt/nonexistent-but-policy-permits.txt' },
-      ctx,
-    )) as ToolResult;
-    // The read will fail with ENOENT — that's fine. What matters is
-    // there's no `sandbox_violation` because we're disabled.
-    expect(r.sandbox_violation).toBeUndefined();
+  it('file_read of /opt/<nonexistent> NOT short-circuited when AIDEN_SANDBOX=0', async () => {
+    // Opt-out path: preflight is a no-op, no sandbox_violation surfaced.
+    await withSandboxDisabled(async () => {
+      const r = (await fileReadTool.execute(
+        { path: '/opt/nonexistent-but-policy-permits.txt' },
+        ctx,
+      )) as ToolResult;
+      expect(r.sandbox_violation).toBeUndefined();
+    });
   });
 });
 

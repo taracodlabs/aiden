@@ -126,23 +126,41 @@ describe('dockerBackend', () => {
 });
 
 describe('shell_exec — routing', () => {
-  it('11. routes to local by default', async () => {
-    const r = (await shellExecTool.execute(
-      { command: echoCmd('local-route') },
-      ctx,
-    )) as { backend: string; stdout: string };
-    expect(r.backend).toBe('local');
-    expect(r.stdout).toMatch(/local-route/);
+  it('11. routes to local by default (AIDEN_SANDBOX=0 opt-out)', async () => {
+    // v4.4 Phase 6 — sandbox is on by default. To exercise the
+    // pre-v4.4 "local default" path, opt out explicitly.
+    process.env.AIDEN_SANDBOX = '0';
+    try {
+      const r = (await shellExecTool.execute(
+        { command: echoCmd('local-route') },
+        ctx,
+      )) as { backend: string; stdout: string };
+      expect(r.backend).toBe('local');
+      expect(r.stdout).toMatch(/local-route/);
+    } finally {
+      delete process.env.AIDEN_SANDBOX;
+    }
   });
 
-  it('12. routes to docker when ctx.terminalBackend=docker', async () => {
-    const dockerCtx: ToolContext = { ...ctx, terminalBackend: 'docker' };
-    const r = (await shellExecTool.execute(
-      { command: 'echo from-docker' },
-      dockerCtx,
-    )) as { backend: string };
-    expect(r.backend).toBe('docker');
-    // Pass either way — if Docker is up we get exit 0, if not we get
-    // the clear error string. Both prove routing.
+  it('12. routes to docker when ctx.terminalBackend=docker (legacy single-shot, AIDEN_SANDBOX=0)', async () => {
+    // v4.4 Phase 6 — sandbox is on by default and routes the
+    // docker path through dockerSessionExec (long-lived container
+    // reuse + fallback-to-local on docker unavailable). This test
+    // specifically exercises the LEGACY single-shot
+    // dockerBackendExecute path that fires when AIDEN_SANDBOX=0 +
+    // ctx.terminalBackend='docker' — kept for back-compat.
+    process.env.AIDEN_SANDBOX = '0';
+    try {
+      const dockerCtx: ToolContext = { ...ctx, terminalBackend: 'docker' };
+      const r = (await shellExecTool.execute(
+        { command: 'echo from-docker' },
+        dockerCtx,
+      )) as { backend: string };
+      expect(r.backend).toBe('docker');
+      // Pass either way — if Docker is up we get exit 0, if not we get
+      // the clear error string. Both prove routing.
+    } finally {
+      delete process.env.AIDEN_SANDBOX;
+    }
   }, 120_000);
 });

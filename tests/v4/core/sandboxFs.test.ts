@@ -82,18 +82,20 @@ describe('realpathWithFallback', () => {
   });
 });
 
-describe('isPathAllowed — sandbox disabled (default)', () => {
+describe('isPathAllowed — sandbox disabled (opt-out via AIDEN_SANDBOX=0)', () => {
+  // v4.4 Phase 6 — sandbox is on by default. These tests exercise the
+  // opt-out path (`AIDEN_SANDBOX=0`) to confirm short-circuit semantics.
   beforeEach(() => { _clearRealPathCacheForTests(); });
 
-  it('returns allowed=true regardless of path when AIDEN_SANDBOX unset', () => {
-    const cfg = readSandboxConfig({});
+  it('returns allowed=true regardless of path when AIDEN_SANDBOX=0', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '0' });
     const d = isPathAllowed('/etc/passwd', 'read', process.cwd(), cfg);
     expect(d.allowed).toBe(true);
     expect(d.violation).toBeUndefined();
   });
 
   it('still resolves the path (so callers can use resolvedPath uniformly)', () => {
-    const cfg = readSandboxConfig({});
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '0' });
     const d = isPathAllowed('./relative/path', 'write', process.cwd(), cfg);
     expect(d.allowed).toBe(true);
     expect(path.isAbsolute(d.resolvedPath)).toBe(true);

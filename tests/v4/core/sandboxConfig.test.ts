@@ -25,11 +25,11 @@ function envWith(over: Record<string, string>): NodeJS.ProcessEnv {
   return { ...over } as NodeJS.ProcessEnv;
 }
 
-describe('readSandboxConfig — defaults', () => {
-  it('no env vars: enabled=false, defaults across the board', () => {
+describe('readSandboxConfig — defaults (v4.4 Phase 6 default-on)', () => {
+  it('no env vars: enabled=true (Phase 6 default-on), other defaults intact', () => {
     const cfg = readSandboxConfig(envWith({}));
-    expect(cfg.enabled).toBe(false);
-    expect(cfg.defaultBackend).toBe('local');
+    expect(cfg.enabled).toBe(true);
+    expect(cfg.defaultBackend).toBe('docker');   // follows enabled
     expect(cfg.persistent).toBe(true);
     expect(cfg.networkMode).toBe('bridge');
     expect(cfg.dryRun).toBe(false);
@@ -50,33 +50,33 @@ describe('readSandboxConfig — defaults', () => {
   });
 });
 
-describe('AIDEN_SANDBOX gating (Phase 1 strict opt-in)', () => {
-  it('AIDEN_SANDBOX=1: enabled', () => {
+describe('AIDEN_SANDBOX gating (v4.4 Phase 6 default-on, strict opt-out)', () => {
+  it('AIDEN_SANDBOX=1: enabled (explicit on, idempotent)', () => {
     expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: '1' })).enabled).toBe(true);
   });
 
-  it('AIDEN_SANDBOX=0: disabled (Phase 1 strict; junk also disables)', () => {
+  it('AIDEN_SANDBOX=0: disabled (only explicit "0" opts out)', () => {
     expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: '0' })).enabled).toBe(false);
   });
 
-  it('AIDEN_SANDBOX=true: disabled (only `1` enables in Phase 1)', () => {
-    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: 'true' })).enabled).toBe(false);
+  it('AIDEN_SANDBOX=true: enabled (anything except "0" enables)', () => {
+    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: 'true' })).enabled).toBe(true);
   });
 
-  it('AIDEN_SANDBOX=yes: disabled', () => {
-    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: 'yes' })).enabled).toBe(false);
+  it('AIDEN_SANDBOX=yes: enabled (anything except "0" enables)', () => {
+    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: 'yes' })).enabled).toBe(true);
   });
 
-  it('AIDEN_SANDBOX unset: disabled', () => {
-    expect(readSandboxConfig(envWith({})).enabled).toBe(false);
+  it('AIDEN_SANDBOX unset: enabled (Phase 6 default-on)', () => {
+    expect(readSandboxConfig(envWith({})).enabled).toBe(true);
   });
 
-  it('defaultBackend flips to docker when enabled', () => {
-    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: '1' })).defaultBackend).toBe('docker');
+  it('defaultBackend = docker when enabled (default)', () => {
+    expect(readSandboxConfig(envWith({})).defaultBackend).toBe('docker');
   });
 
-  it('defaultBackend stays local when disabled', () => {
-    expect(readSandboxConfig(envWith({})).defaultBackend).toBe('local');
+  it('defaultBackend = local when explicitly disabled', () => {
+    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX: '0' })).defaultBackend).toBe('local');
   });
 });
 
@@ -169,8 +169,16 @@ describe('Resource-limit env vars', () => {
 });
 
 describe('AIDEN_DRYRUN — orthogonal to AIDEN_SANDBOX', () => {
-  it('AIDEN_DRYRUN=1 alone: dryRun=true, enabled=false', () => {
+  it('AIDEN_DRYRUN=1 alone: dryRun=true (sandbox follows Phase 6 default-on)', () => {
+    // v4.4 Phase 6 — sandbox is on by default; this test now asserts
+    // dryRun toggles independently of the sandbox default.
     const cfg = readSandboxConfig(envWith({ AIDEN_DRYRUN: '1' }));
+    expect(cfg.dryRun).toBe(true);
+    expect(cfg.enabled).toBe(true);
+  });
+
+  it('AIDEN_DRYRUN=1 + AIDEN_SANDBOX=0: dryRun=true, sandbox disabled', () => {
+    const cfg = readSandboxConfig(envWith({ AIDEN_DRYRUN: '1', AIDEN_SANDBOX: '0' }));
     expect(cfg.dryRun).toBe(true);
     expect(cfg.enabled).toBe(false);
   });
@@ -181,10 +189,17 @@ describe('AIDEN_DRYRUN — orthogonal to AIDEN_SANDBOX', () => {
     expect(cfg.enabled).toBe(true);
   });
 
-  it('both unset: both false', () => {
+  it('both unset: dryRun=false (opt-in), sandbox=true (default-on)', () => {
+    // Phase 6 flip: sandbox now defaults ON; dry-run remains opt-in.
     const cfg = readSandboxConfig(envWith({}));
     expect(cfg.dryRun).toBe(false);
-    expect(cfg.enabled).toBe(false);
+    expect(cfg.enabled).toBe(true);
+  });
+
+  it('AIDEN_DRYRUN remains strict === "1" (Phase 6 does NOT flip dry-run)', () => {
+    expect(readSandboxConfig(envWith({ AIDEN_DRYRUN: 'true' })).dryRun).toBe(false);
+    expect(readSandboxConfig(envWith({ AIDEN_DRYRUN: 'yes'  })).dryRun).toBe(false);
+    expect(readSandboxConfig(envWith({ AIDEN_DRYRUN: ''     })).dryRun).toBe(false);
   });
 });
 

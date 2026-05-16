@@ -22,8 +22,10 @@
  *   - Phase 5 — riskTier annotations consumed by FailureClassifier +
  *               ApprovalEngine (as a FLOOR; patterns can escalate)
  *
- * Strict `=== '1'` opt-in for AIDEN_SANDBOX in Phases 1-5. Phase 6
- * will flip to `!== '0'` for default-on (mirrors v4.2/v4.3 Phase 6).
+ * v4.4 Phase 6 — default-on transition. AIDEN_SANDBOX is now
+ * enabled by default; users opt out with `AIDEN_SANDBOX=0`. The
+ * strict `!== '0'` flip mirrors v4.2 Phase 6 (TCE) + v4.3 Phase 6
+ * (browser depth) semantics exactly.
  *
  * AIDEN_DRYRUN is orthogonal — independent flag, independent semantics.
  * Phase 6 does NOT flip dry-run; it stays opt-in by design (dry-run
@@ -54,9 +56,9 @@ export interface SandboxResourceLimits {
 
 export interface SandboxConfig {
   /**
-   * Master enable flag. Phase 1 strict `=== '1'`; Phase 6 will flip
-   * to `!== '0'` (default-on). When false, every later-phase consumer
-   * short-circuits to current (pre-v4.4) behavior — zero overhead.
+   * Master enable flag. v4.4 Phase 6 — default-on. Users opt out
+   * with `AIDEN_SANDBOX=0`. When false, every consumer
+   * short-circuits to pre-v4.4 behavior — zero overhead.
    */
   enabled: boolean;
 
@@ -291,8 +293,15 @@ export function inferDefaultRiskTier(mutates: boolean): RiskTier {
 export function readSandboxConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): SandboxConfig {
-  // Phase 1 strict opt-in. Phase 6 will flip to `!== '0'`.
-  const enabled = env.AIDEN_SANDBOX === '1';
+  // v4.4 Phase 6 — default-on transition. AIDEN_SANDBOX is now
+  // enabled by default; users opt out with `AIDEN_SANDBOX=0`.
+  //   unset / '1' / 'true' / junk → enabled
+  //   '0'                          → disabled
+  // Mirrors v4.2 Phase 6 (TCE) + v4.3 Phase 6 (browser depth)
+  // semantics exactly. The strict `!== '0'` check matches the
+  // pattern those phases set: any explicit "off" value disables;
+  // everything else (including unset) enables.
+  const enabled = env.AIDEN_SANDBOX !== '0';
 
   // Allow/deny lists: defaults + user-provided extensions.
   const customAllow = parseList(env.AIDEN_SANDBOX_ALLOW).map(resolveRealPath);

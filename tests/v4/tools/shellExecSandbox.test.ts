@@ -59,23 +59,39 @@ interface ShellResult {
   backend: 'local' | 'docker';
 }
 
-describe('shell_exec — sandbox off (default)', () => {
-  it('uses local backend when AIDEN_SANDBOX is unset', async () => {
-    const r = (await shellExecTool.execute(
-      { command: echoCmd('local-default') },
-      ctx,
-    )) as ShellResult;
-    expect(r.backend).toBe('local');
-    expect(r.stdout).toMatch(/local-default/);
+describe('shell_exec — sandbox opt-out via AIDEN_SANDBOX=0', () => {
+  // v4.4 Phase 6 — sandbox is on by default. Force docker-unavailable
+  // OR explicitly opt out to assert the local-backend path still works.
+  it('uses local backend when AIDEN_SANDBOX=0', async () => {
+    process.env.AIDEN_SANDBOX = '0';
+    _resetSandboxConfigForTests();
+    try {
+      const r = (await shellExecTool.execute(
+        { command: echoCmd('local-default') },
+        ctx,
+      )) as ShellResult;
+      expect(r.backend).toBe('local');
+      expect(r.stdout).toMatch(/local-default/);
+    } finally {
+      delete process.env.AIDEN_SANDBOX;
+      _resetSandboxConfigForTests();
+    }
   });
 
-  it('respects ctx.terminalBackend="local" explicit override', async () => {
-    const ctx2: ToolContext = { ...ctx, terminalBackend: 'local' };
-    const r = (await shellExecTool.execute(
-      { command: echoCmd('explicit-local') },
-      ctx2,
-    )) as ShellResult;
-    expect(r.backend).toBe('local');
+  it('respects ctx.terminalBackend="local" explicit override (sandbox=0)', async () => {
+    process.env.AIDEN_SANDBOX = '0';
+    _resetSandboxConfigForTests();
+    try {
+      const ctx2: ToolContext = { ...ctx, terminalBackend: 'local' };
+      const r = (await shellExecTool.execute(
+        { command: echoCmd('explicit-local') },
+        ctx2,
+      )) as ShellResult;
+      expect(r.backend).toBe('local');
+    } finally {
+      delete process.env.AIDEN_SANDBOX;
+      _resetSandboxConfigForTests();
+    }
   });
 });
 
