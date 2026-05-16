@@ -141,3 +141,78 @@ describe('runTriggerSubcommand — unknown kind', () => {
     expect(e.lines.join('')).toMatch(/file.*or.*webhook/i);
   });
 });
+
+// ── Regression: trigger add must NOT bootstrap the daemon ─────────────────
+//
+// Bug caught in v4.5 Phase 2+3 self-test: cli/v4/aidenCLI.ts main() ran
+// `bootstrapDaemon()` at its top for every subcommand when
+// AIDEN_DAEMON=1, including `trigger add`. That booted the full
+// foundation (instance tracker row, runtime lock, HTTP server, watcher
+// activation) just to write a single DB row before the CLI exited.
+// The next invocation's evaluateBootState then reported "crash recovery
+// applied" because the previous bootstrap exited via process.exit
+// without graceful shutdown.
+//
+// Fix: bootstrap is now invoked only from the default REPL action.
+// This test asserts that running runTriggerSubcommand does NOT write
+// a daemon_instances row.
+describe('runTriggerSubcommand does NOT bootstrap the daemon', () => {
+  it('add file: no daemon_instances row created', async () => {
+    process.env.AIDEN_DAEMON = '1';
+    try {
+      const o = out();
+      const e = out();
+      const code = await runTriggerSubcommand(
+        'add', ['file'],
+        { name: 'nobootwatcher', paths: [aidenHome] },
+        { writeOut: o.write, writeErr: e.write },
+      );
+      expect(code).toBe(0);
+      const db = openDaemonDb(daemonDbPath(aidenHome));
+      const instanceCount = (db.prepare('SELECT COUNT(*) AS c FROM daemon_instances').get() as { c: number }).c;
+      expect(instanceCount).toBe(0);
+      // The trigger row WAS written, of course.
+      const triggerCount = (db.prepare('SELECT COUNT(*) AS c FROM triggers WHERE source=?').get('file') as { c: number }).c;
+      expect(triggerCount).toBe(1);
+    } finally {
+      delete process.env.AIDEN_DAEMON;
+    }
+  });
+
+  it('add webhook: no daemon_instances row created', async () => {
+    process.env.AIDEN_DAEMON = '1';
+    try {
+      const o = out();
+      const e = out();
+      const code = await runTriggerSubcommand(
+        'add', ['webhook'],
+        { name: 'nobootwebhook', hmac: 'generic' },
+        { writeOut: o.write, writeErr: e.write },
+      );
+      expect(code).toBe(0);
+      const db = openDaemonDb(daemonDbPath(aidenHome));
+      const instanceCount = (db.prepare('SELECT COUNT(*) AS c FROM daemon_instances').get() as { c: number }).c;
+      expect(instanceCount).toBe(0);
+    } finally {
+      delete process.env.AIDEN_DAEMON;
+    }
+  });
+
+  it('list: no daemon_instances row created', async () => {
+    process.env.AIDEN_DAEMON = '1';
+    try {
+      const o = out();
+      const e = out();
+      const code = await runTriggerSubcommand(
+        'list', [], {},
+        { writeOut: o.write, writeErr: e.write },
+      );
+      expect(code).toBe(0);
+      const db = openDaemonDb(daemonDbPath(aidenHome));
+      const instanceCount = (db.prepare('SELECT COUNT(*) AS c FROM daemon_instances').get() as { c: number }).c;
+      expect(instanceCount).toBe(0);
+    } finally {
+      delete process.env.AIDEN_DAEMON;
+    }
+  });
+});

@@ -499,8 +499,17 @@ export function createApiServer(): Express {
     }
   }, 5 * 60 * 1000).unref()
 
-  // JSON body parsing (10 MB limit)
-  app.use(express.json({ limit: '10mb' }))
+  // JSON body parsing (10 MB limit) — path-conditional skip for the
+  // v4.5 daemon's webhook routes, which need the RAW body to verify
+  // HMAC signatures. Without this guard, express.json would consume
+  // the request stream before mountWebhookRoutes' inline express.raw
+  // could see it, breaking signature verification (every valid POST
+  // would 401 because we'd HMAC empty bytes).
+  const _jsonParser = express.json({ limit: '10mb' })
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith('/api/triggers/webhook/')) return next()
+    return _jsonParser(req, res, next)
+  })
 
   // Security headers
   app.use((_req: Request, res: Response, next: NextFunction) => {

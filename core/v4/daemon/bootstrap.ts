@@ -212,7 +212,16 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     let ownsHttpServer = false;
     if (!app) {
       app = express();
-      app.use(express.json({ limit: '1mb' }));
+      // NOTE: deliberately DO NOT install express.json() globally.
+      // The daemon-only routes mounted below are:
+      //   - GET /health/{live,ready,degraded}   — no body
+      //   - GET /metrics                        — no body
+      //   - GET /api/daemon/{status,resources}  — no body
+      //   - POST /api/triggers/webhook/:id      — requires RAW body
+      //                                            (express.raw inline)
+      // If a global json parser were registered here, it would
+      // consume the webhook body BEFORE the route's express.raw
+      // could see it, making HMAC verification always fail.
       ownsHttpServer = true;
     }
     mountHealthEndpoints(app, {

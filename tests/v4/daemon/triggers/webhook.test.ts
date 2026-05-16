@@ -331,3 +331,116 @@ describe('assertSafeBind', () => {
     })).not.toThrow();
   });
 });
+
+// ── Regression: express.json upstream must not consume the body ────────────
+//
+// Bug caught in v4.5 Phase 2+3 self-test: bootstrap.ts (CLI path) +
+// api/server.ts (HTTP API path) both registered `app.use(express.json(...))`
+// as global middleware BEFORE mountWebhookRoutes installed its route-
+// specific express.raw parser. Express runs middleware in registration
+// order per-request, so json() consumed the body before the route's raw
+// parser could see it — every valid HMAC signed POST 401'd because we
+// computed HMAC over empty bytes.
+//
+// Fix in bootstrap.ts: don't register a global json parser at all.
+// Fix in api/server.ts: wrap the global json with a path-conditional
+// skip for /api/triggers/webhook/*.
+//
+// This test pins the behavior so future refactors can't reintroduce
+// the bug. We deliberately mount express.json BEFORE mountWebhookRoutes
+// (the broken setup) — if the webhook handler can no longer verify a
+// valid HMAC with that setup, the path-conditional skip must be applied
+// by the caller. The fix lives in mountWebhookRoutes-as-helper-only:
+// the caller's job is to NOT install a json parser upstream OR to
+// install one that skips webhook paths.
+describe('regression: express.json upstream must not break HMAC verification', () => {
+  it('with a path-conditional json skipper installed, valid HMAC still 202s', async () => {
+    // Rebuild the app with a path-skipping global json parser, mirroring
+    // the api/server.ts fix.
+    const localDb = new Database(':memory:');
+    localDb.pragma('foreign_keys = ON');
+    runMigrations(localDb);
+    _resetResourceRegistryForTests();
+    const localApp = express();
+    const jsonParser = express.json({ limit: '10mb' });
+    localApp.use((req, res, next) => {
+      if (req.path.startsWith('/api/triggers/webhook/')) return next();
+      return jsonParser(req, res, next);
+    });
+    const localBus    = createTriggerBus({ db: localDb });
+    const localIdem   = createIdempotencyStore({ db: localDb, sweepIntervalMs: 0 });
+    const localReg    = createResourceRegistry();
+    mountWebhookRoutes({
+      app: localApp, db: localDb,
+      triggerBus: localBus, idempotencyStore: localIdem,
+      resourceRegistry: localReg,
+    });
+    localDb.prepare(
+      `INSERT INTO triggers (id, source, name, spec_json, enabled, created_at, updated_at)
+       VALUES ('w', 'webhook', 'w', ?, 1, ?, ?)`,
+    ).run(
+      JSON.stringify({
+        name: 'w', secret: SECRET, hmacFormat: 'generic',
+        rateLimit: { perMinute: 30 }, maxBodyBytes: 1_048_576,
+        idempotencyTtlMs: 3_600_000, deliverOnly: false, publicBound: false,
+      }),
+      Date.now(), Date.now(),
+    );
+    const body = JSON.stringify({ ok: 1 });
+    const sig = hmacHex(SECRET, body);
+    const res = await request(localApp)
+      .post('/api/triggers/webhook/w')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', sig)
+      .set('X-Request-Id', 'rcheck-1')
+      .send(body);
+    expect(res.status).toBe(202);
+    expect(res.body.status).toBe('accepted');
+    localIdem.close();
+    try { localDb.close(); } catch { /* noop */ }
+  });
+
+  it('without the skipper (raw express.json globally), valid HMAC fails', async () => {
+    // This documents the BUG case — express.json eats the body before
+    // express.raw can see it, so HMAC computation is over empty bytes.
+    // We pin this in a test so anyone removing the path-conditional
+    // skip will see this test fail and remember why it was added.
+    const localDb = new Database(':memory:');
+    localDb.pragma('foreign_keys = ON');
+    runMigrations(localDb);
+    _resetResourceRegistryForTests();
+    const localApp = express();
+    localApp.use(express.json({ limit: '1mb' }));
+    const localBus    = createTriggerBus({ db: localDb });
+    const localIdem   = createIdempotencyStore({ db: localDb, sweepIntervalMs: 0 });
+    const localReg    = createResourceRegistry();
+    mountWebhookRoutes({
+      app: localApp, db: localDb,
+      triggerBus: localBus, idempotencyStore: localIdem,
+      resourceRegistry: localReg,
+    });
+    localDb.prepare(
+      `INSERT INTO triggers (id, source, name, spec_json, enabled, created_at, updated_at)
+       VALUES ('w', 'webhook', 'w', ?, 1, ?, ?)`,
+    ).run(
+      JSON.stringify({
+        name: 'w', secret: SECRET, hmacFormat: 'generic',
+        rateLimit: { perMinute: 30 }, maxBodyBytes: 1_048_576,
+        idempotencyTtlMs: 3_600_000, deliverOnly: false, publicBound: false,
+      }),
+      Date.now(), Date.now(),
+    );
+    const body = JSON.stringify({ ok: 1 });
+    const sig = hmacHex(SECRET, body);
+    const res = await request(localApp)
+      .post('/api/triggers/webhook/w')
+      .set('Content-Type', 'application/json')
+      .set('X-Webhook-Signature', sig)
+      .send(body);
+    // With the bug, this returns 401 — proving the global json parser
+    // consumed the body.
+    expect(res.status).toBe(401);
+    localIdem.close();
+    try { localDb.close(); } catch { /* noop */ }
+  });
+});

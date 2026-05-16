@@ -249,30 +249,23 @@ function collectArray(value: string, previous: string[] | undefined): string[] {
 }
 
 export async function main(argv: string[], opts: MainOptions = {}): Promise<number> {
-  // v4.5 Phase 1 — daemon foundation bootstrap. Gated by AIDEN_DAEMON=1;
-  // a NOOP when unset/=0. Idempotent — calling from both api/server.ts
-  // and here is safe (singleton guard). Wires:
-  //   - SQLite daemon.db (WAL) under ~/.aiden/daemon/
-  //   - race-safe runtime lock
-  //   - instance tracker + heartbeat
-  //   - crash recovery (boot-state evaluator)
-  //   - /health/{live,ready,degraded}, /metrics, /api/daemon/{status,resources}
-  //     on a minimal HTTP server on port AIDEN_DAEMON_PORT (default 4200)
-  //   - SIGTERM/SIGINT/SIGUSR1 → 5-step ordered drain
-  // The REPL still runs as before when AIDEN_DAEMON is unset/=0.
-  try {
-    // Lazy-import so the daemon module's side-effect cost stays at
-    // zero when AIDEN_DAEMON is off (better-sqlite3 native binding,
-    // express server, etc. all stay unloaded in CLI-only mode).
-    if (process.env.AIDEN_DAEMON === '1') {
-      const { bootstrapDaemon } = await import('../../core/v4/daemon/bootstrap');
-      bootstrapDaemon();
-    }
-  } catch (e) {
-    // Fail-loud but non-fatal — daemon foundation init failure must
-    // not block the user from opening a REPL.
-    console.error('[daemon] bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
-  }
+  // v4.5 Phase 1 — daemon foundation bootstrap is deferred until the
+  // REPL action handler fires (see the default `.action()` below).
+  // Subcommands like `trigger add`, `trigger list`, `config get`,
+  // `--version`, `--help`, `doctor`, etc. do NOT need the daemon
+  // foundation. Booting it for every CLI invocation:
+  //   1. Wastes work (HTTP server up + tear down for a one-shot
+  //      DB-write subcommand).
+  //   2. Creates phantom "crash recovery" warnings: the daemon-
+  //      foundation install/teardown cycle for each subcommand
+  //      doesn't shut down gracefully (process.exit happens after
+  //      the action), so the NEXT invocation's evaluateBootState
+  //      sees a stale daemon_instances row with a missed heartbeat
+  //      and writes a crash_reports row.
+  //   3. Adds latency on cold paths (CLI feels slow when AIDEN_DAEMON=1).
+  // The interactive REPL action calls `bootstrapDaemon()` explicitly,
+  // which is the only entry point that genuinely benefits from the
+  // foundation (long-running session = useful daemon).
   const program = new Command();
 
   program
@@ -311,6 +304,24 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         process.stderr.write(`error: unknown command "${leftover[0]}"\n`);
         process.stderr.write(`Run 'aiden --help' for available commands.\n`);
         process.exit(2);
+      }
+
+      // v4.5 Phase 1 — daemon foundation bootstrap. Lazy-imported so
+      // the daemon module's side-effect cost stays at zero when
+      // AIDEN_DAEMON is off (better-sqlite3 native binding, chokidar,
+      // express, etc. all stay unloaded). Only fires for the REPL
+      // path — subcommands (trigger add/list/show/remove/enable/
+      // disable/test, config, --version, --help, doctor, …) do NOT
+      // touch the daemon foundation.
+      try {
+        if (process.env.AIDEN_DAEMON === '1') {
+          const { bootstrapDaemon } = await import('../../core/v4/daemon/bootstrap');
+          bootstrapDaemon();
+        }
+      } catch (e) {
+        // Fail-loud but non-fatal — daemon foundation init failure
+        // must not block the user from opening a REPL.
+        console.error('[daemon] bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
       }
 
       // Tier-3.1: surface --no-ui as an env var so downstream modules
