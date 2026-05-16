@@ -508,6 +508,18 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       process.exit(code);
     });
 
+  // v4.5 Phase 4b — daemon supervisor commands.
+  program
+    .command('daemon <action> [args...]')
+    .description('Manage the v4.5 daemon. Actions: install, uninstall, start, stop, restart, status, logs.')
+    .action(async (action: string, posArgs: string[] | undefined) => {
+      const { runDaemonSubcommand } = await import('./commands/daemon');
+      const code = await runDaemonSubcommand(action, posArgs ?? [], {
+        writeOut: opts.writeOut,
+      });
+      process.exit(code);
+    });
+
   program
     .command('mcp <action>')
     .description(
