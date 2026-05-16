@@ -58,6 +58,14 @@ export interface ToolContext {
   cwd: string;
   /** Aiden user-data paths. Sessions, memory, skills, logs all live here. */
   paths: AidenPaths;
+  /**
+   * v4.4 Phase 3 — opaque session identifier used by the docker
+   * sandbox to cache one long-lived container per session and reuse
+   * it across tool calls. When unset, falls back to the literal
+   * `'default'` (single container per process — fine for CLI one-offs
+   * and tests). The agent populates this from its own session id.
+   */
+  sessionId?: string;
   /** Session manager for the `session_search` / `session_list` tools. */
   sessions?: SessionManager;
   /** Memory manager — currently unused (memory loads via prompt snapshot)

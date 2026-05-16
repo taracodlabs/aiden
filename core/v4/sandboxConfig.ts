@@ -112,6 +112,13 @@ export interface SandboxConfig {
    * background async sweep tears it down. Default 5 minutes.
    */
   idleReaperMs: number;
+  /**
+   * Phase 3 — Docker image used for the long-lived sandbox container.
+   * Default `node:22-alpine` (small, fast pull, covers Aiden's main
+   * workflows). Override via `AIDEN_SANDBOX_IMAGE` for Python-heavy
+   * or polyglot workflows (e.g. `python:3.12-slim`, `debian:stable-slim`).
+   */
+  image: string;
 
   // ── Phase 4 — dry-run mode ─────────────────────────────────────────────
 
@@ -134,6 +141,7 @@ const DEFAULT_RESOURCE_LIMITS: SandboxResourceLimits = {
 };
 
 const DEFAULT_IDLE_REAPER_MS = 5 * 60 * 1000;   // 5 minutes
+const DEFAULT_IMAGE          = 'node:22-alpine';
 
 /**
  * v4.4 Phase 2 — default write-permitted paths. Real-resolved at
@@ -303,6 +311,10 @@ export function readSandboxConfig(
   const persistent   = env.AIDEN_SANDBOX_PERSISTENT !== '0';  // default true
   const idleReaperMs = parseIntSafe(env.AIDEN_SANDBOX_IDLE_MS, DEFAULT_IDLE_REAPER_MS);
   const dryRun       = env.AIDEN_DRYRUN === '1';
+  const image        =
+    typeof env.AIDEN_SANDBOX_IMAGE === 'string' && env.AIDEN_SANDBOX_IMAGE.trim().length > 0
+      ? env.AIDEN_SANDBOX_IMAGE.trim()
+      : DEFAULT_IMAGE;
 
   // Phase 3 will route to 'docker' when enabled AND docker is
   // available. Phase 1 reports the abstract default — Phase 3's
@@ -319,6 +331,7 @@ export function readSandboxConfig(
     networkMode,
     idleReaperMs,
     dryRun,
+    image,
   };
 }
 

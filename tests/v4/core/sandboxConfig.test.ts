@@ -188,6 +188,27 @@ describe('AIDEN_DRYRUN — orthogonal to AIDEN_SANDBOX', () => {
   });
 });
 
+describe('AIDEN_SANDBOX_IMAGE — Phase 3 image override', () => {
+  it('unset: defaults to node:22-alpine', () => {
+    expect(readSandboxConfig(envWith({})).image).toBe('node:22-alpine');
+  });
+
+  it('set: pass-through trimmed', () => {
+    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX_IMAGE: '  python:3.12-slim ' })).image)
+      .toBe('python:3.12-slim');
+  });
+
+  it('empty string: falls back to default', () => {
+    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX_IMAGE: '' })).image)
+      .toBe('node:22-alpine');
+  });
+
+  it('whitespace-only: falls back to default', () => {
+    expect(readSandboxConfig(envWith({ AIDEN_SANDBOX_IMAGE: '   ' })).image)
+      .toBe('node:22-alpine');
+  });
+});
+
 describe('inferDefaultRiskTier', () => {
   it('mutates=true → caution', () => {
     expect(inferDefaultRiskTier(true)).toBe('caution');

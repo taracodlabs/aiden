@@ -7,17 +7,36 @@
 /**
  * tools/v4/terminal/shellExec.ts — `shell_exec` wrapper.
  *
- * Routes a shell command to either the local backend (PowerShell on
- * Windows, bash on POSIX) or the Docker backend, based on
- * `ctx.terminalBackend`. Phase 8 has no shell-injection guards —
- * Phase 9's approval engine inspects every call before it lands here.
+ * Routes a shell command to one of three backends:
+ *   - local backend  (status quo: PowerShell on Windows, bash on POSIX)
+ *   - docker single-shot backend (status quo for explicit
+ *     `ctx.terminalBackend='docker'` with AIDEN_SANDBOX=0)
+ *   - docker session backend (v4.4 Phase 3: long-lived container reuse
+ *     with hardening + resource limits when AIDEN_SANDBOX=1)
  *
- * Status: PHASE 8.
+ * Backend selection precedence:
+ *   1. Per-call override `ctx.terminalBackend` wins. When that's
+ *      `'docker'` AND AIDEN_SANDBOX is enabled, the session-backed
+ *      `dockerSessionExec` is used (reuse + hardening). When
+ *      `'docker'` AND AIDEN_SANDBOX is disabled, the legacy
+ *      single-shot `dockerBackendExecute` runs (tests rely on this).
+ *   2. No override + AIDEN_SANDBOX=1 → docker session backend.
+ *   3. No override + AIDEN_SANDBOX=0 → local (current behavior).
+ *
+ * Phase 9's approval engine still gates this tool the same way. The
+ * tool stays `riskTier: 'dangerous'` — sandbox isolation does not
+ * promote a shell command's tier; it only constrains the blast radius.
+ *
+ * Status: PHASE 8 → v4.4 Phase 3.
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { localBackendExecute } from '../backends/local';
 import { dockerBackendExecute } from '../backends/docker';
+import {
+  dockerSessionExec,
+} from '../../../core/v4/dockerSession';
+import { getSandboxConfig } from '../../../core/v4/sandboxConfig';
 
 export const shellExecTool: ToolHandler = {
   schema: {
@@ -61,11 +80,38 @@ export const shellExecTool: ToolHandler = {
     };
 
     const cb = ctx.log ? { log: ctx.log } : {};
-    const backend = ctx.terminalBackend ?? 'local';
-    const result =
-      backend === 'docker'
-        ? await dockerBackendExecute(shellArgs, { image: ctx.dockerImage }, cb)
-        : await localBackendExecute(shellArgs, cb);
+
+    // v4.4 Phase 3 — effective backend selection.
+    const config       = getSandboxConfig();
+    const userOverride = ctx.terminalBackend;
+    const effective: 'local' | 'docker' =
+      userOverride ?? (config.enabled ? config.defaultBackend : 'local');
+
+    let result;
+    if (effective === 'docker') {
+      if (config.enabled) {
+        // Long-lived session container + hardening flags.
+        result = await dockerSessionExec(
+          {
+            ...shellArgs,
+            sessionId: ctx.sessionId,
+            image:     ctx.dockerImage,
+          },
+          cb,
+        );
+      } else {
+        // Status-quo single-shot docker path (AIDEN_SANDBOX=0 +
+        // explicit ctx.terminalBackend='docker'). No reuse, no
+        // hardening — kept for backward compatibility.
+        result = await dockerBackendExecute(
+          shellArgs,
+          { image: ctx.dockerImage },
+          cb,
+        );
+      }
+    } else {
+      result = await localBackendExecute(shellArgs, cb);
+    }
 
     return {
       success: result.exitCode === 0,
