@@ -131,6 +131,34 @@ export interface RecoveryReport {
     /** Auto-derived env-var override suggestion. */
     suggestedEnv?:   string;
   };
+  /**
+   * v4.5 Phase 5a — trigger-specific context. Populated by the
+   * daemon dispatcher when this run was fired from the durable
+   * trigger bus (vs an interactive CLI/REPL session). Surfaced
+   * into the recovery card as a muted "Trigger:" line so the
+   * operator sees which trigger fired this run + attempt count.
+   *
+   * Absent for interactive runs (sessionId not built by
+   * `buildTriggerSessionId`).
+   */
+  triggerContext?: {
+    /** Trigger spec id (FK to `triggers.id`). */
+    triggerId:          string;
+    /** Source type (file / webhook / email / schedule / manual). */
+    source:             string;
+    /** Per-source key (watcherUuid / routeId / triggerUuid / jobId). */
+    sourceKey:          string;
+    /** Human-readable fire reason from the payload. */
+    fireReason:         string;
+    /** Originating `trigger_events.id`. */
+    eventId:            number;
+    /** Current attempt index (1-based). */
+    attempt:            number;
+    /** Configured max-attempts ceiling for this trigger bus. */
+    maxAttempts:        number;
+    /** Whether a prompt template was used to build the initial message. */
+    promptTemplateUsed: boolean;
+  };
 }
 
 /**
@@ -216,6 +244,12 @@ const GUIDANCE_BY_CATEGORY: Record<FailureCategory, string> = {
     'The site requires a human action (login, 2FA, captcha, or verification). Surface this to the user and wait — do not retry automatically.',
   sandbox_violation:
     'Aiden\'s execution sandbox refused this operation. Surface the matched policy to the user and either widen the allowlist via AIDEN_SANDBOX_ALLOW=path1:path2 or disable the sandbox with AIDEN_SANDBOX=0 (not recommended). Denylist matches cannot be overridden — they signal sensitive paths the user explicitly wants protected.',
+  trigger_misconfigured:
+    'The trigger spec is invalid or its prompt template references variables the payload does not supply. Inspect the trigger via `aiden trigger list` and fix the spec — retrying without changes will produce the same failure.',
+  trigger_quota:
+    'The trigger\'s per-source fire-rate cap was hit. Investigate the upstream producer (file watcher loop, runaway webhook caller, mis-scheduled cron) or raise the fire_rate_limit on the trigger spec.',
+  trigger_dead_lettered:
+    'The trigger event exceeded its retry budget and moved to the dead-letter queue. Review the last_error on the trigger event row and either fix the root cause + re-queue, or accept the event as lost.',
   other:
     'The tool failed for an unclassified reason. Inspect the trace for details before retrying.',
 };
@@ -240,6 +274,12 @@ export interface BuildRecoveryReportInput {
    * observer has no tabs (opt-out via AIDEN_BROWSER_DEPTH=0).
    */
   browserState?: BrowserStateLike;
+  /**
+   * v4.5 Phase 5a — trigger invocation context. Populated by the
+   * daemon dispatcher when this run was fired from the trigger
+   * bus. Absent for interactive CLI/REPL runs (zero-overhead).
+   */
+  triggerContext?: NonNullable<RecoveryReport['triggerContext']>;
 }
 
 /**
@@ -317,6 +357,12 @@ export function buildRecoveryReport(
   // re-parse tool results here.
   const sandboxContext = buildSandboxContext(snapshot);
 
+  // ── v4.5 Phase 5a — triggerContext passthrough ─────────────────────────
+  // The dispatcher hands the context in directly; this module just
+  // attaches it to the report shape without re-deriving fields. Keeps
+  // the report module decoupled from the daemon dispatcher.
+  const triggerContext = input.triggerContext;
+
   return {
     goal,
     exitReason,
@@ -329,6 +375,7 @@ export function buildRecoveryReport(
     guidance,
     ...(browserContext ? { browserContext } : {}),
     ...(sandboxContext ? { sandboxContext } : {}),
+    ...(triggerContext ? { triggerContext } : {}),
   };
 }
 
@@ -431,10 +478,13 @@ function synthesizeGuidance(
   const PRIORITY: ReadonlyArray<FailureCategory> = [
     'timeout', 'rate_limit', 'network', 'invalid_input',
     'not_found',
-    'stale_ref',          // v4.3 Phase 5 — auto-recoverable via wait+retry
+    'stale_ref',             // v4.3 Phase 5 — auto-recoverable via wait+retry
     'hallucination', 'dependency_missing',
-    'manual_blocker',     // v4.3 Phase 5 — requires human action; semi-blocking
-    'sandbox_violation',  // v4.4 Phase 5 — env-var override is the specific user action
+    'manual_blocker',        // v4.3 Phase 5 — requires human action; semi-blocking
+    'sandbox_violation',     // v4.4 Phase 5 — env-var override is the specific user action
+    'trigger_misconfigured', // v4.5 Phase 5a — trigger spec fix required
+    'trigger_quota',         // v4.5 Phase 5a — anti-thrash, producer/cap fix
+    'trigger_dead_lettered', // v4.5 Phase 5a — terminal; re-queue or accept loss
     'permission', 'auth', 'other',
   ];
   const rank = (c: FailureCategory): number => {
@@ -487,6 +537,13 @@ export function enrichCardWithReport(
   const sandboxContext = report.sandboxContext
     ? buildSandboxContextLine(report.sandboxContext)
     : undefined;
+  // v4.5 Phase 5a — trigger-context inline row. Present when the
+  // run was fired from the daemon trigger bus. Surfaces below
+  // browser/sandbox lines so the operator sees the trigger
+  // identity + attempt count at-a-glance.
+  const triggerContext = report.triggerContext
+    ? buildTriggerContextLine(report.triggerContext)
+    : undefined;
   return {
     title:           base.title,
     canStill:        base.canStill,
@@ -496,7 +553,28 @@ export function enrichCardWithReport(
     failuresByCategory,
     ...(browserContext ? { browserContext } : {}),
     ...(sandboxContext ? { sandboxContext } : {}),
+    ...(triggerContext ? { triggerContext } : {}),
   };
+}
+
+/**
+ * v4.5 Phase 5a — format the triggerContext fields into a compact
+ * single-line summary for the recovery card. Mirrors
+ * `buildBrowserContextLine` / `buildSandboxContextLine` shape.
+ * Returns empty string only when no signal worth surfacing
+ * (defensive — the dispatcher always sets the core fields).
+ */
+function buildTriggerContextLine(
+  ctx: NonNullable<RecoveryReport['triggerContext']>,
+): string {
+  const parts: string[] = [];
+  parts.push(`${ctx.source}/${ctx.triggerId}`);
+  parts.push(`attempt ${ctx.attempt}/${ctx.maxAttempts}`);
+  if (ctx.promptTemplateUsed) parts.push('templated');
+  if (ctx.fireReason && ctx.fireReason !== 'trigger_fired') {
+    parts.push(`reason=${ctx.fireReason}`);
+  }
+  return parts.length > 0 ? `Trigger: ${parts.join(' · ')}` : '';
 }
 
 /**
@@ -567,10 +645,13 @@ function buildFailuresPills(
   const PRIORITY: ReadonlyArray<FailureCategory> = [
     'timeout', 'rate_limit', 'network', 'invalid_input',
     'not_found',
-    'stale_ref',          // v4.3 Phase 5 — auto-recoverable via wait+retry
+    'stale_ref',             // v4.3 Phase 5 — auto-recoverable via wait+retry
     'hallucination', 'dependency_missing',
-    'manual_blocker',     // v4.3 Phase 5 — requires human action; semi-blocking
-    'sandbox_violation',  // v4.4 Phase 5 — env-var override is the specific user action
+    'manual_blocker',        // v4.3 Phase 5 — requires human action; semi-blocking
+    'sandbox_violation',     // v4.4 Phase 5 — env-var override is the specific user action
+    'trigger_misconfigured', // v4.5 Phase 5a — trigger spec fix required
+    'trigger_quota',         // v4.5 Phase 5a — anti-thrash, producer/cap fix
+    'trigger_dead_lettered', // v4.5 Phase 5a — terminal; re-queue or accept loss
     'permission', 'auth', 'other',
   ];
   const rank = (c: FailureCategory): number => {

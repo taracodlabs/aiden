@@ -537,3 +537,59 @@ describe('buildDefaultClassifier — Phase 5 registrations', () => {
     expect(c?.category).toBe('sandbox_violation');
   });
 });
+
+// ── v4.5 Phase 5a — trigger dispatcher classifier ──────────────────────────
+
+describe('triggerDispatcherClassifier — 3 trigger-failure categories', () => {
+  it('trigger_misconfigured: tag in verification.reason', async () => {
+    const { triggerDispatcherClassifier, DAEMON_DISPATCHER_TOOL_NAME } =
+      await import('../../../core/v4/failureClassifier');
+    const c = triggerDispatcherClassifier(
+      mkFailed('trigger_misconfigured: template references undefined vars: foo'),
+      DAEMON_DISPATCHER_TOOL_NAME, {}, mkResult(),
+    );
+    expect(c.category).toBe('trigger_misconfigured');
+    expect(c.recoverable).toBe(false);
+    expect(c.recoveryHint?.action).toBe('request_user_action');
+  });
+
+  it('trigger_quota: tag in result.error', async () => {
+    const { triggerDispatcherClassifier, DAEMON_DISPATCHER_TOOL_NAME } =
+      await import('../../../core/v4/failureClassifier');
+    const c = triggerDispatcherClassifier(
+      mkFailed('cap hit'),
+      DAEMON_DISPATCHER_TOOL_NAME, {},
+      mkResult({ error: 'trigger_quota: per-trigger cap exceeded' }),
+    );
+    expect(c.category).toBe('trigger_quota');
+    expect(c.recoverable).toBe(false);
+  });
+
+  it('trigger_dead_lettered: tag substring match', async () => {
+    const { triggerDispatcherClassifier, DAEMON_DISPATCHER_TOOL_NAME } =
+      await import('../../../core/v4/failureClassifier');
+    const c = triggerDispatcherClassifier(
+      mkFailed('event moved trigger_dead_lettered after 3 attempts'),
+      DAEMON_DISPATCHER_TOOL_NAME, {}, mkResult(),
+    );
+    expect(c.category).toBe('trigger_dead_lettered');
+    expect(c.recoverable).toBe(false);
+  });
+
+  it('falls through to defaultClassifier when no trigger tag present', async () => {
+    const { triggerDispatcherClassifier, DAEMON_DISPATCHER_TOOL_NAME } =
+      await import('../../../core/v4/failureClassifier');
+    const c = triggerDispatcherClassifier(
+      mkFailed('Operation timed out'),
+      DAEMON_DISPATCHER_TOOL_NAME, {}, mkResult(),
+    );
+    expect(c.category).toBe('timeout');
+  });
+
+  it('buildDefaultClassifier registers the synthetic dispatcher tool', async () => {
+    const { buildDefaultClassifier: build, DAEMON_DISPATCHER_TOOL_NAME } =
+      await import('../../../core/v4/failureClassifier');
+    const reg = build();
+    expect(reg.hasOverride(DAEMON_DISPATCHER_TOOL_NAME)).toBe(true);
+  });
+});

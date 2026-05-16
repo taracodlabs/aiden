@@ -151,6 +151,15 @@ export interface CapabilityCardData {
    * AIDEN_SANDBOX is off OR when no sandbox violation occurred this turn.
    */
   sandboxContext?: string;
+  /**
+   * v4.5 Phase 5a — optional one-line trigger context summary. Populated
+   * by `enrichCardWithReport` from a RecoveryReport's `triggerContext`
+   * field (trigger id + source, attempt counter, fire reason, whether
+   * a prompt template was used). Renderer prints as a muted "Trigger:"
+   * line right below `sandboxContext`; absent for interactive CLI/REPL
+   * runs (zero overhead).
+   */
+  triggerContext?: string;
 }
 
 export interface ToolCallResult {

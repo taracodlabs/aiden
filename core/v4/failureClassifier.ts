@@ -81,9 +81,12 @@ export type FailureCategory =
   | 'invalid_input'
   | 'dependency_missing'
   | 'not_found'
-  | 'stale_ref'         // v4.3 Phase 5 — DOM changed between snapshot+action; Phase 2 already retried unsuccessfully
-  | 'manual_blocker'    // v4.3 Phase 5 — login/2FA/captcha/verification/consent (Phase 3); needs human action
-  | 'sandbox_violation' // v4.4 Phase 5 — Phase 2 fs.* policy refusal OR Phase 3 docker-start failure; not retryable, needs env-var override
+  | 'stale_ref'              // v4.3 Phase 5 — DOM changed between snapshot+action; Phase 2 already retried unsuccessfully
+  | 'manual_blocker'         // v4.3 Phase 5 — login/2FA/captcha/verification/consent (Phase 3); needs human action
+  | 'sandbox_violation'      // v4.4 Phase 5 — Phase 2 fs.* policy refusal OR Phase 3 docker-start failure; not retryable, needs env-var override
+  | 'trigger_misconfigured'  // v4.5 Phase 5a — trigger spec invalid (prompt template missing vars, payload incomplete)
+  | 'trigger_quota'          // v4.5 Phase 5a — per-trigger fire-rate cap exceeded (producer-side anti-thrash)
+  | 'trigger_dead_lettered'  // v4.5 Phase 5a — max retries exhausted; trigger event moved to dead_letter queue
   | 'other';
 
 /** Output of `classify(...)`. */
@@ -832,6 +835,86 @@ export const fileReadClassifierWithSandbox: ClassifierFn = (verification, toolNa
   return fileReadClassifier(verification, toolName, args, result);
 };
 
+// ── v4.5 Phase 5a — trigger-dispatcher classifier ──────────────────────────
+
+/**
+ * Synthetic "tool name" the daemon dispatcher uses when a turn
+ * failed for a daemon-trigger-specific reason (template missing
+ * vars, fire-rate cap exceeded, max retries exhausted). The
+ * dispatcher constructs a `ToolCallResult` envelope with this
+ * name + a reason string in `error`; the classifier inspects the
+ * substring tag to pick the right category.
+ *
+ * Tags are emitted by `core/v4/daemon/dispatcher/dispatcher.ts`
+ * and `triggerBus.markFailed` / `deadLetter` flows.
+ */
+export const DAEMON_DISPATCHER_TOOL_NAME = 'daemon:dispatcher';
+
+const TRIGGER_MISCONFIGURED_TAG = 'trigger_misconfigured';
+const TRIGGER_QUOTA_TAG         = 'trigger_quota';
+const TRIGGER_DEAD_LETTERED_TAG = 'trigger_dead_lettered';
+
+/**
+ * Classifier for the synthetic `daemon:dispatcher` tool. Reads the
+ * envelope's `error` / verification reason for one of the three
+ * trigger-failure tags and returns the matching category. Falls
+ * through to `defaultClassifier` if no tag matched (defensive —
+ * the dispatcher always sets one).
+ *
+ * Recovery hints:
+ *   - trigger_misconfigured  → request_user_action (fix spec)
+ *   - trigger_quota          → request_user_action (raise cap or fix producer)
+ *   - trigger_dead_lettered  → request_user_action (inspect last_error, reset event)
+ */
+export const triggerDispatcherClassifier: ClassifierFn = (verification, toolName, args, result) => {
+  const hay = (
+    (verification.reason ?? '') + ' ' +
+    (result.error ?? '') + ' ' +
+    (typeof result.result === 'string' ? result.result : '')
+  ).toLowerCase();
+
+  if (hay.includes(TRIGGER_MISCONFIGURED_TAG)) {
+    return {
+      category:    'trigger_misconfigured',
+      confidence:  0.95,
+      reason:      'trigger spec invalid or template variables missing',
+      recoverable: false,
+      recoveryHint: {
+        action: 'request_user_action',
+        detail: 'inspect the trigger spec and ensure all template variables are populated by the payload',
+      },
+      matchedPattern: TRIGGER_MISCONFIGURED_TAG,
+    };
+  }
+  if (hay.includes(TRIGGER_QUOTA_TAG)) {
+    return {
+      category:    'trigger_quota',
+      confidence:  0.95,
+      reason:      'per-trigger fire-rate cap exceeded',
+      recoverable: false,
+      recoveryHint: {
+        action: 'request_user_action',
+        detail: 'investigate the upstream producer or raise the trigger\'s fire-rate limit',
+      },
+      matchedPattern: TRIGGER_QUOTA_TAG,
+    };
+  }
+  if (hay.includes(TRIGGER_DEAD_LETTERED_TAG)) {
+    return {
+      category:    'trigger_dead_lettered',
+      confidence:  0.95,
+      reason:      'trigger event exhausted max retries and moved to dead letter',
+      recoverable: false,
+      recoveryHint: {
+        action: 'request_user_action',
+        detail: 'review the last_error on the dead-lettered trigger event and re-queue if appropriate',
+      },
+      matchedPattern: TRIGGER_DEAD_LETTERED_TAG,
+    };
+  }
+  return defaultClassifier(verification, toolName, args, result);
+};
+
 // ── Factory ────────────────────────────────────────────────────────────────
 
 export function buildDefaultClassifier(): FailureClassifier {
@@ -864,5 +947,8 @@ export function buildDefaultClassifier(): FailureClassifier {
   reg.register('browser_type',     browserInteractiveClassifier);
   reg.register('browser_fill',     browserInteractiveClassifier);
   reg.register('browser_navigate', browserNavigateClassifier);
+  // v4.5 Phase 5a — daemon dispatcher synthetic "tool" routes the
+  // three trigger-specific failure categories.
+  reg.register(DAEMON_DISPATCHER_TOOL_NAME, triggerDispatcherClassifier);
   return reg;
 }

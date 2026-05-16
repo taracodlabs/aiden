@@ -117,13 +117,18 @@ export interface HonestyTraceEntry {
   classification?: {
     // v4.3 Phase 5 added 'stale_ref' + 'manual_blocker'.
     // v4.4 Phase 5 added 'sandbox_violation'.
+    // v4.5 Phase 5a added 'trigger_misconfigured' + 'trigger_quota'
+    //                 + 'trigger_dead_lettered'.
     // Mirror stays in lockstep with `FailureCategory` in
     // core/v4/failureClassifier.ts.
     category:    'timeout' | 'auth' | 'hallucination' | 'network'
                | 'permission' | 'rate_limit' | 'invalid_input'
                | 'dependency_missing' | 'not_found'
                | 'stale_ref' | 'manual_blocker'
-               | 'sandbox_violation' | 'other';
+               | 'sandbox_violation'
+               | 'trigger_misconfigured' | 'trigger_quota'
+               | 'trigger_dead_lettered'
+               | 'other';
     confidence:  number;
     reason?:     string;
     recoverable: boolean;

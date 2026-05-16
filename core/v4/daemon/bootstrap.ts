@@ -71,6 +71,12 @@ import { createEmailTrigger } from './triggers/email';
 import type { EmailTriggerHandle } from './triggers/email';
 import { parseEmailSpec } from './triggers/email/emailSpec';
 import { createEmailSeenStore } from './triggers/email/emailSeenStore';
+// v4.5 Phase 5a — trigger dispatcher.
+import {
+  createDispatcher,
+  makeRunner,
+} from './dispatcher';
+import type { Dispatcher, DaemonAgentRunner, DaemonAgentResult } from './dispatcher';
 import { pwClose } from '../../playwrightBridge';
 import { VERSION } from '../../version';
 
@@ -100,6 +106,8 @@ export interface DaemonBootstrapHandle {
   webhookRoutes:     MountedWebhookRoutes | null;
   /** v4.5 Phase 4a — active email trigger handles. */
   emailTriggers:     ReadonlyArray<EmailTriggerHandle>;
+  /** v4.5 Phase 5a — trigger bus dispatcher (null when daemon disabled). */
+  dispatcher:        Dispatcher | null;
 }
 
 const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
@@ -119,6 +127,7 @@ const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
   fileWatchers:          Object.freeze([] as FileWatcherHandle[]),
   webhookRoutes:         null,
   emailTriggers:         Object.freeze([] as EmailTriggerHandle[]),
+  dispatcher:            null,
 });
 
 // Process-wide singleton — the second call returns the same handle.
@@ -311,14 +320,26 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       notifySessions:    async () => { /* CLI path has no distillAllActiveSessions; api/server.ts path passes its own context */ },
       activeRuns:        () => runStore.listActive().map((r) => r.id),
       markResumePending: (runId: number, reason: string) => runStore.markResumePending(runId, reason),
-      interruptRun:      async () => { /* Phase 5 wires this */ },
-      killToolSubprocesses: async () => { /* Phase 5 wires this */ },
+      interruptRun:      async () => {
+        // v4.5 Phase 5a — the dispatcher's runner is the
+        // unit-of-interrupt. Phase 5a's runner is synchronous
+        // (placeholder); the real AidenAgent-backed runner will
+        // receive a per-run abort signal when wired.
+      },
+      killToolSubprocesses: async () => { /* Phase 5b wires tool-subprocess kill */ },
       closeBrowser:      () => pwClose(),
-      closeCron:         () => { /* Phase 5 wires cron stop */ },
+      closeCron:         () => { /* Phase 5b wires cron stop */ },
       closeIdempotency:  () => idempotencyStore.close(),
       closeResources:    () => resourceRegistry.reapAll(3_000),
       touchCleanShutdown: () => touchCleanShutdownMarker(markerPath),
-      removePid:         () => {
+      removePid:         async () => {
+        // v4.5 Phase 5a — drain in-flight dispatcher claims before
+        // releasing the runtime lock so SIGTERM-replace doesn't
+        // duplicate trigger work on the incoming instance.
+        if (_singleton?.dispatcher) {
+          try { await _singleton.dispatcher.stop(cfg.drainTimeoutMs); }
+          catch { /* never block shutdown on dispatcher cleanup */ }
+        }
         try { runtimeLock.release(); } catch { /* noop */ }
         stopEventLoopLagSampler();
         tracker.stop();
@@ -426,6 +447,58 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       log('error', `[email] trigger registry scan failed: ${e instanceof Error ? e.message : String(e)}`);
     }
 
+    // ── v4.5 Phase 5a — start the trigger dispatcher ─────────────────────
+    // The dispatcher is the bus consumer. It claims pending
+    // trigger_events and routes them through the agent loop (or
+    // the deliverOnly stub when spec.deliver_only=1). Phase 5a
+    // wires a placeholder runner that returns 'stop' immediately
+    // — the real AidenAgent-backed runner is wired by the CLI
+    // entry path in a follow-up (it owns provider/toolExecutor
+    // construction). The dispatcher infrastructure is fully
+    // functional NOW; the runner adapter is the last seam.
+    let dispatcher: Dispatcher | null = null;
+    try {
+      dispatcher = createDispatcher({
+        triggerBus,
+        runStore,
+        db,
+        ownerId:       tracker.instanceId,
+        instanceId:    tracker.instanceId,
+        workerCount:   1,                   // Q-P5-1(a)
+        runnerFactory: (): DaemonAgentRunner => makeRunner(async (input) => {
+          // Phase 5a placeholder runner. Marks the run completed
+          // with finishReason='stop' after creating the run row +
+          // emitting a single placeholder event. The real runner
+          // (AidenAgent.runConversation) will be wired by the
+          // bootstrap-CLI integration step that owns the agent
+          // construction. Until then, the bus / dispatch / lease
+          // / markDone path is fully exercised end-to-end.
+          const runId = runStore.create({
+            sessionId:      input.sessionId,
+            instanceId:     input.instanceId,
+            triggerEventId: input.triggerEventId,
+            status:         'running',
+          });
+          runStore.emitEvent(runId, 'dispatcher:invoked', {
+            source:    input.triggerContext.source,
+            triggerId: input.triggerContext.triggerId,
+            eventId:   input.triggerEventId,
+            templated: input.triggerContext.promptTemplate !== null,
+            messageLen: input.initialMessage.length,
+          });
+          runStore.setStatus(runId, 'completed', { finishReason: 'stop' });
+          const result: DaemonAgentResult = { runId, finishReason: 'stop' };
+          return result;
+        }),
+        log,
+      });
+      dispatcher.start();
+      log('info', `[dispatcher] active workerCount=1`);
+    } catch (e) {
+      log('error', `[dispatcher] start failed: ${e instanceof Error ? e.message : String(e)}`);
+      dispatcher = null;
+    }
+
     _singleton = {
       active:                true,
       instanceId:            tracker.instanceId,
@@ -443,6 +516,7 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       fileWatchers,
       webhookRoutes,
       emailTriggers,
+      dispatcher,
     };
     return _singleton;
   } catch (e) {
