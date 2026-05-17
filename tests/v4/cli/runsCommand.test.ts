@@ -43,7 +43,7 @@ function seedRuns(): { db: ReturnType<typeof openDaemonDb>; runStore: ReturnType
   const db = openDaemonDb(daemonDbPath(aidenHome));
   db.prepare(`INSERT INTO daemon_instances
     (instance_id, pid, hostname, started_at, last_heartbeat, version)
-    VALUES (?, ?, ?, ?, ?, ?)`).run('inst-runs', 1, 'h', Date.now(), Date.now(), '4.1.5');
+    VALUES (?, ?, ?, ?, ?, ?)`).run('inst-runs', 1, 'h', Date.now(), Date.now(), '4.5.0');
   const runStore = createRunStore({ db });
   const ids: number[] = [];
   ids.push(runStore.create({ sessionId: 'trigger:file:wat-1:abc', instanceId: 'inst-runs', status: 'running' }));

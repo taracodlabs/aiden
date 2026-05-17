@@ -36,7 +36,7 @@ beforeEach(() => {
   // Seed an instance row so run inserts (FK to daemon_instances) don't fail.
   db.prepare(`INSERT INTO daemon_instances
     (instance_id, pid, hostname, started_at, last_heartbeat, version)
-    VALUES (?, ?, ?, ?, ?, ?)`).run('inst-1', 12345, 'test-host', Date.now(), Date.now(), '4.1.5');
+    VALUES (?, ?, ?, ?, ?, ?)`).run('inst-1', 12345, 'test-host', Date.now(), Date.now(), '4.5.0');
 });
 afterEach(() => { try { db.close(); } catch { /* noop */ } });
 

@@ -171,7 +171,7 @@ for adding them are listed alongside each. Stored under
 | Spec field | CLI flag | Default | Description |
 |---|---|---|---|
 | `provider` / `model` | (set via `aiden trigger ...`-time JSON spec or DB edit) | persisted REPL default | Per-trigger model override. Chain: trigger spec → `AIDEN_DAEMON_MODEL=<provider>/<model>` env → persisted REPL default. |
-| `daemonApproval` | (JSON spec) | `safe-only` | Auto-approval policy for daemon-fired turns. `safe-only` allows safe-tier tools and denies caution + dangerous (matches the Hermes "untrusted ingress" lesson). `caution-ok` allows safe + caution; dangerous still denied. `dangerous-ok` allows all tiers — use only for triggers from fully-trusted sources. |
+| `daemonApproval` | (JSON spec) | `safe-only` | Auto-approval policy for daemon-fired turns. `safe-only` allows safe-tier tools and denies caution + dangerous (the conservative default for untrusted-ingress sources like webhooks). `caution-ok` allows safe + caution; dangerous still denied. `dangerous-ok` allows all tiers — use only for triggers from fully-trusted sources. |
 | `maxTokensPerFire` | (JSON spec) | unlimited | Per-turn token cap. When crossed, the runner aborts the turn via the agent's abort signal; finishReason becomes `budget_exhausted`. The trigger is NOT dead-lettered (budget exhaustion is treated as "this fire ran too hot"; the next fire starts fresh). |
 
 Global guardrails (env vars):

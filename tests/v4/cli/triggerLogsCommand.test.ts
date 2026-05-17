@@ -39,7 +39,7 @@ function out(): { lines: string[]; write: (s: string) => void } {
 function seedTrigger(): { id: string; runId: number } {
   const db = openDaemonDb(daemonDbPath(aidenHome));
   db.prepare(`INSERT INTO daemon_instances (instance_id, pid, hostname, started_at, last_heartbeat, version)
-              VALUES (?, ?, ?, ?, ?, ?)`).run('inst-1', 1, 'h', Date.now(), Date.now(), '4.1.5');
+              VALUES (?, ?, ?, ?, ?, ?)`).run('inst-1', 1, 'h', Date.now(), Date.now(), '4.5.0');
   const triggerId = 'wat-test-1';
   db.prepare(`INSERT INTO triggers (id, source, name, spec_json, enabled, prompt_template, deliver_only, created_at, updated_at)
               VALUES (?, 'file', ?, '{}', 1, NULL, 0, ?, ?)`)

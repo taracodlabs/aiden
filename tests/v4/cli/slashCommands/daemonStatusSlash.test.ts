@@ -83,7 +83,7 @@ describe('/daemon status — running daemon', () => {
     const myPid = process.pid;
     db.prepare(`INSERT INTO daemon_instances
       (instance_id, pid, hostname, started_at, last_heartbeat, version)
-      VALUES (?, ?, ?, ?, ?, ?)`).run('inst-p8a-status', myPid, 'h', now - 60_000, now, '4.1.5');
+      VALUES (?, ?, ?, ?, ?, ?)`).run('inst-p8a-status', myPid, 'h', now - 60_000, now, '4.5.0');
     const triggerId = 'tr-1';
     db.prepare(`INSERT INTO triggers (id, source, name, spec_json, enabled, prompt_template, deliver_only, created_at, updated_at)
                 VALUES (?, 'file', 'w', '{}', 1, NULL, 0, ?, ?)`)
