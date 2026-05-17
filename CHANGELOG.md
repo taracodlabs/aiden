@@ -1,3 +1,74 @@
+## [4.5.0] — Autonomous Aiden — 2026-05-17
+
+### Headline
+
+Aiden 4.5 introduces persistent daemon mode — register file watchers, webhooks, email triggers, and scheduled jobs that fire real autonomous agent turns. Plus continuous error recovery (TCE), browser depth observation, an execution sandbox, and a contextual slash-command UX layer.
+
+### Added
+
+- Daemon mode (`AIDEN_DAEMON=1`) with file / webhook / email / cron trigger sources, durable SQLite-backed bus + dispatcher
+- Real-time agent invocation on trigger fires via `createRealAgentRunner` with per-trigger `sessionId` isolation
+- Execution sandbox (`AIDEN_SANDBOX=1`) with three-tier risk classification (safe / caution / dangerous), file-op allowlist, Docker isolation, dry-run support
+- Browser depth observation (`AIDEN_BROWSER_DEPTH=1`) with stale-reference auto-recovery and multi-tab state tracking
+- TCE: turn-by-turn continuous evaluation with 16 failure categories and structured retry decisions
+- Slash commands: `/sandbox`, `/tce`, `/browser-depth`, `/daemon`, `/suggestions` for live subsystem toggling
+- Boot-time update notifications with `y/n/later` prompt, 5s timeout, semver-aware skip-version persistence
+- Install-method detection (`npm-global` / `npm-local` / `npx` / `standalone-binary`) for context-correct upgrade commands
+- CLI surface: `aiden trigger`, `aiden cron`, `aiden daemon`, `aiden runs` subcommands with `list`, `show`, `logs`, `runs` views
+- Soak test harness (`tests/v4/daemon/soak/`) for production validation — CI-safe quick mode + manual 1h / 72h profiles
+- HMAC webhook verification (GitHub `sha256=`, GitLab token, generic hex) with route → size → hmac → event → rate → idempotency ordering
+- IMAP email trigger with sender allowlist, automated-sender filter (`noreply@`, `MAILER-DAEMON`), attachment policy
+- Cron misfire policies (`skip_stale`, `run_once_if_late`, `catch_up_with_limit`, `manual_review`)
+- Per-trigger token budgets (`maxTokensPerFire`) and daemon-wide daily cap (`AIDEN_DAEMON_DAILY_BUDGET`)
+- Per-trigger approval policies (`safe-only`, `caution-ok`, `dangerous-ok`) — `safe-only` default for untrusted-ingress sources
+- Comprehensive docs at `docs/v4.5/` (overview, triggers, dispatcher, sandbox, TCE, browser-depth, architecture)
+
+### Changed
+
+- Bold markdown rendering: dropped underline (`paintBoldUnderline` → `paintEmphasis`); bold is now bold-only
+- Boot screen spacing improved; boot card UX polish
+- Update check cache TTL bumped 6h → 24h
+- `/update` flow now distinguishes registry-known vs GitHub-only releases
+
+### Architecture
+
+- SQLite daemon foundation with 5-table schema (`triggers`, `trigger_events`, `runs`, `run_events`, `daemon_instances`); migrations v1 → v5
+- Per-trigger `sessionId` derived from `idempotencyKey` keys docker context, browser state, and TCE history isolation
+- Two-phase bootstrap: foundation (bus + dispatcher + bootstraps) runs first; late-install agent builder injected via `bootstrapDaemon({ agentBuilder })`
+- Wizard TTY guard skips raw-mode prompts under systemd / launchd; daemon mode boots non-interactively
+- Run-event audit trail: `dispatcher:invoked` → `tool_call_started` → `tool_call_completed` → `approval_decision` → `dispatcher:completed` (or `:rejected` / `:builder_failed`)
+
+### Migrations
+
+- Existing `cron_jobs.json` auto-migrates to SQLite `scheduled_workflows` on first daemon boot (backup written alongside)
+
+### Breaking
+
+- None. Every new subsystem is opt-in via env var or slash command.
+- `AIDEN_DAEMON=0` default — zero behavioral change from v4.0.2.
+- `AIDEN_SANDBOX=0` default; `AIDEN_TCE=1` auto-on (disable via `/tce off`); `AIDEN_BROWSER_DEPTH=1` auto-on (disable via `/browser-depth off`).
+
+### Install
+
+```bash
+npm install -g aiden-runtime@4.5.0
+# or
+npx aiden-runtime@4.5.0
+```
+
+### Stats
+
+- 38 commits since v4.0.2
+- 3432 tests passing, 41 skipped, zero failures
+- ~22,000 LOC added
+- 14 internal version arcs bundled
+
+### Acknowledgements
+
+Built solo by Shiva at [Taracod](https://taracod.com).
+
+---
+
 ## [4.1.2] - 2026-05-13
 
 ### Memory Architecture (Phases A-D)
