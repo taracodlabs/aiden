@@ -1,4 +1,4 @@
-// tools/eonetTool.ts — NASA EONET natural disaster events (v3 API)
+// tools/eonetTool.ts —  NASA EONET natural disaster events (v3 API)
 // Free, no auth required. Fetches open events filtered to high-impact categories.
 
 import { fetch } from 'undici'
