@@ -76,6 +76,12 @@ import {
   createRunStore,
 } from '../../../core/v4/daemon';
 import { VERSION as AIDEN_VERSION } from '../../../core/version';
+// v4.6 Phase 3A — operator kill-switch. Initialised here so
+// MCP-side `subagent_fanout` (and any future MCP-side
+// `spawn_sub_agent` exposure) reads from the same marker file the
+// REPL writes via /spawn-pause. Cross-process coordination is the
+// whole point of the file-marker design.
+import { initSpawnPause } from '../../../core/v4/subagent/spawnPause';
 
 import {
   startStdioMcpServer,
@@ -298,6 +304,26 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(mcpInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), AIDEN_VERSION);
   const mcpRunStore = createRunStore({ db: mcpDb });
+
+  // v4.6 Phase 3A — wire the pause singleton against the same
+  // `paths.root` the REPL uses. The fanout handler's pause-check
+  // reads through `getSpawnPause()`, so initing here makes MCP
+  // mode respect the operator's /spawn-pause state without any
+  // additional plumbing.
+  const mcpPauseState = initSpawnPause({ aidenHome: opts.paths.root });
+  if (mcpPauseState.isPaused()) {
+    const s = mcpPauseState.status();
+    const reasonSuffix = s.reason ? ` (reason: ${s.reason})` : '';
+    opts.logger.warn(
+      `MCP boot: subagent_fanout is PAUSED${reasonSuffix}. ` +
+      'Operator must run /spawn-pause off in a REPL session to resume.',
+      {
+        pausedAt:   s.pausedAt   ?? null,
+        pausedBy:   s.pausedBy   ?? null,
+        durationMs: s.durationMs ?? null,
+      },
+    );
+  }
 
   opts.registry.register(makeSubagentFanoutTool({
     logger: opts.logger,

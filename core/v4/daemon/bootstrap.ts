@@ -222,6 +222,39 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     const lockPath   = daemonRuntimeLockPath(aidenRoot);
     const markerPath = daemonCleanShutdownMarkerPath(aidenRoot);
 
+    // v4.6 Phase 3A — wire the spawn-pause singleton against the
+    // same `aidenRoot` the REPL uses. Daemon-fired turns that
+    // invoke `subagent_fanout` will read the same marker file the
+    // REPL writes via /spawn-pause. Cross-process coordination is
+    // the whole point of the file-marker design (in-process
+    // singletons in three runtimes would each have independent
+    // pause flags, which would defeat the operator control).
+    // The init is idempotent — if the REPL already ran initSpawnPause
+    // in this same process, this call replaces the singleton with
+    // an equivalent one pointing at the same path.
+    //
+    // Defensive try/catch: a pause-init failure must NOT prevent
+    // daemon bootstrap. Worst case the singleton stays uninit and
+    // tool handlers fall through to their `safeReadPause` path
+    // (treat as "not paused"). The daemon's startup probe below
+    // is best-effort.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { initSpawnPause } = require('../subagent/spawnPause');
+      const sp = initSpawnPause({ aidenHome: aidenRoot });
+      if (sp.isPaused()) {
+        const s = sp.status();
+        const reasonSuffix = s.reason ? ` (reason: ${s.reason})` : '';
+        log('warn',
+          `[daemon] sub-agent spawning is PAUSED${reasonSuffix}. ` +
+          'Daemon-fired subagent_fanout calls will reject until an operator ' +
+          'runs /spawn-pause off in a REPL session.');
+      }
+    } catch (e) {
+      log('warn', '[daemon] spawn-pause init failed (non-fatal): ' +
+        (e instanceof Error ? e.message : String(e)));
+    }
+
     const db = openDaemonDb(dbPath);
     const tracker = createInstanceTracker({ db, version: VERSION });
     tracker.start();

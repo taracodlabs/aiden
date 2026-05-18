@@ -54,6 +54,8 @@ import { daemonStatus } from './daemonStatus';
 import { suggestions } from './suggestions';
 // v4.6 Phase 2M — opt-in keyword-based tool narrower (default OFF).
 import { plannerGuard } from './plannerGuard';
+// v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
+import { spawnPause } from './spawnPause';
 
 export {
   help,
@@ -98,6 +100,8 @@ export {
   suggestions,
   // v4.6 Phase 2M — opt-in keyword-based tool narrower.
   plannerGuard,
+  // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
+  spawnPause,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -145,6 +149,8 @@ export const allCommands: SlashCommand[] = [
   suggestions,
   // v4.6 Phase 2M — opt-in keyword-based tool narrower (default OFF).
   plannerGuard,
+  // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
+  spawnPause,
   clear,
   quit,
 ];

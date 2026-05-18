@@ -560,6 +560,85 @@ describe('runFanout — v4.6 Phase 2Q behavioral (routes through spawnSubAgent)'
     expect(result.diagnostics.singleProviderWarning).toBe(true);
   });
 
+  // ──────────────────────────────────────────────────────────────────────
+  // v4.6 Phase 3A — operator kill-switch gate at fanout handler entry
+  // ──────────────────────────────────────────────────────────────────────
+  it('13. /spawn-pause on → subagent_fanout tool rejects entire call, no partial fanout', async () => {
+    // Init pause + flip it on.
+    const tmpHome = (await import('node:fs')).mkdtempSync(
+      (await import('node:path')).join((await import('node:os')).tmpdir(), 'aiden-fanout-pause-'),
+    );
+    const { initSpawnPause, _resetSpawnPauseForTests } = await import('../../../core/v4/subagent/spawnPause');
+    const state = initSpawnPause({ aidenHome: tmpHome });
+    state.pause({ reason: 'integration-test', pausedBy: 'repl' });
+
+    try {
+      const fb = buildFanoutFallback(['groq', 'openrouter']);
+      const agg = makeAggregatorAdapter();
+      const tool = makeSubagentFanoutTool({
+        resolveProviders:    () => makeProviderOptions(['groq', 'openrouter']),
+        resolveActiveModel:  () => ({ providerId: 'groq', modelId: 'mock-model' }),
+        aggregatorAdapter:   agg as never,
+        spawnDeps:           makeSpawnDeps(fb),
+      });
+      const result = (await tool.execute(
+        { mode: 'ensemble', query: 'q', n: 3, merge: 'all' },
+        {} as never,
+      )) as {
+        success: boolean; errorCode?: string; message?: string;
+        reason?: string | null; pausedBy?: string | null;
+      };
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe('SUBAGENT_SPAWN_PAUSED');
+      expect(result.message).toMatch(/subagent_fanout: spawning is paused/i);
+      expect(result.reason).toBe('integration-test');
+      expect(result.pausedBy).toBe('repl');
+      // Aggregator was NOT invoked — no partial fanout.
+      expect(agg.callCount()).toBe(0);
+      // No child runs created.
+      const childRows = db
+        .prepare(`SELECT COUNT(*) AS c FROM runs WHERE instance_id = ?`)
+        .get(INST) as { c: number };
+      expect(childRows.c).toBe(0);
+    } finally {
+      state.resume();
+      _resetSpawnPauseForTests();
+      try { (await import('node:fs')).rmSync(tmpHome, { recursive: true, force: true }); } catch { /* noop */ }
+    }
+  });
+
+  it('14. /spawn-pause off → next subagent_fanout call proceeds normally', async () => {
+    const tmpHome = (await import('node:fs')).mkdtempSync(
+      (await import('node:path')).join((await import('node:os')).tmpdir(), 'aiden-fanout-pause-resumed-'),
+    );
+    const { initSpawnPause, _resetSpawnPauseForTests } = await import('../../../core/v4/subagent/spawnPause');
+    const state = initSpawnPause({ aidenHome: tmpHome });
+    state.pause({ pausedBy: 'repl' });
+    state.resume();
+
+    try {
+      const fb = buildFanoutFallback(['groq', 'openrouter'], ['a', 'b']);
+      const agg = makeAggregatorAdapter();
+      const tool = makeSubagentFanoutTool({
+        resolveProviders:    () => makeProviderOptions(['groq', 'openrouter']),
+        resolveActiveModel:  () => ({ providerId: 'groq', modelId: 'mock-model' }),
+        aggregatorAdapter:   agg as never,
+        spawnDeps:           makeSpawnDeps(fb),
+      });
+      const result = (await tool.execute(
+        { mode: 'ensemble', query: 'q', n: 2, merge: 'all' },
+        {} as never,
+      )) as { success: boolean; errorCode?: string; results?: unknown[]; diagnostics?: { succeeded: number } };
+      // Tool proceeded — NOT a SUBAGENT_SPAWN_PAUSED rejection.
+      expect(result.errorCode).not.toBe('SUBAGENT_SPAWN_PAUSED');
+      expect(result.success).toBe(true);
+      expect(result.diagnostics?.succeeded).toBe(2);
+    } finally {
+      _resetSpawnPauseForTests();
+      try { (await import('node:fs')).rmSync(tmpHome, { recursive: true, force: true }); } catch { /* noop */ }
+    }
+  });
+
   it('12. single-provider FallbackAdapter parent: all N children complete; no override path triggered', async () => {
     // Parent IS a FallbackAdapter but with only one providerId in
     // its pool. The override would technically resolve, but the

@@ -88,6 +88,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   suggestions: 'System',
   // v4.6 Phase 2M — opt-in keyword-based tool narrower.
   'planner-guard': 'System',
+  // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
+  'spawn-pause': 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

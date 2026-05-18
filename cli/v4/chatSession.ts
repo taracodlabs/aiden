@@ -1768,6 +1768,27 @@ export class ChatSession implements ChatSessionLike {
       }) + '\n',
     );
 
+    // v4.6 Phase 3A — operator kill-switch indicator. Lands ABOVE
+    // the blank-line + provider-source annotation so an operator
+    // who paused in a prior session sees the state immediately on
+    // boot, alongside the standard status pills. Single dim
+    // warning line; no special chrome — the message itself is the
+    // visual signal.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { getSpawnPause } = require('../../core/v4/subagent/spawnPause');
+      const s = getSpawnPause().status();
+      if (s.paused) {
+        const reasonSuffix = s.reason ? ` · ${s.reason}` : '';
+        const durationSuffix = typeof s.durationMs === 'number'
+          ? ` · ${formatDuration(s.durationMs)}`
+          : '';
+        display.warn(`spawn-pause: ON${reasonSuffix}${durationSuffix} — use /spawn-pause off to resume`);
+      }
+    } catch {
+      // Singleton not initialised (test stubs, etc.) — silently skip.
+    }
+
     // v4.5 TUI polish — blank line so the status pills row doesn't
     // crowd the muted source annotation right beneath it.
     display.write('\n');

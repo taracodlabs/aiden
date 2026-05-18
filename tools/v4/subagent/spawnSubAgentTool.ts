@@ -33,6 +33,11 @@ import {
   type SubAgentSpec,
   type SpawnSubAgentDeps,
 } from '../../../core/v4/subagent/spawnSubAgent';
+// v4.6 Phase 3A — operator kill-switch. Checked at handler entry
+// BEFORE any work (no run row written, no child built, no provider
+// call). In-flight children continue uninterrupted; only NEW spawns
+// are blocked. Singleton initialised by REPL/daemon/MCP boot wiring.
+import { getSpawnPause } from '../../../core/v4/subagent/spawnPause';
 
 // ── Factory dependencies ───────────────────────────────────────────────────
 
@@ -71,6 +76,29 @@ export interface SpawnSubAgentFactoryOptions extends SpawnSubAgentDeps {
    * sinks.
    */
   logger?: Logger;
+}
+
+// ── Pause helper (v4.6 Phase 3A) ──────────────────────────────────────────
+
+/**
+ * Safe pause read for the handler entry guard. Catches the
+ * "not initialized" error from `getSpawnPause()` and returns
+ * `{paused: false, status: {paused: false}}` — wiring-order bugs
+ * (handler firing before `initSpawnPause` ran) must NOT take down
+ * the spawn surface. Production boot wiring always inits first,
+ * so this only matters for tests that omit the init step.
+ */
+function safeReadPause(): {
+  paused: boolean;
+  status: ReturnType<import('../../../core/v4/subagent/spawnPause').SpawnPauseState['status']>;
+} {
+  try {
+    const state = getSpawnPause();
+    const status = state.status();
+    return { paused: status.paused, status };
+  } catch {
+    return { paused: false, status: { paused: false } };
+  }
 }
 
 // ── Schema description (verbatim from design doc §4) ───────────────────────
@@ -252,6 +280,33 @@ export function makeSpawnSubAgentTool(
     contexts: ['repl'],
 
     async execute(args, _ctx) {
+      // ── 0. Operator kill-switch (v4.6 Phase 3A) ─────────────────────────
+      // First thing — before arg validation, run-row insertion, or
+      // any child build. A paused state must short-circuit cleanly
+      // with NO side effects (no `runs` row, no log noise beyond
+      // the rejection). Locked decision: paused calls are operator-
+      // induced, NOT real failures; they don't pollute `aiden runs
+      // list`. Envelope intentionally drops the standard SubAgentResult
+      // shape because (a) no childRunId exists (no row was written)
+      // and (b) the error class is qualitatively different from a
+      // spawn that ran and failed.
+      const pauseGate = safeReadPause();
+      if (pauseGate.paused) {
+        const s = pauseGate.status;
+        const reasonSuffix = s.reason ? ` (reason: ${s.reason})` : '';
+        return {
+          success:    false,
+          errorCode:  'SUBAGENT_SPAWN_PAUSED',
+          message:
+            `spawn_sub_agent: spawning is paused${reasonSuffix}. ` +
+            'Run /spawn-pause off to resume.',
+          pausedAt:   s.pausedAt   ?? null,
+          reason:     s.reason     ?? null,
+          pausedBy:   s.pausedBy   ?? null,
+          durationMs: s.durationMs ?? null,
+        };
+      }
+
       // ── 1. Validate + coerce ─────────────────────────────────────────────
       const goal = typeof args.goal === 'string' ? args.goal.trim() : '';
       if (!goal) {

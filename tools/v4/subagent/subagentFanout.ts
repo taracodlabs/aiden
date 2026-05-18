@@ -52,6 +52,13 @@ import {
 } from '../../../core/v4/subagent/merger';
 import type { ProviderOption } from '../../../core/v4/subagent/providerRotation';
 import type { SpawnSubAgentDeps } from '../../../core/v4/subagent/spawnSubAgent';
+// v4.6 Phase 3A — operator kill-switch. Same check the
+// `spawn_sub_agent` tool runs, applied here at fanout's handler
+// entry. Locked decision (§12): check ONCE at entry, not inside
+// the spawn loop — atomicity is per-call. A pause applied
+// mid-fanout leaves the in-flight Promise.all to complete
+// naturally; only the NEXT fanout call hits the rejection.
+import { getSpawnPause } from '../../../core/v4/subagent/spawnPause';
 
 /** Caller-supplied factory inputs. The runtime supplies these once at
  *  boot from the closure scope (provider list, parent's active model,
@@ -193,6 +200,33 @@ export function makeSubagentFanoutTool(
     toolset: 'subagent',
   riskTier: 'caution',   // v4.4 Phase 1
     async execute(args, _ctx) {
+      // ── Operator kill-switch (v4.6 Phase 3A) ────────────────────
+      // Top of handler — before parsing, provider resolution, or
+      // rotation. Reject the WHOLE call if paused; spawn loop never
+      // fires, so partial fanouts are impossible.
+      try {
+        const pauseStatus = getSpawnPause().status();
+        if (pauseStatus.paused) {
+          const reasonSuffix = pauseStatus.reason ? ` (reason: ${pauseStatus.reason})` : '';
+          return {
+            success:    false,
+            errorCode:  'SUBAGENT_SPAWN_PAUSED',
+            message:
+              `subagent_fanout: spawning is paused${reasonSuffix}. ` +
+              'Run /spawn-pause off to resume.',
+            pausedAt:   pauseStatus.pausedAt   ?? null,
+            reason:     pauseStatus.reason     ?? null,
+            pausedBy:   pauseStatus.pausedBy   ?? null,
+            durationMs: pauseStatus.durationMs ?? null,
+          };
+        }
+      } catch {
+        // getSpawnPause() throws when not initialized — let the
+        // fanout proceed rather than blocking on a wiring bug.
+        // Production boot always inits before any tool handler
+        // can fire; this catch only matters for unit tests.
+      }
+
       const logger = factory.logger ?? noopLogger();
 
       // ── Coerce args ────────────────────────────────────────────

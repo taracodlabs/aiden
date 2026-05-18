@@ -727,6 +727,20 @@ export async function buildAgentRuntime(
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
 
+  // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
+  // Initialised as early as possible so any subsequent tool wiring
+  // sees the singleton. The marker file lives at
+  // `<paths.root>/spawn.paused` and is shared across REPL + daemon
+  // + MCP for cross-process coordination. The startup probe (warn
+  // operator that pause is active from a prior session) fires
+  // later, once `bootLogger` is available — see the
+  // `spawnPauseBootStatus` block below.
+  const { initSpawnPause } = await import('../../core/v4/subagent/spawnPause');
+  const spawnPauseState = initSpawnPause({ aidenHome: paths.root });
+  const spawnPauseBootStatus = spawnPauseState.isPaused()
+    ? spawnPauseState.status()
+    : null;
+
   // v4.6 Phase 2Q-B — mutable holder for the REPL's current parent
   // run id. ChatSession's `runAgentTurn` writes a row before each
   // turn dispatches and stores the id here (and clears it on
@@ -1624,6 +1638,25 @@ export async function buildAgentRuntime(
   // Wire the gateway singleton's logger BEFORE registering its processor
   // so register / unregister channel events are scoped correctly.
   gateway.attachLogger(bootLogger.child('gateway'));
+
+  // v4.6 Phase 3A — startup probe for the spawn-pause kill-switch.
+  // The state was initialised early (line ~740) before tool wiring.
+  // Now that bootLogger exists, emit a visible warning so an
+  // operator who forgot they paused in a prior session learns
+  // immediately rather than puzzling at silent rejected fanouts.
+  if (spawnPauseBootStatus) {
+    const s = spawnPauseBootStatus;
+    const reasonSuffix = s.reason ? ` (reason: ${s.reason})` : '';
+    bootLogger.warn(
+      `spawn_sub_agent / subagent_fanout are PAUSED${reasonSuffix}. ` +
+      'Run /spawn-pause off to resume.',
+      {
+        pausedAt:   s.pausedAt   ?? null,
+        pausedBy:   s.pausedBy   ?? null,
+        durationMs: s.durationMs ?? null,
+      },
+    );
+  }
 
   // ── Phase v4.1-subagent.1 — replace subagent_fanout stub with wired version
   //
