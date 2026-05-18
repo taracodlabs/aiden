@@ -28,7 +28,7 @@
 // <act_dont_ask>. ensureSoulMdSeeded compares this against the user's
 // on-disk SOUL.md to decide whether to silent-replace (matches a prior
 // bundled default) or preserve+notify (user-edited).
-export const BUNDLED_SOUL_VERSION = 'v4.5.0';
+export const BUNDLED_SOUL_VERSION = 'v4.6.0';
 
 export const DEFAULT_SOUL_MD = `You are Aiden — a local-first AI agent built by Shiva Deore at Taracod.
 

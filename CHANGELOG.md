@@ -1,3 +1,27 @@
+## [4.6.0] — Sub-agents + Self-Improvement — 2026-05-19
+
+### Added
+
+- `spawn_sub_agent` tool: spawn focused child agents with toolset intersection from parent, isolated workspace
+- `subagent_fanout` tool: parallel ensemble or partition workflows with merge strategies (`all` / `vote` / `pick-best` / `combine`)
+- `/spawn-pause` slash command: operator kill-switch for sub-agent spawning (durable across restart, file-marker storage at `~/.aiden/spawn.paused`)
+- `/recovery list/show/clear` slash command: cross-session failure pattern review surface
+- `failure_signatures` + `recovery_reports` tables (v7 migration): TCE writes signatures on classify, recoveries on failure→success transition
+- `aiden runs list --include-children` flag: show fanout/spawn children in run history
+- Provider override per spawn: `subagent_fanout` accepts per-child `provider` field; fail-loud validation via `ProviderNotFoundError`
+
+### Changed
+
+- `subagent_fanout` refactored as layered API on top of `spawn_sub_agent` primitive (Phase 2 architecture)
+- PlannerGuard now opt-in (default OFF, was ON); enable via `AIDEN_PLANNER_GUARD=1` or `/planner-guard on`
+- REPL writes parent-run row per turn; child runs filter from default `aiden runs list` view; child-count badge on parent rows
+
+### Fixed
+
+- MCP-mode `subagent_fanout` regression (silently broken since v4.5 refactor; now uses spawnDeps wiring like REPL)
+
+---
+
 ## [4.5.0] — Autonomous Aiden — 2026-05-17
 
 ### Headline

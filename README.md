@@ -10,13 +10,13 @@
 
 Autonomous AI Engine — local-first, Windows-native, yours to own
 
-74 skills · 59 tools · 19 providers · 9 channels · AGPL-3.0
+74 skills · 60 tools · 19 providers · 9 channels · AGPL-3.0
 
 Windows · Linux · WSL · macOS (API Mode)
 ```
 
 <p align="center">
-  <a href="https://github.com/taracodlabs/aiden/releases/latest"><img src="https://img.shields.io/badge/version-v4.5.0-f97316?style=for-the-badge" alt="v4.5.0" /></a>
+  <a href="https://github.com/taracodlabs/aiden/releases/latest"><img src="https://img.shields.io/badge/version-v4.6.0-f97316?style=for-the-badge" alt="v4.6.0" /></a>
   <a href="https://www.npmjs.com/package/aiden-runtime"><img src="https://img.shields.io/npm/v/aiden-runtime?color=f97316&label=npm&style=for-the-badge" alt="npm" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-orange?style=for-the-badge" alt="License: AGPL-3.0" /></a>
   <a href="https://discord.gg/gMZ3hUnQTm"><img src="https://img.shields.io/badge/chat-discord-7289da?logo=discord&logoColor=white&style=for-the-badge" alt="Discord" /></a>
@@ -30,6 +30,20 @@ Windows · Linux · WSL · macOS (API Mode)
   <img src="https://img.shields.io/badge/Playwright-1.58-2ea44f?logo=playwright&logoColor=white&style=for-the-badge" alt="Playwright" />
   <img src="https://img.shields.io/badge/MCP-1.27-7c3aed?style=for-the-badge" alt="Model Context Protocol" />
 </p>
+
+---
+
+## What's new in v4.6
+
+Aiden now spawns workers and learns from itself.
+
+- **Sub-agents.** `spawn_sub_agent` runs a focused child with an isolated context + intersected toolset; `subagent_fanout` runs N children in parallel (ensemble or partition) with merge strategies (`all` / `vote` / `pick-best` / `combine`) and provider rotation across configured fallback slots.
+- **Operator kill-switch.** `/spawn-pause on|off|status` blocks new sub-agent spawning while in-flight children continue. Marker file at `~/.aiden/spawn.paused` so the state survives restart and is shared across REPL, daemon, and MCP runtimes. Optional reason field captured in the typed `SUBAGENT_SPAWN_PAUSED` error envelope.
+- **Self-improvement loop foundation.** TCE classifications + recoveries persist to two new SQLite tables (`failure_signatures`, `recovery_reports`); `/recovery list|show|clear` surfaces recurring failure patterns across sessions.
+- **REPL parent-run lineage.** Each REPL turn writes its own `runs` row; sub-agent children link back via `spawned_from_run_id`. `aiden runs list` hides children by default and shows a `(N children, M OK)` badge per parent; `--include-children` flips to flat view.
+- **PlannerGuard opt-in.** The keyword-based per-turn tool narrower is OFF by default in v4.6 (modern models pick well from the full catalog). Enable via `/planner-guard on` or `AIDEN_PLANNER_GUARD=1` for smaller local models.
+
+Phase 2 also fixed an MCP-mode `subagent_fanout` regression that had silently broken in the v4.5 refactor.
 
 ---
 
