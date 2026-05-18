@@ -35,7 +35,6 @@
     "node": ">=18"
   },
   "bin": {
-    "devos-ai": "./dist/bin/npx-init.js",
     "aiden": "./dist/cli/v4/aidenCLI.js",
     "aiden-runtime": "./dist/cli/v4/aidenCLI.js"
   },
