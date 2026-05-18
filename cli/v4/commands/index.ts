@@ -56,6 +56,8 @@ import { suggestions } from './suggestions';
 import { plannerGuard } from './plannerGuard';
 // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
 import { spawnPause } from './spawnPause';
+// v4.6 Phase 3b — self-improvement loop operator surface.
+import { recovery } from './recovery';
 
 export {
   help,
@@ -102,6 +104,8 @@ export {
   plannerGuard,
   // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
   spawnPause,
+  // v4.6 Phase 3b — self-improvement loop operator surface.
+  recovery,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -151,6 +155,8 @@ export const allCommands: SlashCommand[] = [
   plannerGuard,
   // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
   spawnPause,
+  // v4.6 Phase 3b — self-improvement loop operator surface.
+  recovery,
   clear,
   quit,
 ];

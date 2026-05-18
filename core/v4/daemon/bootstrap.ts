@@ -259,6 +259,21 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     const tracker = createInstanceTracker({ db, version: VERSION });
     tracker.start();
 
+    // v4.6 Phase 3b — self-improvement loop singleton. Daemon-fired
+    // turns that classify failures via TCE write through to the
+    // shared failure ledger, so operator queries from a REPL see
+    // daemon-side failure patterns too. Defensive try/catch — init
+    // failure must not block daemon bootstrap; the TCE write-through
+    // path silently no-ops when the singleton is missing.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { initRecoveryStore } = require('../selfimprovement/recoveryStore');
+      initRecoveryStore({ db });
+    } catch (e) {
+      log('warn', '[daemon] recovery-store init failed (non-fatal): ' +
+        (e instanceof Error ? e.message : String(e)));
+    }
+
     // Race-safe runtime lock. EEXIST + live PID → DaemonAlreadyRunningError.
     let runtimeLock: RuntimeLock;
     try {

@@ -96,6 +96,12 @@ import {
   enrichCardWithReport,
   extractGoal,
 } from './recoveryReport';
+// v4.6 Phase 3b — self-improvement loop. Durable cross-session
+// failure ledger + recovery report writes. Loaded lazily inside the
+// per-call branch so a missing singleton (test agents without a
+// daemon DB) never blocks the agent loop.
+import { buildFailureSignature } from './selfimprovement/signatureBuilder';
+import { getRecoveryStore } from './selfimprovement/recoveryStore';
 // v4.2 Phase 4 — checkpoint / restore. Lets the recovery controller
 // roll conversation messages + TurnState internals back to before a
 // looping tool started failing, so the model retries from a clean
@@ -977,6 +983,16 @@ export class AidenAgent {
 
     const messages: Message[]              = [...initialMessages];
     const toolCallTrace: HonestyTraceEntry[] = [];
+    // v4.6 Phase 3b — per-turn signature tracker for failure → success
+    // transitions. Each entry records the signatureId + failure count
+    // observed so far for a given signature THIS turn. When a verifier
+    // later reports `ok` for a tool call whose signature has prior
+    // failures, we record a recovery report. Keyed by signature string
+    // (the canonical `tool:category[:hash]` form).
+    const turnFailureTracker = new Map<string, {
+      signatureId:    number;
+      failedAttempts: number;
+    }>();
     // Internal trace mirror that retains tool-call arguments — Honesty's
     // shape doesn't include args, but SkillTeacher needs them. Both live
     // off the same entry index.
@@ -1263,6 +1279,69 @@ export class AidenAgent {
             } catch {
               // Defensive — a buggy classifier never breaks the loop.
               classification = null;
+            }
+            // v4.6 Phase 3b — write-through to the durable failure
+            // ledger. Best-effort: a null/missing store (test agents
+            // without a daemon DB wired) silently no-ops. The
+            // signature builder is pure + cheap.
+            if (classification) {
+              try {
+                const store = getRecoveryStore();
+                if (store) {
+                  const sig = buildFailureSignature({
+                    toolName: call.name,
+                    category: classification.category,
+                    args:     call.arguments,
+                  });
+                  const signatureId = store.recordFailureOccurrence({
+                    signature: sig.signature,
+                    toolName:  call.name,
+                    category:  classification.category,
+                    argsHash:  sig.argsHash,
+                  });
+                  if (signatureId > 0) {
+                    const existing = turnFailureTracker.get(sig.signature);
+                    turnFailureTracker.set(sig.signature, {
+                      signatureId,
+                      failedAttempts: (existing?.failedAttempts ?? 0) + 1,
+                    });
+                  }
+                }
+              } catch {
+                // Defensive — persistence failure must never break the loop.
+              }
+            }
+          } else if (verification && verification.ok) {
+            // v4.6 Phase 3b — failure → success transition detection.
+            // We don't know the failure CATEGORY for this successful
+            // call (the verifier said ok, so classify() wasn't run),
+            // but the per-turn tracker remembers every signature seen
+            // failing this turn. Walk the tracker; if any entry's
+            // signature starts with `<call.name>:`, this tool now
+            // succeeded — record a recovery and drop the entry so
+            // subsequent successes don't double-count.
+            try {
+              const store = getRecoveryStore();
+              if (store) {
+                const matching: string[] = [];
+                for (const sig of turnFailureTracker.keys()) {
+                  if (sig.startsWith(`${call.name}:`)) matching.push(sig);
+                }
+                for (const sig of matching) {
+                  const entry = turnFailureTracker.get(sig);
+                  if (!entry) continue;
+                  store.recordRecovery({
+                    signatureId:        entry.signatureId,
+                    sessionId:          (this as { sessionId?: string }).sessionId,
+                    failedAttempts:     entry.failedAttempts,
+                    successfulStrategy: 'in_turn_retry',
+                    notes:              `${call.name} succeeded after ${entry.failedAttempts} prior failure(s) this turn`,
+                  });
+                  turnFailureTracker.delete(sig);
+                }
+              }
+            } catch {
+              // Defensive — recovery persistence failure must never break the loop.
             }
           }
         }

@@ -90,6 +90,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   'planner-guard': 'System',
   // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
   'spawn-pause': 'System',
+  // v4.6 Phase 3b — self-improvement loop operator surface.
+  recovery: 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

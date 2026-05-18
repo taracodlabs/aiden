@@ -737,6 +737,17 @@ export async function buildAgentRuntime(
   // `spawnPauseBootStatus` block below.
   const { initSpawnPause } = await import('../../core/v4/subagent/spawnPause');
   const spawnPauseState = initSpawnPause({ aidenHome: paths.root });
+
+  // v4.6 Phase 3b — self-improvement loop. Initialise the durable
+  // failure-ledger / recovery-report store against the same
+  // daemon.db handle the runStore uses. WAL coexistence: REPL +
+  // daemon + MCP all share the same connection-cached handle, so
+  // any writes from one runtime are visible to the others. The
+  // TCE write-through path inside the agent loop reads through the
+  // module-level singleton; initialising here makes spawnSubAgent
+  // and daemon-fired turns observe the same persistence.
+  const { initRecoveryStore } = await import('../../core/v4/selfimprovement/recoveryStore');
+  initRecoveryStore({ db: replDb });
   const spawnPauseBootStatus = spawnPauseState.isPaused()
     ? spawnPauseState.status()
     : null;

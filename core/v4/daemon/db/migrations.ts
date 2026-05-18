@@ -275,13 +275,67 @@ CREATE INDEX IF NOT EXISTS idx_runs_spawned_from
   WHERE spawned_from_run_id IS NOT NULL;
 `;
 
+// Embedded v7 schema. Source of truth at
+// `core/v4/daemon/db/schema/v7.sql` (same convention). Kept in
+// sync via `tests/v4/daemon/db/migrations-v7.test.ts`.
+//
+// v4.6 Phase 3b: self-improvement loop foundation — adds two
+// tables for durable cross-session failure tracking:
+//   * `failure_signatures` — one row per (tool, category, args_hash);
+//     `occurrences` increments on every observed failure, so the
+//     operator can `SELECT … ORDER BY occurrences DESC` to find the
+//     most-stubborn failure shapes.
+//   * `recovery_reports` — one row per observed failure → success
+//     transition; carries the strategy that worked + verification +
+//     free-text notes for operator review.
+const V7_SQL = `
+CREATE TABLE IF NOT EXISTS failure_signatures (
+  id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+  signature                TEXT    UNIQUE NOT NULL,
+  tool_name                TEXT    NOT NULL,
+  failure_category         TEXT    NOT NULL,
+  args_hash                TEXT,
+  first_seen_at            INTEGER NOT NULL,
+  last_seen_at             INTEGER NOT NULL,
+  occurrences              INTEGER NOT NULL DEFAULT 1,
+  recovered_count          INTEGER NOT NULL DEFAULT 0,
+  last_recovery_report_id  INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_failure_signatures_signature
+  ON failure_signatures(signature);
+
+CREATE INDEX IF NOT EXISTS idx_failure_signatures_tool
+  ON failure_signatures(tool_name);
+
+CREATE TABLE IF NOT EXISTS recovery_reports (
+  id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+  signature_id          INTEGER NOT NULL REFERENCES failure_signatures(id),
+  run_id                INTEGER REFERENCES runs(id),
+  session_id            TEXT,
+  failed_attempts       INTEGER NOT NULL,
+  successful_strategy   TEXT    NOT NULL,
+  changed_parameters    TEXT,
+  verification          TEXT,
+  created_at            INTEGER NOT NULL,
+  notes                 TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_reports_signature
+  ON recovery_reports(signature_id);
+
+CREATE INDEX IF NOT EXISTS idx_recovery_reports_run
+  ON recovery_reports(run_id);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
-  { version: 1, name: 'phase 1 — daemon foundation',           sql: V1_SQL },
-  { version: 2, name: 'phase 2 — file watcher observations',   sql: V2_SQL },
-  { version: 3, name: 'phase 3 — webhook deliveries log',      sql: V3_SQL },
-  { version: 4, name: 'phase 4a — email seen forensic table',  sql: V4_SQL },
-  { version: 5, name: 'phase 5b — scheduled workflows',        sql: V5_SQL },
-  { version: 6, name: 'v4.6 phase 1 — sub-agent lineage',      sql: V6_SQL },
+  { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
+  { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
+  { version: 3, name: 'phase 3 — webhook deliveries log',             sql: V3_SQL },
+  { version: 4, name: 'phase 4a — email seen forensic table',         sql: V4_SQL },
+  { version: 5, name: 'phase 5b — scheduled workflows',               sql: V5_SQL },
+  { version: 6, name: 'v4.6 phase 1 — sub-agent lineage',             sql: V6_SQL },
+  { version: 7, name: 'v4.6 phase 3b — self-improvement loop',        sql: V7_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

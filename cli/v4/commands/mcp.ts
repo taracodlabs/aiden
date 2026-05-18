@@ -305,6 +305,16 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
   ).run(mcpInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), AIDEN_VERSION);
   const mcpRunStore = createRunStore({ db: mcpDb });
 
+  // v4.6 Phase 3b — self-improvement loop singleton against the
+  // same daemon.db. MCP-side spawn_sub_agent / subagent_fanout
+  // dispatches now record failure occurrences + recoveries into
+  // the shared ledger, so operators see MCP failures alongside
+  // REPL failures in `aiden /recovery list` from a future REPL
+  // session.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { initRecoveryStore } = require('../../../core/v4/selfimprovement/recoveryStore');
+  initRecoveryStore({ db: mcpDb });
+
   // v4.6 Phase 3A — wire the pause singleton against the same
   // `paths.root` the REPL uses. The fanout handler's pause-check
   // reads through `getSpawnPause()`, so initing here makes MCP
