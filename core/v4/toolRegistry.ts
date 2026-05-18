@@ -53,6 +53,28 @@ import type { BundledManifest } from './skillBundledManifest';
  */
 export type ToolCategory = 'read' | 'write' | 'execute' | 'network' | 'browser';
 
+/**
+ * v4.6 Phase 1 — execution context a tool is permitted in.
+ *
+ *   - 'repl'   — interactive CLI sessions and any agent constructed
+ *                from a REPL parent (including v4.6 sub-agents whose
+ *                parent is the REPL agent).
+ *   - 'daemon' — agents constructed by `cli/v4/daemonAgentBuilder.ts`
+ *                in response to trigger events (file/webhook/email/
+ *                schedule). No interactive UI; runs autonomously.
+ *
+ * Tools self-declare via `ToolHandler.contexts`. When the field is
+ * undefined, the tool is visible in BOTH contexts (the existing
+ * pre-v4.6 behaviour — keeps backward compatibility for all tools
+ * registered before this field existed).
+ *
+ * `getSchemas(filterToolsets, context)` filters by context when
+ * provided. REPL agent passes `'repl'`; daemon agent passes
+ * `'daemon'`. Tools whose `contexts` array does NOT include the
+ * caller's context are excluded.
+ */
+export type ExecutionContext = 'repl' | 'daemon';
+
 export interface ToolContext {
   /** Current working directory (for relative paths in file tools). */
   cwd: string;
@@ -133,6 +155,23 @@ export interface ToolHandler {
    */
   riskTier?: import('./sandboxConfig').RiskTier;
   /**
+   * v4.6 Phase 1 — the execution contexts in which this tool is
+   * visible to the LLM. Default behaviour (when the field is
+   * undefined): visible in both `repl` and `daemon` — matches every
+   * tool registered pre-v4.6.
+   *
+   * Tools that should only appear to interactive (REPL) agents tag
+   * `['repl']`. Tools that should only appear to daemon-fired
+   * agents tag `['daemon']`. The v4.6 sub-agent primitive itself
+   * (`spawn_sub_agent`) is `['repl']` per Q6 (daemon-fired turns
+   * must not initiate sub-agent spawns in Phase 1).
+   *
+   * The filter is applied in `getSchemas(filterToolsets, context)`.
+   * `register()` itself ignores the field — every tool stays in the
+   * registry; the field only narrows what each AidenAgent sees.
+   */
+  contexts?: ExecutionContext[];
+  /**
    * v4.4 Phase 4 — produce a preview of what `execute` would do
    * WITHOUT performing any side effects. Called when AIDEN_DRYRUN=1
    * (via the `withDryRun` HOC in `core/v4/dryRun.ts`) OR when the
@@ -175,14 +214,30 @@ export class ToolRegistry {
   }
 
   /**
-   * Schemas to advertise to the LLM. When `filterToolsets` is provided,
-   * only handlers whose `toolset` matches one of the entries are returned.
+   * Schemas to advertise to the LLM. Two optional filters, AND-combined:
+   *
+   *   - `filterToolsets`: include only handlers whose `toolset` matches
+   *     one of the entries. Applied first (preserves pre-v4.6 behaviour
+   *     when called with one argument).
+   *   - `context` (v4.6 Phase 1): include only handlers whose
+   *     `contexts` array contains this value, OR whose `contexts` is
+   *     undefined (default = visible everywhere). Applied second.
+   *
+   * Both filters default to "no filter" when omitted. Callers that
+   * predate v4.6 pass one arg or none and continue working unchanged.
    */
-  getSchemas(filterToolsets?: string[]): ToolSchema[] {
+  getSchemas(filterToolsets?: string[], context?: ExecutionContext): ToolSchema[] {
     const out: ToolSchema[] = [];
     for (const handler of this.handlers.values()) {
       if (filterToolsets && filterToolsets.length > 0) {
         if (!handler.toolset || !filterToolsets.includes(handler.toolset)) {
+          continue;
+        }
+      }
+      if (context !== undefined) {
+        // contexts undefined → tool is visible in both REPL and daemon
+        // (backward-compat default for every pre-v4.6 tool).
+        if (handler.contexts !== undefined && !handler.contexts.includes(context)) {
           continue;
         }
       }

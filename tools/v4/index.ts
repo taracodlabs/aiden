@@ -98,6 +98,9 @@ import {
   makeSubagentFanoutTool,
   type SubagentFanoutFactoryOptions,
 } from './subagent/subagentFanout';
+// v4.6 Phase 1 — spawn_sub_agent stub registered alongside the
+// fanout stub so the schema is visible at agent construction.
+import { makeSpawnSubAgentStub } from './subagent/spawnSubAgentTool';
 
 /**
  * Register every read-only tool into `registry`. The
@@ -169,6 +172,16 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   // Until then, calling the stub returns a clear "not wired" error
   // rather than crashing.
   register(makeSubagentFanoutStub());
+
+  // v4.6 Phase 1 — register a stub for spawn_sub_agent. Same
+  // rationale: agent construction at `cli/v4/aidenCLI.ts` snapshots
+  // the tool array, so the schema must be in the registry by then.
+  // The REPL wiring at `buildAgentRuntime` calls
+  // `register(makeSpawnSubAgentTool({...real deps}))` to replace
+  // this stub once `parentAgent`, `runStore`, etc. are available.
+  // The stub carries `contexts: ['repl']` so it's excluded from the
+  // daemon agent's tool catalog via `getSchemas(_, 'daemon')`.
+  register(makeSpawnSubAgentStub());
 }
 
 /** Stub used until the runtime wires real provider / adapter / agent

@@ -60,6 +60,13 @@ import { SkillLoader } from '../../core/v4/skillLoader';
 import { makeSubagentFanoutTool } from '../../tools/v4/index';
 import type { ProviderOption } from '../../core/v4/subagent/providerRotation';
 import type { RunChildArgs } from '../../core/v4/subagent/fanout';
+// v4.6 Phase 1 — spawn_sub_agent: always-on runStore + LLM-callable tool.
+import { randomUUID } from 'node:crypto';
+import os from 'node:os';
+import { daemonDbPath } from '../../core/v4/daemon/daemonConfig';
+import { openDaemonDb } from '../../core/v4/daemon/db/connection';
+import { createRunStore } from '../../core/v4/daemon/runStore';
+import { makeSpawnSubAgentTool } from '../../tools/v4/subagent/spawnSubAgentTool';
 import type { Message as ProviderMessage } from '../../providers/v4/types';
 import { SkillCommands } from '../../core/v4/skillCommands';
 import { AidenAgent } from '../../core/v4/aidenAgent';
@@ -696,6 +703,29 @@ export async function buildAgentRuntime(
 ): Promise<AgentRuntime> {
   const paths = opts.pathsOverride ?? resolveAidenPaths();
   await ensureAidenDirsExist(paths);
+
+  // ── v4.6 Phase 1 — always-on runStore for spawn_sub_agent ──────────────
+  //
+  // The spawn_sub_agent primitive persists each child run to the runs
+  // table via spawned_from_run_id FK. The REPL needs a runStore handle
+  // regardless of whether AIDEN_DAEMON=1 or not. SQLite WAL mode
+  // (enabled in openDaemonDb) allows REPL + daemon to coexist on the
+  // same file without lock contention. The connection.ts module caches
+  // per-path, so when daemon foundation has already opened the DB this
+  // call returns the same handle. Migration runner is idempotent on
+  // already-current schemas.
+  const replInstanceId = `repl-${randomUUID().slice(0, 8)}`;
+  const replDb = openDaemonDb(daemonDbPath(paths.root));
+  // Seed the REPL's daemon_instances row so the FK on runs.instance_id
+  // is satisfied. Idempotent under INSERT OR IGNORE — multiple REPL
+  // launches reusing the same instance_id (rare with random UUID
+  // suffix) silently no-op.
+  replDb.prepare(
+    `INSERT OR IGNORE INTO daemon_instances
+       (instance_id, pid, hostname, started_at, last_heartbeat, version)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
+  const replRunStore = createRunStore({ db: replDb });
 
   // Phase 16c.2: load `paths.envFile` (the aiden-managed `.env` that
   // `setupWizard.ts::upsertEnvVar` writes to) into `process.env` BEFORE
@@ -1403,7 +1433,11 @@ export async function buildAgentRuntime(
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
-    tools: toolRegistry.getSchemas(),
+    // v4.6 Phase 1 — 'repl' context filter excludes tools tagged
+    // daemon-only (none today) and INCLUDES tools tagged repl-only
+    // (e.g. spawn_sub_agent, registered after this line). Tools with
+    // no `contexts` field default to visible in both contexts.
+    tools: toolRegistry.getSchemas(undefined, 'repl'),
     toolExecutor,
     maxTurns: config.getValue<number>('agent.max_turns', 90)!,
     auxiliaryClient,
@@ -1726,6 +1760,51 @@ export async function buildAgentRuntime(
     providerId,
     modelId,
     fallback: adapter instanceof FallbackAdapter ? 'FallbackAdapter' : 'direct',
+  });
+
+  // ── v4.6 Phase 1 — register spawn_sub_agent (REPL only) ────────────────
+  //
+  // The new single-child synchronous primitive. Coexists with
+  // subagent_fanout (Q9 — additive in Phase 1; Phase 2 will refactor
+  // fanout to call this primitive N times).
+  //
+  // Wired here, AFTER `agent` and `toolExecutor` are in scope, because
+  // the child builder needs the parent agent's reference (to read
+  // `getCurrentSignal()` at dispatch time per the agent-instance signal
+  // pattern) and the parent's tool context for ssrf/tirith/memory/etc.
+  //
+  // Deliberately NOT registered in cli/v4/daemonAgentBuilder.ts —
+  // daemon-fired agents don't expose spawn_sub_agent in their tool
+  // catalog (Q6 lock).
+  toolRegistry.register(makeSpawnSubAgentTool({
+    parentAgent:         agent,
+    toolRegistry,
+    parentToolContext: {
+      cwd:            process.cwd(),
+      paths,
+      sessions:       sessionManager,
+      memory:         memoryManager,
+      memoryGuard,
+      // approvalEngine intentionally OMITTED — the child builder
+      // constructs its own auto-deny ApprovalEngine. Listing it here
+      // would be ignored (childBuilder overrides via spread), but
+      // keeping it out makes the intent explicit.
+      ssrfProtection,
+      tirithScanner,
+      skillLoader,
+    },
+    parentProvider:      adapter,
+    parentProviderId:    providerId,
+    parentModelId:       modelId,
+    resolveVerifiedFlag,
+    resolveToolset,
+    resolveMutates,
+    runStore:            replRunStore,
+    instanceId:          replInstanceId,
+  }));
+  bootLogger.child('subagent').info('spawn_sub_agent: wired (REPL only)', {
+    instanceId: replInstanceId,
+    dbPath:     daemonDbPath(paths.root),
   });
 
   // ── Phase v4.1-2.1: gateway message processor ────────────────────

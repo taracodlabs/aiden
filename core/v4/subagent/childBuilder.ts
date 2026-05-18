@@ -156,8 +156,12 @@ export function buildChildAgent(
     : [...parentToolsetNames];
 
   // Step 4b — pull the schemas for those toolsets.
+  // v4.6 Phase 1 — pass 'repl' context: in Phase 1 spawn_sub_agent
+  // is REPL-only (Q6), so children always spawn from a REPL parent.
+  // Phase 3+ may extend the child builder to receive the parent's
+  // context dynamically; for now, 'repl' is the only path.
   const candidateSchemas: ToolSchema[] = chosenToolsets.length > 0
-    ? deps.toolRegistry.getSchemas(chosenToolsets)
+    ? deps.toolRegistry.getSchemas(chosenToolsets, 'repl')
     : [];  // No matching toolsets means an empty child toolset.
 
   // Step 4c — strip the hard blocklist.

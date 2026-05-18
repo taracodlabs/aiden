@@ -24,6 +24,7 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import type { ToolSchema } from '../../../providers/v4/types';
 import type { AidenAgent } from '../../../core/v4/aidenAgent';
 import {
   spawnSubAgent,
@@ -78,61 +79,110 @@ const SCHEMA_DESC =
   'can answer in 1-3 of your own iterations. Spawn when isolation, focus, or ' +
   'a restricted toolset actually helps.';
 
+// ── Schema constant (shared by real factory + boot-time stub) ─────────────
+
+/**
+ * v4.6 Phase 1 — module-level schema constant so the boot-time stub
+ * (`makeSpawnSubAgentStub`) advertises the SAME JSON-schema surface
+ * the real factory ships. Both register under name `spawn_sub_agent`
+ * with `contexts: ['repl']`, so the model sees a consistent surface
+ * regardless of whether the stub or the real handler is active.
+ */
+export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
+  name:        'spawn_sub_agent',
+  description: SCHEMA_DESC,
+  inputSchema: {
+    type: 'object',
+    required: ['goal'],
+    properties: {
+      goal: {
+        type: 'string',
+        description:
+          'The single concrete task for the child. Phrase as an imperative ' +
+          'outcome — what should be done, not how. The child cannot ask ' +
+          'follow-up questions; if the goal is ambiguous, refine it before ' +
+          'spawning.',
+      },
+      context: {
+        type: 'string',
+        description:
+          "Optional background the child needs but couldn't infer from the " +
+          "goal alone (file paths, prior findings, constraints). Plain text. " +
+          "The child does NOT see your conversation history; anything it needs " +
+          'must be here or discoverable via its toolset.',
+      },
+      toolsets: {
+        type: 'array',
+        description:
+          'Requested toolsets for the child. Will be intersected with your own ' +
+          'enabled toolsets — the child cannot exceed your capabilities. Omit ' +
+          'to let the child inherit your full intersected set (after blocklist ' +
+          'removal).',
+        items: { type: 'string' },
+      },
+      maxIterations: {
+        type: 'integer',
+        description:
+          'Maximum tool-call iterations the child may run. Clamped to [1, 200]. ' +
+          'Choose tight bounds for narrow tasks (5-15) and looser for ' +
+          'exploration (50-100). Default 50.',
+      },
+      timeoutMs: {
+        type: 'integer',
+        description:
+          'Hard wall-clock timeout in milliseconds. Default 10 minutes. The ' +
+          "child is signalled to interrupt on timeout; if it doesn't yield " +
+          'cooperatively, the worker leaks but the parent stays responsive.',
+      },
+    },
+  },
+};
+
+// ── Boot-time stub (registered before runtime deps are resolved) ──────────
+
+/**
+ * v4.6 Phase 1 — stub handler used until the REPL wiring at
+ * `cli/v4/aidenCLI.ts` replaces it with the real factory. Returns
+ * the SAME schema surface so `toolRegistry.getSchemas(undefined,
+ * 'repl')` at agent construction sees `spawn_sub_agent` and the
+ * LLM can address the tool by name. If called before the real
+ * wiring lands, returns a clear "not wired" error envelope so the
+ * model gets a structured error rather than a crash.
+ *
+ * Mirrors `makeSubagentFanoutStub` in `tools/v4/index.ts`.
+ */
+export function makeSpawnSubAgentStub(): ToolHandler {
+  return {
+    schema:   SPAWN_SUB_AGENT_SCHEMA,
+    category: 'network',
+    mutates:  false,
+    toolset:  'subagent',
+    riskTier: 'caution',
+    contexts: ['repl'],
+    async execute() {
+      return {
+        ok:             false,
+        status:         'failed' as const,
+        summary:        null,
+        error:
+          'spawn_sub_agent: tool not wired — runtime did not replace the stub. ' +
+          'Call register(makeSpawnSubAgentTool({...})) after buildAgentRuntime.',
+        exitReason:     'error' as const,
+        metrics:        { apiCalls: 0, durationMs: 0, tokensIn: 0, tokensOut: 0 },
+        childRunId:     '0',
+        childSessionId: '',
+      };
+    },
+  };
+}
+
 // ── Implementation ────────────────────────────────────────────────────────
 
 export function makeSpawnSubAgentTool(
   factory: SpawnSubAgentFactoryOptions,
 ): ToolHandler {
   return {
-    schema: {
-      name:        'spawn_sub_agent',
-      description: SCHEMA_DESC,
-      inputSchema: {
-        type: 'object',
-        required: ['goal'],
-        properties: {
-          goal: {
-            type: 'string',
-            description:
-              'The single concrete task for the child. Phrase as an imperative ' +
-              'outcome — what should be done, not how. The child cannot ask ' +
-              'follow-up questions; if the goal is ambiguous, refine it before ' +
-              'spawning.',
-          },
-          context: {
-            type: 'string',
-            description:
-              "Optional background the child needs but couldn't infer from the " +
-              "goal alone (file paths, prior findings, constraints). Plain text. " +
-              "The child does NOT see your conversation history; anything it needs " +
-              'must be here or discoverable via its toolset.',
-          },
-          toolsets: {
-            type: 'array',
-            description:
-              'Requested toolsets for the child. Will be intersected with your own ' +
-              'enabled toolsets — the child cannot exceed your capabilities. Omit ' +
-              'to let the child inherit your full intersected set (after blocklist ' +
-              'removal).',
-            items: { type: 'string' },
-          },
-          maxIterations: {
-            type: 'integer',
-            description:
-              'Maximum tool-call iterations the child may run. Clamped to [1, 200]. ' +
-              'Choose tight bounds for narrow tasks (5-15) and looser for ' +
-              'exploration (50-100). Default 50.',
-          },
-          timeoutMs: {
-            type: 'integer',
-            description:
-              'Hard wall-clock timeout in milliseconds. Default 10 minutes. The ' +
-              "child is signalled to interrupt on timeout; if it doesn't yield " +
-              'cooperatively, the worker leaks but the parent stays responsive.',
-          },
-        },
-      },
-    },
+    schema: SPAWN_SUB_AGENT_SCHEMA,
     // The tool itself spends tokens. Disk / process side effects, if
     // any, happen INSIDE the child agent whose toolset is intersected
     // with the parent's and stripped of the v4.6 blocklist.
@@ -140,6 +190,18 @@ export function makeSpawnSubAgentTool(
     mutates:  false,
     toolset:  'subagent',
     riskTier: 'caution',
+    // v4.6 Phase 1 — REPL-only execution context per Q6.
+    // Daemon-fired agents must not initiate sub-agent spawns in
+    // Phase 1: the spawn factory captured the REPL agent reference
+    // at construction, so a daemon-fired turn invoking this tool
+    // would route its child's signal chain through the REPL agent's
+    // state rather than the daemon turn's. Tagging it `['repl']`
+    // here causes `toolRegistry.getSchemas(_, 'daemon')` (used by
+    // daemonAgentBuilder.ts:130) to exclude `spawn_sub_agent` from
+    // the daemon agent's tool catalog, so the model never sees it
+    // when running in daemon mode. Phase 3+ may add a daemon-mode
+    // spawn factory tied to the daemon agent's own reference.
+    contexts: ['repl'],
 
     async execute(args, _ctx) {
       // ── 1. Validate + coerce ─────────────────────────────────────────────

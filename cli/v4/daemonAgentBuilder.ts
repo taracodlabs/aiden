@@ -127,7 +127,10 @@ export function buildDaemonAgentBuilder(
 
     const agent = new AidenAgent({
       provider:             adapter,
-      tools:                deps.toolRegistry.getSchemas(),
+      // v4.6 Phase 1 — 'daemon' context filter excludes REPL-only
+      // tools (`spawn_sub_agent` per Q6). Tools without an explicit
+      // `contexts` field stay visible to both REPL and daemon.
+      tools:                deps.toolRegistry.getSchemas(undefined, 'daemon'),
       toolExecutor:         deps.toolExecutor,
       maxTurns,
       auxiliaryClient:      deps.auxiliaryClient,
