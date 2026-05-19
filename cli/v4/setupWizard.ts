@@ -658,7 +658,12 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
 
   await ensureAidenDirsExist(paths);
 
-  display.printBanner();
+  // ONB1-WIRE-2 Slice A — drop the duplicate AIDEN banner. The
+  // disclaimer screen (ONB1 slice 3) already paints the framed banner
+  // before the wizard runs in the fresh-install flow. For users who
+  // invoke `aiden setup` or `/setup` directly (which bypass the
+  // disclaimer), the single welcome heading is enough — no second
+  // banner needed for visual consistency.
   display.write('\nWelcome — let\'s pick a provider.\n');
   display.write(
     `${kleur.dim('(Press Enter to accept Groq — free + fastest setup.)')}\n\n`,
