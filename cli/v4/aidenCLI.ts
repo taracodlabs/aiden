@@ -901,7 +901,31 @@ export async function buildAgentRuntime(
         'config.yaml is empty — let\'s pick a provider that matches.\n',
       );
     }
-    process.stdout.write('Launching setup wizard…\n\n');
+    // ONB1-WIRE — disclaimer + loading screens land BEFORE the wizard.
+    // Only inside this TTY-guarded branch (the non-TTY branch at the
+    // outer else already bails into explore mode). The detection
+    // summary above gives the user context for what was found; the
+    // disclaimer then asks for explicit consent before we walk them
+    // through setup. Declining exits 0 — the user chose not to
+    // continue, that's not an error.
+    //
+    // Lazy-required so the test harness paths that stub the wizard
+    // don't pay the load cost.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { showDisclaimer } = require('./onboarding/disclaimer') as typeof import('./onboarding/disclaimer');
+    const disc = await showDisclaimer();
+    if (!disc.ok) {
+      // User typed 'n' / 'no'. The disclaimer already printed the
+      // friendly goodbye line; just exit cleanly.
+      process.exit(0);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { runLoadingSequence, defaultLoadingSteps } =
+      require('./onboarding/loading') as typeof import('./onboarding/loading');
+    await runLoadingSequence(defaultLoadingSteps(paths));
+
+    process.stdout.write('\n');
 
     const result = await runSetupWizard({ paths });
 
