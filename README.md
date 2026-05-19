@@ -39,7 +39,6 @@ Windows · Linux · WSL · macOS (API Mode)
 [![Website](https://img.shields.io/badge/Website-aiden.taracod.com-FF6B35?style=for-the-badge&logo=safari&logoColor=white)](https://aiden.taracod.com)
 [![Book: Omega](https://img.shields.io/badge/Book-Omega-FFB088?style=for-the-badge&logo=amazon&logoColor=white)](https://amzn.to/49ceO8l)
 [![Email](https://img.shields.io/badge/Contact-contact@taracod.com-4ADE80?style=for-the-badge&logo=gmail&logoColor=white)](mailto:contact@taracod.com)
-[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/<your-github-handle>)
 [![Sponsor via Razorpay](https://img.shields.io/badge/Sponsor-Razorpay-3395FF?style=for-the-badge&logo=razorpay&logoColor=white)](https://razorpay.me/@whitelotus9625)
 
 <br>
@@ -411,7 +410,7 @@ Common issues live in [`docs/v4.5/troubleshooting.md`](docs/v4.5/troubleshooting
 
 Aiden is free and open source. If it saves you time or you want it to keep getting better, sponsorship helps cover server costs, API testing, and the time to ship features instead of taking client work.
 
-[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub_Sponsors-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/<your-github-handle>)
+
 [![Sponsor via Razorpay](https://img.shields.io/badge/Sponsor-Razorpay-3395FF?style=for-the-badge&logo=razorpay&logoColor=white)](https://razorpay.me/@whitelotus9625)
 
 Even a one-time tip or a star on the repo is appreciated.
@@ -464,7 +463,6 @@ The future `skills.taracod.com` marketplace will ship community skills under the
 | 📁 **Standalone releases** | [github.com/taracodlabs/aiden-releases](https://github.com/taracodlabs/aiden-releases) |
 | 📖 **Book — Omega** | [Amazon](https://amzn.to/49ceO8l) |
 | 📚 **Docs** | [`docs/v4.5/`](docs/v4.5/) (in this repo) |
-| 💖 **Sponsor (GitHub)** | [github.com/sponsors/<your-github-handle>](https://github.com/sponsors/<your-github-handle>) |
 | 💖 **Sponsor (Razorpay)** | [razorpay.me/@whitelotus9625](https://razorpay.me/@whitelotus9625) |
 | ✉️ **Contact** | [contact@taracod.com](mailto:contact@taracod.com) |
 
