@@ -16,11 +16,91 @@ Windows · Linux · WSL · macOS (API Mode)
 ```
 <div align="center">
 
+<div align="center">
+
 # Aiden
 
 **Autonomous AI Engine — local-first, Windows-native, yours to own**
 
 *74 skills · 60 tools · 19 providers · 9 channels · AGPL-3.0*
+
+<br>
+
+<!-- Status row -->
+[![npm version](https://img.shields.io/npm/v/aiden-runtime?color=FF6B35&label=npm&style=for-the-badge)](https://www.npmjs.com/package/aiden-runtime)
+[![npm downloads](https://img.shields.io/npm/dm/aiden-runtime?color=FF6B35&style=for-the-badge)](https://www.npmjs.com/package/aiden-runtime)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-FF6B35?style=for-the-badge)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/taracodlabs/aiden?color=FF6B35&style=for-the-badge)](https://github.com/taracodlabs/aiden/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/taracodlabs/aiden?color=FF6B35&style=for-the-badge)](https://github.com/taracodlabs/aiden/network/members)
+[![GitHub issues](https://img.shields.io/github/issues/taracodlabs/aiden?color=FF6B35&style=for-the-badge)](https://github.com/taracodlabs/aiden/issues)
+
+<br>
+
+<!-- Community row -->
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/CU5wshJW4F)
+[![Website](https://img.shields.io/badge/Website-aiden.taracod.com-FF6B35?style=for-the-badge&logo=safari&logoColor=white)](https://aiden.taracod.com)
+[![Book: Omega](https://img.shields.io/badge/Book-Omega-FFB088?style=for-the-badge&logo=amazon&logoColor=white)](https://amzn.to/49ceO8l)
+[![Email](https://img.shields.io/badge/Contact-contact@taracod.com-4ADE80?style=for-the-badge&logo=gmail&logoColor=white)](mailto:contact@taracod.com)
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/<your-github-handle>)
+[![Sponsor via Razorpay](https://img.shields.io/badge/Sponsor-Razorpay-3395FF?style=for-the-badge&logo=razorpay&logoColor=white)](https://razorpay.me/@whitelotus9625)
+
+<br>
+
+<!-- Language & runtime -->
+![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?style=flat-square&logo=typescript&logoColor=white)
+![JavaScript](https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?style=flat-square&logo=javascript&logoColor=black)
+![Node.js](https://img.shields.io/badge/Node.js-≥18-339933?style=flat-square&logo=node.js&logoColor=white)
+![ESM](https://img.shields.io/badge/Modules-ESM-FFB088?style=flat-square)
+![esbuild](https://img.shields.io/badge/Bundler-esbuild-FFCF00?style=flat-square&logo=esbuild&logoColor=black)
+![npm](https://img.shields.io/badge/Registry-npm-CB3837?style=flat-square&logo=npm&logoColor=white)
+
+<!-- Platforms -->
+![Windows](https://img.shields.io/badge/Windows-11-0078D6?style=flat-square&logo=windows&logoColor=white)
+![Linux](https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black)
+![WSL](https://img.shields.io/badge/WSL-2-4D4D4D?style=flat-square&logo=linux&logoColor=white)
+![macOS](https://img.shields.io/badge/macOS-API_mode-000000?style=flat-square&logo=apple&logoColor=white)
+![PowerShell](https://img.shields.io/badge/PowerShell-7-5391FE?style=flat-square&logo=powershell&logoColor=white)
+
+<!-- Core infrastructure -->
+![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57?style=flat-square&logo=sqlite&logoColor=white)
+![better-sqlite3](https://img.shields.io/badge/better--sqlite3-11.x-003B57?style=flat-square&logo=sqlite&logoColor=white)
+![Playwright](https://img.shields.io/badge/Playwright-browser-45ba4b?style=flat-square&logo=playwright&logoColor=white)
+![Chromium](https://img.shields.io/badge/Chromium-headless-4285F4?style=flat-square&logo=googlechrome&logoColor=white)
+![Docker](https://img.shields.io/badge/Docker-sandbox-2496ED?style=flat-square&logo=docker&logoColor=white)
+![MCP](https://img.shields.io/badge/Model_Context_Protocol-1.0-FF6B35?style=flat-square)
+
+<!-- Streaming + runtime features -->
+![SSE](https://img.shields.io/badge/SSE-streaming-FF6B35?style=flat-square)
+![Daemon mode](https://img.shields.io/badge/Daemon-opt--in-FFB088?style=flat-square)
+![Sub-agents](https://img.shields.io/badge/Sub--agents-fanout-FFB088?style=flat-square)
+![TCE](https://img.shields.io/badge/TCE-error_recovery-4ADE80?style=flat-square)
+![Sandbox](https://img.shields.io/badge/Sandbox-tiered-FBBF24?style=flat-square)
+![BYOK](https://img.shields.io/badge/BYOK-pure-FF6B35?style=flat-square)
+
+<!-- Providers (sample) -->
+![Groq](https://img.shields.io/badge/Groq-fast-F55036?style=flat-square)
+![Anthropic](https://img.shields.io/badge/Anthropic-Claude-D97757?style=flat-square&logo=anthropic&logoColor=white)
+![OpenAI](https://img.shields.io/badge/OpenAI-GPT-412991?style=flat-square&logo=openai&logoColor=white)
+![Gemini](https://img.shields.io/badge/Google-Gemini-4285F4?style=flat-square&logo=google&logoColor=white)
+![Ollama](https://img.shields.io/badge/Ollama-local-000000?style=flat-square&logo=ollama&logoColor=white)
+![+14 more](https://img.shields.io/badge/+14_more-providers-B8A893?style=flat-square)
+
+<!-- Channels -->
+![Discord channel](https://img.shields.io/badge/Channel-Discord-5865F2?style=flat-square&logo=discord&logoColor=white)
+![Slack channel](https://img.shields.io/badge/Channel-Slack-4A154B?style=flat-square&logo=slack&logoColor=white)
+![Telegram channel](https://img.shields.io/badge/Channel-Telegram-26A5E4?style=flat-square&logo=telegram&logoColor=white)
+![Email channel](https://img.shields.io/badge/Channel-Email-EA4335?style=flat-square&logo=gmail&logoColor=white)
+![Webhook channel](https://img.shields.io/badge/Channel-Webhook-FF6B35?style=flat-square)
+![+4 more](https://img.shields.io/badge/+4_more-channels-B8A893?style=flat-square)
+
+<!-- Quality + identity -->
+![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
+![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
+![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
+![v4.6.1](https://img.shields.io/badge/Latest-v4.6.1-4ADE80?style=flat-square)
+
+</div>
+---
 
 <br>
 
