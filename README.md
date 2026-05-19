@@ -14,55 +14,55 @@ Autonomous AI Engine — local-first, Windows-native, yours to own
 
 Windows · Linux · WSL · macOS (API Mode)
 ```
+<div align="center">
 
-<p align="center">
-  <a href="https://github.com/taracodlabs/aiden/releases/latest"><img src="https://img.shields.io/badge/version-v4.6.0-f97316?style=for-the-badge" alt="v4.6.0" /></a>
-  <a href="https://www.npmjs.com/package/aiden-runtime"><img src="https://img.shields.io/npm/v/aiden-runtime?color=f97316&label=npm&style=for-the-badge" alt="npm" /></a>
-  <a href="https://www.npmjs.com/package/aiden-runtime"><img src="https://img.shields.io/npm/dm/aiden-runtime?color=f97316&label=downloads&style=for-the-badge" alt="npm downloads" /></a>
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-orange?style=for-the-badge" alt="License: AGPL-3.0" /></a>
-  <a href="https://discord.gg/gMZ3hUnQTm"><img src="https://img.shields.io/badge/chat-discord-7289da?logo=discord&logoColor=white&style=for-the-badge" alt="Discord" /></a>
-  <a href="https://github.com/taracodlabs/aiden/stargazers"><img src="https://img.shields.io/github/stars/taracodlabs/aiden?style=for-the-badge&color=f9d71c" alt="Stars" /></a>
-</p>
+# Aiden
 
-<p align="center">
-  <img src="https://img.shields.io/badge/TypeScript-5.9-3178c6?logo=typescript&logoColor=white&style=for-the-badge" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/Node.js-18+-43853d?logo=node.js&logoColor=white&style=for-the-badge" alt="Node.js 18+" />
-  <img src="https://img.shields.io/badge/SQLite-003b57?logo=sqlite&logoColor=white&style=for-the-badge" alt="SQLite" />
-  <img src="https://img.shields.io/badge/Playwright-1.58-2ea44f?logo=playwright&logoColor=white&style=for-the-badge" alt="Playwright" />
-  <img src="https://img.shields.io/badge/MCP-1.27-7c3aed?style=for-the-badge" alt="Model Context Protocol" />
-</p>
+**Autonomous AI Engine — local-first, Windows-native, yours to own**
 
----
+*74 skills · 60 tools · 19 providers · 9 channels · AGPL-3.0*
 
-## What's new in v4.6
+<br>
 
-Aiden now spawns workers and learns from itself.
+[![npm version](https://img.shields.io/npm/v/aiden-runtime?color=FF6B35&label=npm&style=for-the-badge)](https://www.npmjs.com/package/aiden-runtime)
+[![npm downloads](https://img.shields.io/npm/dm/aiden-runtime?color=FF6B35&style=for-the-badge)](https://www.npmjs.com/package/aiden-runtime)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-FF6B35?style=for-the-badge)](LICENSE)
+[![GitHub stars](https://img.shields.io/github/stars/taracodlabs/aiden?color=FF6B35&style=for-the-badge)](https://github.com/taracodlabs/aiden/stargazers)
 
-- **Sub-agents.** `spawn_sub_agent` runs a focused child with an isolated context + intersected toolset; `subagent_fanout` runs N children in parallel (ensemble or partition) with merge strategies (`all` / `vote` / `pick-best` / `combine`) and provider rotation across configured fallback slots.
-- **Operator kill-switch.** `/spawn-pause on|off|status` blocks new sub-agent spawning while in-flight children continue. Marker file at `~/.aiden/spawn.paused` so the state survives restart and is shared across REPL, daemon, and MCP runtimes. Optional reason field captured in the typed `SUBAGENT_SPAWN_PAUSED` error envelope.
-- **Self-improvement loop foundation.** TCE classifications + recoveries persist to two new SQLite tables (`failure_signatures`, `recovery_reports`); `/recovery list|show|clear` surfaces recurring failure patterns across sessions.
-- **REPL parent-run lineage.** Each REPL turn writes its own `runs` row; sub-agent children link back via `spawned_from_run_id`. `aiden runs list` hides children by default and shows a `(N children, M OK)` badge per parent; `--include-children` flips to flat view.
-- **PlannerGuard opt-in.** The keyword-based per-turn tool narrower is OFF by default in v4.6 (modern models pick well from the full catalog). Enable via `/planner-guard on` or `AIDEN_PLANNER_GUARD=1` for smaller local models.
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/CU5wshJW4F)
+[![Website](https://img.shields.io/badge/Website-aiden.taracod.com-FF6B35?style=for-the-badge&logo=safari&logoColor=white)](https://aiden.taracod.com)
+[![Book: Omega](https://img.shields.io/badge/Book-Omega-FFB088?style=for-the-badge&logo=amazon&logoColor=white)](https://amzn.to/49ceO8l)
+[![Email](https://img.shields.io/badge/Contact-contact@taracod.com-4ADE80?style=for-the-badge&logo=gmail&logoColor=white)](mailto:contact@taracod.com)
 
-Phase 2 also fixed an MCP-mode `subagent_fanout` regression that had silently broken in the v4.5 refactor.
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/<your-github-handle>)
+[![Sponsor via Razorpay](https://img.shields.io/badge/Sponsor-Razorpay-3395FF?style=for-the-badge&logo=razorpay&logoColor=white)](https://razorpay.me/@whitelotus9625)
 
----
+<br>
 
-## What's new in v4.5
+[![TypeScript](https://img.shields.io/badge/TypeScript-007ACC?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
+[![Node.js 18+](https://img.shields.io/badge/Node.js-18+-339933?style=flat-square&logo=node.js&logoColor=white)](https://nodejs.org/)
+[![SQLite](https://img.shields.io/badge/SQLite-003B57?style=flat-square&logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![Playwright](https://img.shields.io/badge/Playwright-45ba4b?style=flat-square&logo=playwright&logoColor=white)](https://playwright.dev/)
+[![MCP](https://img.shields.io/badge/Model_Context_Protocol-FF6B35?style=flat-square)](https://modelcontextprotocol.io/)
+[![Windows](https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows&logoColor=white)](https://www.microsoft.com/windows)
+[![Linux](https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black)](https://www.linux.org/)
+[![WSL](https://img.shields.io/badge/WSL-4D4D4D?style=flat-square&logo=linux&logoColor=white)](https://learn.microsoft.com/windows/wsl/)
+[![macOS](https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white)](https://www.apple.com/macos/)
+[![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)](https://taracod.com)
+[![Made by Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)](https://taracod.com)
 
-Aiden now wakes up by itself.
+</div>
 
-- **Persistent daemon mode (opt-in).** `AIDEN_DAEMON=1` boots a background service with a SQLite-backed trigger bus. File watchers, webhook endpoints, IMAP polling, and cron schedules all feed the same durable queue.
-- **Autonomous trigger dispatch.** When a trigger fires, a real AidenAgent turn runs end-to-end — same tools, same sandbox, same recovery pipeline as your interactive REPL. Surface the chain with `aiden runs show <id>`.
-- **Execution sandbox with risk tiers.** Filesystem allowlist + Docker session backend + dry-run preflight. Default on; flip live with `/sandbox on|off`.
-- **State-aware browser depth.** URL + DOM + iframe-tree capture before/after every browser tool call. Stale-ref auto-retry. Surfaces login / 2FA / captcha / consent blockers as structured cards.
-- **Continuous error recovery (TCE).** 16 failure categories classified per tool call. Smart retry with cooldown. Dead-letter for permanent failures. Recovery report enriches the REPL's capability card.
-- **Live-flip slash commands.** `/sandbox`, `/tce`, `/browser-depth`, `/daemon status`, `/suggestions`, `/update` — toggle every subsystem without restart. Choices persist to `config.yaml`.
-- **Update notification + `/update` CLI.** Boot prompt when a newer version is on npm. Skip-this-version persistence. Install-method detection (npm-global / npx / standalone). Q-U6: spawn directly when supported, print command when not.
+<br>
 
-Full v4.5 internals: `docs/v4.5/` (overview, triggers, architecture, daemon on Linux/macOS/Windows, troubleshooting).
+<img width="929" height="673" alt="image" src="https://github.com/user-attachments/assets/78224b1f-5517-4865-9142-48dd0a68fb46" />
 
----
+
+![Aiden boot](docs/screenshots/boot.png)
+
+> A semi-autonomous AI agent that runs on your machine. Touches your files, browser, and shell. Remembers what matters. Built solo. Open source. Still rough in spots.
+
+<br>
 
 ## Try it in 60 seconds
 
@@ -73,7 +73,7 @@ aiden
 
 That's it. Pick a provider (Groq is free + fastest), paste your key, and start chatting.
 
-Want autonomous triggers?
+**Want autonomous triggers?**
 
 ```bash
 export AIDEN_DAEMON=1          # PowerShell: $env:AIDEN_DAEMON = "1"
@@ -83,31 +83,66 @@ aiden                          # boots the REPL + dispatcher
 
 Drop a file in `~/Documents/inbox/anything.txt` and Aiden acts on it. The agent turn is visible via `aiden runs list`.
 
----
+<br>
+
+![Aiden in action](docs/screenshots/autonomy.png)
+
+<br>
+
+## What's new in v4.6
+
+**Aiden now spawns workers and learns from itself.**
+
+- **Sub-agents.** `spawn_sub_agent` runs a focused child with an isolated context + intersected toolset; `subagent_fanout` runs N children in parallel (ensemble or partition) with merge strategies (`all` / `vote` / `pick-best` / `combine`) and provider rotation across configured fallback slots.
+- **Operator kill-switch.** `/spawn-pause on|off|status` blocks new sub-agent spawning while in-flight children continue. Marker file at `~/.aiden/spawn.paused` so the state survives restart and is shared across REPL, daemon, and MCP runtimes. Optional reason field captured in the typed `SUBAGENT_SPAWN_PAUSED` error envelope.
+- **Self-improvement loop foundation.** TCE classifications + recoveries persist to two new SQLite tables (`failure_signatures`, `recovery_reports`); `/recovery list|show|clear` surfaces recurring failure patterns across sessions.
+- **REPL parent-run lineage.** Each REPL turn writes its own `runs` row; sub-agent children link back via `spawned_from_run_id`. `aiden runs list` hides children by default and shows a `(N children, M OK)` badge per parent; `--include-children` flips to flat view.
+- **PlannerGuard opt-in.** The keyword-based per-turn tool narrower is **OFF by default** in v4.6 (modern models pick well from the full catalog). Enable via `/planner-guard on` or `AIDEN_PLANNER_GUARD=1` for smaller local models.
+- **v4.6.1 onboarding redesign.** Fresh disclaimer screen, loading sequence, rich provider picker with live `/models` fetch, 3-step connection probe, success screen, and `/walkthrough` guided tour. Phase 2 also fixed an MCP-mode `subagent_fanout` regression that had silently broken in the v4.5 refactor.
+
+<br>
+
+## What's new in v4.5
+
+**Aiden now wakes up by itself.**
+
+- **Persistent daemon mode (opt-in).** `AIDEN_DAEMON=1` boots a background service with a SQLite-backed trigger bus. File watchers, webhook endpoints, IMAP polling, and cron schedules all feed the same durable queue.
+- **Autonomous trigger dispatch.** When a trigger fires, a real `AidenAgent` turn runs end-to-end — same tools, same sandbox, same recovery pipeline as your interactive REPL. Surface the chain with `aiden runs show <id>`.
+- **Execution sandbox with risk tiers.** Filesystem allowlist + Docker session backend + dry-run preflight. Default on; flip live with `/sandbox on|off`.
+- **State-aware browser depth.** URL + DOM + iframe-tree capture before/after every browser tool call. Stale-ref auto-retry. Surfaces login / 2FA / captcha / consent blockers as structured cards.
+- **Continuous error recovery (TCE).** 16 failure categories classified per tool call. Smart retry with cooldown. Dead-letter for permanent failures. Recovery report enriches the REPL's capability card.
+- **Live-flip slash commands.** `/sandbox`, `/tce`, `/browser-depth`, `/daemon status`, `/suggestions`, `/update` — toggle every subsystem without restart. Choices persist to `config.yaml`.
+- **Update notification + `/update` CLI.** Boot prompt when a newer version is on npm. Skip-this-version persistence. Install-method detection (npm-global / npx / standalone).
+
+Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architecture, daemon on Linux/macOS/Windows, troubleshooting).
+
+<br>
 
 ## Core capabilities
 
 | Category | What Aiden does |
 |---|---|
-| **Inference & providers** | 19 providers: Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama (fully offline), custom OpenAI-compatible endpoints. OAuth subscription routing for Claude Pro and ChatGPT Plus. |
-| **59 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops, process control, shell exec, code execution, system info, screenshot, clipboard, app launch, media keys, MCP bridge, memory ops, session list/search/summary/recall, skill view/list/manage, `aiden_self_update`. |
+| **Inference & providers** | 19 providers: Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama (fully offline), Nous Portal, custom OpenAI-compatible endpoints. OAuth subscription routing for Claude Pro and ChatGPT Plus. |
+| **60 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops, process control, shell exec, code execution, system info, screenshot, clipboard, app launch, media keys, MCP bridge, memory ops, session list/search/summary/recall, skill view/list/manage, `aiden_self_update`. |
 | **74 bundled skills** | Composable workflows each with a `SKILL.md` prompt, optional helper scripts, and tool requirements. GitHub PR/issue workflows, NSE / Upstox / Zerodha trading, Censys / Shodan / VirusTotal lookups, Windows Defender / Task Scheduler, Docker management, YouTube content tools, and more. |
 | **Self-promoting memory** | `USER.md` + `SOUL.md` identity, plus `MEMORY.md` split between durable facts (compression-protected) and recent-session distillations. Each session ends with a structured summary that graduates durable facts into the protected section. Semantic recall over past sessions via `recall_session`. |
 | **Voice** | Edge TTS / Windows SAPI text-to-speech, speech-to-text helpers. |
 | **Channel adapters** | Discord, Slack, Telegram, WhatsApp, Email (IMAP+SMTP), Webhook, Twilio SMS, iMessage (macOS), Signal — any channel triggers the same agent loop. |
 | **Computer use** | Screenshot capture, screen-state vision loop, browser automation. Mouse/keyboard automation partial. |
-| **v4.5 daemon mode (opt-in)** | File watcher / webhook / email IMAP / scheduled triggers route through a durable trigger bus consumed by the Phase 5a dispatcher. Triggers fire → real agent runs → tool calls execute → `run_events` captures the chain. Off by default. |
+| **v4.5 daemon mode (opt-in)** | File watcher / webhook / email IMAP / scheduled triggers route through a durable trigger bus consumed by the Phase 5a dispatcher. Triggers fire → real agent runs → tool calls execute → `run_events` captures the chain. **Off by default.** |
 | **Plugins** | Three bundled plugins: Chrome DevTools Protocol bridge, Claude Pro OAuth, ChatGPT Plus OAuth. Permission-state machine (pending-grant / loaded / suspended). |
 | **MCP** | Model Context Protocol bridge — stdio + HTTP transports, schema discovery, tool dispatch. |
-| **Security moat** | Tiered approval engine (safe / caution / dangerous), dangerous-command pattern classifier, honesty enforcement (post-loop scan rewrites false claims), memory guard, planner-guard tool narrowing, SSRF-safe URL fetcher, secret/PII pre-write scanner, skill-teacher (auto-create skills from successful flows). |
+| **Security moat** | Tiered approval engine (`safe` / `caution` / `dangerous`), dangerous-command pattern classifier, honesty enforcement (post-loop scan rewrites false claims), memory guard, planner-guard tool narrowing, SSRF-safe URL fetcher, secret/PII pre-write scanner, skill-teacher (auto-create skills from successful flows). |
 
----
+<br>
 
-## Architecture (one paragraph)
+## Architecture
 
-Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns. Detailed diagrams + module map in [`docs/v4.5/architecture.md`](./docs/v4.5/architecture.md).
+Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, every tool call passes through verification + failure classification + recovery, and tool results stream back as structured envelopes the model can reason over. v4.5 added a SQLite daemon foundation alongside the REPL — file watchers and webhook endpoints write to a durable trigger bus, a single-worker dispatcher claims events, and each trigger fires a fresh agent turn keyed by a stable session id. Sandboxed execution (filesystem allow/deny + Docker session backend), state-aware browser observation, and continuous error recovery apply to daemon-fired turns identically to REPL turns.
 
----
+Detailed diagrams + module map in [`docs/v4.5/architecture.md`](docs/v4.5/architecture.md).
+
+<br>
 
 ## Install + first run
 
@@ -140,33 +175,72 @@ npm install -g aiden-runtime@latest
 ```
 
 Or, from inside a running session, the slash command:
-
-```
 /update install
-```
 
 (Aiden also prompts you on boot when a newer version is on npm — see `/update auto off` to silence.)
 
-### Daemon mode (opt-in)
-
-**Linux:** install a systemd `--user` unit.
+### Uninstall
 
 ```bash
-export AIDEN_DAEMON=1
-aiden daemon install
-loginctl enable-linger $USER     # keep running between sessions
+npm uninstall -g aiden-runtime
 ```
 
-**macOS:** install a launchd plist.
+To also wipe your local Aiden home (config, sessions, memory, skills):
 
 ```bash
-export AIDEN_DAEMON=1
-aiden daemon install
+# Linux / macOS
+rm -rf ~/.aiden
+
+# Windows (PowerShell)
+Remove-Item -Recurse -Force $env:LOCALAPPDATA\aiden
 ```
 
-**Windows:** see [`docs/v4.5/daemon-windows.md`](./docs/v4.5/daemon-windows.md). Recommended: foreground (`aiden daemon start`) or `pm2` for background.
+<br>
 
----
+<img width="938" height="1049" alt="preview (3)" src="https://github.com/user-attachments/assets/93af497d-0fe3-4e2b-aa73-7739682c18b1" />
+
+
+## Setup wizard
+
+The first time you run `aiden`, you'll see:
+
+1. **Disclaimer screen** — honest about what Aiden can touch (files, browser, shell)
+2. **Loading sequence** — system check, skills load, tools register, memory init
+3. **Provider picker** — pick from 19 providers, no defaults — explicit choice
+4. **Live model fetch** — Aiden hits the provider's `/models` API for the current catalog
+5. **3-step probe** — key works → model accessible → tool calls supported
+6. **Success screen** — three example prompts to get started
+7. **REPL handoff** — first-run hint banner: `Tip: try /walkthrough`
+
+To re-run the wizard later:
+
+```bash
+aiden setup
+```
+
+To diagnose without re-running:
+
+```bash
+aiden doctor
+```
+
+<br>
+
+## Switching models
+
+Inside the REPL:
+/model
+
+Picks a provider (with `✓ authed` badges next to ones you've configured), fetches the live model list, and saves your choice to `config.yaml`. Persists across sessions.
+
+To set the default at the env level:
+
+```bash
+export AIDEN_DEFAULT_PROVIDER=groq
+export AIDEN_DEFAULT_MODEL=llama-3.3-70b-versatile
+```
+
+<br>
 
 ## Configuration
 
@@ -186,39 +260,88 @@ Aiden reads `~/.aiden/config.yaml` (Linux/macOS) or `%LOCALAPPDATA%\aiden\config
 | `AIDEN_BROWSER_DEPTH` | `1` | `0` to disable state-aware browser observation |
 | `AIDEN_API_KEY` | unset | Required for non-loopback daemon bind |
 | `AIDEN_NO_UPDATE_CHECK` | `0` | Set to `1` to silence the boot-time update probe |
+| `AIDEN_PLANNER_GUARD` | `0` | Set to `1` to enable keyword-based tool narrowing (helps smaller local models) |
 
-Most flags are also flippable live via slash commands:
+Most flags are also flippable live via slash commands.
 
-| Slash command | Effect |
+<br>
+
+## CLI commands
+
+| Command | What it does |
 |---|---|
-| `/sandbox on\|off\|status` | Filesystem + execution sandbox |
-| `/tce on\|off\|status` | Continuous error recovery |
-| `/browser-depth on\|off\|status` | State-aware browser observer |
-| `/suggestions on\|off\|status` | Contextual capability hints |
-| `/daemon status` | Read-only daemon snapshot (port, triggers, recent runs, daily budget) |
-| `/update check\|install\|skip <v>\|auto on\|off` | Update probe + install |
-| `/cron add\|list\|show\|run\|remove` | Scheduled jobs |
-| `/runs list\|show <id>\|interrupt\|stats` | Daemon run history |
+| `aiden` | Start the REPL (runs setup wizard on first launch) |
+| `aiden setup` | Re-run the onboarding wizard |
+| `aiden doctor` | Diagnose providers, auth, config, and environment |
+| `aiden --version` | Print the installed version |
+| `aiden --help` | Show the full CLI manual |
+| `aiden update` | Check for and install updates |
+| `aiden daemon start` | Run the daemon in foreground |
+| `aiden daemon install` | Install daemon as system service (systemd / launchd / Task Scheduler) |
+| `aiden daemon status` | Show daemon health, recent triggers, run history |
+| `aiden trigger add file --path <p>` | Add a file-watcher trigger |
+| `aiden trigger add webhook --label <n>` | Add an HTTP webhook trigger |
+| `aiden trigger add cron --schedule "<expr>"` | Add a scheduled trigger |
+| `aiden trigger list` | List all configured triggers |
+| `aiden runs list` | List recent agent runs (interactive + daemon) |
+| `aiden runs show <id>` | Inspect a specific run's tool chain |
+| `aiden runs stats` | Aggregate stats across runs |
 
-Full reference: [`docs/v4.5/`](./docs/v4.5/).
+<br>
 
----
+## In-chat slash commands
 
-## In-chat slash commands (38 total)
+Type `/help` inside Aiden for the full list grouped by category. 38 commands total.
 
-Type `/help` inside Aiden for the full list grouped by category. Highlights:
+### Configuration
+`/model` · `/personality` · `/skin` · `/streaming` · `/reasoning` · `/verbose` · `/debug-prompt` · `/identity`
 
-- **Configuration** — `/model`, `/personality`, `/skin`, `/streaming`, `/reasoning`, `/verbose`, `/debug-prompt`, `/identity`
-- **Session** — `/clear`, `/compress`, `/save`, `/title`, `/usage`
-- **System** — `/sandbox`, `/tce`, `/browser-depth`, `/daemon`, `/suggestions`, `/update`, `/skills`, `/tools`, `/plugins`, `/cron`, `/runs`, `/trigger`, `/doctor`, `/status`, `/show`, `/history`
-- **Auth** — `/auth login`, `/auth status`, `/auth refresh`
-- **MCP** — `/reload-mcp`, `/setup`
+### Session
+`/clear` · `/compress` · `/save` · `/title` · `/usage`
 
----
+### System
+`/sandbox` · `/tce` · `/browser-depth` · `/daemon` · `/suggestions` · `/update` · `/skills` · `/tools` · `/plugins` · `/cron` · `/runs` · `/trigger` · `/doctor` · `/status` · `/show` · `/history`
+
+### Sub-agents (v4.6)
+`/spawn-pause on|off|status` · `/recovery list|show|clear` · `/planner-guard on|off|status`
+
+### Walkthrough & onboarding (v4.6.1)
+`/walkthrough` — 60-second guided tour of what Aiden can do
+
+### Auth
+`/auth login` · `/auth status` · `/auth refresh`
+
+### MCP
+`/reload-mcp` · `/setup`
+
+<br>
+
+## Daemon mode (opt-in)
+
+### Linux
+
+```bash
+export AIDEN_DAEMON=1
+aiden daemon install
+loginctl enable-linger $USER     # keep running between sessions
+```
+
+### macOS
+
+```bash
+export AIDEN_DAEMON=1
+aiden daemon install              # installs launchd plist
+```
+
+### Windows
+
+See [`docs/v4.5/daemon-windows.md`](docs/v4.5/daemon-windows.md). Recommended: foreground (`aiden daemon start`) or `pm2` for background.
+
+<br>
 
 ## Troubleshooting
 
-Common issues live in [`docs/v4.5/troubleshooting.md`](./docs/v4.5/troubleshooting.md). Quick reference:
+Common issues live in [`docs/v4.5/troubleshooting.md`](docs/v4.5/troubleshooting.md). Quick reference:
 
 - **"daemon already running"** — stale `~/.aiden/daemon/runtime.lock`; remove it
 - **Webhook 401 despite valid HMAC** — check format (`github` / `gitlab` / `generic`)
@@ -226,38 +349,94 @@ Common issues live in [`docs/v4.5/troubleshooting.md`](./docs/v4.5/troubleshooti
 - **High RSS / slow drain** — run the 72-hour soak (`tests/v4/daemon/soak/README.md`)
 - **Boot stuck on wizard** — non-TTY stdin (CI / piped); set provider env var or use `--no-ui`
 - **`/help` doesn't list a command** — that command likely needs an active session field; run from a real REPL
+- **`npm install` permission errors on Windows** — install into a real folder (not a drive root like `S:\`)
 
----
+<br>
+
+## The book
+
+📖 **Omega** — A novel about code, solitude, and what builds back. The story behind Aiden and what it means to build alone.
+
+[![Get Omega on Amazon](https://img.shields.io/badge/Get_Omega-Amazon-FF9900?style=for-the-badge&logo=amazon&logoColor=white)](https://amzn.to/49ceO8l)
+
+<br>
+
+## Sponsor
+
+Aiden is free and open source. If it saves you time or you want it to keep getting better, sponsorship helps cover server costs, API testing, and the time to ship features instead of taking client work.
+
+[![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-GitHub_Sponsors-EA4AAA?style=for-the-badge&logo=githubsponsors&logoColor=white)](https://github.com/sponsors/<your-github-handle>)
+[![Sponsor via Razorpay](https://img.shields.io/badge/Sponsor-Razorpay-3395FF?style=for-the-badge&logo=razorpay&logoColor=white)](https://razorpay.me/@whitelotus9625)
+
+Even a one-time tip or a star on the repo is appreciated.
+
+<br>
 
 ## Acknowledgements
 
-Built solo by **Shiva Deore** at [Taracod](https://taracod.com).
+Built solo by **Shiva Deore** at **Taracod**.
 
-Aiden builds on the open-source giants: TypeScript, Node, SQLite, better-sqlite3, Playwright, Chromium, chokidar, croner, inquirer, marked, kleur, the Model Context Protocol, and every provider SDK. Thank you.
+Aiden builds on the open-source giants: TypeScript, Node, SQLite, `better-sqlite3`, Playwright, Chromium, `chokidar`, `croner`, `inquirer`, `marked`, `kleur`, the Model Context Protocol, and every provider SDK. Thank you.
 
-If you use Aiden in production, on a side project, or just to learn — a star on the repo is appreciated. Bug reports and feature ideas go on the [GitHub issue tracker](https://github.com/taracodlabs/aiden/issues).
+<br>
 
----
+## Contributing
+
+Aiden is built solo right now, but contributions are welcome — bug reports, skill submissions, provider adapters, documentation fixes.
+
+Before opening a PR:
+
+1. Fork the repo
+2. `npm install`
+3. Make your changes on a feature branch
+4. `npm run build` — confirm it compiles
+5. Test with `aiden` locally
+6. Open a PR with a clear description of what changed and why
+
+Keep PRs focused. One feature or fix per PR. Be honest in the description about what works and what doesn't.
+
+<br>
 
 ## License
 
-- **Core runtime**: [AGPL-3.0](./LICENSE).
-- **Bundled skills**: [Apache-2.0](./skills/LICENSE). The future `skills.taracod.com` marketplace will ship community skills under the same permissive terms.
+- **Core runtime**: [AGPL-3.0](LICENSE). You can self-host, modify, and distribute Aiden as long as your modifications stay under AGPL.
+- **Bundled skills**: Apache-2.0. Use them however you want.
+- **Commercial licensing** for closed-source derivatives: contact [hello@taracod.com](mailto:hello@taracod.com).
 
-AGPL-3.0 means: you can self-host, modify, and distribute Aiden as long as your modifications stay under AGPL. Commercial licensing for closed-source derivatives: contact <hello@taracod.com>.
+The future `skills.taracod.com` marketplace will ship community skills under the same permissive terms.
 
----
+<br>
 
 ## Links
 
-- Website: [aiden.taracod.com](https://aiden.taracod.com)
-- Docs: [`docs/v4.5/`](./docs/v4.5/) (in this repo)
-- Discord: [discord.gg/gMZ3hUnQTm](https://discord.gg/gMZ3hUnQTm)
-- Source: [github.com/taracodlabs/aiden](https://github.com/taracodlabs/aiden)
-- Standalone releases: [github.com/taracodlabs/aiden-releases](https://github.com/taracodlabs/aiden-releases)
-- npm: [aiden-runtime](https://www.npmjs.com/package/aiden-runtime)
-- Author's book: [_Omega_](https://amzn.to/4tpiXwM)
+| Where | What |
+|---|---|
+| 🌐 **Website** | [aiden.taracod.com](https://aiden.taracod.com) |
+| 💬 **Discord** | [discord.gg/CU5wshJW4F](https://discord.gg/CU5wshJW4F) |
+| 📦 **npm** | [aiden-runtime](https://www.npmjs.com/package/aiden-runtime) |
+| 🐙 **Source** | [github.com/taracodlabs/aiden](https://github.com/taracodlabs/aiden) |
+| 📁 **Standalone releases** | [github.com/taracodlabs/aiden-releases](https://github.com/taracodlabs/aiden-releases) |
+| 📖 **Book — Omega** | [Amazon](https://amzn.to/49ceO8l) |
+| 📚 **Docs** | [`docs/v4.5/`](docs/v4.5/) (in this repo) |
+| 💖 **Sponsor (GitHub)** | [github.com/sponsors/<your-github-handle>](https://github.com/sponsors/<your-github-handle>) |
+| 💖 **Sponsor (Razorpay)** | [razorpay.me/@whitelotus9625](https://razorpay.me/@whitelotus9625) |
+| ✉️ **Contact** | [contact@taracod.com](mailto:contact@taracod.com) |
 
+<br>
+
+## Disclaimer
+
+Aiden can touch your files, run shell commands, and access the web. It's autonomous within the limits you set. Things will go wrong sometimes. Use at your own risk, read the code if you're nervous, and report what breaks.
+
+**Built solo. Started as a hobby project. Still rough in spots. Getting better every week.**
+
+---
+
+<div align="center">
+
+**By Taracod · White Lotus**
+
+</div>
 ---
 
 <p align="center">
