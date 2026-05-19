@@ -676,15 +676,32 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   // the prompt") into the same "skipped" exit state as recovery [4]
   // — the user clearly didn't want to finish, but we still want them
   // to land in REPL "explore mode" rather than crash.
+  //
+  // ONB1 slice 5 — the picker now uses the rich provider-picker
+  // (description column + Free/API/OAuth badges) when the caller
+  // hasn't injected a custom `prompts` (which means we're in a real
+  // terminal, not a unit test). Stubbed-prompts callers fall through
+  // to the legacy `prompts.choose` path so existing fixtures keep
+  // working unchanged.
   // eslint-disable-next-line no-constant-condition
   outer: while (true) {
   let providerIndex: number;
   try {
-    providerIndex = await prompts.choose(
-      'Which provider would you like to use?',
-      PROVIDERS.map((p) => p.label),
-      groqDefaultIdx > 0 ? groqDefaultIdx : undefined,
-    );
+    if (!opts.prompts) {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { pickProvider } = require('./onboarding/providerPicker') as typeof import('./onboarding/providerPicker');
+      const picked = await pickProvider({
+        providers: PROVIDERS,
+        defaultId: 'groq',
+      });
+      providerIndex = picked.index + 1; // back to 1-based for the rest of the loop
+    } else {
+      providerIndex = await prompts.choose(
+        'Which provider would you like to use?',
+        PROVIDERS.map((p) => p.label),
+        groqDefaultIdx > 0 ? groqDefaultIdx : undefined,
+      );
+    }
   } catch (err) {
     const msg = (err as Error)?.message ?? '';
     if (/force closed|cancel/i.test(msg)) {
