@@ -36,6 +36,7 @@ import {
   createRunStore,
 } from '../../../core/v4/daemon';
 import { resolveAidenRoot } from '../../../core/v4/paths';
+import { renderTable } from '../table';
 
 export interface RunsCliOptions {
   writeOut?: (s: string) => void;
@@ -109,18 +110,12 @@ function cmdList(
     sessionIdPrefix: argv.trigger,
     topLevelOnly:    !includeChildren,
   });
-  if (rows.length === 0) {
-    out('No runs match the filter.\n');
-    return 0;
-  }
-  out(`${'runId'.padEnd(6)}  ${'status'.padEnd(11)}  ${'finish'.padEnd(11)}  ${'started'.padEnd(20)}  sessionId\n`);
-  for (const r of rows) {
-    const started = new Date(r.startedAt).toISOString().slice(0, 19) + 'Z';
-    const finish = r.finishReason ?? '-';
-    // v4.6 Phase 2Q-B — child-count badge. Only relevant for the
-    // top-level view (when --include-children is OFF). Skipped on
-    // the flat view to avoid double-counting visual weight: in flat
-    // mode the children are already on screen as their own rows.
+  // v4.8.0 Slice 3 — migrate from padEnd string concatenation to the
+  // framed table primitive. Title + count in the top border; empty
+  // state paints a framed message so layout weight matches populated
+  // runs. The trigger-badge (child-count summary) becomes part of the
+  // sessionId cell's `format` so column widths still auto-fit.
+  const tableRows = rows.map((r) => {
     let badge = '';
     if (!includeChildren) {
       const { total, completed } = runStore.countChildren(r.id);
@@ -128,12 +123,35 @@ function cmdList(
         badge = `  (${total} ${total === 1 ? 'child' : 'children'}, ${completed} OK)`;
       }
     }
-    out(`${String(r.id).padEnd(6)}  ${r.status.padEnd(11)}  ${finish.padEnd(11)}  ${started.padEnd(20)}  ${r.sessionId}${badge}\n`);
+    return {
+      runId:     String(r.id),
+      status:    r.status,
+      finish:    r.finishReason ?? '-',
+      started:   new Date(r.startedAt).toISOString().slice(0, 19) + 'Z',
+      sessionId: r.sessionId + badge,
+    };
+  });
+  out(renderTable(
+    tableRows,
+    [
+      { key: 'runId',     header: 'runId',     align: 'left'                 },
+      { key: 'status',    header: 'status',    align: 'left'                 },
+      { key: 'finish',    header: 'finish',    align: 'left'                 },
+      { key: 'started',   header: 'started',   align: 'left'                 },
+      { key: 'sessionId', header: 'sessionId', align: 'left', flex: true     },
+    ],
+    {
+      title:        'Recent runs',
+      totalCount:   `${rows.length} ${rows.length === 1 ? 'run' : 'runs'}`,
+      emptyMessage: 'no runs match the filter',
+    },
+  ));
+  if (rows.length > 0) {
+    const hint = includeChildren
+      ? '(parents + sub-agent children)'
+      : '(top-level; use --include-children for sub-agents)';
+    out(`  ${hint}\n`);
   }
-  const hint = includeChildren
-    ? ' (parents + sub-agent children)'
-    : ' (top-level; use --include-children for sub-agents)';
-  out(`\n${rows.length} run${rows.length === 1 ? '' : 's'} shown${hint}\n`);
   return 0;
 }
 
@@ -242,11 +260,21 @@ function cmdStats(
        FROM runs
       WHERE status = 'completed' AND completed_at IS NOT NULL`,
   ).get() as { mean: number | null; min: number | null; max: number | null; n: number };
-  out('Run status counts:\n');
-  if (counts.length === 0) { out('  (no runs recorded)\n'); }
-  for (const r of counts) {
-    out(`  ${r.status.padEnd(12)}  ${r.c}\n`);
-  }
+  // v4.8.0 Slice 3 — framed table replaces the padEnd block. Right-
+  // align the count column so multi-digit totals don't break visual
+  // rhythm. Empty state paints a framed message.
+  out(renderTable(
+    counts.map((r) => ({ status: r.status, count: String(r.c) })),
+    [
+      { key: 'status', header: 'status', align: 'left'  },
+      { key: 'count',  header: 'count',  align: 'right' },
+    ],
+    {
+      title:        'Run status counts',
+      totalCount:   `${counts.length} ${counts.length === 1 ? 'status' : 'statuses'}`,
+      emptyMessage: 'no runs recorded',
+    },
+  ));
   if (completed.n > 0 && completed.mean !== null) {
     out('\nCompleted-run duration (ms):\n');
     out(`  mean  ${Math.round(completed.mean)}\n`);

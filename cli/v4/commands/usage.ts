@@ -13,6 +13,7 @@
  */
 import type { SlashCommand } from '../commandRegistry';
 import { findModel } from '../../../providers/v4/modelCatalog';
+import { renderTable } from '../table';
 
 export const usage: SlashCommand = {
   name: 'usage',
@@ -47,14 +48,27 @@ export const usage: SlashCommand = {
       const aux = ctx.auxiliaryClient.getUsage();
       const purposes = Object.keys(aux);
       if (purposes.length > 0) {
+        // v4.8.0 Slice 3 — framed auxiliary-calls table replaces the
+        // ad-hoc padEnd lines. Right-align numeric columns.
         ctx.display.write('\n');
-        ctx.display.info('Auxiliary calls:');
-        for (const p of purposes) {
-          const u = aux[p];
-          ctx.display.write(
-            `  ${p.padEnd(18)} calls=${u.calls} in=${u.inputTokens} out=${u.outputTokens}\n`,
-          );
-        }
+        ctx.display.write(renderTable(
+          purposes.map((p) => ({
+            purpose: p,
+            calls:   String(aux[p].calls),
+            in:      String(aux[p].inputTokens),
+            out:     String(aux[p].outputTokens),
+          })),
+          [
+            { key: 'purpose', header: 'purpose', align: 'left'  },
+            { key: 'calls',   header: 'calls',   align: 'right' },
+            { key: 'in',      header: 'in',      align: 'right' },
+            { key: 'out',     header: 'out',     align: 'right' },
+          ],
+          {
+            title:      'Auxiliary calls',
+            totalCount: `${purposes.length} ${purposes.length === 1 ? 'purpose' : 'purposes'}`,
+          },
+        ));
       }
     }
     return {};

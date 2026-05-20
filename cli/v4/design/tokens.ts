@@ -127,6 +127,16 @@ export const glyphs = {
     /** Tool-trail gutter character. Re-exported from toolTrail.ts. */
     gutter: '┊' as const,
   },
+  /**
+   * Box-drawing chrome for table + panel surfaces (Slice 3+). Renders
+   * sharp ASCII so wide-display terminals and narrow ConPTYs both
+   * align cleanly. Slice 4 will reuse for framed panels.
+   */
+  chrome: {
+    topLeft: '┌', topRight: '┐', botLeft: '└', botRight: '┘',
+    teeDown: '┬', teeUp:    '┴', teeRight: '├', teeLeft:  '┤',
+    cross:   '┼', hLine:    '─', vLine:    '│',
+  },
 } as const;
 
 // ── Spacing ───────────────────────────────────────────────────────────────

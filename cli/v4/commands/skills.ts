@@ -32,20 +32,21 @@ export const skills: SlashCommand = {
         return {};
       }
       const skills = await ctx.skillLoader.list();
-      if (skills.length === 0) {
-        ctx.display.dim('(no skills installed)');
-        return {};
-      }
-      ctx.display.info(`Installed skills (${skills.length}):`);
+      // v4.8.0 Slice 3 — title + count in the top border replaces the
+      // separate `Installed skills (N):` info line. Empty state paints
+      // a framed message so layout weight matches populated tables.
       ctx.display.write(
         renderTable(
           skills.map((s) => ({ name: s.name, description: s.description ?? '' })),
           [
             { key: 'name',        header: 'Name',        align: 'left', minWidth: 16 },
-            // Tier-3.1b: drop the legacy `truncate: 60` cap so the
-            // description column flexes to fill available width.
             { key: 'description', header: 'Description', align: 'left', flex: true },
           ],
+          {
+            title:        'Skills',
+            totalCount:   `${skills.length} installed`,
+            emptyMessage: 'no skills installed',
+          },
         ),
       );
       return {};
@@ -104,17 +105,9 @@ export const skills: SlashCommand = {
 
     if (sub === 'review') {
       const candidates = await store.list();
-      if (candidates.length === 0) {
-        ctx.display.dim('(no pending candidates — mined skills appear here after a successful 3+ tool turn)');
-        return {};
-      }
-      ctx.display.info(`Pending mined candidates (${candidates.length}):`);
       ctx.display.write(
         renderTable(
           candidates.map((c) => {
-            // Pull the name + 1-line description from the candidate's
-            // own SKILL.md so the table reflects what the user will
-            // accept verbatim.
             let name = '(unparsed)';
             let description = '';
             try {
@@ -139,8 +132,14 @@ export const skills: SlashCommand = {
             { key: 'created',     header: 'Created',     align: 'left'  },
             { key: 'description', header: 'Description', align: 'left', flex: true },
           ],
+          {
+            title:        'Pending skill candidates',
+            totalCount:   `${candidates.length} pending`,
+            emptyMessage: 'no pending candidates — mined skills appear here after a successful 3+ tool turn',
+          },
         ),
       );
+      if (candidates.length === 0) return {};
       ctx.display.dim('Use `/skills view-candidate <id-prefix>` to preview, `/skills accept <id>` to promote, `/skills reject <id> [reason]` to dismiss.');
       return {};
     }

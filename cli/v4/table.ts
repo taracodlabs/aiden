@@ -22,6 +22,7 @@ const stringWidth: (s: string) => number = require('string-width');
 
 import { getSkinEngine, ColorKind } from './skinEngine';
 import { visibleLength, truncateVisible } from './box';
+import { glyphs } from './design/tokens';
 
 export type CellAlign = 'left' | 'right' | 'center';
 
@@ -68,6 +69,27 @@ export interface RenderTableOptions {
    * description cap.
    */
   maxWidth?:       number;
+  /**
+   * v4.8.0 Slice 3 — embedded title in the top border.
+   *   `┌─ title ──────────── totalCount ──┐`
+   * `totalCount` right-aligns inside the title row (e.g. "81 skills").
+   * Both fields optional; omit for the legacy borderless-title look.
+   */
+  title?:          string;
+  totalCount?:     string;
+  /**
+   * v4.8.0 Slice 3 — pagination footer above the bottom border:
+   *   `│ ← prev · page 2/5 · next →                              │`
+   * Caller renders the page-state arrows muted; we paint the divider.
+   * Omit for un-paginated tables.
+   */
+  page?:           { current: number; total: number };
+  /**
+   * v4.8.0 Slice 3 — message to render when `rows.length === 0`. The
+   * full top + bottom border still paints so the empty state has the
+   * same visual weight as a populated table.
+   */
+  emptyMessage?:   string;
 }
 
 /**
@@ -237,15 +259,34 @@ export function renderTable<T>(
     }
   }
 
-  // Border characters (sharp ASCII).
-  const TL = '┌', TR = '┐', BL = '└', BR = '┘';
-  const T  = '┬', B  = '┴', L  = '├', R  = '┤';
-  const X  = '┼', H  = '─', V  = '│';
+  // Border characters — token-sourced from design/tokens.ts (v4.8.0 Slice 3).
+  const { topLeft: TL, topRight: TR, botLeft: BL, botRight: BR } = glyphs.chrome;
+  const { teeDown: T, teeUp: B, teeRight: L, teeLeft: R } = glyphs.chrome;
+  const { cross: X, hLine: H, vLine: V } = glyphs.chrome;
 
   const ind = ' '.repeat(indent);
 
-  // Top border.
-  const top = TL + widths.map((w) => H.repeat(w + 2)).join(T) + TR;
+  // Total inner content width across all cells + inner separators.
+  // Used by title-embedded top border + page footer.
+  const innerWidth = widths.reduce((s, w) => s + w + 2, 0) + (numCols - 1);
+
+  // v4.8.0 Slice 3 — top border with optional embedded title + count.
+  // Format: `┌─ title ──────────── totalCount ──┐`
+  // Pads the centre with `─` so the right edge stays aligned regardless
+  // of title / count length. Falls back to the legacy plain top border
+  // when neither field is supplied.
+  let top: string;
+  if (opts.title || opts.totalCount) {
+    const titleText = opts.title ? ` ${opts.title} ` : '';
+    const countText = opts.totalCount ? ` ${opts.totalCount} ` : '';
+    const fixed = vWidth(titleText) + vWidth(countText);
+    const filler = Math.max(0, innerWidth - fixed);
+    const titlePainted = opts.title ? skin.applyColors(titleText, 'heading') : '';
+    const countPainted = opts.totalCount ? skin.applyColors(countText, 'muted') : '';
+    top = TL + H + titlePainted + H.repeat(filler) + countPainted + H + TR;
+  } else {
+    top = TL + widths.map((w) => H.repeat(w + 2)).join(T) + TR;
+  }
 
   // Header row — heading colour, padded. Truncate first if the
   // header itself is wider than the allocated width (rare, but
@@ -279,14 +320,53 @@ export function renderTable<T>(
     bodyLines.push(V + cells.join(V) + V);
   });
 
-  // Bottom border.
-  const bot = BL + widths.map((w) => H.repeat(w + 2)).join(B) + BR;
+  // v4.8.0 Slice 3 — pagination footer above the bottom border. Renders
+  // `← prev · page X/Y · next →` centred inside the inner width. Side
+  // arrows are dim when the page is at the edge so users can read
+  // "at-end" cleanly. Caller wires hotkeys; we just paint the chrome.
+  let pageFooter: string | null = null;
+  if (opts.page) {
+    const { current, total } = opts.page;
+    const atStart = current <= 1;
+    const atEnd   = current >= total;
+    const leftKind: ColorKind  = atStart ? 'muted' : 'session';
+    const rightKind: ColorKind = atEnd   ? 'muted' : 'session';
+    const left  = skin.applyColors('← prev', leftKind);
+    const mid   = skin.applyColors(`page ${current}/${total}`, 'muted');
+    const right = skin.applyColors('next →', rightKind);
+    const sep   = skin.applyColors(' · ', 'muted');
+    const body  = `${left}${sep}${mid}${sep}${right}`;
+    const bodyW = vWidth('← prev') + vWidth(` · page ${current}/${total} · `) + vWidth('next →');
+    const padW  = Math.max(0, innerWidth - bodyW);
+    const lpad  = Math.floor(padW / 2);
+    const rpad  = padW - lpad;
+    pageFooter  = V + ' '.repeat(lpad) + body + ' '.repeat(rpad) + V;
+  }
+
+  // Bottom border. Skip the inner tees when the title-style top was
+  // used (legacy plain bottom keeps column alignment for un-titled
+  // tables; a title-only border on top reads cleanest with a plain
+  // bottom mirror).
+  const bot = (opts.title || opts.totalCount)
+    ? BL + H.repeat(innerWidth) + BR
+    : BL + widths.map((w) => H.repeat(w + 2)).join(B) + BR;
+
+  // v4.8.0 Slice 3 — empty-state path. Borders stay so the layout
+  // weight matches a populated table; the body is one centered line.
+  if (rows.length === 0 && opts.emptyMessage) {
+    const msg = skin.applyColors(opts.emptyMessage, 'muted');
+    const pad = Math.max(0, innerWidth - vWidth(opts.emptyMessage));
+    const lpad = Math.floor(pad / 2);
+    const emptyRow = V + ' '.repeat(lpad) + msg + ' '.repeat(pad - lpad) + V;
+    return [top, emptyRow, bot].map((l) => ind + l).join('\n') + '\n';
+  }
 
   const allLines = [
     top,
     headerRow,
     ...(showRule ? [rule] : []),
     ...bodyLines,
+    ...(pageFooter ? [pageFooter] : []),
     bot,
   ].map((l) => ind + l);
 

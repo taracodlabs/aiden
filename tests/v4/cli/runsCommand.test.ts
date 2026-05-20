@@ -64,7 +64,9 @@ describe('runRunsSubcommand — list', () => {
     expect(text).toMatch(/runId/);
     expect(text).toMatch(/completed/);
     expect(text).toMatch(/failed/);
-    expect(text).toMatch(/2 runs shown/);
+    // v4.8.0 Slice 3 — count moved from a trailing "N runs shown"
+    // line into the framed table's title-border totalCount field.
+    expect(text).toMatch(/\b2 runs\b/);
   });
 
   it('filters by --status', async () => {
@@ -202,7 +204,7 @@ describe('runRunsSubcommand — list (v4.6 Phase 2Q-B child filter + badge)', ()
     expect(code).toBe(0);
     const text = o.lines.join('');
     // Exactly one row (the parent); the 3 children are filtered at SQL.
-    expect(text).toMatch(/1 run shown/);
+    expect(text).toMatch(/\b1 run\b/);
     // The parent's session id appears; child sessionIds do not.
     expect(text).toMatch(/repl-parent-2qb/);
     expect(text).not.toMatch(/child-1/);
@@ -226,7 +228,7 @@ describe('runRunsSubcommand — list (v4.6 Phase 2Q-B child filter + badge)', ()
     expect(code).toBe(0);
     const text = o.lines.join('');
     // 4 rows total: 1 parent + 3 children.
-    expect(text).toMatch(/4 runs shown/);
+    expect(text).toMatch(/\b4 runs\b/);
     expect(text).toMatch(/child-1/);
     expect(text).toMatch(/child-2/);
     expect(text).toMatch(/child-3/);
@@ -240,7 +242,9 @@ describe('runRunsSubcommand — list (v4.6 Phase 2Q-B child filter + badge)', ()
     const o = out();
     await runRunsSubcommand('list', [], {}, { writeOut: o.write });
     const text = o.lines.join('');
-    expect(text).toMatch(/2 runs shown/);
+    // v4.8.0 Slice 3 — count moved from a trailing "N runs shown"
+    // line into the framed table's title-border totalCount field.
+    expect(text).toMatch(/\b2 runs\b/);
     // Neither row gets a "(N children)" suffix.
     expect(text).not.toMatch(/\(\d+ child/);
   });
