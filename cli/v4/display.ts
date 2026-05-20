@@ -683,6 +683,11 @@ export class Display {
    * across lines.
    */
   scrollFooter(): string {
+    // v4.8.0 Slice 10b — migrated from `|`/`_` parchment frame to the
+    // Aiden-native orange-bar panel chrome that the rest of v4.8.0
+    // surfaces use. Content rows (Built solo + GitHub/Web/Contact)
+    // preserved verbatim so existing content-level assertions still
+    // pass; only the surrounding frame changes.
     const sk = this.skin;
     const m = (s: string): string => sk.applyColors(s, 'muted');
     const lab = (s: string): string => sk.applyColors(s, 'brand');
@@ -690,39 +695,23 @@ export class Display {
     const heart = sk.applyColors('♥', 'brand');
 
     if (this.cols() < 80) {
-      // Tier-3.1b: single-line credits at narrow widths so the boot
-      // card stays compact. The 4-line plain fallback shipped earlier
-      // wastes vertical space when terminals already squeeze content.
+      // Narrow fallback unchanged — single-line credits stays compact.
       return `  ${heart} ${m('built solo · github.com/taracodlabs/aiden · aiden.taracod.com')}`;
     }
 
-    // Parchment.
-    const INTERIOR = 63;
-    const wallIndent = '     ';     // 5 spaces — column where the | sits
-    const lidIndent = '      ';     // 6 spaces — lid floats one past the wall
-    const pipe = m('|');
-    const lid = m('_'.repeat(INTERIOR));
+    const indent = '  ';
+    const bar = sk.applyColors(glyphs.panel.bar, 'brand');
+    const innerW = 64;
+    const divider = sk.applyColors(glyphs.chrome.hLine.repeat(innerW - 2), 'muted');
+    const line = (content: string): string => `${indent}${bar}  ${content}`;
 
-    const padInner = (text: string): string => {
-      const v = visibleLength(text);
-      if (v >= INTERIOR) return truncateVisible(text, INTERIOR);
-      return text + ' '.repeat(INTERIOR - v);
-    };
-
-    // v4.5 TUI polish — add a leading + trailing blank line so the
-    // box has visual breathing room from the lines above/below, and
-    // a trailing interior blank so contact info doesn't crowd the
-    // bottom border.
     return [
       '',
-      lidIndent + lid,
-      wallIndent + pipe + ' '.repeat(INTERIOR) + pipe,
-      wallIndent + pipe + padInner(`   ${heart}  ${val('Built solo')}`) + pipe,
-      wallIndent + pipe + padInner(`   ${lab('GitHub:')}  ${val('github.com/taracodlabs/aiden')}`) + pipe,
-      wallIndent + pipe + padInner(`   ${lab('Web:')}     ${val('aiden.taracod.com')}`) + pipe,
-      wallIndent + pipe + padInner(`   ${lab('Contact:')} ${val('contact@taracod.com')}`) + pipe,
-      wallIndent + pipe + ' '.repeat(INTERIOR) + pipe,
-      wallIndent + pipe + lid + pipe,
+      line(`${heart}  ${val('Built solo')}`),
+      line(divider),
+      line(`${lab('GitHub:'.padEnd(10))}${val('github.com/taracodlabs/aiden')}`),
+      line(`${lab('Web:'.padEnd(10))}${val('aiden.taracod.com')}`),
+      line(`${lab('Contact:'.padEnd(10))}${val('contact@taracod.com')}`),
       '',
     ].join('\n');
   }

@@ -108,29 +108,22 @@ export function renderBanner(opts: BannerOptions): string {
     return out.join('\n') + '\n';
   }
 
-  // Wide layout: framed panel with ASCII art inside, taglines below.
+  // v4.8.0 Slice 10b — wide layout flows the AIDEN art without the
+  // heavy `╔══╗` frame (legacy chrome). The art carries its own
+  // visual weight as the boot-card identity anchor; framing it
+  // inside a closed box collides with the asymmetric orange-bar
+  // language used by every other v4.8.0 surface. Version + credits
+  // lines retain the `framed` boolean only for backward compat —
+  // tests pass `framed: false` to assert the unframed shape.
   const inner = w - 2;
   const artPad = Math.max(0, Math.floor((inner - ART_WIDTH) / 2));
-  const framed = opts.framed !== false;
-
-  const horiz = '═'.repeat(inner);
-  const top    = framed ? c.rule(`╔${horiz}╗`) : '';
-  const bottom = framed ? c.rule(`╚${horiz}╝`) : '';
-  const blank  = framed
-    ? `${c.rule('║')}${' '.repeat(inner)}${c.rule('║')}`
-    : ' '.repeat(w);
 
   const lines: string[] = [];
   lines.push('');
-  if (framed) lines.push(top);
-  lines.push(blank);
   for (const row of AIDEN_ART) {
     const padded = rpad(' '.repeat(artPad) + row, inner);
-    const coloured = c.primary(padded);
-    lines.push(framed ? `${c.rule('║')}${coloured}${c.rule('║')}` : `  ${coloured}`);
+    lines.push(`  ${c.primary(padded)}`);
   }
-  lines.push(blank);
-  if (framed) lines.push(bottom);
   lines.push('');
   lines.push('  ' + dim(c.muted(versionLine)));
   lines.push('');

@@ -55,22 +55,29 @@ export function renderSuccessScreen(opts: SuccessScreenOptions = {}): void {
     return;
   }
 
+  // v4.8.0 Slice 10b — Aiden-native framed panel chrome. Each row
+  // carries the orange `▎` bar; content (title + examples + closing
+  // hint) preserved verbatim so content-level test assertions hold.
   const w = termWidth();
   const sepW = Math.min(w - 4, 64);
   const narrow = w < 60;
+  const bar = c.primary('▎');
+  const divider = c.muted('─'.repeat(sepW - 2));
+  const line = (s: string) => `  ${bar}  ${s}`;
 
-  out.write('\n  ' + separator(sepW) + '\n');
-  out.write('\n  ' + bold(c.primary('All set!')) + '\n');
-  out.write('\n  ' + c.text('Aiden is ready. Try these to start:') + '\n');
   out.write('\n');
+  out.write(line(bold(c.primary('All set!'))) + '\n');
+  out.write(line(divider) + '\n');
+  out.write(line(c.text('Aiden is ready. Try these to start:')) + '\n');
+  out.write(line('') + '\n');
   if (narrow) {
-    // Compact: a single suggestion line + the muted hello fallback.
-    out.write('  ' + c.muted('▸ ') + c.accent(examples[0]) + '\n');
+    out.write(line(c.muted('▸ ') + c.accent(examples[0])) + '\n');
   } else {
     for (const ex of examples) {
-      out.write('  ' + c.muted('▸ ') + c.accent(ex) + '\n');
+      out.write(line(c.muted('▸ ') + c.accent(ex)) + '\n');
     }
   }
-  out.write('\n  ' + c.muted('Or just say hi.') + '\n');
-  out.write('\n  ' + separator(sepW) + '\n\n');
+  out.write(line('') + '\n');
+  out.write(line(c.muted('Or just say hi.')) + '\n');
+  out.write('\n');
 }

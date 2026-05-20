@@ -51,6 +51,8 @@ import { boxBottom, boxLine, boxTopTitled } from './box';
 // the cost of broken unit tests under the test runtime.
 import { renderSuccessScreen } from './onboarding/successScreen';
 import { pickProvider } from './onboarding/providerPicker';
+// v4.8.0 Slice 10b — bar + chrome tokens for step headers.
+import { glyphs } from './design/tokens';
 import { fetchModels } from '../../core/v4/providers/modelFetch';
 import { runProbe, type ProbeResult } from '../../core/v4/providers/probe';
 
@@ -678,9 +680,22 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   if (opts.prompts) {
     display.printBanner();
   }
-  display.write('\nWelcome — let\'s pick a provider.\n');
+
+  // v4.8.0 Slice 10b — step-header helper. Each major wizard step
+  // starts with `  ▎ Set up Aiden  step N` painted with the orange
+  // panel bar so the flow visually consistent with /help and the
+  // approval panel. Inquirer widgets render below unchanged.
+  const stepHeader = (n: number): string => {
+    const bar = display.applyColors(glyphs.panel.bar, 'brand');
+    const title = display.applyColors('Set up Aiden', 'heading');
+    const sub = display.applyColors(`step ${n}`, 'muted');
+    return `\n  ${bar}  ${title}  ${sub}\n`;
+  };
+
+  display.write(stepHeader(1));
+  display.write('  Welcome — let\'s pick a provider.\n');
   display.write(
-    `${kleur.dim('(Press Enter to accept Groq — free + fastest setup.)')}\n\n`,
+    `  ${kleur.dim('(Press Enter to accept Groq — free + fastest setup.)')}\n\n`,
   );
 
   // Phase 30.2.1 — Groq is the new recommended default for first-time
@@ -872,6 +887,9 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   // anyway, so the reorder bought nothing there. Existing test
   // fixtures provide inputs in legacy order; preserving custom's
   // order keeps them green.
+  if (provider.kind === 'key' || provider.kind === 'subscription' || provider.kind === 'local') {
+    display.write(stepHeader(2));
+  }
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
 
@@ -896,6 +914,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   // provider.kind === 'custom' — defer credential prompts until AFTER
   // the model picker below.
 
+  display.write(stepHeader(3));
   // Step 3: live model fetch + pick.
   //
   // Test-harness gate: when the caller injected `opts.prompts` (only
