@@ -274,6 +274,11 @@ export function createRealAgentRunner(
           // signal in its options — the budget watcher is best-effort
           // observability via tally(). Future enhancement: thread the
           // signal into the loop body via options.
+          //
+          // v4.8.0 Phase 2.2 — uiOnly events on the daemon side are
+          // dropped here. Phase 2.4 will serialize them into the
+          // dispatcher's run_events stream.
+          onUiEvent: () => { /* no-op stub — Phase 2.4 serializes to run_events */ },
         });
         // Stamp the actual token usage onto the watcher for the
         // post-turn snapshot below.

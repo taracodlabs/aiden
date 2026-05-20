@@ -1637,6 +1637,7 @@ export async function buildAgentRuntime(
     resolveVerifiedFlag,
     resolveToolset,
     resolveMutates,
+    resolveUiOnly,
     // v4.7.0 Phase 2.4 — share the REPL's config-resolved honesty mode
     // with daemon-built agents so autonomous turns honour the same
     // setting interactive turns do.
@@ -1749,6 +1750,7 @@ export async function buildAgentRuntime(
       resolveVerifiedFlag,
       resolveToolset,
       resolveMutates,
+      resolveUiOnly,
       runStore:            replRunStore,
       instanceId:          replInstanceId,
       logger:              bootLogger.child('subagent'),
@@ -1824,6 +1826,7 @@ export async function buildAgentRuntime(
     resolveVerifiedFlag,
     resolveToolset,
     resolveMutates,
+    resolveUiOnly,
     runStore:            replRunStore,
     instanceId:          replInstanceId,
     // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the same

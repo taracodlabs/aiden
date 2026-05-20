@@ -67,6 +67,8 @@ export interface BuildDaemonAgentBuilderInput {
   resolveVerifiedFlag:  AidenAgentOptions['resolveVerifiedFlag'];
   resolveToolset:       AidenAgentOptions['resolveToolset'];
   resolveMutates:       AidenAgentOptions['resolveMutates'];
+  /** v4.8.0 — resolves uiOnly flag for the dispatch-loop bypass. */
+  resolveUiOnly?:       AidenAgentOptions['resolveUiOnly'];
   /**
    * v4.7.0 Phase 2.4 — honesty-mode plumbed in from the REPL's config
    * resolution at boot, so daemon turns honour the same setting the
@@ -158,6 +160,7 @@ export function buildDaemonAgentBuilder(
       resolveVerifiedFlag:  deps.resolveVerifiedFlag,
       resolveToolset:       deps.resolveToolset,
       resolveMutates:       deps.resolveMutates,
+      resolveUiOnly:        deps.resolveUiOnly,
       // Memory snapshot refresh — daemon agent doesn't track dirty
       // bits because each instance is short-lived; we provide the
       // refresh callback so honestyEnforcement (and any future

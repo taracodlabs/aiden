@@ -277,6 +277,47 @@ export function registerWriteTools(registry: ToolRegistry): void {
 export function registerAllTools(registry: ToolRegistry): void {
   registerReadOnlyTools(registry);
   registerWriteTools(registry);
+  // v4.8.0 Phase 2.2 — register the 7 semantic ui_* event tools.
+  // All uiOnly: true → the dispatch loop in core/v4/aidenAgent.ts
+  // bypasses execute and fires onUiEvent on the caller. execute()
+  // throws as a safety guard: if the uiOnly branch ever misfires
+  // and an executor is reached, that's a wiring bug, not a render.
+  // Renderer is a no-op stub in this phase; Phase 2.3 lands chrome.
+  const ui = (name: string, description: string, properties: Record<string, unknown>, required: string[]): ToolHandler => ({
+    schema:   { name, description, inputSchema: { type: 'object', properties, required } },
+    execute:  async () => { throw new Error(`${name} is uiOnly — dispatch branch should bypass execute`); },
+    category: 'read', mutates: false, uiOnly: true,
+  });
+  const str = { type: 'string' };
+  const num = { type: 'number' };
+  registry.register(ui('ui_task_update', 'Signal current task state for the live task panel. Append-only stream.',
+    { task_id: str, label: { type: 'string', description: '≤80 chars' },
+      status: { type: 'string', enum: ['running', 'blocked', 'paused'] },
+      kind: { type: 'string', enum: ['task', 'subagent'] }, depth: num, parent_id: str },
+    ['task_id', 'label', 'status']));
+  registry.register(ui('ui_task_done', 'Signal a task is complete. Pairs with a prior ui_task_update.',
+    { task_id: str, status: { type: 'string', enum: ['success', 'failure', 'blocked'] },
+      summary: { type: 'string', description: 'Optional, ≤120 chars' } },
+    ['task_id', 'status']));
+  registry.register(ui('ui_command_result', 'Surface shell output as a formatted block.',
+    { command: str, stdout: str, stderr: str, exit_code: num }, ['command']));
+  registry.register(ui('ui_test_result', 'Pass/fail count after a test run.',
+    { framework: { type: 'string', description: 'e.g. "vitest", "pytest"' },
+      passed: num, failed: num, skipped: num, duration_ms: num },
+    ['framework', 'passed', 'failed']));
+  registry.register(ui('ui_approval_request', 'Structured approval prompt before a privileged action.',
+    { prompt: { type: 'string', description: '≤160 chars' },
+      risk_tier: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
+      reason: { type: 'string', description: 'Optional, ≤200 chars' } },
+    ['prompt', 'risk_tier']));
+  registry.register(ui('ui_toast', 'Transient notice to surface without interrupting flow.',
+    { message: { type: 'string', description: '≤120 chars' },
+      kind: { type: 'string', enum: ['info', 'success', 'warning', 'error'] } },
+    ['message', 'kind']));
+  registry.register(ui('ui_artifact_created', 'Surface a file or skill created/modified this turn.',
+    { path: str, kind: { type: 'string', enum: ['file', 'skill', 'directory'] },
+      preview: { type: 'string', description: 'Optional, ≤200 chars' } },
+    ['path', 'kind']));
   // v4.8.0 Phase 2.1 — env-gated uiOnly smoke stub. Never registers
   // in production. Set AIDEN_TEST_UI_STUB=1 to enable for the
   // dispatch-branch smoke harness. The execute() throws on purpose:

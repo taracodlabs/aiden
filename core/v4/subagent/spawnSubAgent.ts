@@ -303,7 +303,13 @@ export async function spawnSubAgent(
   try {
     const result = await agentBundle.agent.runConversation(
       agentBundle.history,
-      { signal: childCtrl.signal },
+      {
+        signal:    childCtrl.signal,
+        // v4.8.0 Phase 2.2 — uiOnly events from a subagent are
+        // dropped. Subagents have no chat surface; the parent
+        // assembles their summary. Stub stays a no-op forever.
+        onUiEvent: () => { /* no-op: subagents do not render */ },
+      },
     );
     apiCalls = result.turnCount;       // one provider call per turn
     tokensIn = result.totalUsage.inputTokens;

@@ -89,6 +89,8 @@ export interface ChildBuilderDeps {
   resolveVerifiedFlag?: AidenAgentOptions['resolveVerifiedFlag'];
   resolveToolset?:      AidenAgentOptions['resolveToolset'];
   resolveMutates?:      AidenAgentOptions['resolveMutates'];
+  /** v4.8.0 — resolves uiOnly flag for the dispatch-loop bypass. */
+  resolveUiOnly?:       AidenAgentOptions['resolveUiOnly'];
   /**
    * v4.6 Phase 1 observability — when supplied, the child agent's
    * `onToolCall` is wired to emit `tool_call_started` /
@@ -297,6 +299,7 @@ export function buildChildAgent(
     resolveVerifiedFlag: deps.resolveVerifiedFlag,
     resolveToolset:      deps.resolveToolset,
     resolveMutates:      deps.resolveMutates,
+    resolveUiOnly:       deps.resolveUiOnly,
     honestyEnforcement:  childHonestyEnforcement,
     onToolCall,
     // iterationBudgetInjection inherits the default (true) — child
