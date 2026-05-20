@@ -138,44 +138,45 @@ const CODE_BG_ON  = '\x1b[48;2;50;50;60m';
 const CODE_BG_OFF = '\x1b[49m';
 
 function renderCodeBlock(code: string, lang: string | undefined): string {
-  // v4.8.0 Slice 9 — Aiden-native code block chrome.
+  // v4.8.0 Slice 9 hotfix — top-divider asymmetric chrome.
   //
-  //   ▎ python
-  //   ▎  print("Hello, world!")
-  //   ▎  greet("Aiden")
+  //   ── python ─────────────────────────────────────────
+  //     print("Hello, world!")
+  //     greet("Aiden")
   //
-  // Replaces the prior `── lang ────` divider + `│` rail with the orange
-  // `▎` panel bar (matches /help, approval prompt, Aiden reply, status
-  // bar). Asymmetric chrome — no closing bottom border — mirrors the
-  // Slice 4 framedPanel signature. CODE_BG_ON/OFF envelope preserved
-  // for the "this is code" affordance.
+  // The earlier Slice 9 version used `▎` left-rail on every line and
+  // visually competed with the dark-bg syntax highlighting. This
+  // revision drops the rail, keeps a single muted `──` top divider
+  // with the language label in brand orange, indents body content,
+  // and omits the bottom border (Slice 4 asymmetric signature).
+  // CODE_BG_ON/OFF envelope preserved.
   const sk = getSkinEngine();
   const width = getBodyWidth();
   const langLabel = (lang ?? '').trim();
   const body = isSupportedLang(langLabel)
     ? highlightCode(code, langLabel)
     : code;
-  // Outer indent (2 cells) + bar + 2 inner cells before content. Content
-  // budget shrinks by 5 cells total to keep wrap math accurate.
   const indent = '  ';
-  const bar = sk.applyColors(glyphs.panel.bar, 'brand');
-  const contentBudget = Math.max(8, width - 5);
+  const hLine = glyphs.chrome.hLine;
+  // Top divider: `── <lang> ─────` (lang in brand) OR full-width
+  // `────────────` when no language declared.
+  const top = langLabel
+    ? `${indent}${sk.applyColors(`${hLine.repeat(2)} `, 'muted')}` +
+      `${sk.applyColors(langLabel, 'brand')}` +
+      ` ${sk.applyColors(hLine.repeat(Math.max(1, width - langLabel.length - 4)), 'muted')}`
+    : `${indent}${sk.applyColors(hLine.repeat(width), 'muted')}`;
+  // Body content lands at col 4 (4-space indent inside the divider).
+  // Width budget: leave room for body indent + CODE_BG envelope spaces.
+  const bodyIndent = '    ';
+  const contentBudget = Math.max(8, width - 6);
   const wrappedLines: string[] = [];
-  // Wrap each source line independently so a logical code line stays
-  // visible as one unit even when soft-wrapped. The CODE_BG painting
-  // closes per visual line so a wrap break doesn't bleed bg across
-  // the bar of the next row.
   for (const srcLine of body.split('\n')) {
     const wrapped = frameWrap(srcLine, contentBudget, { trim: false, hard: true });
     for (const visualLine of wrapped.split('\n')) {
-      wrappedLines.push(`${indent}${bar}  ${CODE_BG_ON} ${visualLine} ${CODE_BG_OFF}`);
+      wrappedLines.push(`${bodyIndent}${CODE_BG_ON} ${visualLine} ${CODE_BG_OFF}`);
     }
   }
-  // Header: brand bar + space + language label (brand, dim if absent).
-  const header = langLabel
-    ? `${indent}${bar} ${sk.applyColors(langLabel, 'brand')}`
-    : `${indent}${bar}`;
-  return [header, ...wrappedLines, ''].join('\n') + '\n';
+  return [top, ...wrappedLines].join('\n') + '\n';
 }
 
 /**

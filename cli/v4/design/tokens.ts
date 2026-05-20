@@ -119,13 +119,16 @@ export const glyphs = {
     dotOpen:  '○',
     /** Status footer column separator. */
     sep:      '│',
-    /** Slice 7 — turn counter prefix. Hotfix #3: `⌘` → `#` (ASCII-safe,
-     *  rendered consistently across all monospace fonts). */
-    turn:     '#',
-    /** Slice 7 — session timer prefix. Hotfix #3: `⏱` retired; the
-     *  timer segment now renders the bare elapsed string in teal,
-     *  no glyph. Kept for backward-compat callers. */
-    timer:    '',
+    /** Slice 7 — turn counter prefix. Slice 9 hotfix: glyph dropped
+     *  entirely. The bare colored number (purple `metric_turn` kind)
+     *  carries the meaning, matching the timer pattern. */
+    turn:     '',
+    /** Slice 7 — session timer prefix. Slice 9 hotfix: `⌛` (U+231B
+     *  HOURGLASS WITH FLOWING SAND) restored. The font set Shiva
+     *  confirmed renders ●/○/▲ also renders this widely-supported
+     *  emoji-class hourglass. Trailing space owned by the segment
+     *  composition site to keep the token minimal. */
+    timer:    '⌛',
   },
   util: {
     /** Section / row divider. */

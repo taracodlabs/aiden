@@ -823,18 +823,17 @@ export class Display {
     const stateDot = args.state
       ? sk.applyColors(glyphs.status.dot, this.stateKind(args.state))
       : '';
+    // v4.8.0 Slice 9 hotfix — turn glyph dropped; bare colored number
+    // matches the timer pattern. Color alone (purple metric_turn)
+    // carries the semantic.
     const turnSeg = args.turnCount !== undefined
-      ? `${sk.applyColors(glyphs.status.turn, 'metric_turn')} ${sk.applyColors(String(args.turnCount), 'metric_turn')}`
+      ? sk.applyColors(String(args.turnCount), 'metric_turn')
       : '';
-    // v4.8.0 Slice 7 hotfix — ⏱ slot now shows per-turn elapsed time
-    // (was session uptime — over-engineered; user expects per-turn at
-    // the right edge). `sessionMs` plumbed-but-unused stays for
-    // backward compat with the field name.
-    // v4.8.0 Slice 7 hotfix #3 — glyphs.status.timer is now '' so the
-    // timer segment renders the bare elapsed string in teal (success
-    // kind). The fancy `⏱` codepoint rendered as `□` on many fonts.
+    // v4.8.0 Slice 9 hotfix — ⌛ restored ahead of the bare elapsed
+    // string. Wider font support than the retired ⏱. `sessionMs` arg
+    // stays plumbed-but-unused for backward compat with the field name.
     const sessionSeg = args.elapsedMs !== undefined
-      ? sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')
+      ? `${sk.applyColors(glyphs.status.timer, 'success')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')}`
       : '';
     // ctxRatio + ctxPctText are pre-painted (warn + ctxKind respectively).
     const ctxSegFull = `${ctxRatio} ${bar} ${ctxPctText}`;

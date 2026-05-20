@@ -258,23 +258,26 @@ describe('replyRenderer v4.8.0 Slice 9 — code block chrome', () => {
     return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
   }
 
-  it('code block uses ▎ panel bar (NOT the legacy ── divider or │ rail)', () => {
+  // Slice 9 hotfix: chrome flipped from `▎` left-rail (every line) to
+  // `── lang ──` top-divider only. Body content indents below the
+  // divider with no per-line rail so the dark-bg syntax highlight
+  // owns the visual weight.
+  it('code block uses top-divider chrome (NOT every-line rail)', () => {
     const r = getReplyRenderer();
     const out = stripAnsi(r.render('```python\nprint("hi")\n```'));
-    // Every emitted line that has content carries the orange bar.
-    const contentLines = out.split('\n').filter(l => l.trim().length > 0);
-    for (const line of contentLines) {
-      expect(line.startsWith('  ▎')).toBe(true);
-    }
-    // Legacy chrome glyphs gone.
-    expect(out).not.toContain('── python');
+    // First non-empty line is the divider with language label.
+    const lines = out.split('\n').filter(l => l.trim().length > 0);
+    expect(lines[0]).toMatch(/^  ── python ─+$/);
+    // No per-line `▎` rail anymore.
+    expect(out).not.toMatch(/^  ▎/m);
+    // No per-line `│` rail either.
     expect(out).not.toMatch(/^  │/m);
   });
 
-  it('header row shows the language label after the bar', () => {
+  it('header divider includes the language label between two `─` segments', () => {
     const r = getReplyRenderer();
     const out = stripAnsi(r.render('```typescript\nconst x = 1;\n```'));
-    expect(out).toMatch(/^  ▎ typescript$/m);
+    expect(out).toMatch(/^  ── typescript ─+$/m);
   });
 
   it('code block has NO closing bottom border (asymmetric chrome)', () => {
@@ -295,18 +298,20 @@ describe('replyRenderer v4.8.0 Slice 9 — code block chrome', () => {
     expect(out).toContain('\x1b[49m');
   });
 
-  it('bar paints brand orange (#FF6B35)', () => {
+  it('language label paints brand orange (#FF6B35)', () => {
     const r = getReplyRenderer();
-    const out = r.render('```\nfoo\n```');
+    const out = r.render('```python\nfoo\n```');
+    // Slice 9 hotfix — language label still painted brand orange
+    // inside the muted top-divider segments.
     expect(out).toContain('\x1b[38;2;255;107;53m');
   });
 
-  it('code with no language label still renders bar + content', () => {
+  it('code with no language label renders full-width divider', () => {
     const r = getReplyRenderer();
     const out = stripAnsi(r.render('```\nplain\n```'));
-    // Header row is just the bar (no label).
+    // Header row is just the divider (no label between segments).
     const lines = out.split('\n').filter(l => l.trim().length > 0);
-    expect(lines[0].trim()).toBe('▎');
+    expect(lines[0]).toMatch(/^  ─+$/);
     expect(out).toContain('plain');
   });
 });
