@@ -295,26 +295,30 @@ describe('AidenAgent — PlannerGuard opt-in toggle (v4.6 Phase 2M)', () => {
   });
 });
 
-// TODO(v4.7.0 Phase 2.3): tests assert deleted regex scanner (correctedResponse rewrite + memory_verified_false detection). Rewrite against outcome-based recorder when that lands.
-describe.skip('AidenAgent — HonestyEnforcement wiring', () => {
-  it('4. failed claims rewritten in finalContent', async () => {
-    const provider = new MockProviderAdapter([
-      MockProviderAdapter.stop('I saved the file to disk.'),
-    ]);
-    const honesty = new HonestyEnforcement('enforce');
-    const agent = new AidenAgent({
-      provider,
-      toolExecutor: okExecutor,
-      tools: ALL_SCHEMAS,
-      honestyEnforcement: honesty,
-    });
-    const result = await agent.runConversation([userMsg('save the file')]);
-    expect(result.honestyFindings).toBeDefined();
-    expect(result.honestyFindings![0].found).toBe(false);
-    expect(result.finalContent).toContain("I shouldn't claim");
-  });
+/**
+ * v4.7.0 Phase 2.5 — wiring tests for the outcome-based verifier.
+ *
+ * Asserts the integration between AidenAgent.runConversation and
+ * HonestyEnforcement.check at the post-loop scan site
+ * (aidenAgent.ts:712-727). Three invariants:
+ *
+ *   - finalContent gets the footer APPENDED when enforce mode finds
+ *     unverified outcomes — never rewritten in place
+ *   - findings are captured into honestyFindings regardless of mode
+ *     (off mode short-circuits before this point)
+ *   - loopResult.messages history is NEVER mutated by the verifier
+ *     (the v4.6.x correctedResponse path that mutated message[].content
+ *     is gone)
+ */
+describe('AidenAgent — HonestyEnforcement wiring', () => {
+  // The verifier only fires the mutation_errored event for tools whose
+  // resolveMutates returns true. For the wiring tests, mark file_write
+  // and memory_add as mutating.
+  const mutatingTools = new Set(['file_write', 'memory_add', 'memory_replace', 'memory_remove']);
+  const resolveMutates = (name: string): boolean | undefined =>
+    mutatingTools.has(name) ? true : false;
 
-  it('5. honest claim passes through unchanged', async () => {
+  it('4. clean turn (no errors): no findings, no footer, finalContent unchanged', async () => {
     const provider = new MockProviderAdapter([
       MockProviderAdapter.toolUse([tc('a', 'file_write', {})]),
       MockProviderAdapter.stop('I saved the file to disk.'),
@@ -325,29 +329,71 @@ describe.skip('AidenAgent — HonestyEnforcement wiring', () => {
       toolExecutor: okExecutor,
       tools: ALL_SCHEMAS,
       honestyEnforcement: honesty,
+      resolveMutates,
     });
     const result = await agent.runConversation([userMsg('save the file')]);
     expect(result.finalContent).toBe('I saved the file to disk.');
-    expect(result.honestyFindings).toBeUndefined();
+    expect(result.honestyFindings).toHaveLength(0);
   });
 
-  it('6. memory verified=false detected and rewritten', async () => {
+  it('5. mutating tool errored: footer appended in enforce mode, message history untouched', async () => {
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.toolUse([tc('a', 'file_write', {})]),
+      MockProviderAdapter.stop('I saved the file.'),
+    ]);
+    const erroringExecutor: ToolExecutor = async (call) => ({
+      id:     call.id,
+      name:   call.name,
+      result: null,
+      error:  'EACCES: permission denied',
+    });
+    const honesty = new HonestyEnforcement('enforce');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: erroringExecutor,
+      tools: ALL_SCHEMAS,
+      honestyEnforcement: honesty,
+      resolveMutates,
+    });
+    const result = await agent.runConversation([userMsg('save the file')]);
+
+    // The model's original text is preserved AND the footer is appended.
+    expect(result.finalContent.startsWith('I saved the file.')).toBe(true);
+    expect(result.finalContent).toContain('Verifier');
+    expect(result.finalContent).toContain('file_write');
+    expect(result.finalContent).toContain('errored');
+    expect(result.finalContent).toContain('EACCES');
+
+    expect(result.honestyFindings).toBeDefined();
+    expect(result.honestyFindings).toHaveLength(1);
+    expect(result.honestyFindings![0].reason).toBe('tool_errored');
+
+    // CRITICAL invariant: the assistant message in loopResult.messages
+    // history is NEVER mutated. The footer lives only in
+    // result.finalContent (the caller-visible final string).
+    const lastAssistant = [...result.messages]
+      .reverse()
+      .find((m) => m.role === 'assistant' && (!m.toolCalls || m.toolCalls.length === 0));
+    expect(lastAssistant?.content).toBe('I saved the file.');
+  });
+
+  it('6. memory_add verified=false: footer appended, finalContent never rewritten in place', async () => {
     const provider = new MockProviderAdapter([
       MockProviderAdapter.toolUse([tc('a', 'memory_add', { fact: 'x' })]),
       MockProviderAdapter.stop('I remembered that fact.'),
     ]);
-    // Tool returns a result with verified=false.
     const memExecutor: ToolExecutor = async (call) => ({
-      id: call.id,
-      name: call.name,
+      id:     call.id,
+      name:   call.name,
       result: { verified: false, reason: 'duplicate' },
     });
     const honesty = new HonestyEnforcement('enforce');
     const agent = new AidenAgent({
       provider,
-      toolExecutor: memExecutor,
-      tools: ALL_SCHEMAS,
-      honestyEnforcement: honesty,
+      toolExecutor:        memExecutor,
+      tools:               ALL_SCHEMAS,
+      honestyEnforcement:  honesty,
+      resolveMutates,
       resolveVerifiedFlag: (r) => {
         const v = (r.result as { verified?: boolean })?.verified;
         return typeof v === 'boolean' ? v : undefined;
@@ -357,9 +403,60 @@ describe.skip('AidenAgent — HonestyEnforcement wiring', () => {
       userMsg('remember my color is purple'),
     ]);
     expect(result.toolCallTrace[0].verified).toBe(false);
-    expect(result.honestyFindings).toBeDefined();
+    expect(result.honestyFindings).toHaveLength(1);
     expect(result.honestyFindings![0].reason).toBe('memory_verified_false');
-    expect(result.finalContent).toContain('NOT VERIFIED');
+
+    // finalContent has the original text intact + appended footer.
+    expect(result.finalContent.startsWith('I remembered that fact.')).toBe(true);
+    expect(result.finalContent).toContain('Verifier');
+    expect(result.finalContent).toContain('memory_add');
+    expect(result.finalContent).toContain('not verified');
+  });
+
+  it('7. detect mode: findings captured but no footer appended', async () => {
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.toolUse([tc('a', 'file_write', {})]),
+      MockProviderAdapter.stop('I saved.'),
+    ]);
+    const erroringExecutor: ToolExecutor = async (call) => ({
+      id: call.id, name: call.name, result: null, error: 'fail',
+    });
+    const honesty = new HonestyEnforcement('detect');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor:       erroringExecutor,
+      tools:              ALL_SCHEMAS,
+      honestyEnforcement: honesty,
+      resolveMutates,
+    });
+    const result = await agent.runConversation([userMsg('x')]);
+
+    // finalContent is the raw model output — no footer in detect mode.
+    expect(result.finalContent).toBe('I saved.');
+    // But the finding is still captured for telemetry.
+    expect(result.honestyFindings).toHaveLength(1);
+    expect(result.honestyFindings![0].reason).toBe('tool_errored');
+  });
+
+  it('8. model claims action with no tool fired: no finding (no false refusal)', async () => {
+    // The v4.6.x verifier would have flagged "model said saved, no
+    // file_write fired" as no_tool_call. The new verifier records
+    // OUTCOMES only — silence on missing tools. This test guards
+    // against regression to the false-refusal behaviour.
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.stop('I saved the file to disk.'),
+    ]);
+    const honesty = new HonestyEnforcement('enforce');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: okExecutor,
+      tools: ALL_SCHEMAS,
+      honestyEnforcement: honesty,
+      resolveMutates,
+    });
+    const result = await agent.runConversation([userMsg('save the file')]);
+    expect(result.finalContent).toBe('I saved the file to disk.');
+    expect(result.honestyFindings).toHaveLength(0);
   });
 });
 
