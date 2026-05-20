@@ -103,7 +103,7 @@ Windows · Linux · WSL · macOS (API Mode)
 <img width="929" height="673" alt="image" src="https://github.com/user-attachments/assets/78224b1f-5517-4865-9142-48dd0a68fb46" />
 
 
-![Aiden boot](docs/screenshots/boot.png)
+
 
 > A semi-autonomous AI agent that runs on your machine. Touches your files, browser, and shell. Remembers what matters. Built solo. Open source. Still rough in spots.
 
