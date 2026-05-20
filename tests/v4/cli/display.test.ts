@@ -1480,44 +1480,48 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     state:    'ok' as const,
   };
 
-  it('narrow (<100 cols): compact tier — bar + percent + elapsed only', () => {
+  // v4.8.0 Slice 7 hotfix #3 — tier detection now uses the `│`
+  // separator count (3-tier disclosure: compact=2 seps, medium=3,
+  // wide=4) instead of asserting specific glyphs. `⌘`/`⏱` got swapped
+  // for `#`/empty in the hotfix because hex/clover glyphs rendered
+  // as boxes on many fonts. The `●` glyph is now used by BOTH the
+  // context bar (filled cells) and the state dot, so literal-glyph
+  // assertions are ambiguous.
+  const sepCount = (s: string): number => (s.match(/│/g) || []).length;
+
+  it('narrow (<100 cols): compact tier — 2 separators (prov│ctx│elapsed)', () => {
     withCols(80, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
       expect(out).toContain('chatgpt-plus');
       expect(out).toContain('gpt-5');
       expect(out).toContain('%');
-      expect(out).not.toContain('⌘');  // turn segment dropped
-      expect(out).not.toContain('⏱');  // session segment dropped
-      expect(out).not.toContain('●');  // state dot dropped
+      expect(sepCount(out)).toBe(2);
+      expect(out).not.toContain('#');  // turn segment dropped
     });
   });
 
-  it('medium (≥100, <120 cols): adds turn counter, no session/dot', () => {
+  it('medium (≥100, <120 cols): 3 separators (adds turn counter)', () => {
     withCols(110, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
-      expect(out).toContain('⌘');
+      expect(out).toContain('#');
       expect(out).toContain('4');
-      expect(out).not.toContain('⏱');
-      expect(out).not.toContain('●');
+      expect(sepCount(out)).toBe(3);
     });
   });
 
-  it('wide (≥120 cols): full density — adds session timer + state dot', () => {
+  it('wide (≥120 cols): 4 separators (full density)', () => {
     withCols(140, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
-      expect(out).toContain('⌘');
+      expect(out).toContain('#');
       expect(out).toContain('4');
-      expect(out).toContain('⏱');
-      expect(out).toContain('●');
+      expect(sepCount(out)).toBe(4);
     });
   });
 
-  it('legacy callers (no turn/session/state) still render at all tiers', () => {
-    // Backward-compat: pre-Slice-7 callers omit the optional args.
-    // Footer falls through to the compact tier regardless of width.
+  it('legacy callers (no turn/session/state) collapse to compact tier', () => {
     withCols(140, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter({
@@ -1525,9 +1529,8 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
       }));
       expect(out).toContain('groq');
       expect(out).toContain('llama-3.3');
-      expect(out).not.toContain('⌘');
-      expect(out).not.toContain('⏱');
-      expect(out).not.toContain('●');
+      expect(out).not.toContain('#');
+      expect(sepCount(out)).toBe(2);
     });
   });
 

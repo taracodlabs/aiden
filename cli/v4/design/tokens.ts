@@ -119,10 +119,13 @@ export const glyphs = {
     dotOpen:  '○',
     /** Status footer column separator. */
     sep:      '│',
-    /** Slice 7 — turn counter prefix. */
-    turn:     '⌘',
-    /** Slice 7 — session timer prefix. */
-    timer:    '⏱',
+    /** Slice 7 — turn counter prefix. Hotfix #3: `⌘` → `#` (ASCII-safe,
+     *  rendered consistently across all monospace fonts). */
+    turn:     '#',
+    /** Slice 7 — session timer prefix. Hotfix #3: `⏱` retired; the
+     *  timer segment now renders the bare elapsed string in teal,
+     *  no glyph. Kept for backward-compat callers. */
+    timer:    '',
   },
   util: {
     /** Section / row divider. */
@@ -166,13 +169,17 @@ export const glyphs = {
     bar: '▎',
   },
   /**
-   * v4.8.0 Slice 7 hotfix — hex-dot progress bar pair. Replaces the
-   * generic shaded blocks (▓/░) for a more distinctive Aiden look.
-   * Used by the status footer's context-fill bar.
+   * Status footer progress bar pair. v4.8.0 Slice 7 hotfix #3 — moved
+   * from hex dots (⬢/⬡) back to the U+25CF/U+25CB circle pair: those
+   * codepoints render in every monospace font (Consolas, Cascadia,
+   * SF Mono, JetBrains Mono, etc.) whereas the hex dots required
+   * Nerd Font / Apple Symbols fallback chains and rendered as `□`
+   * boxes on many setups. Colour still carries the meaning; the
+   * glyph just needs to render at all.
    */
   bar: {
-    filled: '⬢',
-    empty:  '⬡',
+    filled: '●',
+    empty:  '○',
   },
 } as const;
 

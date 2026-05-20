@@ -830,8 +830,11 @@ export class Display {
     // (was session uptime — over-engineered; user expects per-turn at
     // the right edge). `sessionMs` plumbed-but-unused stays for
     // backward compat with the field name.
+    // v4.8.0 Slice 7 hotfix #3 — glyphs.status.timer is now '' so the
+    // timer segment renders the bare elapsed string in teal (success
+    // kind). The fancy `⏱` codepoint rendered as `□` on many fonts.
     const sessionSeg = args.elapsedMs !== undefined
-      ? `${sk.applyColors(glyphs.status.timer, 'success')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')}`
+      ? sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')
       : '';
     // ctxRatio + ctxPctText are pre-painted (warn + ctxKind respectively).
     const ctxSegFull = `${ctxRatio} ${bar} ${ctxPctText}`;
@@ -1842,18 +1845,30 @@ export class Display {
   streamPartial(text: string): void {
     if (!text) return;
     if (!this.streamHeaderShown) {
-      // Phase 26.2.3 — share the single-line `┃ Aiden` header with
-      // non-streaming agentTurn so streamed and non-streamed responses
-      // open identically.
+      // Phase 26.2.3 — share the `▎ Aiden` header with non-streaming
+      // agentTurn so streamed + non-streamed responses open identically.
       this.out.write(this.agentHeader());
       this.streamHeaderShown = true;
       this.streamBuffer = '';
       this.streamLineCount = 0;
-      // v4.8.0 Phase 2.3 fix — fresh stream cycle; clear the ui-fired
-      // flag so the rerender gate is per-turn, not sticky.
       this.uiEventsFiredThisTurn = false;
+      // agentHeader emits trailing `\n\n`; cursor is at col 0 of a fresh
+      // line, so the very next chunk needs the leading indent.
+      this.streamLastEndedNewline = true;
     }
-    this.out.write(text);
+    // v4.8.0 Slice 7 hotfix #3 — inject a 2-cell indent at every line
+    // start so streamed content aligns with the ▎ bar in agentHeader.
+    // Pre-this-fix the raw chunk wrote at col 0; the post-stream
+    // rerender in applyFrameToRendered would indent eventually, but
+    // mid-stream the user saw col-0 content. streamBuffer stays raw
+    // (the rerender path applies its own indent).
+    const indent = '  ';
+    let toWrite = text;
+    if (this.streamLastEndedNewline) toWrite = indent + toWrite;
+    const endsNl = toWrite.endsWith('\n');
+    const body = endsNl ? toWrite.slice(0, -1) : toWrite;
+    toWrite = body.replace(/\n/g, '\n' + indent) + (endsNl ? '\n' : '');
+    this.out.write(toWrite);
     this.streamLastEndedNewline = text.endsWith('\n');
     // Phase v4.1-reply-formatting: track buffer + line count for the
     // post-stream re-render.
