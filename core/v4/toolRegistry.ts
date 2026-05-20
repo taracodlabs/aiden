@@ -172,6 +172,14 @@ export interface ToolHandler {
    */
   contexts?: ExecutionContext[];
   /**
+   * v4.8.0 — when true, this tool is a UI-only signal channel: the
+   * dispatch loop skips execution, skips iteration accounting, skips
+   * observability hooks, and instead fires onUiEvent on the caller.
+   * Used by ui_task_update, ui_task_done, etc. Always pair with
+   * `mutates: false`.
+   */
+  uiOnly?: boolean;
+  /**
    * v4.4 Phase 4 — produce a preview of what `execute` would do
    * WITHOUT performing any side effects. Called when AIDEN_DRYRUN=1
    * (via the `withDryRun` HOC in `core/v4/dryRun.ts`) OR when the

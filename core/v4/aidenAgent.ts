@@ -228,6 +228,13 @@ export interface AidenAgentOptions {
    * should ensure their tools declare `mutates` honestly.
    */
   resolveMutates?:         (toolName: string) => boolean | undefined;
+  /**
+   * v4.8.0 — resolves a tool name to its `uiOnly` flag. When the
+   * dispatch loop sees `true`, it skips execute / observability hooks /
+   * iteration accounting and fires `onUiEvent` on the caller instead.
+   * Undefined means "treat as a normal executable tool" (default).
+   */
+  resolveUiOnly?:          (toolName: string) => boolean | undefined;
   // ── Context layers ───────────────────────────────────────────────────
   promptBuilder?:          PromptBuilder;
   promptBuilderOptions?:   PromptBuilderOptions;
@@ -351,6 +358,15 @@ export interface RunConversationOptions {
    * to a future phase — see docs/v4.6/phase-1-design.md §11.0).
    */
   signal?:           AbortSignal;
+  /**
+   * v4.8.0 — fired when the dispatch loop encounters a `uiOnly` tool
+   * call. Carries the tool name and the raw model-provided arguments;
+   * the caller (display layer) interprets them as a render signal
+   * (e.g. `ui_task_update`, `ui_toast`). Never fires for executable
+   * tools. Synchronous, best-effort — handler exceptions are swallowed
+   * by the dispatch branch so a bad listener cannot break the turn.
+   */
+  onUiEvent?:        (name: string, args: Record<string, unknown>) => void;
 }
 
 interface EmptyResponseMetrics {
@@ -392,6 +408,7 @@ export class AidenAgent {
   private readonly resolveVerifiedFlag?:        AidenAgentOptions['resolveVerifiedFlag'];
   private readonly resolveToolset?:             AidenAgentOptions['resolveToolset'];
   private readonly resolveMutates?:             AidenAgentOptions['resolveMutates'];
+  private readonly resolveUiOnly?:              AidenAgentOptions['resolveUiOnly'];
   private readonly promptBuilder?:              PromptBuilder;
   private          promptBuilderOptions?:       PromptBuilderOptions;
   private readonly contextCompressor?:          ContextCompressor;
@@ -472,6 +489,7 @@ export class AidenAgent {
     this.resolveVerifiedFlag      = opts.resolveVerifiedFlag;
     this.resolveToolset           = opts.resolveToolset;
     this.resolveMutates           = opts.resolveMutates;
+    this.resolveUiOnly            = opts.resolveUiOnly;
     this.promptBuilder            = opts.promptBuilder;
     this.promptBuilderOptions     = opts.promptBuilderOptions;
     this.contextCompressor        = opts.contextCompressor;
@@ -1222,6 +1240,27 @@ export class AidenAgent {
           finishReason = 'interrupted';
           finalContent = '';
           break;
+        }
+        // v4.8.0 — uiOnly tools are signal channels, not executable
+        // tools. The model calls them to communicate render-time
+        // state. Dispatch loop skips execute / iteration / mutation
+        // marking / verifier / trace / observability hooks and fires
+        // onUiEvent on the caller. A '(no output)' tool_result is
+        // pushed to satisfy the provider protocol (every tool_call_id
+        // needs a matching tool_result). Listener exceptions are
+        // swallowed so a bad UI handler cannot break the turn.
+        if (this.resolveUiOnly?.(call.name) === true) {
+          turnToolMessages.push({
+            role:       'tool',
+            toolCallId: call.id,
+            content:    '(no output)',
+          });
+          try {
+            runOptions.onUiEvent?.(call.name, call.arguments);
+          } catch {
+            // defensive — UI listener faults must never break dispatch
+          }
+          continue;
         }
         this.onToolCall?.(call, 'before');
         // v4.2 Phase 4 — mark any active checkpoints as containing a

@@ -1409,6 +1409,13 @@ export async function buildAgentRuntime(
   // checkpoint flag); plugin authors must declare `mutates` honestly.
   const resolveMutates = (name: string) =>
     toolRegistry.get(name)?.mutates;
+  // v4.8.0 Phase 2.1 — resolver for the uiOnly flag. The dispatch
+  // loop branches on `=== true` so any non-true value (undefined for
+  // unknown tools, false for explicit executables) keeps the normal
+  // executable path. Closure-captures the live registry, same as
+  // resolveMutates / resolveToolset.
+  const resolveUiOnly = (name: string) =>
+    toolRegistry.get(name)?.uiOnly;
 
   // ── Phase 16b.4: assemble system-prompt context ─────────────────────
   // PromptBuilder needs SOUL.md (read at build time from `paths.soulMd`),
@@ -1549,6 +1556,7 @@ export async function buildAgentRuntime(
     resolveVerifiedFlag,
     resolveToolset,
     resolveMutates,
+    resolveUiOnly,
     providerId,
     modelId,
     // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.

@@ -277,6 +277,32 @@ export function registerWriteTools(registry: ToolRegistry): void {
 export function registerAllTools(registry: ToolRegistry): void {
   registerReadOnlyTools(registry);
   registerWriteTools(registry);
+  // v4.8.0 Phase 2.1 — env-gated uiOnly smoke stub. Never registers
+  // in production. Set AIDEN_TEST_UI_STUB=1 to enable for the
+  // dispatch-branch smoke harness. The execute() throws on purpose:
+  // if the uiOnly branch is wired correctly the model can never
+  // reach the executor.
+  if (process.env.AIDEN_TEST_UI_STUB === '1') {
+    registry.register({
+      schema: {
+        name:        '_test_ui_stub',
+        description: 'Test-only uiOnly stub for v4.8.0 Phase 2.1 smoke. Set AIDEN_TEST_UI_STUB=1 to enable.',
+        inputSchema: {
+          type:       'object',
+          properties: {
+            message: { type: 'string', description: 'Arbitrary message to echo via onUiEvent' },
+          },
+          required: ['message'],
+        },
+      },
+      execute: async () => {
+        throw new Error('_test_ui_stub should never execute — uiOnly branch should bypass it');
+      },
+      category: 'read',
+      mutates:  false,
+      uiOnly:   true,
+    });
+  }
 }
 
 export {
