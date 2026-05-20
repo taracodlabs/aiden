@@ -2070,6 +2070,62 @@ export class Display {
     this.out.write(`${sk.applyColors(`${arrow} ${name}…`, 'tool')}\n`);
     this.streamLastEndedNewline = true;
   }
+
+  // v4.8.0 Phase 2.3 — task_id → label map for in-flight ui_task_update
+  // rows. ui_task_done looks up the label so the completion row can
+  // echo it even when the model only sends task_id + status. Cleared
+  // on done. Map is per-Display-instance; one REPL session.
+  private uiTaskRows = new Map<string, { label: string }>();
+
+  /**
+   * v4.8.0 Phase 2.3 — render a semantic ui_* event signalled by the
+   * model via a uiOnly tool call. Append-only: each event paints one
+   * row; in-place mutation is a v4.8.x upgrade if UX demands it.
+   *
+   * Currently handles `ui_task_update` and `ui_task_done`; other 5
+   * names land in Phase 2.4 (silent ignore until then). Non-TTY out
+   * surfaces silent — matches the activityIndicator precedent.
+   */
+  renderUiEvent(name: string, args: Record<string, unknown>): void {
+    if (!this.out.isTTY) return;
+    if (name === 'ui_task_update') { this.renderUiTaskUpdate(args); return; }
+    if (name === 'ui_task_done')   { this.renderUiTaskDone(args);   return; }
+    // Other 5 events: silent until Phase 2.4 lands their renderers.
+  }
+
+  private renderUiTaskUpdate(args: Record<string, unknown>): void {
+    const taskId = typeof args.task_id === 'string' ? args.task_id : '';
+    const label  = typeof args.label   === 'string' ? args.label   : '';
+    const status = typeof args.status  === 'string' ? args.status  : '';
+    if (!taskId || !label) return;
+    this.commitStreamChunk();
+    const glyph = status === 'paused' ? '⏸' : status === 'blocked' ? '⛔' : '⟳';
+    const kind: ColorKind = status === 'running' ? 'tool' : 'warn';
+    this.uiTaskRows.set(taskId, { label });
+    const short = label.length > 80 ? label.slice(0, 79) + '…' : label;
+    this.out.write(`${this.skin.applyColors(`${glyph} ${short}`, kind)}\n`);
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiTaskDone(args: Record<string, unknown>): void {
+    const taskId  = typeof args.task_id === 'string' ? args.task_id : '';
+    const status  = typeof args.status  === 'string' ? args.status  : '';
+    const summary = typeof args.summary === 'string' ? args.summary : '';
+    if (!taskId) return;
+    this.commitStreamChunk();
+    const tracked = this.uiTaskRows.get(taskId);
+    const label = tracked?.label ?? taskId;
+    this.uiTaskRows.delete(taskId);
+    const glyph = status === 'success' ? '✓' : status === 'failure' ? '✗' : '⊘';
+    const kind: ColorKind =
+      status === 'success' ? 'success' :
+      status === 'failure' ? 'error'   : 'warn';
+    const shortLabel = label.length > 80 ? label.slice(0, 79) + '…' : label;
+    const shortSum   = summary.length > 120 ? summary.slice(0, 119) + '…' : summary;
+    const tail = shortSum ? ` — ${shortSum}` : '';
+    this.out.write(`${this.skin.applyColors(`${glyph} ${shortLabel}${tail}`, kind)}\n`);
+    this.streamLastEndedNewline = true;
+  }
 }
 
 // ── Phase v4.1-voice-cli — voice indicator helper ─────────────────────

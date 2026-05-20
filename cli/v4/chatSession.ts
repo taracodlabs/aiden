@@ -1424,9 +1424,11 @@ export class ChatSession implements ChatSessionLike {
               this.opts.display.streamToolIndicator(call.name);
             }
           : undefined,
-        // v4.8.0 Phase 2.2 — uiOnly event sink. No-op stub for now;
-        // Phase 2.3 wires the renderer (display layer chrome) here.
-        onUiEvent: () => { /* no-op stub — Phase 2.3 wires renderer */ },
+        // v4.8.0 Phase 2.3 — uiOnly events route to the display layer.
+        // Phase 2.3 handles ui_task_update + ui_task_done; the other 5
+        // event names land in Phase 2.4 (renderer silent-ignores them
+        // for now).
+        onUiEvent: (name, args) => this.opts.display.renderUiEvent(name, args),
         onProgress: streamingEnabled
           ? (outputTokens: number, maxTokens?: number) => {
               if (indicatorStopped === false) return;
