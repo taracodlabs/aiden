@@ -55,13 +55,13 @@ const TRAIL_MAP: readonly TrailEntry[] = [
            'file_list', 'list_directory', 'list_directory_with_sizes',
            'directory_tree', 'file_info', 'get_file_info',
            'observe', 'read', 'list'],
-    icon: '👁',  verb: 'reading'   },
+    icon: '👁️',  verb: 'reading'   },
 
   // ── Write / edit / create ────────────────────────────────────────────
   { keys: ['file_write', 'write_file', 'edit_file', 'move_file',
            'notebook_edit', 'create_directory',
            'write', 'edit', 'create', 'save'],
-    icon: '✏',  verb: 'writing'   },
+    icon: '✏️',  verb: 'writing'   },
 
   // ── Execute / run / shell ────────────────────────────────────────────
   { keys: ['bash', 'powershell', 'execute_code', 'skill_view',
