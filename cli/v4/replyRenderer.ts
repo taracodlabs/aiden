@@ -138,61 +138,44 @@ const CODE_BG_ON  = '\x1b[48;2;50;50;60m';
 const CODE_BG_OFF = '\x1b[49m';
 
 function renderCodeBlock(code: string, lang: string | undefined): string {
+  // v4.8.0 Slice 9 — Aiden-native code block chrome.
+  //
+  //   ▎ python
+  //   ▎  print("Hello, world!")
+  //   ▎  greet("Aiden")
+  //
+  // Replaces the prior `── lang ────` divider + `│` rail with the orange
+  // `▎` panel bar (matches /help, approval prompt, Aiden reply, status
+  // bar). Asymmetric chrome — no closing bottom border — mirrors the
+  // Slice 4 framedPanel signature. CODE_BG_ON/OFF envelope preserved
+  // for the "this is code" affordance.
   const sk = getSkinEngine();
-  // v4.1.4 reply-quality polish: width sourced from frame.ts. Same
-  // visual budget as the v4.1.3 formula (cols capped at 100, minus
-  // gutter+2) — but expressed via the shared helper so it tracks any
-  // future width-policy change in one place.
   const width = getBodyWidth();
   const langLabel = (lang ?? '').trim();
-  // v4.1.3-essentials reply-polish: language tag on the top rule
-  // already shipped; keep it. Bottom rule unlabeled (closing fence).
-  const top = langLabel
-    ? `── ${langLabel} ${'─'.repeat(Math.max(0, width - langLabel.length - 4))}`
-    : '─'.repeat(width);
-  const bot = '─'.repeat(width);
   const body = isSupportedLang(langLabel)
     ? highlightCode(code, langLabel)
     : code;
-  // v4.1.4 reply-quality polish: per-line soft wrap. The rail + bg
-  // chrome adds 4 visible columns (` │ `, padding spaces around the
-  // line). Subtract those so wrap math targets the actual content
-  // budget. `hard: true` ensures even pathological long tokens
-  // (minified JS, hashes) break instead of escaping the frame.
-  //
-  // Width inside the body of a code line:
-  //   gutter (3) + `│ ` (2) + leading-space (1) + CONTENT + trailing-space (1)
-  // → content budget = width - gutter - 4. We further cap at width to
-  //   keep the fence rule aligned with the body's right margin.
-  const contentBudget = Math.max(8, width - GUTTER - 4);
-  // v4.1.3-essentials reply-polish (preserved): each body line gets:
-  //   - frame gutter (was 2-space outer indent; now uses shared GUTTER)
-  //   - left rail `│ ` painted muted (mirrors blockquote's `┃ ` rail
-  //     with a different glyph so they're visually distinct)
-  //   - 24-bit dark background wrapping the rail + content (subtle
-  //     "this is code" affordance without going full TUI box-frame)
-  const rail = sk.applyColors('│', 'muted');
-  const gutter = getIndent(0);
-  // Wrap each source line independently — code-block semantics demand
-  // that a "logical line" remains visible as one continued unit even
-  // when soft-wrapped. The CODE_BG painting closes per VISUAL line so
-  // a wrap break doesn't bleed bg across the rail of the next row.
+  // Outer indent (2 cells) + bar + 2 inner cells before content. Content
+  // budget shrinks by 5 cells total to keep wrap math accurate.
+  const indent = '  ';
+  const bar = sk.applyColors(glyphs.panel.bar, 'brand');
+  const contentBudget = Math.max(8, width - 5);
   const wrappedLines: string[] = [];
+  // Wrap each source line independently so a logical code line stays
+  // visible as one unit even when soft-wrapped. The CODE_BG painting
+  // closes per visual line so a wrap break doesn't bleed bg across
+  // the bar of the next row.
   for (const srcLine of body.split('\n')) {
     const wrapped = frameWrap(srcLine, contentBudget, { trim: false, hard: true });
     for (const visualLine of wrapped.split('\n')) {
-      wrappedLines.push(`${gutter}${rail} ${CODE_BG_ON} ${visualLine} ${CODE_BG_OFF}`);
+      wrappedLines.push(`${indent}${bar}  ${CODE_BG_ON} ${visualLine} ${CODE_BG_OFF}`);
     }
   }
-  const indented = wrappedLines.join('\n');
-  // Top + bottom fence rules sit at the gutter too — visually anchors
-  // the block as a unit inside the assistant frame.
-  return [
-    `${gutter}${sk.applyColors(top, 'muted')}`,
-    indented,
-    `${gutter}${sk.applyColors(bot, 'muted')}`,
-    '',
-  ].join('\n') + '\n';
+  // Header: brand bar + space + language label (brand, dim if absent).
+  const header = langLabel
+    ? `${indent}${bar} ${sk.applyColors(langLabel, 'brand')}`
+    : `${indent}${bar}`;
+  return [header, ...wrappedLines, ''].join('\n') + '\n';
 }
 
 /**

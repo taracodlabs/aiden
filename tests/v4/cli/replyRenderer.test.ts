@@ -251,3 +251,62 @@ describe('replyRenderer v4.8.0 Slice 8 — list polish', () => {
     expect(out).toContain('\x1b[38;2;255;107;53m');
   });
 });
+
+describe('replyRenderer v4.8.0 Slice 9 — code block chrome', () => {
+  function stripAnsi(s: string): string {
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  }
+
+  it('code block uses ▎ panel bar (NOT the legacy ── divider or │ rail)', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render('```python\nprint("hi")\n```'));
+    // Every emitted line that has content carries the orange bar.
+    const contentLines = out.split('\n').filter(l => l.trim().length > 0);
+    for (const line of contentLines) {
+      expect(line.startsWith('  ▎')).toBe(true);
+    }
+    // Legacy chrome glyphs gone.
+    expect(out).not.toContain('── python');
+    expect(out).not.toMatch(/^  │/m);
+  });
+
+  it('header row shows the language label after the bar', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render('```typescript\nconst x = 1;\n```'));
+    expect(out).toMatch(/^  ▎ typescript$/m);
+  });
+
+  it('code block has NO closing bottom border (asymmetric chrome)', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render('```\nfoo\n```'));
+    // No trailing horizontal-rule line.
+    const trimmedLines = out.trim().split('\n');
+    const lastLine = trimmedLines[trimmedLines.length - 1];
+    expect(lastLine).not.toMatch(/^  ─+$/);
+  });
+
+  it('CODE_BG envelope still wraps body content (this-is-code affordance preserved)', () => {
+    const r = getReplyRenderer();
+    const out = r.render('```\nfoo\n```');
+    // Slice 9 keeps the 24-bit dark background for body lines.
+    // CODE_BG_ON = \x1b[48;2;50;50;60m, CODE_BG_OFF = \x1b[49m.
+    expect(out).toContain('\x1b[48;2;50;50;60m');
+    expect(out).toContain('\x1b[49m');
+  });
+
+  it('bar paints brand orange (#FF6B35)', () => {
+    const r = getReplyRenderer();
+    const out = r.render('```\nfoo\n```');
+    expect(out).toContain('\x1b[38;2;255;107;53m');
+  });
+
+  it('code with no language label still renders bar + content', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render('```\nplain\n```'));
+    // Header row is just the bar (no label).
+    const lines = out.split('\n').filter(l => l.trim().length > 0);
+    expect(lines[0].trim()).toBe('▎');
+    expect(out).toContain('plain');
+  });
+});
