@@ -106,6 +106,10 @@ export const glyphs = {
     dotOpen:  '○',
     /** Status footer column separator. */
     sep:      '│',
+    /** Slice 7 — turn counter prefix. */
+    turn:     '⌘',
+    /** Slice 7 — session timer prefix. */
+    timer:    '⏱',
   },
   util: {
     /** Section / row divider. */

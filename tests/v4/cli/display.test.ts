@@ -1464,3 +1464,91 @@ describe('Display v4.8.0 ui_* event renderers', () => {
     expect(stripAnsi(b.chunks.join(''))).toContain('🛠 Created: mySkill');
   });
 });
+
+describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
+  // Width-aware footer needs us to stub process.stdout.columns for each
+  // case so progressive disclosure deterministically picks the tier.
+  function withCols<T>(cols: number, fn: () => T): T {
+    const orig = process.stdout.columns;
+    Object.defineProperty(process.stdout, 'columns', { value: cols, configurable: true });
+    try { return fn(); }
+    finally { Object.defineProperty(process.stdout, 'columns', { value: orig, configurable: true }); }
+  }
+
+  const BASE = {
+    provider: 'chatgpt-plus', model: 'gpt-5',
+    ctxUsed:  6400, ctxMax: 272_000,
+    elapsedMs: 16_000,
+    turnCount: 4, sessionMs: 8 * 60_000 + 29_000,
+    state:    'ok' as const,
+  };
+
+  it('narrow (<100 cols): compact tier — bar + percent + elapsed only', () => {
+    withCols(80, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+      const out = stripAnsi(d.statusFooter(BASE));
+      expect(out).toContain('chatgpt-plus');
+      expect(out).toContain('gpt-5');
+      expect(out).toContain('%');
+      expect(out).not.toContain('⌘');  // turn segment dropped
+      expect(out).not.toContain('⏱');  // session segment dropped
+      expect(out).not.toContain('●');  // state dot dropped
+    });
+  });
+
+  it('medium (≥100, <120 cols): adds turn counter, no session/dot', () => {
+    withCols(110, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+      const out = stripAnsi(d.statusFooter(BASE));
+      expect(out).toContain('⌘');
+      expect(out).toContain('4');
+      expect(out).not.toContain('⏱');
+      expect(out).not.toContain('●');
+    });
+  });
+
+  it('wide (≥120 cols): full density — adds session timer + state dot', () => {
+    withCols(140, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+      const out = stripAnsi(d.statusFooter(BASE));
+      expect(out).toContain('⌘');
+      expect(out).toContain('4');
+      expect(out).toContain('⏱');
+      expect(out).toContain('●');
+    });
+  });
+
+  it('legacy callers (no turn/session/state) still render at all tiers', () => {
+    // Backward-compat: pre-Slice-7 callers omit the optional args.
+    // Footer falls through to the compact tier regardless of width.
+    withCols(140, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+      const out = stripAnsi(d.statusFooter({
+        provider: 'groq', model: 'llama-3.3', ctxUsed: 1_000, ctxMax: 128_000, elapsedMs: 2_000,
+      }));
+      expect(out).toContain('groq');
+      expect(out).toContain('llama-3.3');
+      expect(out).not.toContain('⌘');
+      expect(out).not.toContain('⏱');
+      expect(out).not.toContain('●');
+    });
+  });
+
+  it('state dot paints a semantic colour (mono-off): ok → success rgb', () => {
+    withCols(140, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: false }) });
+      const out = d.statusFooter(BASE);
+      // default skin success = #4caf50 → rgb 76, 175, 80
+      expect(out).toContain('\x1b[38;2;76;175;80m');
+    });
+  });
+
+  it('80-col output fits without wrap (≤80 visible cells)', () => {
+    withCols(80, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+      const out = stripAnsi(d.statusFooter(BASE));
+      // 80-col tier: no ANSI to strip in forceMono; raw len is the visible width.
+      expect(out.length).toBeLessThanOrEqual(80);
+    });
+  });
+});

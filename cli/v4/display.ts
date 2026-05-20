@@ -24,6 +24,7 @@ const TerminalRenderer: new (opts?: unknown) => unknown = require('marked-termin
 
 import { SkinEngine, getSkinEngine, type ColorKind } from './skinEngine';
 import { visibleLength, truncateVisible } from './box';
+import { glyphs } from './design/tokens';
 import {
   iconForTool as trailIconForTool,
   padVerb,
@@ -746,20 +747,27 @@ export class Display {
   }
 
   /**
-   * v3-style post-turn status footer:
+   * v3-style post-turn status footer, extended in v4.8.0 Slice 7 with
+   * packed info density (turn counter, session uptime, per-turn state
+   * dot) and progressive disclosure based on terminal width.
    *
-   *   ▲ groq · llama-3.3-70b  │  ▓▓▓░░░░░░░ 12.4K/128K  │  2s
+   * Layout tiers:
+   *   ≥120 cols: ▲ provider · model │ N/M <bar> N% │ ⌘ N │ ⏱ Hms │ ● state
+   *   ≥100 cols: ▲ provider · model │ N/M <bar> N% │ ⌘ N │ Ns
+   *   < 100:     ▲ provider · model │ <bar> N% │ Ns
    *
-   * Width-bounded (10-cell context bar), always one line.  Provider
-   * appears in muted, model bold, ctx bar colour-graded by % full,
-   * elapsed in muted.  Returns string sans trailing newline.
+   * `turnCount`, `sessionMs`, `state` are optional for backward compat;
+   * old call sites continue to work unchanged.
    */
   statusFooter(args: {
-    provider: string;
-    model: string;
-    ctxUsed: number;
-    ctxMax: number;
-    elapsedMs: number;
+    provider:    string;
+    model:       string;
+    ctxUsed:     number;
+    ctxMax:      number;
+    elapsedMs:   number;
+    turnCount?:  number;
+    sessionMs?:  number;
+    state?:      'ok' | 'warn' | 'error' | 'muted';
   }): string {
     const sk = this.skin;
     const SEP = sk.applyColors(' │ ', 'muted');
@@ -779,12 +787,49 @@ export class Display {
     const bar =
       sk.applyColors('▓'.repeat(filled), ctxKind) +
       sk.applyColors('░'.repeat(barW - filled), 'muted');
-    const ctxLabel = `${formatCompactTokens(args.ctxUsed)}/${formatCompactTokens(args.ctxMax)}`;
-    const ctxSeg = `${bar} ${sk.applyColors(ctxLabel, ctxKind)}`;
+    const ctxRatio = `${formatCompactTokens(args.ctxUsed)}/${formatCompactTokens(args.ctxMax)}`;
+    const ctxPctText = `${pct}%`;
 
     const elapsed = sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted');
 
-    return `  ${provModel}${SEP}${ctxSeg}${SEP}${elapsed}`;
+    // Progressive disclosure: pick layout based on RAW terminal width.
+    // `this.cols()` caps at 100 (frame budget for body content), but
+    // the footer wants the full physical width to choose its tier.
+    const cols = (typeof this.out.columns === 'number' && this.out.columns >= 1)
+      ? this.out.columns
+      : 100;
+    // Tier ≥120: full density (ratio + bar + pct + turn + session + state).
+    // Tier ≥100: ratio + bar + pct + turn + elapsed.
+    // Tier <100: bar + pct + elapsed.
+    const stateDot = args.state
+      ? sk.applyColors(glyphs.status.dot, this.stateKind(args.state))
+      : '';
+    const turnSeg = args.turnCount !== undefined
+      ? `${sk.applyColors(glyphs.status.turn, 'muted')} ${sk.applyColors(String(args.turnCount), 'agent')}`
+      : '';
+    const sessionSeg = args.sessionMs !== undefined
+      ? `${sk.applyColors(glyphs.status.timer, 'muted')} ${sk.applyColors(formatElapsedShort(args.sessionMs), 'muted')}`
+      : '';
+    const ctxSegFull = `${sk.applyColors(ctxRatio, 'muted')} ${bar} ${sk.applyColors(ctxPctText, ctxKind)}`;
+    const ctxSegCompact = `${bar} ${sk.applyColors(ctxPctText, ctxKind)}`;
+
+    let segments: string[];
+    if (cols >= 120 && stateDot && turnSeg && sessionSeg) {
+      segments = [provModel, ctxSegFull, turnSeg, sessionSeg, stateDot];
+    } else if (cols >= 100 && turnSeg) {
+      segments = [provModel, ctxSegFull, turnSeg, elapsed];
+    } else {
+      segments = [provModel, ctxSegCompact, elapsed];
+    }
+    return `  ${segments.join(SEP)}`;
+  }
+
+  /** Map a per-turn outcome to the colour kind used by the state dot. */
+  private stateKind(state: 'ok' | 'warn' | 'error' | 'muted'): ColorKind {
+    if (state === 'ok')    return 'success';
+    if (state === 'warn')  return 'warn';
+    if (state === 'error') return 'error';
+    return 'muted';
   }
 
   /**

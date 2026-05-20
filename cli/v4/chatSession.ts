@@ -383,6 +383,11 @@ export class ChatSession implements ChatSessionLike {
   // turn's elapsed ms (rendered in the trailing footer) and the
   // provider used last turn (so a switch surfaces as `groq ──→ together`).
   private lastTurnElapsedMs = 0;
+  // v4.8.0 Slice 7 — status-footer telemetry. turnCount increments on
+  // every completed turn (success OR failure paths); lastTurnOutcome
+  // maps result.finishReason to a colour-kind hint for the state dot.
+  private turnCount = 0;
+  private lastTurnOutcome: 'ok' | 'warn' | 'error' | 'muted' = 'ok';
   private lastFooterProvider: string | null = null;
 
   /**
@@ -1586,6 +1591,12 @@ export class ChatSession implements ChatSessionLike {
 
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
+      // v4.8.0 Slice 7 — record per-turn outcome for the status dot.
+      this.turnCount += 1;
+      this.lastTurnOutcome =
+        result.finishReason === 'stop'             ? 'ok'    :
+        result.finishReason === 'budget_exhausted' ? 'warn'  :
+        result.finishReason === 'interrupted'      ? 'muted' : 'error';
       // v4.5 Phase 8b — surface a deferred daemon-scheduling tip
       // queued at turn start. Renders AFTER the agent's response per
       // Q-P8b-3(b) — the user reads the answer first, then sees the
@@ -1683,6 +1694,10 @@ export class ChatSession implements ChatSessionLike {
       }
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
+      // v4.8.0 Slice 7 — error path also bumps the turn counter and
+      // records a red state-dot outcome for the next footer render.
+      this.turnCount += 1;
+      this.lastTurnOutcome = 'error';
       // v4.1.5+ Path A — finalize the loop trace on the error path
       // too. Loop patterns that ended in an error are exactly the
       // ones most worth capturing for diagnosis.
@@ -1998,6 +2013,10 @@ export class ChatSession implements ChatSessionLike {
         ctxUsed: usedTokens,
         ctxMax: maxTokens,
         elapsedMs: this.lastTurnElapsedMs,
+        // v4.8.0 Slice 7 — packed info density (wide-terminal additions).
+        turnCount: this.turnCount,
+        sessionMs: Date.now() - this.startedAt,
+        state:     this.lastTurnOutcome,
       }) + '\n\n',
     );
   }
