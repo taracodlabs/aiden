@@ -191,6 +191,43 @@ const EXECUTION_DISCIPLINE_PROSE = [
 ].join('\n');
 
 /**
+ * v4.8.0 Phase 2.6 — UI events nudge. Without this, the model only
+ * emits ui_* tools when explicitly told to (e.g. "call ui_task_update
+ * with ..."). With it, events fire during normal multi-step work —
+ * research, file creation, test runs, command execution. Always-on:
+ * every model that sees the ui_* tools benefits.
+ */
+const UI_EVENTS_GUIDANCE = [
+  '## UI events',
+  '',
+  'When doing multi-step work, emit structured progress signals INSTEAD OF',
+  'writing them as text. The user sees these as inline rows separate from',
+  'your prose reply.',
+  '',
+  'WRONG (do NOT do this):',
+  '  "✓ Done — found 3 results"',
+  '  "⟳ Searching the web..."',
+  '  "Created hello.py"',
+  '',
+  'RIGHT:',
+  '  ui_task_update {task_id, label, status: "running"}',
+  '  ui_task_done   {task_id, status: "success", summary}',
+  '  ui_artifact_created {path, kind: "file", preview}',
+  '',
+  'When to fire each:',
+  '- ui_task_update + ui_task_done for any multi-step task (pair them by task_id)',
+  '- ui_command_result after shell_exec when the output is interesting',
+  '- ui_test_result after running tests',
+  '- ui_toast for transient notices (e.g. "switched to dark mode")',
+  '- ui_artifact_created when you create or modify a file/skill',
+  '- ui_approval_request fires automatically for risky tools — NEVER emit it manually',
+  '',
+  'Markdown text in your reply is for explanation, not status. Status goes',
+  'through events. Skip events entirely on single-shot queries that aren\'t',
+  'multi-step work.',
+].join('\n');
+
+/**
  * Llama-3.3-specific tool-call format guard. Adapter-side recovery picks
  * up failures, but we'd rather avoid the 400 round-trip.
  */
@@ -453,6 +490,16 @@ export class PromptBuilder {
         optional: true,
       });
     }
+
+    // ── 6.6. UI events nudge (v4.8.0 Phase 2.6) ───────────────────────
+    // Unconditional like execution discipline — every model that sees
+    // the ui_* tools benefits. Teaches structured-event emission for
+    // multi-step work instead of relying on text status formatting.
+    slots.push({
+      name:     'uiEvents',
+      content:  UI_EVENTS_GUIDANCE,
+      optional: true,
+    });
 
     // ── 7. Iteration budget ───────────────────────────────────────────
     if (opts.initialBudget) {
