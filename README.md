@@ -242,7 +242,7 @@ Remove-Item -Recurse -Force $env:LOCALAPPDATA\aiden
 
 <br>
 
-<img width="938" height="1049" alt="preview (3)" src="https://github.com/user-attachments/assets/93af497d-0fe3-4e2b-aa73-7739682c18b1" />
+<img width="938" height="1049" alt="preview (3)" src="https://github.com/user-attachments/assets/4e32ae38-74ad-433d-b986-0a15bc2dffec" />
 
 
 ## Setup wizard
