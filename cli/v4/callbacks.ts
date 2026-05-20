@@ -33,6 +33,8 @@ import type { ToolCallRequest, ToolCallResult, CapabilityCardData } from '../../
 // lives in tools/v4/browser/browserBlocker.ts; we import the type
 // here for the renderer + the structural mapping helper below.
 import type { BlockerKind, BlockerSurface } from '../../tools/v4/browser/browserBlocker';
+// v4.8.0 Slice 5 — verbose-mode gate for internal-telemetry dim lines.
+import { isVerbose } from './design/tokens';
 /* Phase 23.6 rollback — Ink controller bridge stashed to
  * docs/sprint/_internal/v4.1-ink-stash/.  Re-introduce when v4.1 picks
  * up the Ink rebuild. */
@@ -578,11 +580,11 @@ Reply with ONE word: safe, caution, or dangerous.`;
     candidateConfidence: number;
     skillContent:        string;
   }): void => {
+    // v4.8.0 Slice 5 — internal-telemetry cue; user already discovers
+    // candidates via /skills review. Surface only in verbose mode.
+    if (!isVerbose()) return;
     let name = candidate.id.slice(0, 8);
     try {
-      // Tier-3.1c sweep: do not import here — chatSession's display
-      // wraps strings, and the SKILL.md frontmatter is plain enough
-      // that a quick regex is fine for the cue line.
       const m = /\bname\s*:\s*([^\n]+)/.exec(candidate.skillContent);
       if (m) name = m[1].trim();
     } catch { /* fall through */ }
@@ -602,6 +604,10 @@ Reply with ONE word: safe, caution, or dangerous.`;
       this.display.warn('[compress] auxiliary call failed; history unchanged');
       return;
     }
+    // v4.8.0 Slice 5 — successful auto-compress is technical telemetry
+    // (refused / failed variants stay visible since they explain action
+    // outcomes; success is just bookkeeping).
+    if (!isVerbose()) return;
     this.display.dim(
       `[compress] removed ${result.removedMessageCount} msgs, kept ${result.preservedRecentCount} recent (~${result.summaryTokens} tok)`,
     );
@@ -616,7 +622,9 @@ Reply with ONE word: safe, caution, or dangerous.`;
     const msg = `Turn ${turn}/${max}`;
     if (level === 'warning') {
       this.display.warn(`Budget: ${msg} — approaching the cap.`);
-    } else {
+    } else if (isVerbose()) {
+      // v4.8.0 Slice 5 — caution-level per-turn dim line is verbose-only;
+      // the actionable 'warning' tier above continues to fire unchanged.
       this.display.dim(`[budget] ${msg}`);
     }
   };
@@ -631,6 +639,9 @@ Reply with ONE word: safe, caution, or dangerous.`;
   onMemoryRefresh = (files: ReadonlyArray<'memory' | 'user' | 'soul'>): void => {
     // Phase v4.1.2: argument switched from single-string-or-'both' to
     // the full sorted set of dirty files (SOUL.md joined the rotation).
+    // v4.8.0 Slice 5 — internal cache refresh; the user's "✓ Saved"
+    // confirmation lands separately when memory_add returns verified=true.
+    if (!isVerbose()) return;
     const label = files.length > 0 ? files.join(', ') : 'none';
     this.display.dim(`[memory] refreshed system prompt (${label})`);
   };

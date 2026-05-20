@@ -193,6 +193,13 @@ export class AuxiliaryClient {
   }
 
   private warn(msg: string) {
+    // v4.8.0 Slice 5 — gate behind AIDEN_VERBOSE. Auxiliary failures
+    // are recoverable (the main loop continues; result content is just
+    // empty), so the warning is pure noise for end users. Power users
+    // set AIDEN_VERBOSE=1 to surface them. Inline env-read preserves
+    // the core → cli no-import invariant; canonical isVerbose() lives
+    // at cli/v4/design/tokens.ts.
+    if (process.env.AIDEN_VERBOSE !== '1') return;
     (this.opts.warn ?? ((m: string) => console.warn(`[auxiliary] ${m}`)))(msg);
   }
 

@@ -254,16 +254,32 @@ describe('CliCallbacks.onPlannerGuardDecision', () => {
 });
 
 describe('CliCallbacks.onCompression', () => {
-  it('always emits even in compact mode', () => {
-    const { display, output } = makeDisplay();
-    const cb = new CliCallbacks({ display, verboseMode: 'compact' });
-    cb.onCompression({
-      compressedMessages: [],
-      removedMessageCount: 5,
-      summaryTokens: 200,
-      preservedRecentCount: 6,
-    });
-    expect(output()).toMatch(/removed 5/);
+  // v4.8.0 Slice 5 — successful auto-compress is now gated behind
+  // AIDEN_VERBOSE=1 (refused / failed variants remain visible because
+  // they explain user-actionable outcomes). The test asserts both
+  // behaviours: silent by default, visible under verbose.
+  it('successful compress is silent by default; visible under AIDEN_VERBOSE=1', () => {
+    const orig = process.env.AIDEN_VERBOSE;
+    try {
+      delete process.env.AIDEN_VERBOSE;
+      const d1 = makeDisplay();
+      new CliCallbacks({ display: d1.display, verboseMode: 'compact' }).onCompression({
+        compressedMessages: [], removedMessageCount: 5,
+        summaryTokens: 200, preservedRecentCount: 6,
+      });
+      expect(d1.output()).not.toMatch(/removed 5/);
+
+      process.env.AIDEN_VERBOSE = '1';
+      const d2 = makeDisplay();
+      new CliCallbacks({ display: d2.display, verboseMode: 'compact' }).onCompression({
+        compressedMessages: [], removedMessageCount: 5,
+        summaryTokens: 200, preservedRecentCount: 6,
+      });
+      expect(d2.output()).toMatch(/removed 5/);
+    } finally {
+      if (orig === undefined) delete process.env.AIDEN_VERBOSE;
+      else process.env.AIDEN_VERBOSE = orig;
+    }
   });
 
   it('reports refusal cleanly', () => {
@@ -281,11 +297,24 @@ describe('CliCallbacks.onCompression', () => {
 });
 
 describe('CliCallbacks.onBudgetWarning', () => {
-  it('caution emits a dim line', () => {
-    const { display, output } = makeDisplay();
-    const cb = new CliCallbacks({ display });
-    cb.onBudgetWarning('caution', 70, 90);
-    expect(output()).toMatch(/budget.*70\/90/);
+  // v4.8.0 Slice 5 — caution-level per-turn dim line is verbose-only;
+  // the actionable warning-level fires unchanged regardless of env.
+  it('caution is silent by default; emits dim line under AIDEN_VERBOSE=1', () => {
+    const orig = process.env.AIDEN_VERBOSE;
+    try {
+      delete process.env.AIDEN_VERBOSE;
+      const d1 = makeDisplay();
+      new CliCallbacks({ display: d1.display }).onBudgetWarning('caution', 70, 90);
+      expect(d1.output()).not.toMatch(/budget.*70\/90/);
+
+      process.env.AIDEN_VERBOSE = '1';
+      const d2 = makeDisplay();
+      new CliCallbacks({ display: d2.display }).onBudgetWarning('caution', 70, 90);
+      expect(d2.output()).toMatch(/budget.*70\/90/);
+    } finally {
+      if (orig === undefined) delete process.env.AIDEN_VERBOSE;
+      else process.env.AIDEN_VERBOSE = orig;
+    }
   });
 
   it('warning emits a visible warn', () => {
