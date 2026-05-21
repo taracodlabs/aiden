@@ -347,13 +347,31 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     handle.stop();
   });
 
-  it('Slice 11: erase walks up ONE row (single-row layout)', () => {
+  it('Slice 2 hotfix #4: stop() without prior pause walks up TWO rows', () => {
+    // v4.8.1 Slice 2 hotfix #4 — stop() consumes BOTH the indicator
+    // row AND the leading blank above it when the indicator never
+    // moved (no pause/resume). This keeps the post-stop layout at
+    // exactly 1 blank between user input and `▎ Aiden`.
     const { d, chunks } = makeDisplay({ tty: true });
-    const handle = d.activityIndicator('thinking'); // shimmer default on
+    const handle = d.activityIndicator('thinking');
     chunks.length = 0;
     handle.stop();
     const after = chunks.join('');
-    // Single `\x1b[1A\x1b[2K` sequence for the 1-row erase.
+    const occurrences = (after.match(/\x1b\[1A\x1b\[2K/g) ?? []).length;
+    expect(occurrences).toBe(2);
+  });
+
+  it('Slice 2 hotfix #4: stop() AFTER pause walks up only ONE row', () => {
+    // After a pause/resume cycle the leading blank is far above the
+    // current indicator row — consuming it would erase tool-row
+    // content. Stop falls back to single-row erase.
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    handle.pause();
+    handle.resume();
+    chunks.length = 0;
+    handle.stop();
+    const after = chunks.join('');
     const occurrences = (after.match(/\x1b\[1A\x1b\[2K/g) ?? []).length;
     expect(occurrences).toBe(1);
   });
@@ -367,7 +385,9 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     expect(after.endsWith('\n')).toBe(true);
   });
 
-  it('Slice 11: opt-out (waveBar: false) erase also ends with newline + 1 walk-up', () => {
+  it('Slice 2 hotfix #4: opt-out (waveBar: false) stop erase ends with newline + 2 walk-ups', () => {
+    // Same Slice 2 hotfix #4 behaviour applies to the opt-out path:
+    // stop() without prior pause consumes the leading blank.
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking', { waveBar: false });
     chunks.length = 0;
@@ -375,7 +395,7 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     const after = chunks.join('');
     expect(after.endsWith('\n')).toBe(true);
     const occurrences = (after.match(/\x1b\[1A\x1b\[2K/g) ?? []).length;
-    expect(occurrences).toBe(1);
+    expect(occurrences).toBe(2);
   });
 
   it('v4.1.6 Polish 1: pause() erase also includes the breathing gutter', () => {
@@ -401,18 +421,16 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     handle.stop();
   });
 
-  it('Slice 2 hotfix #2: initial paint does NOT prepend a blank `\\n`', () => {
-    // v4.8.0 Slice 11 originally prepended `\n` for breathing space.
-    // v4.8.1 Slice 2 hotfix #2 reverted that — `chatSession.ts:1155`'s
-    // dim rule already separates the user-input row from the indicator
-    // visually, and the leading `\n` stacked with downstream emits
-    // produced 2+ blanks between the rule and `▎ Aiden`. Initial paint
-    // now writes just `${buildLine()}\n` so the indicator occupies the
-    // row immediately below the rule with no extra blank above it.
+  it('Slice 2 hotfix #4: initial paint prepends a blank `\\n` for breathing space', () => {
+    // v4.8.1 Slice 2 hotfix #4 — leading `\n` restored after the
+    // chatSession dim rule was removed in hotfix #3. Without it the
+    // indicator butts flush against the user-prompt row. The matching
+    // stop() walks up 2 rows so the gap is consumed cleanly when
+    // `▎ Aiden` takes over.
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     const initial = chunks.join('');
-    expect(initial.startsWith('\n')).toBe(false);
+    expect(initial.startsWith('\n')).toBe(true);
     expect(initial.endsWith('\n')).toBe(true);
     handle.stop();
   });

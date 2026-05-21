@@ -1102,6 +1102,13 @@ export class Display {
     let stopped     = false;
     let printed     = false;
     let tickTimer: ReturnType<typeof setInterval> | null = null;
+    // v4.8.1 Slice 2 hotfix #4 — true once the indicator has paused
+    // and resumed at least once (i.e. a tool row interrupted it). When
+    // false at stop() time, the indicator is still in its initial-paint
+    // row immediately below the leading blank, so stop()'s erase can
+    // safely consume BOTH rows. When true, the leading blank is far
+    // above and stop() erases only the current indicator row.
+    let movedFromInitial = false;
 
     // Tunable cadence. v4.1.4 Phase 3b' (Issue G): bumped from 400ms
     // to 250ms after visual smoke — 400ms felt sluggish, made the
@@ -1165,7 +1172,12 @@ export class Display {
         : '';
       // Shimmer prefix (or none, when opts.waveBar === false).
       const prefix = shimmerEnabled ? `${buildShimmer()} ` : '';
-      return `${prefix}${verb}${dots.padEnd(3, ' ')}${elapsedStr}`;
+      // v4.8.1 Slice 2 hotfix #4 — 2-space leading indent so the
+      // indicator line aligns at col 2, matching `▎ Aiden`, the
+      // user-prompt `  ▲ `, the panel `  │ ` bar, and every other
+      // structured surface. Prior buildLine started at col 0 which
+      // read as misaligned against the rest of the v4.8 chrome.
+      return `  ${prefix}${verb}${dots.padEnd(3, ' ')}${elapsedStr}`;
     };
 
     // v4.1.5 Part 1a — Issue M (Windows ConPTY buffering fix).
@@ -1233,18 +1245,16 @@ export class Display {
 
     // Initial paint — only on TTY.
     //
-    // v4.8.0 Slice 11 originally prepended a `\n` here for "breathing
-    // space" above the indicator. v4.8.1 Slice 2 hotfix #2 reverted
-    // that: the prior dim-rule line (chatSession.ts:1155) already
-    // separates the user-input row from the indicator visually, and
-    // the leading `\n` stacked with `chatSession.ts:1151` (also
-    // dropped in hotfix #1) and the indicator's erase-emits-`\n`
-    // handoff was producing 2 visible blanks between the rule and
-    // `▎ Aiden`. With the leading `\n` gone, the layout is:
-    //   user → rule → [indicator paints + erases] → ▎ Aiden
-    // = exactly one blank row (the erased indicator's residue).
+    // v4.8.1 Slice 2 hotfix #4 — leading `\n` restored to give one
+    // blank row between the user-input row and the indicator (hotfix
+    // #3 dropped the dim rule that previously provided that gap).
+    // To keep the post-stop layout at "exactly one blank between
+    // user input and ▎ Aiden", stop() now walks up TWO rows when
+    // the indicator never moved (no pause/resume), consuming both
+    // the indicator row AND the leading blank. The `movedFromInitial`
+    // flag below tracks that state.
     if (isTty) {
-      out.write(`${buildLine()}\n`);
+      out.write(`\n${buildLine()}\n`);
       printed = true;
       startTick();
     }
@@ -1254,6 +1264,12 @@ export class Display {
         if (stopped || paused) return;
         paused = true;
         stopTick();
+        // v4.8.1 Slice 2 hotfix #4 — mark the indicator as "moved" so
+        // a subsequent stop() does NOT walk up 2 rows. The leading
+        // blank from initial paint is now far above the current row
+        // and shouldn't be consumed; doing so would erase tool-row
+        // content instead.
+        movedFromInitial = true;
         eraseLine();
         // After erase the cursor is at column 0 of the indicator's
         // (now empty) line. Caller is expected to write its own
@@ -1288,7 +1304,18 @@ export class Display {
         if (stopped) return;
         stopped = true;
         stopTick();
-        eraseLine();
+        // v4.8.1 Slice 2 hotfix #4 — when the indicator never moved
+        // (no pause/resume happened during the turn), walk up TWO
+        // rows: erase the indicator row AND the leading blank above
+        // it. The trailing `\n` then lands the cursor exactly one
+        // row below the user-input echo, so the next writer
+        // (agentHeader → ▎ Aiden) produces a clean single-blank gap.
+        if (!printed || !isTty) return;
+        if (movedFromInitial) {
+          out.write(`${ANSI_UP_ERASE}\n`);
+        } else {
+          out.write(`${ANSI_UP_ERASE}${ANSI_UP_ERASE}\n`);
+        }
       },
       isPaused:  () => paused,
       isStopped: () => stopped,
