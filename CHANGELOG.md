@@ -1,3 +1,27 @@
+## v4.8.1 — 2026-05-21
+
+### Fixed
+
+- **Paste handling**: Robust paste support across terminal environments (Windows ConPTY, SSH without `-t`, tmux/screen passthrough, VS Code integrated terminal). Stateful parser across stdin chunk boundaries, 800ms watchdog for missing paste-end markers, degraded marker form normalisation, universal CRLF / bare-CR → LF normalisation, and 30ms timing accumulation that catches line-by-line paste delivery. Typed prefix is preserved when a paste is added mid-input.
+- **Tables**: Markdown tables now render as proper grids. Proportional column distribution with header-floor minimum widths so short labels never wrap awkwardly. Model nudged via system prompt to prefer sectioned lists or 3-column tables for wide comparison content.
+- **Version reporting**: Boot card and `/version` now read from the runtime `package.json` instead of a build-time injected constant. Fixes stale version display after `/update install` and the v4.8.0 case where the tsc-compiled `dist/core/version.js` baked the pre-publish version.
+- **`/update install`**: Dropped the Node 20+ deprecation warning by removing `shell: true` from the npm child-process spawn (uses `npm.cmd` directly on Windows). Install progress shown via the sliding-shimmer indicator. Install-method detection broadened to Windows user-mode globals (`AppData/Roaming/npm`).
+- **Loading indicator**: Now aligned at column 2 matching all other structured surfaces. Conditional erase preserves a clean 1-blank rhythm between user input and `▎ Aiden` header without consuming tool-row content.
+- **Spacing**: Exactly one blank line between the user input echo and the Aiden reply header. Removed accumulated blanks that had stacked across multiple v4.8.0 slices.
+- **Timer glyph**: Hourglass `⌛` now visible at all terminal widths in the status bar (mid and compact tiers previously dropped it).
+- **Approval prompts**: Single panel per `file_write` approval. The `ui_approval_request` event-row paint that stacked above the framed panel was suppressed; the panel is now the sole chat-surface paint.
+
+### Changed
+
+- `core/version.ts` is now a runtime reader (walks up from `__dirname` to find the `aiden-runtime` `package.json`). The `prebuild:cli` / `prebuild:api` hooks that ran `scripts/inject-version.js` have been removed.
+
+### Notes
+
+- All visual changes apply at first build; no migration required.
+- Runtime version detection means the published artifact reports its own version correctly without a re-bake step at publish time.
+
+---
+
 ## v4.8.0 — 2026-05-21
 
 ### Semantic ui_* event surface (Phase 2.1–2.7)
