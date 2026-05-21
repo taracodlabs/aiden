@@ -1428,14 +1428,19 @@ describe('Display v4.8.0 ui_* event renderers', () => {
 
   // ── ui_approval_request ───────────────────────────────────────────────
 
-  it('ui_approval_request paints prompt row + optional reason on second line', () => {
+  it('ui_approval_request is a renderer-side no-op (v4.8.1 Slice 1)', () => {
+    // v4.8.1 Slice 1 — `renderUiApprovalRequest` became a silent no-op.
+    // The Phase 2.5 wiring fires both this event AND the framed approval
+    // panel via callbacks.promptApproval, which read as a visual
+    // duplicate in live smoke. The panel is the canonical surface; this
+    // event-row paint is now suppressed. The engine still fires the
+    // event for telemetry / daemon-side subscribers — only the chat
+    // surface paint is gone.
     const { d, chunks } = captureDisplay({ tty: true });
     d.renderUiEvent('ui_approval_request', {
       prompt: 'delete logs', risk_tier: 'medium', reason: 'cleanup task',
     });
-    const out = stripAnsi(chunks.join(''));
-    expect(out).toContain('⚠ Approval needed: delete logs');
-    expect(out).toContain('cleanup task');
+    expect(chunks.join('')).toBe('');
   });
 
   // ── ui_toast ──────────────────────────────────────────────────────────

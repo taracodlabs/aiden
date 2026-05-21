@@ -2292,22 +2292,25 @@ export class Display {
     this.streamLastEndedNewline = true;
   }
 
-  private renderUiApprovalRequest(args: Record<string, unknown>): void {
-    const prompt = typeof args.prompt === 'string' ? args.prompt : '';
-    if (!prompt) return;
-    const riskTier = typeof args.risk_tier === 'string' ? args.risk_tier : 'medium';
-    const reason = typeof args.reason === 'string' ? args.reason : '';
-    this.commitStreamChunk();
-    const kind: ColorKind = riskTier === 'low' ? 'success'
-      : (riskTier === 'high' || riskTier === 'critical') ? 'error' : 'warn';
-    const shortP = prompt.length > 160 ? prompt.slice(0, 159) + '…' : prompt;
-    let out = this.uiTrailRow(`⚠ Approval needed: ${shortP}`, kind);
-    if (reason) {
-      const shortR = reason.length > 200 ? reason.slice(0, 199) + '…' : reason;
-      out += this.uiTrailRow(`  ${shortR}`, 'muted');
-    }
-    this.out.write(out);
-    this.streamLastEndedNewline = true;
+  private renderUiApprovalRequest(_args: Record<string, unknown>): void {
+    // v4.8.1 Slice 1 — silent no-op. The Phase 2.5 wiring fires both
+    // `ui_approval_request` (this method) AND `callbacks.promptApproval`
+    // (which paints the framed approval panel via `renderApprovalBox`)
+    // for every single approval request. The intent was complementary —
+    // succinct event row above, structured kv panel below — but in live
+    // smoke the two surfaces stack as a visual duplicate ("Approval
+    // needed: file_write {...}" event row + "│ tool / │ reason / │ args"
+    // panel). The panel is the canonical, information-rich surface; this
+    // event-row paint is redundant.
+    //
+    // Behavioural change is renderer-side only: `approvalEngine` still
+    // fires `onUiEvent('ui_approval_request', ...)` so any future
+    // telemetry / daemon-side run_events subscriber will still see the
+    // event. Nothing paints to the chat surface from this method.
+    //
+    // The `_args` parameter is retained for the dispatch signature
+    // contract (`renderUiEvent` calls it positionally) and for the day
+    // we re-introduce a single-paint surface keyed off args.risk_tier.
   }
 
   private renderUiToast(args: Record<string, unknown>): void {
