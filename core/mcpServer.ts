@@ -4,7 +4,7 @@
 // ============================================================
 
 // core/mcpServer.ts — Sprint 29: Expose Aiden as an MCP server.
-// Any MCP-compatible client (Claude Desktop, Cursor, OpenClaw, etc.)
+// Any MCP-compatible client (Claude Desktop, Cursor, Cline, etc.)
 // can connect to http://localhost:3001 and use all of Aiden's tools,
 // plus unified memory recall.
 

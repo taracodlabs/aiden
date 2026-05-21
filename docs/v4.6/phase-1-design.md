@@ -3,7 +3,6 @@
 > **Status:** Design locked, implementation deferred to Phase 2.
 > **Scope:** This document specifies the contract, schema, and lifecycle for
 > single, synchronous, non-nested sub-agent spawning. Code lives in Phase 2.
-> Reference graphify input: `C:\Users\shiva\refs\hermes-subagent-graphify.md`.
 
 ## 1. Overview
 
