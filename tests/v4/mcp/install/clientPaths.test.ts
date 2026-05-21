@@ -31,6 +31,37 @@ describe('clientPaths — Slice 2a', () => {
     expect(r.format).toBe('json');
   });
 
+  // v4.9.0 Slice 2a hotfix #1 — Windows-env regression guard.
+  // Locks down the exact path layout shipped to Windows users: when
+  // `process.env.APPDATA` is set to the canonical `C:\Users\<u>\AppData
+  // \Roaming` form, the resolved parentDir matches the real Claude
+  // Desktop install location byte-for-byte. The fielded bug report
+  // turned out to be a stale-bin issue (published v4.8.0 doesn't have
+  // `mcp init`) rather than a path resolver fault, but the test
+  // remains as a sentinel against a future refactor that breaks this
+  // case without notice.
+  it('claude on win32: full byte-for-byte path matches Claude Desktop layout', () => {
+    const r = resolveClientPath('claude', {
+      platform: 'win32',
+      homedir:  'C:\\Users\\shiva',
+      env:      { APPDATA: 'C:\\Users\\shiva\\AppData\\Roaming' },
+    });
+    expect(r.parentDir).toBe('C:\\Users\\shiva\\AppData\\Roaming\\Claude');
+    expect(r.configPath).toBe(
+      'C:\\Users\\shiva\\AppData\\Roaming\\Claude\\claude_desktop_config.json',
+    );
+    expect(r.unsupportedOs).toBeFalsy();
+  });
+
+  it('claude on win32 falls back to homedir\\AppData\\Roaming when APPDATA env is unset', () => {
+    const r = resolveClientPath('claude', {
+      platform: 'win32',
+      homedir:  'C:\\Users\\u',
+      env:      {},
+    });
+    expect(r.parentDir).toBe('C:\\Users\\u\\AppData\\Roaming\\Claude');
+  });
+
   it('claude on linux flagged unsupportedOs', () => {
     const r = resolveClientPath('claude', { platform: 'linux', homedir: HOME });
     expect(r.unsupportedOs).toBe(true);

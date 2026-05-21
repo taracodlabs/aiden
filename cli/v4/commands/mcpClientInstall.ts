@@ -82,10 +82,22 @@ async function doInit(client: ClientId, io: IO, opts: InitOpts): Promise<number>
   }
 
   if (planned.parentMissing) {
+    // v4.9.0 Slice 2a hotfix #1 — clearer diagnostic. If the user
+    // believes the client IS installed (file is right there in
+    // Explorer / Finder), the most likely cause is that they're
+    // running an older `aiden` bin from npm that doesn't have these
+    // commands at all — globally-installed aiden-runtime predates
+    // v4.9.0. Surface that hypothesis explicitly so they don't chase
+    // a phantom path-detection bug.
     io.writeErr(
       `${planned.resolution.displayName} doesn't appear to be installed.\n` +
       `Expected parent dir: ${planned.resolution.parentDir}\n` +
-      `Install ${planned.resolution.displayName} first, or run with --print-snippet to copy the entry manually.\n`,
+      `Install ${planned.resolution.displayName} first, or run with --print-snippet to copy the entry manually.\n` +
+      `\n` +
+      `If you're sure the client IS installed and you see this error,\n` +
+      `check that your \`aiden\` bin is the current dev build (not a\n` +
+      `published version): run \`which aiden\` (POSIX) or \`where aiden\`\n` +
+      `(Windows) and verify the resolved path matches your local repo.\n`,
     );
     return 1;
   }
