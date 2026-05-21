@@ -57,7 +57,16 @@ export function parseThemeYaml(text: string): LoadResult {
     warnings.push(`YAML parse error: ${(err as Error).message}`);
     return { parsed: null, warnings };
   }
-  if (typeof doc !== 'object' || doc === null) {
+  // v4.9.0 Slice 1a hotfix — `yaml.load('')` returns `undefined` for
+  // an empty file. That's a benign transient state — the user just
+  // created theme.yaml via /theme edit and hasn't typed content yet,
+  // OR they cleared the file before retyping. Don't surface a warning
+  // for that case; just signal "no theme parsed" and let the caller
+  // keep the current theme active.
+  if (doc === undefined || doc === null) {
+    return { parsed: null, warnings };
+  }
+  if (typeof doc !== 'object') {
     warnings.push('Theme root must be a mapping; got ' + typeof doc);
     return { parsed: null, warnings };
   }

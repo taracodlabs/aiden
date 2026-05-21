@@ -97,6 +97,19 @@ colors:
     expect(warnings.some((w) => /Array not supported/.test(w))).toBe(true);
   });
 
+  // v4.9.0 Slice 1a hotfix #1 — empty file = silent (no warning, no parse).
+  it('empty YAML string → no warning, parsed: null', () => {
+    const { parsed, warnings } = parseThemeYaml('');
+    expect(parsed).toBe(null);
+    expect(warnings).toEqual([]);
+  });
+
+  it('whitespace-only YAML → no warning, parsed: null', () => {
+    const { parsed, warnings } = parseThemeYaml('   \n\n  \n');
+    expect(parsed).toBe(null);
+    expect(warnings).toEqual([]);
+  });
+
   it('strips the colors./glyphs. prefix from override keys', () => {
     const yaml = `
 name: "x"

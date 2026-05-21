@@ -26,9 +26,58 @@ import path from 'node:path';
 import os from 'node:os';
 import yaml from 'js-yaml';
 
+// v4.9.0 Slice 1a hotfix — read live theme overrides from tokens.ts.
+import { colors as liveColors } from './design/tokens';
+import { getActivePath as getActiveThemePath } from '../../core/v4/theme/themeRegistry';
+
 /** Wrap text with a 24-bit ANSI foreground colour. */
 function ansiRgb(text: string, r: number, g: number, b: number): string {
   return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
+}
+
+/**
+ * v4.9.0 Slice 1a hotfix — map each SkinEngine `ColorKind` to a dotted
+ * path inside the v4.8 `tokens.ts` colour tree so the legacy paint API
+ * (`applyColors(text, kind)`) can resolve user-theme overrides without
+ * touching the legacy skin YAML cache. Each kind picks the closest
+ * semantic equivalent from the new tree; kinds without a natural fit
+ * (e.g. `agent`, `user`) fall through to the skin's own RGB tuple.
+ *
+ * The lookup is only consulted when a user theme is active (i.e.
+ * `getActiveThemePath() !== null`). When no theme is loaded, the
+ * legacy skin path runs unchanged — preserves /skin custom-palette
+ * users from being silently overridden by tokens.ts baselines.
+ */
+const COLOR_KIND_TO_TOKEN_PATH: Partial<Record<string, string>> = {
+  brand:       'brand.primary',
+  accent:      'brand.primary',
+  heading:     'brand.primary',
+  tool:        'metrics.model',
+  session:     'metrics.model',
+  error:       'semantic.error',
+  warn:        'semantic.warn',
+  success:     'semantic.success',
+  muted:       'content.secondary',
+  tertiary:    'content.tertiary',
+  metric_turn: 'metrics.turnCount',
+  degraded:    'semantic.warn',
+};
+
+function hexToRgb(hex: string): [number, number, number] | null {
+  const m3 = /^#([0-9a-fA-F])([0-9a-fA-F])([0-9a-fA-F])$/.exec(hex);
+  if (m3) return [parseInt(m3[1] + m3[1], 16), parseInt(m3[2] + m3[2], 16), parseInt(m3[3] + m3[3], 16)];
+  const m6 = /^#([0-9a-fA-F]{2})([0-9a-fA-F]{2})([0-9a-fA-F]{2})$/.exec(hex);
+  if (m6) return [parseInt(m6[1], 16), parseInt(m6[2], 16), parseInt(m6[3], 16)];
+  return null;
+}
+
+function readDottedPath(root: unknown, dotted: string): unknown {
+  let node: unknown = root;
+  for (const seg of dotted.split('.')) {
+    if (node === null || typeof node !== 'object') return undefined;
+    node = (node as Record<string, unknown>)[seg];
+  }
+  return node;
 }
 
 export type ColorKind =
@@ -323,6 +372,24 @@ export class SkinEngine {
    */
   applyColors(text: string, kind: ColorKind): string {
     if (this.forceMono) return text;
+    // v4.9.0 Slice 1a hotfix — when a user theme is active, resolve
+    // the colour from the live tokens.ts tree FIRST. This lets a
+    // ~/.aiden/theme.yaml override every paint surface that routes
+    // through SkinEngine (Aiden reply chrome, panel bars, status
+    // footer text, tool rows) without requiring users to also
+    // re-author a parallel ~/.aiden/skins/<name>.yaml. When no user
+    // theme is active, the legacy skin RGB path runs unchanged —
+    // preserves /skin custom-palette users from regression.
+    if (getActiveThemePath() !== null) {
+      const dotted = COLOR_KIND_TO_TOKEN_PATH[kind];
+      if (dotted) {
+        const hex = readDottedPath(liveColors, dotted);
+        if (typeof hex === 'string') {
+          const rgb = hexToRgb(hex);
+          if (rgb) return ansiRgb(text, rgb[0], rgb[1], rgb[2]);
+        }
+      }
+    }
     const rgb = this.current.colors[kind];
     if (!rgb) return text;
     return ansiRgb(text, rgb[0], rgb[1], rgb[2]);
