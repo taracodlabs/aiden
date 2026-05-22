@@ -33,7 +33,13 @@ import type {
   MemoryProvider,
   MemorySnapshot,
 } from '../core/v4/memoryProvider';
+// v4.9.0 Slice 11 — method signatures widened from `MemoryFile` to
+// `string` to accept the namespace registry's new entries. Legacy
+// callers passing 'memory' / 'user' continue to compile because the
+// string literals are assignable to the wider type.
 import type { MemoryFile } from '../core/v4/memoryManager';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+type _LegacyAlias = MemoryFile;
 
 export interface GuardedResult {
   ok: boolean;
@@ -48,7 +54,7 @@ export class MemoryGuard {
   constructor(private readonly memory: MemoryProvider) {}
 
   async guardedAdd(
-    file: MemoryFile,
+    file: string,
     content: string,
   ): Promise<GuardedResult> {
     const trimmed = content.trim();
@@ -78,7 +84,7 @@ export class MemoryGuard {
   }
 
   async guardedReplace(
-    file: MemoryFile,
+    file: string,
     oldText: string,
     newText: string,
   ): Promise<GuardedResult> {
@@ -148,7 +154,7 @@ export class MemoryGuard {
    * `guardedRemove` semantics.
    */
   async replaceSection(
-    file: MemoryFile,
+    file: string,
     header: string,
     newBody: string,
   ): Promise<GuardedResult> {
@@ -214,7 +220,7 @@ export class MemoryGuard {
   }
 
   async guardedRemove(
-    file: MemoryFile,
+    file: string,
     text: string,
   ): Promise<GuardedResult> {
     const trimmed = text.trim();
@@ -244,8 +250,13 @@ export class MemoryGuard {
   }
 }
 
-function pickFile(snap: MemorySnapshot, file: MemoryFile): string {
-  return file === 'user' ? snap.userMd : snap.memoryMd;
+function pickFile(snap: MemorySnapshot, file: string): string {
+  // v4.9.0 Slice 11 — legacy back-compat for 'memory' / 'user' direct
+  // reads (Phase 9 + Honesty Enforcement still consult these); new
+  // namespaces flow through the generalized `files` map.
+  if (file === 'user'   && snap.userMd   !== undefined) return snap.userMd;
+  if (file === 'memory' && snap.memoryMd !== undefined) return snap.memoryMd;
+  return snap.files?.[file]?.content ?? '';
 }
 
 /**

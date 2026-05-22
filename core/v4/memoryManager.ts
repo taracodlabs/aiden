@@ -48,7 +48,16 @@ import path from 'node:path';
 
 import type { AidenPaths } from './paths';
 import type { MemoryProvider, MemorySnapshot } from './memoryProvider';
+// v4.9.0 Slice 11 — namespace registry generalizes 'memory'|'user' to N.
+import { getNamespace, hasNamespace, listNamespaces } from './memory/namespaceRegistry';
 
+/**
+ * Legacy two-namespace alias kept for backward compatibility with the
+ * 9 v4.0-v4.8 consumers (memoryGuard, aidenAgent listeners, tools,
+ * tests). Slice 11 widened `MemoryManager` methods to accept any
+ * registered namespace name (`string`), of which `MemoryFile` is the
+ * built-in subset. New code should pass `string` directly.
+ */
 export type MemoryFile = 'memory' | 'user';
 
 export interface MutationResult {
@@ -82,12 +91,22 @@ export const ENTRY_SEPARATOR = '\n§\n';
  * swallowed to keep mutation paths safe.
  */
 export type MemoryMutationListener = (
-  file: MemoryFile,
+  // v4.9.0 Slice 11 — widened from `MemoryFile` to `string`. Existing
+  // listeners (aidenAgent, chatSession) match the wider type because
+  // 'memory' / 'user' string literals are assignable to `string`.
+  file: string,
   action: 'add' | 'replace' | 'remove',
 ) => void;
 
+export interface MemoryManagerOptions {
+  paths:        AidenPaths;
+  /** v4.9.0 Slice 11 — required for `project` namespace; null otherwise. */
+  projectRoot?: string | null;
+}
+
 export class MemoryManager implements MemoryProvider {
   readonly name = 'builtin';
+  readonly projectRoot: string | null;
   private writeQueue: Promise<unknown> = Promise.resolve();
   /**
    * Phase 16d: registered subscribers fired after each successful mutation.
@@ -97,7 +116,22 @@ export class MemoryManager implements MemoryProvider {
    */
   private readonly mutationListeners = new Set<MemoryMutationListener>();
 
-  constructor(private readonly paths: AidenPaths) {}
+  // v4.9.0 Slice 11 — constructor now accepts either the legacy
+  // `AidenPaths` (back-compat) OR an options object with optional
+  // `projectRoot`. Both shapes preserve `this.paths` for the rest of
+  // the class.
+  constructor(opts: AidenPaths | MemoryManagerOptions) {
+    if ((opts as MemoryManagerOptions).paths !== undefined) {
+      const o = opts as MemoryManagerOptions;
+      this.paths = o.paths;
+      this.projectRoot = o.projectRoot ?? null;
+    } else {
+      this.paths = opts as AidenPaths;
+      this.projectRoot = null;
+    }
+  }
+  // eslint-disable-next-line @typescript-eslint/explicit-member-accessibility
+  private readonly paths: AidenPaths;
 
   /**
    * Phase 16d: subscribe to successful memory mutations. Returns an
@@ -112,7 +146,7 @@ export class MemoryManager implements MemoryProvider {
   }
 
   /** Phase 16d: internal — fire listeners. Errors are swallowed. */
-  private fireMutation(file: MemoryFile, action: 'add' | 'replace' | 'remove'): void {
+  private fireMutation(file: string, action: 'add' | 'replace' | 'remove'): void {
     for (const listener of this.mutationListeners) {
       try {
         listener(file, action);
@@ -131,15 +165,26 @@ export class MemoryManager implements MemoryProvider {
   async loadSnapshot(): Promise<MemorySnapshot> {
     const memoryMd = await readFileOrEmpty(this.paths.memoryMd);
     const userMd = await readFileOrEmpty(this.paths.userMd);
-    return {
-      memoryMd,
-      userMd,
-      loadedAt: Date.now(),
-      isEmpty: memoryMd.trim().length === 0 && userMd.trim().length === 0,
-    };
+    // v4.9.0 Slice 11 — collect every registered namespace's content
+    // into the generalized `files` map. Legacy `memoryMd` / `userMd`
+    // fields stay populated for back-compat with the 9 v4 consumers
+    // that read them directly (memoryGuard, aidenAgent listeners, ...).
+    const files: Record<string, { content: string; charCount: number; charLimit: number; path: string }> = {};
+    let anyContent = memoryMd.trim().length > 0 || userMd.trim().length > 0;
+    for (const ns of listNamespaces()) {
+      let p: string;
+      try { p = ns.resolve(this.paths, this.projectRoot); }
+      catch { continue;  /* requiresProject + no root — silently skip */ }
+      const content = await readFileOrEmpty(p);
+      files[ns.name] = {
+        content, charCount: content.length, charLimit: ns.charLimit, path: p,
+      };
+      if (content.trim().length > 0) anyContent = true;
+    }
+    return { memoryMd, userMd, loadedAt: Date.now(), isEmpty: !anyContent, files };
   }
 
-  add(file: MemoryFile, content: string): Promise<MutationResult> {
+  add(file: string, content: string): Promise<MutationResult> {
     return this.serialised(async () => {
       const trimmed = content.trim();
       if (!trimmed) {
@@ -179,7 +224,7 @@ export class MemoryManager implements MemoryProvider {
   }
 
   replace(
-    file: MemoryFile,
+    file: string,
     oldText: string,
     newText: string,
   ): Promise<MutationResult> {
@@ -235,7 +280,7 @@ export class MemoryManager implements MemoryProvider {
     });
   }
 
-  remove(file: MemoryFile, text: string): Promise<MutationResult> {
+  remove(file: string, text: string): Promise<MutationResult> {
     return this.serialised(async () => {
       const trimmed = text.trim();
       if (!trimmed) {
@@ -272,8 +317,22 @@ export class MemoryManager implements MemoryProvider {
 
   // ── Internals ────────────────────────────────────────────────────────
 
-  private pathFor(file: MemoryFile): string {
-    return file === 'user' ? this.paths.userMd : this.paths.memoryMd;
+  // v4.9.0 Slice 11 — resolve via namespace registry. Legacy callers
+  // passing 'memory' / 'user' hit the built-in resolvers; new namespaces
+  // (project, future plugin namespaces) flow through the same path.
+  private pathFor(file: string): string {
+    if (!hasNamespace(file)) {
+      throw new Error(`unknown memory namespace '${file}'`);
+    }
+    return getNamespace(file).resolve(this.paths, this.projectRoot);
+  }
+
+  /**
+   * v4.9.0 Slice 11 — public char-limit lookup for any namespace.
+   * Replaces the legacy file-local `limitFor` switch with a registry hit.
+   */
+  charLimitFor(namespace: string): number {
+    return getNamespace(namespace).charLimit;
   }
 
   /**
@@ -287,8 +346,12 @@ export class MemoryManager implements MemoryProvider {
   }
 }
 
-function limitFor(file: MemoryFile): number {
-  return file === 'user' ? USER_CHAR_LIMIT : MEMORY_CHAR_LIMIT;
+// v4.9.0 Slice 11 — registry-aware. Legacy two-namespace callers
+// (memoryGuard, tools) hit this via the existing add/replace/remove
+// paths; the constants above stay exported for any consumer still
+// importing them directly.
+function limitFor(file: string): number {
+  return getNamespace(file).charLimit;
 }
 
 async function readFileOrEmpty(p: string): Promise<string> {

@@ -19,6 +19,7 @@
  */
 
 import type { MemoryFile } from '../../memoryManager';
+import { listNamespaceNames } from '../namespaceRegistry';
 
 export interface ReviewerCandidate {
   file:      MemoryFile;
@@ -48,8 +49,14 @@ export function buildReviewerPrompt(opts: BuildPromptOptions): string {
       ' additions to long-term memory.',
     '',
     'STRICT RULES (a candidate that violates ANY rule is DROPPED):',
-    '  - Two files only: `memory` (project / environment / Aiden facts)',
-    '    or `user` (user identity / preferences / workflow style).',
+    // v4.9.0 Slice 11 — namespaces are now dynamic. The parser drops
+    // any candidate whose `<file>` field isn't in the registry; the
+    // skip-rule pass drops `project` candidates when no project root
+    // is detected.
+    '  - <file> must be one of: ' + listNamespaceNames().join(', ') + '.',
+    '    `memory` = project / environment / Aiden facts (global).',
+    '    `user`   = user identity / preferences / workflow style.',
+    '    `project` (when available) = current-repo-specific context.',
     '  - NO negations ("user does not X", "no longer Y"). Skip them.',
     '  - NO transient artifacts ("today", "this session", "just now").',
     '  - NO sensitive inference (health, politics, religion, finance,',
@@ -90,7 +97,10 @@ export function parseReviewerResponse(raw: string): { candidates: ReviewerCandid
     const parts = cleaned.split('|').map((p) => p.trim());
     if (parts.length < 3) { drops += 1; continue; }
     const [file, text, ...rest] = parts;
-    if (file !== 'memory' && file !== 'user') { drops += 1; continue; }
+    // v4.9.0 Slice 11 — accept any registered namespace name. The
+    // reviewer orchestrator's skip-rule pass drops `project`
+    // candidates when no project root resolves.
+    if (!listNamespaceNames().includes(file)) { drops += 1; continue; }
     const rationale = rest.join('|').trim();
     if (!text || !rationale) { drops += 1; continue; }
     out.push({ file: file as MemoryFile, text, rationale });

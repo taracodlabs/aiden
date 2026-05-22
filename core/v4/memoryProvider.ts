@@ -28,14 +28,26 @@ import type { MemoryFile, MutationResult } from './memoryManager';
  * Anthropic / OpenAI prefix cache across turns.
  */
 export interface MemorySnapshot {
-  /** Raw MEMORY.md content (~800 tokens budget). */
+  /** @deprecated Slice 11: read via `files['memory'].content`. Kept for back-compat. */
   memoryMd: string;
-  /** Raw USER.md content (~500 tokens budget). */
+  /** @deprecated Slice 11: read via `files['user'].content`. Kept for back-compat. */
   userMd: string;
   /** Unix-epoch ms — useful for cache-bust comparisons. */
   loadedAt: number;
-  /** True when both files were missing or whitespace-only at load time. */
+  /** True when every namespace file was missing or whitespace-only. */
   isEmpty: boolean;
+  /**
+   * v4.9.0 Slice 11 — per-namespace content map. The set of keys is
+   * the registry's current list (`listNamespaceNames()`). Namespaces
+   * with `requiresProject: true` are silently absent when the current
+   * working directory has no detected project root.
+   */
+  files?: Record<string, {
+    content:   string;
+    charCount: number;
+    charLimit: number;
+    path:      string;
+  }>;
 }
 
 /**
@@ -49,16 +61,13 @@ export interface MemoryProvider {
   /** Load both files. Called once at session start. */
   loadSnapshot(): Promise<MemorySnapshot>;
 
-  /** Append a new entry. Rejected (returns `ok:false`) on duplicate or capacity overflow. */
-  add(file: MemoryFile, content: string): Promise<MutationResult>;
-
-  /** Substring-matched replace. `ok:false` on zero or ambiguous matches. */
-  replace(
-    file: MemoryFile,
-    oldText: string,
-    newText: string,
-  ): Promise<MutationResult>;
-
-  /** Substring-matched remove. `ok:false` on zero or ambiguous matches. */
-  remove(file: MemoryFile, text: string): Promise<MutationResult>;
+  /**
+   * v4.9.0 Slice 11 — `file` widened from `MemoryFile` to `string` so
+   * any registered namespace ('project', future plugin namespaces) can
+   * flow through the provider contract. Legacy callers passing the
+   * `'memory' | 'user'` literal still compile (subset of `string`).
+   */
+  add(file: string, content: string): Promise<MutationResult>;
+  replace(file: string, oldText: string, newText: string): Promise<MutationResult>;
+  remove(file: string, text: string): Promise<MutationResult>;
 }

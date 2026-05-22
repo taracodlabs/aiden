@@ -23,6 +23,8 @@ import { evaluateCandidate, type SkipClass } from './skipRules';
 import { appendCandidates, type PendingCandidate } from './pendingStore';
 import type { MemoryFile } from '../../memoryManager';
 import { ENTRY_SEPARATOR } from '../../memoryManager';
+import { getNamespace, listNamespaceNames } from '../namespaceRegistry';
+import type { AidenPaths } from '../../paths';
 
 export interface ReviewOptions {
   /** Recent N turns of the active conversation, oldest-first. */
@@ -31,7 +33,7 @@ export interface ReviewOptions {
   liveMemoryRaw: string;
   /** Current live USER.md (raw text). */
   liveUserRaw:   string;
-  /** Absolute paths to the two files. */
+  /** Absolute paths to the two legacy files. */
   memoryPath:    string;
   userPath:      string;
   /** Injected LLM call. Implementation routes through any provider. */
@@ -42,6 +44,14 @@ export interface ReviewOptions {
   timeoutMs:     number;
   /** Optional logger. */
   log?:          (level: 'info' | 'warn' | 'error', msg: string) => void;
+  /**
+   * v4.9.0 Slice 11 — when set, the reviewer can resolve namespaces
+   * beyond memory + user (e.g. `project`). `projectRoot=null` means
+   * no project detected; `project`-namespace candidates from the LLM
+   * are dropped with `skipped: no_project_root`.
+   */
+  paths?:        AidenPaths;
+  projectRoot?:  string | null;
 }
 
 export type ReviewOutcome =
@@ -87,16 +97,25 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewOutcome> {
     const { candidates: parsed, parserDrops } = parseReviewerResponse(raw);
     const liveMemoryEntries = splitLiveEntries(liveMemory);
     const liveUserEntries   = splitLiveEntries(liveUser);
-    const dropsByClass: Record<SkipClass | 'parser', number> = {
-      sensitive_class: 0, negation: 0, transient: 0, duplicate: 0, char_cap: 0, parser: parserDrops,
+    const dropsByClass: Record<SkipClass | 'parser' | 'no_project_root', number> = {
+      sensitive_class: 0, negation: 0, transient: 0, duplicate: 0, char_cap: 0,
+      no_project_root: 0, parser: parserDrops,
     };
-    const keptMemory: Array<{ text: string; rationale: string }> = [];
-    const keptUser:   Array<{ text: string; rationale: string }> = [];
-    // v4.9.0 Slice 10 — apply maxCandidates to the KEPT count (after
-    // skip-rule filtering), not the parsed count. A good candidate at
-    // position 6 should still land if positions 1-5 were all filtered.
+    // v4.9.0 Slice 11 — per-namespace kept buckets so `project`
+    // (and future namespaces) flow through the same path as memory/user.
+    const keptByNamespace: Map<string, Array<{ text: string; rationale: string }>> = new Map();
     for (const c of parsed) {
-      if ((keptMemory.length + keptUser.length) >= opts.maxCandidates) break;
+      let total = 0; for (const arr of keptByNamespace.values()) total += arr.length;
+      if (total >= opts.maxCandidates) break;
+      // Skip-rule: `requiresProject` namespace + no detected root → drop.
+      try {
+        const ns = getNamespace(c.file);
+        if (ns.requiresProject && !opts.projectRoot) {
+          dropsByClass.no_project_root += 1;
+          log('info', `[memory-reviewer] skipped (no_project_root): "${c.text.slice(0, 60)}"`);
+          continue;
+        }
+      } catch { /* unknown namespace — parser already dropped these but defensive */ }
       const live = c.file === 'user' ? liveUserEntries : liveMemoryEntries;
       const decision = evaluateCandidate(c.text, live);
       if (decision.drop && decision.klass) {
@@ -104,13 +123,24 @@ export async function runReview(opts: ReviewOptions): Promise<ReviewOutcome> {
         log('info', `[memory-reviewer] skipped (${decision.klass}): "${c.text.slice(0, 60)}"`);
         continue;
       }
-      (c.file === 'user' ? keptUser : keptMemory).push({ text: c.text, rationale: c.rationale });
+      const bucket = keptByNamespace.get(c.file) ?? [];
+      bucket.push({ text: c.text, rationale: c.rationale });
+      keptByNamespace.set(c.file, bucket);
     }
 
-    // Append into pending sections.
-    const stampedMemory = await appendCandidates(opts.memoryPath, 'memory', keptMemory);
-    const stampedUser   = await appendCandidates(opts.userPath,   'user',   keptUser);
-    const candidatesProposed = [...stampedMemory, ...stampedUser];
+    // Append into pending sections — one call per namespace.
+    const candidatesProposed: PendingCandidate[] = [];
+    for (const [nsName, kept] of keptByNamespace) {
+      let targetPath: string;
+      if (nsName === 'memory')      targetPath = opts.memoryPath;
+      else if (nsName === 'user')   targetPath = opts.userPath;
+      else if (opts.paths) {
+        try { targetPath = getNamespace(nsName).resolve(opts.paths, opts.projectRoot ?? null); }
+        catch { continue;  /* skip — already counted in no_project_root */ }
+      } else { continue; }
+      const stamped = await appendCandidates(targetPath, nsName as MemoryFile, kept);
+      candidatesProposed.push(...stamped);
+    }
 
     log('info',
       `[memory-reviewer] review complete: proposed=${candidatesProposed.length} ` +

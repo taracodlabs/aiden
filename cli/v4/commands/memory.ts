@@ -37,6 +37,14 @@ import {
   type MemoryFile,
 } from '../../../core/v4/memoryManager';
 import { MemoryGuard } from '../../../moat/memoryGuard';
+// v4.9.0 Slice 11 — namespace registry + project root detection.
+import {
+  listNamespaces,
+  listNamespaceNames,
+  hasNamespace,
+  getNamespace,
+} from '../../../core/v4/memory/namespaceRegistry';
+import { findProjectRoot } from '../../../core/v4/memory/projectRoot';
 import {
   runWithContext,
   newRunId,
@@ -56,13 +64,21 @@ export interface MemoryCliOptions {
 const noopOut = (s: string): void => { process.stdout.write(s); };
 const noopErr = (s: string): void => { process.stderr.write(s); };
 
-/** Validate the `<memory|user>` positional. */
-function parseFile(raw: string | undefined): MemoryFile | null {
-  if (raw === 'memory' || raw === 'user') return raw;
-  return null;
+/**
+ * v4.9.0 Slice 11 — validate against the dynamic namespace registry
+ * rather than the hard-coded `'memory' | 'user'` pair. Return type
+ * widened to `string` so the caller can pass any registered name
+ * through MemoryManager / MemoryGuard (whose method signatures were
+ * widened in the same slice).
+ */
+function parseFile(raw: string | undefined): string | null {
+  if (!raw) return null;
+  return hasNamespace(raw) ? raw : null;
 }
 
-function limitFor(f: MemoryFile): number {
+function limitFor(f: string): number {
+  if (hasNamespace(f)) return getNamespace(f).charLimit;
+  // Defensive fallback — should never hit in practice.
   return f === 'user' ? USER_CHAR_LIMIT : MEMORY_CHAR_LIMIT;
 }
 
@@ -80,11 +96,12 @@ function buildCliCtx(opName: string): ExecutionContext {
   };
 }
 
-/** Wrap a memory mutation in a span; return the span_id (`mem_...` synonym). */
+/** Wrap a memory mutation in a span; return the span_id (`mem_...` synonym).
+ *  v4.9.0 Slice 11 — `file` widened to `string` to accept any namespace. */
 async function withMemorySpan<T>(
   ctx:      ExecutionContext,
   opName:   string,
-  file:     MemoryFile,
+  file:     string,
   fn:       (memoryId: string) => Promise<T>,
 ): Promise<{ memoryId: string; value: T }> {
   const memoryId = newMemoryId();
@@ -145,7 +162,12 @@ export async function runMemorySubcommand(
   const positional = args.filter((a) => !a.startsWith('--'));
 
   const paths = resolveAidenPaths(opts.rootDir ? { rootOverride: opts.rootDir } : {});
-  const mgr   = new MemoryManager(paths);
+  // v4.9.0 Slice 11 — detect project root from cwd so the `project`
+  // namespace can resolve its file path. `null` is fine — the
+  // namespace's resolver throws on access, the CLI catches + surfaces
+  // a helpful message instead of routing the error to the user.
+  const projectRoot = findProjectRoot(process.cwd());
+  const mgr   = new MemoryManager({ paths, projectRoot });
   const guard = new MemoryGuard(mgr);
 
   const effective = action || 'list';
@@ -160,6 +182,7 @@ export async function runMemorySubcommand(
     case 'restore':  return cmdRestore(positional[0], paths, out, err, json, yes);
     case 'diff':     return cmdDiff(paths, out, err);
     // v4.9.0 Slice 10 — post-turn reviewer surface.
+    case 'namespaces': return cmdNamespaces(paths, projectRoot, out, json);
     case 'pending':  return cmdPending(paths, out, json);
     case 'approve':  return cmdApprove(positional[0], args, paths, guard, mgr, out, err, json);
     case 'reject':   return cmdReject(positional[0], args, paths, out, err, json);
@@ -186,6 +209,7 @@ function cmdHelp(write: (s: string) => void): number {
     '  backup                               Snapshot both files to memory-backups/<ts>/.\n' +
     '  restore <timestamp>                  Restore both files from a snapshot.\n' +
     '  diff                                 Diff current state against latest backup.\n' +
+    '  namespaces                           List registered memory namespaces.\n' +
     '  pending                              List candidates from `## Pending review` blocks.\n' +
     '  approve <mem_id> | --all             Promote a pending candidate to a live entry.\n' +
     '  reject <mem_id> | --all              Discard a pending candidate (logged).\n' +
@@ -200,25 +224,72 @@ async function cmdList(
   out:   (s: string) => void,
   json:  boolean,
 ): Promise<number> {
+  // v4.9.0 Slice 11 — iterate every registered namespace via the
+  // snapshot's `files` map. Namespaces requiring a project root (e.g.
+  // `project`) that aren't reachable from cwd are silently absent —
+  // matches `loadSnapshot` behaviour.
   const snap = await mgr.loadSnapshot();
+  const files = snap.files ?? {};
   if (json) {
-    out(JSON.stringify({
-      memory: { path: paths.memoryMd, chars: snap.memoryMd.length, limit: MEMORY_CHAR_LIMIT, entries: splitEntries(snap.memoryMd) },
-      user:   { path: paths.userMd,   chars: snap.userMd.length,   limit: USER_CHAR_LIMIT,   entries: splitEntries(snap.userMd) },
-    }, null, 2) + '\n');
+    const payload: Record<string, unknown> = {};
+    for (const ns of listNamespaces()) {
+      const f = files[ns.name];
+      if (!f) continue;
+      payload[ns.name] = { path: f.path, chars: f.charCount, limit: f.charLimit, entries: splitEntries(f.content) };
+    }
+    out(JSON.stringify(payload, null, 2) + '\n');
     return 0;
   }
-  out(`memory: ${snap.memoryMd.length} / ${MEMORY_CHAR_LIMIT} chars  (${paths.memoryMd})\n`);
-  out(`user:   ${snap.userMd.length} / ${USER_CHAR_LIMIT} chars  (${paths.userMd})\n`);
-  const mEntries = splitEntries(snap.memoryMd);
-  const uEntries = splitEntries(snap.userMd);
-  if (mEntries.length > 0) {
-    out(`\n--- memory ---\n`);
-    mEntries.forEach((e, i) => out(`  ${i + 1}. ${e}\n`));
+  // Human format: one summary line per available namespace. Slice 9
+  // formatted as "memory: ...", "user:   ..." with the value column
+  // at offset 8. Match that, with min 1 space for longer names.
+  for (const ns of listNamespaces()) {
+    const f = files[ns.name];
+    if (!f) continue;
+    const pad = ' '.repeat(Math.max(1, 8 - (ns.name.length + 1)));
+    out(`${ns.name}:${pad}${f.charCount} / ${f.charLimit} chars  (${f.path})\n`);
   }
-  if (uEntries.length > 0) {
-    out(`\n--- user ---\n`);
-    uEntries.forEach((e, i) => out(`  ${i + 1}. ${e}\n`));
+  for (const ns of listNamespaces()) {
+    const f = files[ns.name];
+    if (!f) continue;
+    const entries = splitEntries(f.content);
+    if (entries.length > 0) {
+      out(`\n--- ${ns.name} ---\n`);
+      entries.forEach((e, i) => out(`  ${i + 1}. ${e}\n`));
+    }
+  }
+  return 0;
+}
+
+async function cmdNamespaces(
+  paths:       import('../../../core/v4/paths').AidenPaths,
+  projectRoot: string | null,
+  out:         (s: string) => void,
+  json:        boolean,
+): Promise<number> {
+  const rows = listNamespaces().map((ns) => {
+    let resolvedPath: string | null = null;
+    let available = true;
+    let reason: string | undefined;
+    try { resolvedPath = ns.resolve(paths, projectRoot); }
+    catch (e) {
+      available = false;
+      reason = e instanceof Error ? e.message : String(e);
+    }
+    return {
+      name: ns.name, label: ns.label, description: ns.description,
+      charLimit: ns.charLimit, requiresProject: !!ns.requiresProject,
+      injectIntoPrompt: ns.injectIntoPrompt, available, path: resolvedPath, reason,
+    };
+  });
+  if (json) {
+    out(JSON.stringify({ projectRoot, namespaces: rows }, null, 2) + '\n');
+    return 0;
+  }
+  out(`project root: ${projectRoot ?? '(none detected)'}\n\n`);
+  for (const r of rows) {
+    const status = r.available ? `ok   path=${r.path}` : `requires project root — ${r.reason}`;
+    out(`  ${r.name.padEnd(8)} (${r.charLimit} chars)  ${status}\n    ${r.description}\n`);
   }
   return 0;
 }
@@ -232,7 +303,10 @@ async function cmdShow(
 ): Promise<number> {
   const file = parseFile(fileRaw);
   if (!file) { err('show: pass `memory` or `user`\n'); return 2; }
-  const target = file === 'user' ? paths.userMd : paths.memoryMd;
+  // v4.9.0 Slice 11 — resolve via registry (supports project namespace).
+  let target: string;
+  try { target = getNamespace(file).resolve(paths, findProjectRoot(process.cwd())); }
+  catch (e) { err(`${file}: ${e instanceof Error ? e.message : String(e)}\n`); return 1; }
   let text = '';
   try { text = await fs.readFile(target, 'utf8'); }
   catch (e) { if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e; }
@@ -257,7 +331,11 @@ async function cmdAdd(
   if (!content) { err('add: missing entry text\n'); return 2; }
   const ctx = buildCliCtx('memory_add');
   // Ensure parent dir exists (first-run convenience).
-  await fs.mkdir(path.dirname(file === 'user' ? paths.userMd : paths.memoryMd), { recursive: true });
+  // v4.9.0 Slice 11 — ensure parent dir exists via registry-resolved path.
+  let nsPath: string;
+  try { nsPath = getNamespace(file).resolve(paths, findProjectRoot(process.cwd())); }
+  catch (e) { err(`${file}: ${e instanceof Error ? e.message : String(e)}\n`); return 1; }
+  await fs.mkdir(path.dirname(nsPath), { recursive: true });
   const { memoryId, value: result } = await withMemorySpan(ctx, 'add', file, async () => guard.guardedAdd(file, content));
   if (!result.ok || !result.verified) {
     if (json) { out(JSON.stringify({ ok: false, reason: result.reason, mem_id: memoryId }) + '\n'); }
@@ -265,7 +343,10 @@ async function cmdAdd(
     return 1;
   }
   const snap = await mgr.loadSnapshot();
-  const len  = (file === 'user' ? snap.userMd : snap.memoryMd).length;
+  // v4.9.0 Slice 11 — read post-write length from the generalized
+  // files map (`memory`/`user` keys still populated for back-compat).
+  const len  = (snap.files?.[file]?.content
+    ?? (file === 'user' ? snap.userMd : snap.memoryMd) ?? '').length;
   if (json) { out(JSON.stringify({ ok: true, file, mem_id: memoryId, chars: len, limit: limitFor(file) }) + '\n'); }
   else      { out(`added to ${file} (now ${len} / ${limitFor(file)} chars)  mem_id=${memoryId}\n`); }
   return 0;
@@ -307,7 +388,10 @@ async function cmdEdit(
 ): Promise<number> {
   const file = parseFile(fileRaw);
   if (!file) { err('edit: pass `memory` or `user`\n'); return 2; }
-  const target = file === 'user' ? paths.userMd : paths.memoryMd;
+  // v4.9.0 Slice 11 — resolve via registry (supports project namespace).
+  let target: string;
+  try { target = getNamespace(file).resolve(paths, findProjectRoot(process.cwd())); }
+  catch (e) { err(`${file}: ${e instanceof Error ? e.message : String(e)}\n`); return 1; }
   await fs.mkdir(path.dirname(target), { recursive: true });
   try { await fs.access(target); }
   catch { await fs.writeFile(target, '', 'utf8'); }
@@ -343,11 +427,19 @@ async function cmdBackup(
   const stamp = ts();
   const dir = path.join(paths.memoryBackupsDir, stamp);
   await fs.mkdir(dir, { recursive: true });
-  const memText = await fs.readFile(paths.memoryMd, 'utf8').catch(() => '');
-  const usrText = await fs.readFile(paths.userMd,   'utf8').catch(() => '');
+  // v4.9.0 Slice 11 — snapshot every reachable namespace.
+  const projectRoot = findProjectRoot(process.cwd());
+  const snapshots: Array<{ name: string; bytes: number; sha256: string }> = [];
   const { memoryId } = await withMemorySpan(ctx, 'backup', 'memory', async () => {
-    await fs.writeFile(path.join(dir, 'memory.md'), memText, 'utf8');
-    await fs.writeFile(path.join(dir, 'user.md'),   usrText, 'utf8');
+    for (const ns of listNamespaces()) {
+      let srcPath: string;
+      try { srcPath = ns.resolve(paths, projectRoot); }
+      catch { continue;  /* requiresProject + no root → skip */ }
+      const text = await fs.readFile(srcPath, 'utf8').catch(() => '');
+      const outName = `${ns.name}.md`;
+      await fs.writeFile(path.join(dir, outName), text, 'utf8');
+      snapshots.push({ name: outName, bytes: Buffer.byteLength(text, 'utf8'), sha256: sha256(text) });
+    }
     return null;
   });
   const manifest: BackupManifest = {
@@ -355,14 +447,15 @@ async function cmdBackup(
     daemonId:     getCurrentDaemonId(),
     incarnationId: getCurrentIncarnationId(),
     spanId:       memoryId,
-    files: [
-      { name: 'memory.md', bytes: Buffer.byteLength(memText, 'utf8'), sha256: sha256(memText) },
-      { name: 'user.md',   bytes: Buffer.byteLength(usrText, 'utf8'), sha256: sha256(usrText) },
-    ],
+    files:        snapshots,
   };
   await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf8');
   if (json) { out(JSON.stringify({ ok: true, dir, manifest }, null, 2) + '\n'); }
-  else      { out(`backup: ${dir}\n  memory.md: ${manifest.files[0].bytes} B\n  user.md:   ${manifest.files[1].bytes} B\n  mem_id=${memoryId}\n`); }
+  else {
+    out(`backup: ${dir}\n`);
+    for (const f of manifest.files) out(`  ${f.name.padEnd(12)} ${f.bytes} B\n`);
+    out(`  mem_id=${memoryId}\n`);
+  }
   return 0;
 }
 
@@ -379,16 +472,31 @@ async function cmdRestore(
   try { await fs.access(dir); }
   catch { err(`restore: backup not found: ${dir}\n`); return 1; }
   const ctx = buildCliCtx('memory_restore');
-  const memBackup = await fs.readFile(path.join(dir, 'memory.md'), 'utf8');
-  const usrBackup = await fs.readFile(path.join(dir, 'user.md'),   'utf8');
-  await fs.mkdir(path.dirname(paths.memoryMd), { recursive: true });
+  // v4.9.0 Slice 11 — restore every namespace file that exists in the
+  // backup. Namespace files missing from the backup are skipped (not
+  // an error — older snapshots may pre-date the namespace).
+  const projectRoot = findProjectRoot(process.cwd());
+  const restored: Array<{ name: string; chars: number }> = [];
   const { memoryId } = await withMemorySpan(ctx, 'restore', 'memory', async () => {
-    await fs.writeFile(paths.memoryMd, memBackup, 'utf8');
-    await fs.writeFile(paths.userMd,   usrBackup, 'utf8');
+    for (const ns of listNamespaces()) {
+      let destPath: string;
+      try { destPath = ns.resolve(paths, projectRoot); }
+      catch { continue;  /* requiresProject + no root → skip */ }
+      const src = path.join(dir, `${ns.name}.md`);
+      const text = await fs.readFile(src, 'utf8').catch(() => null);
+      if (text === null) continue;
+      await fs.mkdir(path.dirname(destPath), { recursive: true });
+      await fs.writeFile(destPath, text, 'utf8');
+      restored.push({ name: ns.name, chars: text.length });
+    }
     return null;
   });
-  if (json) { out(JSON.stringify({ ok: true, restored_from: dir, mem_id: memoryId }) + '\n'); }
-  else      { out(`restored from ${dir}\n  memory.md: ${memBackup.length} chars\n  user.md:   ${usrBackup.length} chars\n  mem_id=${memoryId}\n`); }
+  if (json) { out(JSON.stringify({ ok: true, restored_from: dir, restored, mem_id: memoryId }) + '\n'); }
+  else {
+    out(`restored from ${dir}\n`);
+    for (const r of restored) out(`  ${r.name.padEnd(10)} ${r.chars} chars\n`);
+    out(`  mem_id=${memoryId}\n`);
+  }
   return 0;
 }
 
@@ -581,6 +689,10 @@ async function cmdReview(
     outcome = await runReview({
       recentTurns, liveMemoryRaw, liveUserRaw,
       memoryPath: paths.memoryMd, userPath: paths.userMd,
+      // v4.9.0 Slice 11 — pass paths + projectRoot so the reviewer
+      // can route `project`-namespace candidates to the right file
+      // when a project root is detected.
+      paths, projectRoot: findProjectRoot(process.cwd()),
       callLLM:        opts.reviewerCallLLM!,
       maxCandidates:  cfg.maxCandidates,
       timeoutMs:      cfg.timeoutMs,

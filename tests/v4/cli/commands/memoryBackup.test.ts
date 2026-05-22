@@ -31,7 +31,10 @@ describe('aiden memory backup/restore/diff — Slice 9', () => {
     expect(fs.existsSync(path.join(dir, 'user.md'))).toBe(true);
     expect(fs.existsSync(path.join(dir, 'manifest.json'))).toBe(true);
     const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'manifest.json'), 'utf8')) as { files: Array<{ name: string; bytes: number; sha256: string }>; spanId: string };
-    expect(manifest.files).toHaveLength(2);
+    // v4.9.0 Slice 11 — backup now includes every reachable namespace.
+    // From the DevOS repo (project root detected), that's 3 files
+    // (memory + user + project); outside a project root, 2 files.
+    expect(manifest.files.length).toBeGreaterThanOrEqual(2);
     expect(manifest.spanId).toMatch(/^mem_[0-9a-f]{32}$/);
   });
 
