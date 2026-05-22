@@ -75,9 +75,21 @@ export async function runDaemonSubcommand(
     case 'restart':    return runRestart({ out, err });
     case 'status':     return runStatus({ out, err });
     case 'logs':       return runLogs({ out, err });
+    case 'doctor': {
+      // v4.9.0 Slice 8 — substrate health diagnostic. Read-only by
+      // default; `--fix` runs safe sweeps; `--json` outputs machine-
+      // parseable shape.
+      const { runDaemonDoctor } = await import('./daemonDoctor');
+      return runDaemonDoctor({
+        json:     args.includes('--json'),
+        fix:      args.includes('--fix'),
+        writeOut: out,
+        writeErr: err,
+      });
+    }
     default:
       err(`Unknown daemon action: ${action}\n`);
-      err('Actions: install, uninstall, start, stop, restart, status, logs\n');
+      err('Actions: install, uninstall, start, stop, restart, status, logs, doctor\n');
       return 2;
   }
 }

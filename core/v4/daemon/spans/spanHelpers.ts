@@ -36,6 +36,7 @@ import {
   childSpan,
   currentContext,
   runWithContext,
+  reportMissingContext,
   type ExecutionContext,
 } from '../../identity';
 import { openSpan, closeSpan, type SpanKind } from './spanStore';
@@ -60,6 +61,23 @@ function canonicaliseForHash(v: unknown): unknown {
     return out;
   }
   return v;
+}
+
+// v4.9.0 Slice 8 — map SpanKind → EnforcementKind so the enforcement
+// layer's per-kind config buckets line up with the span taxonomy.
+function spanKindToEnforcementKind(k: SpanKind):
+  'tool' | 'llm' | 'http_outbound' | 'subprocess' | 'memory_write' | 'hook' {
+  switch (k) {
+    case 'llm':        return 'llm';
+    case 'tool':       return 'tool';
+    case 'hook':       return 'hook';
+    case 'memory':     return 'memory_write';
+    case 'http':       return 'http_outbound';
+    case 'subprocess': return 'subprocess';
+    case 'subagent':
+    case 'other':
+    default:           return 'tool';
+  }
 }
 
 export interface WithSpanOptions {
@@ -89,8 +107,11 @@ export async function withSpan<T>(
 ): Promise<T> {
   const parent = currentContext();
   if (!parent) {
-    // Degraded path: no ambient context, span is dropped. Project rule:
-    // do not throw — the caller's work proceeds without instrumentation.
+    // v4.9.0 Slice 8 — enforcement (counter + strict-throw) is
+    // additive to the original warn contract. Pass `warn: undefined`
+    // so the enforcement layer doesn't double-log; spanHelpers owns
+    // the opts.warn invocation below.
+    reportMissingContext(spanKindToEnforcementKind(opts.kind), `${opts.kind}/${opts.name}`);
     if (opts.warn) {
       try { opts.warn(`[span] withSpan(${opts.kind}/${opts.name}) — no ambient context, dropping span`); }
       catch { /* logger may not be wired yet — ignore */ }
@@ -202,6 +223,8 @@ export async function withLlmSpan<T>(
 ): Promise<T> {
   const parent = currentContext();
   if (!parent) {
+    // v4.9.0 Slice 8 — enforcement (counter + strict-throw).
+    reportMissingContext('llm', `llm/${opts.model}`);
     if (opts.warn) {
       try { opts.warn(`[span] withLlmSpan(${opts.model}) — no ambient context, dropping span`); }
       catch { /* noop */ }
@@ -272,6 +295,8 @@ export async function runHookWithSpan<T>(
   const timeoutMs = opts.timeoutMs ?? 5_000;
   const parent = currentContext();
   if (!parent) {
+    // v4.9.0 Slice 8 — enforcement (counter + strict-throw).
+    reportMissingContext('hook', `hook/${opts.hookName}`);
     if (opts.warn) {
       try { opts.warn(`[span] runHookWithSpan(${opts.hookName}) — no ambient context, dropping span`); }
       catch { /* noop */ }

@@ -19,7 +19,7 @@
 
 import { spawn } from 'node:child_process';
 // v4.9.0 Slice 7 — propagate ExecutionContext into the child via env.
-import { currentContext, spawnEnvWithContext } from '../../../core/v4/identity';
+import { currentContext, spawnEnvWithContext, reportMissingContext } from '../../../core/v4/identity';
 
 export interface ShellExecArgs {
   command: string;
@@ -72,9 +72,14 @@ export async function localBackendExecute(
     // `readContextFromEnv(process.env)`. Outside a context frame, the
     // env spread is unchanged.
     const ambient = currentContext();
-    const baseEnv = ambient
-      ? spawnEnvWithContext(ambient, process.env)
-      : process.env;
+    let baseEnv: NodeJS.ProcessEnv;
+    if (ambient) {
+      baseEnv = spawnEnvWithContext(ambient, process.env);
+    } else {
+      // v4.9.0 Slice 8 — report through the enforcement layer.
+      reportMissingContext('subprocess', 'shellExec');
+      baseEnv = process.env;
+    }
     const child = isWin
       ? spawn('powershell.exe', ['-NoProfile', '-Command', command], {
           cwd: args.cwd,

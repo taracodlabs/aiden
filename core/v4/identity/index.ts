@@ -57,3 +57,14 @@ export {
   type HookExecutionOpts,
   type HookOutcome,
 } from './hookExecution';
+// v4.9.0 Slice 8 — enforcement layer for missing-context events.
+export {
+  getEnforcementMode,
+  reportMissingContext,
+  ContextMissingError,
+  getContextMissingCounter,
+  getAllContextMissingCounters,
+  _resetContextMissingCountersForTests,
+  type EnforcementMode,
+  type EnforcementKind,
+} from './enforcement';

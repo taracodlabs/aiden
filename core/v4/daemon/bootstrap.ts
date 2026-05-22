@@ -99,6 +99,8 @@ import {
   type LogLevel,
 } from '../logger';
 import { reclaimStuckRuns } from './runs/reclaim';
+// v4.9.0 Slice 8 — stuck-attempt watchdog ticker.
+import { sweepStuckAttempts } from './runs/stuckAttemptWatchdog';
 // v4.9.0 Slice 4 — identity substrate + incarnations table.
 import {
   loadOrCreateDaemonId,
@@ -679,6 +681,43 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       catch { /* never let the sweep crash the daemon */ }
     }, 30_000);
     if (typeof reclaimTimer.unref === 'function') reclaimTimer.unref();
+
+    // v4.9.0 Slice 8 — stuck-attempt + orphan-span watchdog.
+    // Sweeps run_attempts (status='running', older than threshold,
+    // owned by non-current incarnation) and spans (open + non-current
+    // incarnation). Default cadence 5min; threshold 30min. Both
+    // configurable via env. unref'd so the ticker doesn't block exit.
+    const watchdogIntervalMs = (() => {
+      const raw = process.env.AIDEN_STUCK_ATTEMPT_CHECK_MS;
+      const n = raw ? Number.parseInt(raw, 10) : NaN;
+      return Number.isFinite(n) && n > 0 ? n : 5 * 60 * 1000;
+    })();
+    const watchdogThresholdMs = (() => {
+      const raw = process.env.AIDEN_STUCK_ATTEMPT_THRESHOLD_MS;
+      const n = raw ? Number.parseInt(raw, 10) : NaN;
+      return Number.isFinite(n) && n > 0 ? n : 30 * 60 * 1000;
+    })();
+    const runWatchdogSweep = (): void => {
+      try {
+        if (!_currentIncarnationId) return;
+        const r = sweepStuckAttempts(db, {
+          currentIncarnationId: _currentIncarnationId,
+          thresholdMs:          watchdogThresholdMs,
+        });
+        if (r.reclaimedAttempts > 0 || r.reclaimedSpans > 0) {
+          log('warn',
+            `[watchdog] swept stuck attempts=${r.reclaimedAttempts} ` +
+            `orphan_spans=${r.reclaimedSpans}`);
+        }
+      } catch (e) {
+        log('warn', `[watchdog] sweep failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    };
+    // Boot-time sweep covers anything left over from a prior crash
+    // that evaluateBootState / reclaimStuckRuns didn't catch.
+    runWatchdogSweep();
+    const watchdogTimer = setInterval(runWatchdogSweep, watchdogIntervalMs);
+    if (typeof watchdogTimer.unref === 'function') watchdogTimer.unref();
 
     // Drain context — same shape api/server.ts wires.
     const getDrainCtx = () => ({

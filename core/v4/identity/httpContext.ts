@@ -25,6 +25,7 @@
 import { emitTraceparent, stripPrefix } from './traceparent';
 import { newRequestId } from './ids';
 import type { ExecutionContext } from './executionContext';
+import { reportMissingContext } from './enforcement';
 
 /**
  * Headers Aiden adds to outbound requests when an ExecutionContext
@@ -58,5 +59,10 @@ export function maybeInjectContextHeaders(
   ctx:     ExecutionContext | undefined,
   headers: Record<string, string> = {},
 ): Record<string, string> {
-  return ctx ? injectContextHeaders(ctx, headers) : headers;
+  if (ctx) return injectContextHeaders(ctx, headers);
+  // v4.9.0 Slice 8 — report missing-context on the outbound HTTP path.
+  // 'silent' / 'warn' degrade to pass-through (no trace propagation
+  // outside a context frame); 'strict' throws via the enforcement.
+  reportMissingContext('http_outbound', 'maybeInjectContextHeaders');
+  return headers;
 }

@@ -529,7 +529,10 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   // v4.5 Phase 4b — daemon supervisor commands.
   program
     .command('daemon <action> [args...]')
-    .description('Manage the v4.5 daemon. Actions: install, uninstall, start, stop, restart, status, logs.')
+    .description('Manage the v4.5 daemon. Actions: install, uninstall, start, stop, restart, status, logs, doctor.')
+    // v4.9.0 Slice 8 — `aiden daemon doctor --json` / `--fix`. Allow
+    // unknown flags so the subcommand can parse them via posArgs.
+    .allowUnknownOption()
     .action(async (action: string, posArgs: string[] | undefined) => {
       const { runDaemonSubcommand } = await import('./commands/daemon');
       const code = await runDaemonSubcommand(action, posArgs ?? [], {
