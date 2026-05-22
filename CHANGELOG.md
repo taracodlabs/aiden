@@ -1,3 +1,68 @@
+## v4.9.0 — 2026-05-23
+
+The biggest Aiden release yet. Three new feature families on a fully rebuilt observability substrate.
+
+### 🧠 Memory system
+
+Aiden now has structured, persistent memory across conversations.
+
+- **Three namespaces:** `memory` (project & environment facts), `user` (your identity & preferences), `project` (per-repo context auto-detected from `.git`)
+- **CLI surface:** `aiden memory list/show/add/remove/edit/backup/restore/diff/namespaces`
+- **Post-turn reviewer:** Aiden quietly reviews each conversation for memory candidates, surfaces them in a pending section, you approve via `aiden memory approve <id>` or `reject <id>`
+- **Strict skip rules:** Sensitive-class filtering, negation rejection, duplicate detection — Hermes-style "don't store harmful inferences"
+- **Substrate-integrated:** Every memory op produces a `mem_<uuidv7>` span with full audit trail
+
+### 🪝 Hook system
+
+User-defined subprocess hooks that observe, decide, or transform Aiden's behavior.
+
+- **Six events:** `tool.call.pre`, `tool.call.post`, `session.start`, `session.end`, `approval.requested`, `approval.responded`
+- **Three authority levels:** observe, decision (allow/block), transform
+- **Three modes:** best_effort_observer, advisory_policy, mandatory_policy
+- **Security defaults:** Subprocess isolation (no in-process eval), env-scrubbed (no API key leaks), per-hook timeout, default `untrusted` until explicitly trusted
+- **Auto-disable:** `on_error: disable_hook` policy + 3-strike rule (defense in depth)
+- **CLI surface:** `aiden hooks list/show/trust/revoke/rescan/test/doctor/audit`
+- **Drift detection:** SHA256 hash pinning catches modified hook scripts automatically
+- **Full audit trail:** Every hook firing recorded in `hook_executions` table with stdout/stderr previews
+
+### ⚙️ Strategic substrate (production-grade observability)
+
+The daemon now has real durability + tracing infrastructure.
+
+- **UUIDv7 identity** with typed prefixes: `dmn_/inc_/run_/trc_/spn_/mem_/hook_/tool_/req_/att_`
+- **W3C Trace Context** propagation — incoming `traceparent` adopted, outgoing requests emit it
+- **AsyncLocalStorage ambient context** for log injection; explicit `ExecutionContext` for crossings
+- **Durable run queue** — runs, attempts, spans, idempotency keys all persisted; 202 responses only after durable insert
+- **Idempotency keys** — duplicate webhooks/triggers rejected at ingress, no double-execution
+- **Subprocess context propagation** via env vars (works across `spawn`/`exec` boundaries where AsyncLocalStorage can't reach)
+- **Crash recovery** — daemon incarnations table tracks every process start; stuck-attempt watchdog sweeps abandoned work; orphan spans cleaned up automatically
+- **Retry policy** with exponential backoff, error classification, dead-letter handling
+- **Structured NDJSON logs** with redaction sink + automatic context enrichment
+- **`aiden daemon doctor`** with `--json` and `--fix` for production diagnostics
+
+### ✨ Polish
+
+- **Theme system:** 5 bundled themes (default, monochrome, light, tokyo-night, dracula) with hot-reload at `~/.aiden/theme.yaml`
+- **MCP integration:** `aiden mcp init/doctor/repair/uninstall` for Claude Desktop, Cursor, and VS Code (5 server profiles: general/dev/readonly/browser/research)
+- **UI refinements:** Cleaner status line, sandwiched prompt zone with horizontal rules, blank-line breathing room around Aiden's responses, improved markdown rendering with proper inter-block spacing
+
+### 🛠️ Internals
+
+- Schema migrations v8→v12 (incarnations, runs/attempts/spans/idempotency, traceparent columns, hooks family, hook consecutive_failures)
+- 4166 tests passing (started this sprint at 902 — added 3264 tests)
+- Project memory auto-detection via `.git`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod`, `.aiden/PROJECT.md` anchors
+- Honest LOC accounting: ~9000 LOC added across 22 feature commits + 1 ship commit
+
+### 🐛 Known follow-ups for v4.9.1
+
+- `hook_subscriptions.subscription_id` foreign-key missing `ON DELETE CASCADE` (cosmetic noise on rescan, functional behavior correct)
+- `runtime.lock` stale-PID handling for programmatic daemon bootstrap
+- Hook firings produce audit rows in `hook_executions` but don't nest under `kind='hook'` spans (two surfaces, unified later)
+- Typing-suggestion cursor misalignment in REPL input area
+- 3 non-Anthropic LLM adapters silently drop outbound trace headers (W3C-recommended fallback, no regression — formal merge deferred)
+
+---
+
 ## v4.8.1 — 2026-05-21
 
 ### Fixed
