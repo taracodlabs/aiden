@@ -94,7 +94,10 @@ export const recallSessionTool: ToolHandler = {
         error:   'recall_session requires resolved aiden paths',
       };
     }
-    const dir = path.join(ctx.paths.root, 'distillations');
+    // v4.9.0 Slice 9 — paths hygiene: use centralised distillationsDir
+    // when present (added in Slice 9); fall back to the legacy ad-hoc
+    // reconstruction so externally-mocked `ctx.paths` objects keep working.
+    const dir = ctx.paths.distillationsDir ?? path.join(ctx.paths.root, 'distillations');
 
     // Read everything off disk first. Each failure (malformed JSON,
     // EACCES on individual files) is skipped silently; the diagnostic
@@ -181,6 +184,8 @@ export const recallSessionTool: ToolHandler = {
 // register recall_session with the slice3 SubsystemHealthRegistry
 // pass this helper to the tracker so they get health snapshots without
 // hard-coding the path in two places.
+// v4.9.0 Slice 9 — kept for back-compat; mirrors `paths.distillationsDir`
+// without requiring the full AidenPaths object.
 export function getDistillationsDir(rootDir: string): string {
   return path.join(rootDir, 'distillations');
 }

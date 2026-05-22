@@ -526,6 +526,19 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       process.exit(code);
     });
 
+  // v4.9.0 Slice 9 — memory CLI surface.
+  program
+    .command('memory [action] [args...]')
+    .description('Manage MEMORY.md + USER.md. Actions: list (default), show, add, remove, edit, backup, restore, diff.')
+    .allowUnknownOption()
+    .action(async (action: string | undefined, posArgs: string[] | undefined) => {
+      const { runMemorySubcommand } = await import('./commands/memory');
+      const code = await runMemorySubcommand(action ?? 'list', posArgs ?? [], {
+        writeOut: opts.writeOut,
+      });
+      process.exit(code);
+    });
+
   // v4.5 Phase 4b — daemon supervisor commands.
   program
     .command('daemon <action> [args...]')

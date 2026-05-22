@@ -66,6 +66,19 @@ export interface AidenPaths {
    * path is exposed for migration tooling and aiden doctor.
    */
   sessionsDir: string;
+  /**
+   * v4.9.0 Slice 9 — root/distillations/ holds per-session JSON
+   * distillations consumed by `recall_session`. Previously reconstructed
+   * ad-hoc at the `recallSession.ts` call site; now centralised here so
+   * any consumer can reach it via the paths object.
+   */
+  distillationsDir: string;
+  /**
+   * v4.9.0 Slice 9 — root/memory-backups/<YYYYMMDD-HHMMSS>/ holds
+   * `aiden memory backup` snapshots. Per-snapshot subdirs carry
+   * `memory.md` + `user.md` + `manifest.json`.
+   */
+  memoryBackupsDir: string;
   /** root/plugins/ — third-party plugins. */
   pluginsDir: string;
   /** root/logs/ — auto-redacted runtime logs. */
@@ -163,6 +176,8 @@ export function resolveAidenPaths(opts: ResolveAidenPathsOptions = {}): AidenPat
     skinsDir: path.join(root, 'skins'),
     recentCommandsFile: path.join(root, '.recent-commands.json'),
     sessionsDir: path.join(root, 'sessions'),
+    distillationsDir: path.join(root, 'distillations'),
+    memoryBackupsDir: path.join(root, 'memory-backups'),
     pluginsDir: path.join(root, 'plugins'),
     logsDir: path.join(root, 'logs'),
     bundledManifest: path.join(root, '.bundled_manifest'),
