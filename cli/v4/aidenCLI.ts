@@ -529,7 +529,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   // v4.9.0 Slice 9 — memory CLI surface.
   program
     .command('memory [action] [args...]')
-    .description('Manage MEMORY.md + USER.md. Actions: list (default), show, add, remove, edit, backup, restore, diff.')
+    .description('Manage MEMORY.md + USER.md + project memory. Actions: list (default), show, add, remove, edit, backup, restore, diff, namespaces, pending, approve, reject, review.')
     .allowUnknownOption()
     .action(async (action: string | undefined, posArgs: string[] | undefined) => {
       const { runMemorySubcommand } = await import('./commands/memory');
@@ -606,8 +606,8 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   program
     .command('mcp <action> [target] [extraArgs...]')
     .description(
-      'MCP server mode. Actions: serve | status | tools | init <client> | doctor <client> | repair <client>. ' +
-      'Clients (v4.9 Slice 2a): claude, cursor.',
+      'MCP server mode + client config. Actions: serve | status | tools | init <client> | doctor <client> | repair <client> | uninstall <client>. ' +
+      'Clients: claude (Claude Desktop), cursor, vscode.',
     )
     .allowUnknownOption()
     .action(async (action: string, target: string | undefined, extraArgs: string[] = []) => {
