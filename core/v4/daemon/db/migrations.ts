@@ -491,6 +491,12 @@ CREATE INDEX IF NOT EXISTS idx_hook_executions_hook  ON hook_executions(hook_id,
 CREATE INDEX IF NOT EXISTS idx_hook_executions_event ON hook_executions(event, started_at);
 `;
 
+// v4.9.0 Slice 12b — auto-disable rail. Just an ADD COLUMN; full
+// rationale lives in `core/v4/daemon/db/schema/v12.sql`.
+const V12_SQL = `
+ALTER TABLE hooks ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -503,6 +509,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 9, name: 'v4.9 slice 5 — durable run queue',              sql: V9_SQL },
   { version: 10, name: 'v4.9 slice 7 — external trace adoption',       sql: V10_SQL },
   { version: 11, name: 'v4.9 slice 12a — hook system',                  sql: V11_SQL },
+  { version: 12, name: 'v4.9 slice 12b — hook auto-disable counter',    sql: V12_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

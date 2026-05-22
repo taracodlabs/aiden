@@ -29,6 +29,90 @@ import path from 'node:path';
 import type { Db } from '../daemon/db/connection';
 import { newHookExecId } from '../identity';
 import { runHookSubprocess, type RunnerOutcome } from './runtime/subprocessRunner';
+import { markRevoked } from './trust';
+
+/**
+ * v4.9.0 Slice 12b — auto-disable threshold. After this many
+ * consecutive non-`ok` outcomes the dispatcher auto-revokes the
+ * hook regardless of `on_error` / `on_timeout` policy. Defense in
+ * depth: a poorly-configured `on_error: 'allow'` won't mask a
+ * permanently broken hook.
+ */
+export const CONSECUTIVE_FAILURE_THRESHOLD = 3;
+
+/** Optional sink for `hook.auto_disabled` structured events. */
+export type AutoDisableLogger = (event: {
+  hookId:           string;
+  subscriptionId?:  string;
+  reason:           string;
+  hookExecutionIds: string[];
+}) => void;
+let _autoDisableLogger: AutoDisableLogger | null = null;
+export function setAutoDisableLogger(fn: AutoDisableLogger | null): void { _autoDisableLogger = fn; }
+
+/**
+ * Look up the most recent N `hook_executions` rows for a hook so the
+ * `hook.auto_disabled` log line can cross-reference the failures.
+ */
+function recentExecutionIds(db: Db, hookId: string, n: number): string[] {
+  const rows = db.prepare(
+    `SELECT hook_execution_id FROM hook_executions WHERE hook_id = ?
+       ORDER BY started_at DESC LIMIT ?`,
+  ).all(hookId, n) as Array<{ hook_execution_id: string }>;
+  return rows.map((r) => r.hook_execution_id);
+}
+
+/**
+ * Apply auto-disable policy after a single subscription firing.
+ * Branches:
+ *   - status='ok'                          → reset consecutive_failures = 0
+ *   - status in {timeout,crash,malformed}  → increment counter
+ *     * if `on_error|on_timeout == 'disable_hook'` → immediate revoke
+ *     * else if counter >= threshold       → 3-strike revoke
+ *
+ * `testMode=true` (used by `aiden hooks test`) skips ALL counter
+ * mutation and policy application — pure dry-run.
+ */
+function applyAutoDisablePolicy(
+  db:       Db,
+  hookId:   string,
+  subId:    string,
+  status:   RunnerOutcome['status'],
+  policy:   string,
+  testMode: boolean,
+): void {
+  if (testMode) return;
+  if (status === 'ok') {
+    db.prepare(`UPDATE hooks SET consecutive_failures=0, updated_at=? WHERE hook_id=?`)
+      .run(new Date().toISOString(), hookId);
+    return;
+  }
+  // Increment counter for any non-ok outcome.
+  db.prepare(`UPDATE hooks SET consecutive_failures = consecutive_failures + 1,
+                              updated_at=? WHERE hook_id=?`)
+    .run(new Date().toISOString(), hookId);
+  // Immediate revoke when the subscription explicitly opts in.
+  if (policy === 'disable_hook') {
+    markRevoked(db, hookId);
+    _autoDisableLogger?.({
+      hookId, subscriptionId: subId,
+      reason: `auto_disable:${status}`,
+      hookExecutionIds: recentExecutionIds(db, hookId, 3),
+    });
+    return;
+  }
+  // 3-strike defense in depth.
+  const row = db.prepare(`SELECT consecutive_failures AS n FROM hooks WHERE hook_id=?`)
+    .get(hookId) as { n: number } | undefined;
+  if (row && row.n >= CONSECUTIVE_FAILURE_THRESHOLD) {
+    markRevoked(db, hookId);
+    _autoDisableLogger?.({
+      hookId, subscriptionId: subId,
+      reason: `auto_disable:three_strikes:${status}`,
+      hookExecutionIds: recentExecutionIds(db, hookId, 3),
+    });
+  }
+}
 
 export interface DispatchContext {
   runId?:        string;
@@ -38,6 +122,13 @@ export interface DispatchContext {
   toolCallId?:   string;
   /** When set, only matchers naming this tool fire (event-specific). */
   toolName?:     string;
+  /**
+   * v4.9.0 Slice 12b — when true, the dispatcher writes the audit row
+   * but does NOT touch `consecutive_failures` or trigger auto-revoke.
+   * Used by `aiden hooks test <id>` to dry-run a hook against a
+   * synthetic payload without burning a strike against the counter.
+   */
+  testMode?:     boolean;
 }
 
 export interface DispatchResult {
@@ -221,6 +312,11 @@ export async function dispatchHook(
       event, ctx, status: outcome.status, decision: outcome.response?.decision ?? policyDecision,
       outcome, startedAt, finishedAt,
     });
+    // v4.9.0 Slice 12b — auto-disable policy. `disable_hook` triggers
+    // immediate revoke; 3 consecutive failures triggers revoke
+    // regardless of policy (defense in depth).
+    const policy = outcome.status === 'timeout' ? sub.on_timeout : sub.on_error;
+    applyAutoDisablePolicy(db, sub.hook_id, sub.subscription_id, outcome.status, policy, ctx.testMode === true);
     fired.push({
       hookId: sub.hook_id, subscriptionId: sub.subscription_id,
       status: outcome.status, decision: outcome.response?.decision ?? policyDecision,

@@ -1,0 +1,13 @@
+-- v4.9.0 Slice 12b — auto-disable rail for the hook system.
+--
+-- Adds `consecutive_failures` counter to the `hooks` table so the
+-- dispatcher can implement the 3-strike auto-revoke rule independent
+-- of each subscription's `on_error` / `on_timeout` policy.
+--
+-- The dispatcher increments the column on every non-`ok` outcome
+-- (timeout / crash / malformed_output) and resets it to 0 on the
+-- next `ok`. At 3 consecutive failures the hook is auto-revoked
+-- (`trust_state='revoked', enabled=0`) regardless of `on_error`
+-- setting — defense in depth against a poorly-configured
+-- `on_error: 'allow'` mask hiding a broken hook.
+ALTER TABLE hooks ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;

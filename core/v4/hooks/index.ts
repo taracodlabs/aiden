@@ -43,9 +43,28 @@ export {
 export {
   dispatchHook,
   runHookSubprocess,
+  setAutoDisableLogger,
+  CONSECUTIVE_FAILURE_THRESHOLD,
   type DispatchContext,
   type DispatchResult,
+  type AutoDisableLogger,
 } from './dispatcher';
+
+export {
+  fireSessionStart,
+  fireSessionEnd,
+  fireApprovalRequested,
+  fireApprovalResponded,
+} from './lifecycle';
+
+export {
+  queryHookExecutions,
+  failureRates,
+  countByStatus,
+  type AuditRow,
+  type AuditQuery,
+  type FailureRateRow,
+} from './auditQuery';
 
 export {
   type RunnerInput,

@@ -75,6 +75,13 @@ export interface ApprovalCallbacks {
   }>;
   /** Logging hook — fired AFTER every decision (allow or deny). */
   onDecision?: (req: ApprovalRequest, decision: ApprovalDecision) => void;
+  /**
+   * v4.9.0 Slice 12b — fired BEFORE the engine decides. Observer-only;
+   * the engine ignores the return value. Wiring path: `aiden hooks`
+   * subsystem fires `approval.requested` so registered hooks can
+   * observe (but not preempt) tool-approval gates.
+   */
+  onRequested?: (req: ApprovalRequest) => void;
   /** Permanent-allowlist sink. Phase 6 ConfigManager wires this up. */
   persistAllow?: (toolName: string, argSignature: string) => void;
   /**
@@ -266,6 +273,10 @@ export class ApprovalEngine {
    * categories are always allowed without consulting any callback.
    */
   async checkApproval(req: ApprovalRequest): Promise<boolean> {
+    // v4.9.0 Slice 12b — fire `approval.requested` for any gated call.
+    // Read-category short-circuits below; we still fire so observers
+    // see ALL approval requests (not just the ones that prompt).
+    this.callbacks.onRequested?.(req);
     if (req.category === 'read') {
       this.callbacks.onDecision?.(req, 'allow');
       return true;

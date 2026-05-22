@@ -539,6 +539,19 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       process.exit(code);
     });
 
+  // v4.9.0 Slice 12b — hooks CLI surface.
+  program
+    .command('hooks [action] [args...]')
+    .description('Manage hook subsystem. Actions: list (default), show, trust, revoke, rescan, test, doctor, audit.')
+    .allowUnknownOption()
+    .action(async (action: string | undefined, posArgs: string[] | undefined) => {
+      const { runHooksSubcommand } = await import('./commands/hooks');
+      const code = await runHooksSubcommand(action ?? 'list', posArgs ?? [], {
+        writeOut: opts.writeOut,
+      });
+      process.exit(code);
+    });
+
   // v4.5 Phase 4b — daemon supervisor commands.
   program
     .command('daemon <action> [args...]')
