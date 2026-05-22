@@ -1632,8 +1632,10 @@ export class ChatSession implements ChatSessionLike {
         _deferredTip = null;
       }
       // Tier-3.1a: dim full-width rule between the agent reply and the
-      // post-turn status footer.
-      this.opts.display.write(`  ${this.opts.display.rule()}\n`);
+      // post-turn status footer. v4.9.0 pre-ship UI: prepend a blank
+      // line so the response zone gets breathing room above the rule
+      // — matches the `\n\n` blank already below `▎ Aiden` header.
+      this.opts.display.write(`\n  ${this.opts.display.rule()}\n`);
       this.renderStatusLine();
       // v4.1.5+ Path A — finalize the loop trace. No-op if the env
       // var is unset OR if the turn didn't trip any threshold. When
@@ -1941,15 +1943,16 @@ export class ChatSession implements ChatSessionLike {
       }
     } catch { /* never let a missing marker crash boot */ }
 
-    // Bottom prompt hint — final line of the boot card.
-    // v4.8.0 Slice 10d — full-width muted `─` divider between the
-    // boot card (parchment / capability card / two-column block) and
-    // the input hint prevents the boot chrome from merging visually
-    // with the active prompt. Pattern: blank · rule · blank · hint.
-    display.write('\n');
-    display.write(`  ${display.rule()}\n`);
+    // v4.9.0 pre-ship UI: hint moved BEFORE the closing rule so the
+    // rule sits adjacent to the active prompt (it becomes the visual
+    // top of the prompt zone). New order: blank · hint · blank · rule.
+    // Banner content ends with the hint; the rule below it brackets
+    // the user-input zone together with the new bottom-rule emission
+    // in the REPL loop.
     display.write('\n');
     display.write(display.bottomPromptHint() + '\n');
+    display.write('\n');
+    display.write(`  ${display.rule()}\n`);
   }
 
   /**

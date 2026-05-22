@@ -189,7 +189,7 @@ function renderBlockquote(quote: string): string {
   return quote
     .split('\n')
     .map((ln) => (ln.length === 0 ? rail.trimEnd() : `${rail}${ln}`))
-    .join('\n') + '\n';
+    .join('\n') + '\n\n';  // v4.9.0 pre-ship UI: blank line after blockquote
 }
 
 /**
@@ -659,11 +659,12 @@ export function getReplyRenderer(): { render: (text: string) => string } {
 
     proto._listDepth -= 1;
 
-    // Top-level list closes with a trailing newline to separate from
-    // the next block; nested lists return without extra padding so
-    // they nest cleanly inside their parent item.
+    // v4.9.0 pre-ship UI: top-level list closes with a BLANK LINE
+    // (`\n\n`) so a following paragraph / heading / table reads with
+    // breathing room. Nested lists stay tight (`\n`) so they nest
+    // cleanly under their parent item.
     const out = lines.join('\n');
-    return proto._listDepth === 0 ? out + '\n' : out + '\n';
+    return proto._listDepth === 0 ? out + '\n\n' : out + '\n';
   };
 
   // ── v4.8.1 Slice 2 — markdown table override ──────────────────────────
