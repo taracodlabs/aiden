@@ -32,6 +32,18 @@ import express from 'express';
 
 import type { TriggerBus } from '../triggerBus';
 import { fingerprintCanonical } from '../idempotency/runIdempotencyStore';
+// v4.9.0 Slice 7 — inbound trace adoption.
+import {
+  parseTraceparent,
+  validateExternalRequestId,
+  runWithContext,
+  newTraceId,
+  newSpanId,
+  newRequestId,
+  newRunId,
+  type ExecutionContext,
+} from '../../identity';
+import { getCurrentDaemonId, getCurrentIncarnationId, getCurrentDaemonDb } from '../bootstrap';
 
 export interface MountRunsRoutesOptions {
   app:        Express;
@@ -82,23 +94,70 @@ export function mountRunsRoutes(opts: MountRunsRoutesOptions): MountedRunsRoutes
         ? body.client_id
         : 'default';
 
-      try {
-        const result = opts.triggerBus.insert({
-          source:         'manual',
-          sourceKey,
-          idempotencyKey,
-          payload:        { body, fingerprint, headerKey },
-        });
-        res.status(202).json({
-          accepted:           true,
-          duplicate:          !result.inserted,
-          trigger_event_id:   result.id,
-          idempotency_key:    idempotencyKey,
-        });
-      } catch (e) {
-        opts.log('error', `[api/runs] insert failed: ${e instanceof Error ? e.message : String(e)}`);
-        res.status(500).json({ error: 'internal_error' });
+      // v4.9.0 Slice 7 — inbound trace adoption.
+      const incomingTp = parseTraceparent(req.header('traceparent'));
+      const rawIncomingTp = req.header('traceparent');
+      if (rawIncomingTp && !incomingTp) {
+        opts.log('warn',
+          `[api/runs] dropped malformed traceparent header (length=${rawIncomingTp.length})`);
       }
+      const rawExternalReqId = req.header('x-request-id');
+      const externalReqId = validateExternalRequestId(rawExternalReqId);
+      if (rawExternalReqId && externalReqId === null) {
+        opts.log('warn',
+          `[api/runs] dropped invalid X-Request-Id header (length=${rawExternalReqId.length})`);
+      }
+
+      const ctx: ExecutionContext = {
+        daemonId:          getCurrentDaemonId()      ?? '',
+        incarnationId:     getCurrentIncarnationId() ?? '',
+        runId:             newRunId(),  // pre-claim run id (dispatcher assigns final numeric id)
+        traceId:           incomingTp ? `trc_${incomingTp.traceId}` : newTraceId(),
+        spanId:            newSpanId(),
+        parentSpanId:      incomingTp?.parentSpanId ?? undefined,
+        requestId:         newRequestId(),
+        externalRequestId: externalReqId ?? undefined,
+        source:            'api',
+        attempt:           1,
+      };
+
+      void runWithContext(ctx, () => {
+        try {
+          const result = opts.triggerBus.insert({
+            source:         'manual',
+            sourceKey,
+            idempotencyKey,
+            payload:        {
+              body, fingerprint, headerKey,
+              external_trace_id:  incomingTp?.traceId ?? null,
+              external_request_id: externalReqId ?? null,
+            },
+          });
+          // Persist `external_trace_id` on the trigger payload so the
+          // dispatcher can copy it onto the `runs` row when it
+          // creates one. We can't write to `runs` here (no run row
+          // yet), but the payload carries the value.
+          opts.log('info',
+            `[api/runs] accepted trigger_event_id=${result.id} ` +
+            `${incomingTp ? `external_trace_id=${incomingTp.traceId} ` : ''}` +
+            `${externalReqId ? `external_request_id=${externalReqId}` : ''}`);
+          res.status(202).json({
+            accepted:            true,
+            duplicate:           !result.inserted,
+            trigger_event_id:    result.id,
+            idempotency_key:     idempotencyKey,
+            run_id:              ctx.runId,
+            trace_id:            ctx.traceId,
+            external_trace_id:   incomingTp?.traceId ?? null,
+          });
+        } catch (e) {
+          opts.log('error', `[api/runs] insert failed: ${e instanceof Error ? e.message : String(e)}`);
+          res.status(500).json({ error: 'internal_error' });
+        }
+      });
+      // Quiet unused-warning on the db handle; future Slice 8 uses it
+      // to back-fill the `runs.external_trace_id` column on creation.
+      void getCurrentDaemonDb;
     },
   );
 

@@ -223,6 +223,15 @@ export interface ProviderCallInput {
    * the signal that the request was cancelled.
    */
   signal?: AbortSignal;
+  /**
+   * v4.9.0 Slice 7 — optional outbound headers to merge into the
+   * adapter's request. Aiden populates this with `traceparent` +
+   * `X-Aiden-*` correlation headers when an ambient ExecutionContext
+   * is active. Adapters that don't merge headers MUST still accept
+   * the field without error; the trace propagation simply degrades
+   * to "best-effort" for that provider.
+   */
+  headers?: Record<string, string>;
 }
 
 /**

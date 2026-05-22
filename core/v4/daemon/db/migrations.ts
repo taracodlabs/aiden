@@ -411,6 +411,16 @@ CREATE INDEX IF NOT EXISTS idx_idempotency_run
   ON run_idempotency_keys(run_id) WHERE run_id IS NOT NULL;
 `;
 
+// v4.9.0 Slice 7 — external trace adoption. Adds `external_trace_id`
+// to `spans` + `runs` for W3C traceparent adoption alongside Aiden's
+// typed `trc_<uuidv7>`. Source of truth: `db/schema/v10.sql`.
+const V10_SQL = `
+ALTER TABLE spans ADD COLUMN external_trace_id TEXT;
+ALTER TABLE runs  ADD COLUMN external_trace_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_spans_external_trace
+  ON spans(external_trace_id) WHERE external_trace_id IS NOT NULL;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -421,6 +431,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 7, name: 'v4.6 phase 3b — self-improvement loop',        sql: V7_SQL },
   { version: 8, name: 'v4.9 slice 4 — daemon identity + incarnations', sql: V8_SQL },
   { version: 9, name: 'v4.9 slice 5 — durable run queue',              sql: V9_SQL },
+  { version: 10, name: 'v4.9 slice 7 — external trace adoption',       sql: V10_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

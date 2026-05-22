@@ -35,3 +35,25 @@ export {
   requireContext,
 } from './contextManager';
 export { loadOrCreateDaemonId, daemonIdFilePath } from './daemonId';
+// v4.9.0 Slice 7 — HTTP / subprocess / hook boundaries.
+export {
+  parseTraceparent,
+  emitTraceparent,
+  stripPrefix,
+  validateExternalRequestId,
+  type ParsedTraceparent,
+} from './traceparent';
+export {
+  injectContextHeaders,
+  maybeInjectContextHeaders,
+} from './httpContext';
+export {
+  spawnEnvWithContext,
+  readContextFromEnv,
+} from './subprocessContext';
+export {
+  executeHookWithBoundary,
+  HookTimeoutError,
+  type HookExecutionOpts,
+  type HookOutcome,
+} from './hookExecution';

@@ -1632,10 +1632,16 @@ export class AidenAgent {
     try {
       this.onProviderRequestStart?.(this.providerId);
     } catch { /* defensive */ }
+    // v4.9.0 Slice 7 — when an ExecutionContext is active, emit
+    // outbound correlation headers (`traceparent`, `X-Aiden-*`). The
+    // adapter merges them under its own auth headers so they can't
+    // override security-relevant fields. No-context: headers omitted.
+    const ambient = _llmCurrentContext();
+    const outboundHeaders = ambient ? _injectContextHeaders(ambient) : undefined;
     if (!wantStream) {
       // v4.6 prep — forward the abort signal into the provider call so
       // an in-flight HTTP request can be cancelled mid-flight.
-      return this.provider.call({ messages, tools, signal: runOptions.signal });
+      return this.provider.call({ messages, tools, signal: runOptions.signal, headers: outboundHeaders });
     }
 
     let firstDeltaFired = false;
@@ -1647,6 +1653,7 @@ export class AidenAgent {
       // v4.6 prep — also forward to streaming adapters; mid-stream
       // aborts cancel the underlying SSE read via the same signal.
       signal: runOptions.signal,
+      headers: outboundHeaders,
     });
     for await (const evt of stream) {
       if (evt.type === 'delta') {
@@ -1734,6 +1741,8 @@ function stringifyToolResult(result: unknown): string {
 import { getCurrentDaemonDb as _getCurrentDaemonDb } from './daemon/bootstrap';
 import { withLlmSpan as _withLlmSpan } from './daemon/spans/spanHelpers';
 import { currentContext as _llmCurrentContext } from './identity';
+// v4.9.0 Slice 7 — outbound trace propagation.
+import { injectContextHeaders as _injectContextHeaders } from './identity';
 
 interface LlmSpanShim {
   db: import('./daemon/db/connection').Db | null;

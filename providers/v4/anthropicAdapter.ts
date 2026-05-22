@@ -186,7 +186,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input, /* streaming */ false);
-    const reply = await this.dispatch(body, /* streaming */ false, input.signal);
+    const reply = await this.dispatch(body, /* streaming */ false, input.signal, input.headers);
     const json  = (await reply.json()) as WireMessageBody;
     return decodeResponse(json);
   }
@@ -195,7 +195,7 @@ export class AnthropicAdapter implements ProviderAdapter {
 
   async *callStream(input: ProviderCallInput): AsyncGenerator<StreamEvent, void, void> {
     const body = this.buildBody(input, /* streaming */ true);
-    const reply = await this.dispatch(body, /* streaming */ true, input.signal);
+    const reply = await this.dispatch(body, /* streaming */ true, input.signal, input.headers);
     if (!reply.body) {
       // Server promised SSE but gave us nothing — fall through to a synthetic
       // empty done event so the agent loop terminates rather than hangs.
@@ -262,11 +262,18 @@ export class AnthropicAdapter implements ProviderAdapter {
     body: WireRequestBody,
     streaming: boolean,
     externalSignal?: AbortSignal,
+    outboundHeaders?: Record<string, string>,
   ): Promise<Response> {
     // Resolved once per process via the userAgent module's cache, so paying
     // for the version detection here is cheap on every retry/turn.
     const userAgent   = await getClaudeCliUserAgent();
-    const headers     = this.buildHeaders(streaming, userAgent);
+    // v4.9.0 Slice 7 — merge caller-supplied outbound headers (e.g.
+    // `traceparent`, `X-Aiden-Run-Id`) below the adapter's defaults so
+    // they can't override `Authorization` / `anthropic-version` etc.,
+    // but above `extraHeaders` so a deliberate per-deployment override
+    // still wins.
+    const base = this.buildHeaders(streaming, userAgent);
+    const headers = outboundHeaders ? { ...outboundHeaders, ...base } : base;
     const serialised  = JSON.stringify(body);
     const totalTries  = this.maxRetries + 1;
 

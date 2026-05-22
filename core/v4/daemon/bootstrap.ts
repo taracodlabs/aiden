@@ -106,6 +106,10 @@ import {
   currentContext,
 } from '../identity';
 import { insertIncarnation, markEnded } from './incarnationStore';
+// v4.9.0 Slice 7 — static import. The lazy `require()` form here
+// silently failed under vite-node (CJS `.ts` resolution) and the
+// `/api/runs` route never mounted in tests.
+import { mountRunsRoutes } from './api/runs';
 
 export interface DaemonBootstrapHandle {
   /** True when the foundation actually initialized (AIDEN_DAEMON=1). */
@@ -587,11 +591,8 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
 
     // v4.9.0 Slice 5 — POST /api/runs durable ingress. Returns 202
     // only after the trigger_event + run_idempotency_keys rows commit.
-    // Read AIDEN_DAEMON_BIND directly here — the `bindHost` const
-    // below shadows it but isn't in scope yet.
+    // Slice 7 also adopts inbound `traceparent` here.
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { mountRunsRoutes } = require('./api/runs') as typeof import('./api/runs');
       const ingressBindHost = process.env.AIDEN_DAEMON_BIND ?? '127.0.0.1';
       mountRunsRoutes({
         app,

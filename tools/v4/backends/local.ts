@@ -18,6 +18,8 @@
  */
 
 import { spawn } from 'node:child_process';
+// v4.9.0 Slice 7 — propagate ExecutionContext into the child via env.
+import { currentContext, spawnEnvWithContext } from '../../../core/v4/identity';
 
 export interface ShellExecArgs {
   command: string;
@@ -64,14 +66,23 @@ export async function localBackendExecute(
   const capture = args.captureOutput ?? true;
 
   return new Promise<ShellExecResult>((resolve) => {
+    // v4.9.0 Slice 7 — when running inside a `runWithContext` frame,
+    // stamp AIDEN_* env vars so the child process can reconstitute
+    // the same daemon/incarnation/run/trace correlation chain via
+    // `readContextFromEnv(process.env)`. Outside a context frame, the
+    // env spread is unchanged.
+    const ambient = currentContext();
+    const baseEnv = ambient
+      ? spawnEnvWithContext(ambient, process.env)
+      : process.env;
     const child = isWin
       ? spawn('powershell.exe', ['-NoProfile', '-Command', command], {
           cwd: args.cwd,
-          env: { ...process.env, ...(args.env ?? {}) },
+          env: { ...baseEnv, ...(args.env ?? {}) },
         })
       : spawn('bash', ['-lc', command], {
           cwd: args.cwd,
-          env: { ...process.env, ...(args.env ?? {}) },
+          env: { ...baseEnv, ...(args.env ?? {}) },
         });
 
     let stdout = '';

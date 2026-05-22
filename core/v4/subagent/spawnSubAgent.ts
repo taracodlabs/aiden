@@ -28,6 +28,8 @@
 import { randomUUID } from 'node:crypto';
 import { buildChildAgent, ProviderNotFoundError } from './childBuilder';
 import type { ChildBuilderDeps } from './childBuilder';
+// v4.9.0 Slice 7 — fork ExecutionContext into the child agent.
+import { currentContext, runWithContext, childSpan } from '../identity';
 import type { RunStore } from '../daemon/runStore';
 import type { Logger } from '../logger/logger';
 import { noopLogger } from '../logger/factory';
@@ -300,8 +302,16 @@ export async function spawnSubAgent(
   let tokensIn = 0;
   let tokensOut = 0;
 
-  try {
-    const result = await agentBundle.agent.runConversation(
+  // v4.9.0 Slice 7 — fork an ExecutionContext for the child so its
+  // tool/LLM spans chain off the parent's spanId. AsyncLocalStorage
+  // is in-process; the child runs inside `runWithContext(childCtx, ...)`
+  // so any `currentContext()` reads during the child's runConversation
+  // see the child's chain (same traceId, fresh spanId, parentSpanId =
+  // parent's spanId). Out-of-context callers (legacy paths) leave
+  // the call exactly as it was pre-Slice-7.
+  const parentCtx = currentContext();
+  const runChild = async (): Promise<Awaited<ReturnType<typeof agentBundle.agent.runConversation>>> =>
+    agentBundle.agent.runConversation(
       agentBundle.history,
       {
         signal:    childCtrl.signal,
@@ -311,6 +321,11 @@ export async function spawnSubAgent(
         onUiEvent: () => { /* no-op: subagents do not render */ },
       },
     );
+
+  try {
+    const result = await (parentCtx
+      ? runWithContext(childSpan({ ...parentCtx, source: 'subagent' }), runChild)
+      : runChild());
     apiCalls = result.turnCount;       // one provider call per turn
     tokensIn = result.totalUsage.inputTokens;
     tokensOut = result.totalUsage.outputTokens;
