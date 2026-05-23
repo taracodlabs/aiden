@@ -359,6 +359,23 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
     // is deferred to v4.10 once this slice's test harness can guard it.
     const ghostStr = dim(ghost);
     line = `${prefix} ${message}${value}${ghostStr}${ansiEscapes.cursorBackward(ghost.length)}`;
+    // v4.9.2 Bug D diagnostic — REMOVE BEFORE LANDING.
+    // File-only log (no stdout — would corrupt the REPL prompt) confirms
+    // this branch fires when the user types in a real interactive REPL.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const fs   = require('node:fs') as typeof import('node:fs');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const path = require('node:path') as typeof import('node:path');
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const os   = require('node:os')   as typeof import('node:os');
+      const dir = path.join(os.homedir(), '.aiden', 'logs');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.appendFileSync(
+        path.join(dir, 'aidenPrompt-bugD.log'),
+        `${new Date().toISOString()} ghost-branch fired: value=${JSON.stringify(value)} ghost=${JSON.stringify(ghost)} isTTY=${process.stdout.isTTY}\n`,
+      );
+    } catch { /* never let diagnostic IO crash the prompt */ }
   } else {
     line = `${prefix} ${message}${value}`;
   }

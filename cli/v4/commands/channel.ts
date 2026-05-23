@@ -290,10 +290,8 @@ async function telegramRemove(ctx: import('../commandRegistry').SlashCommandCont
     return;
   }
   const proceed = await confirm('Remove the Telegram bot token? This stops polling.');
-  if (!proceed) {
-    display.dim('  Cancelled.');
-    return;
-  }
+  // v4.9.2 Slice 3 — confirm() now owns the rejection message.
+  if (!proceed) return;
 
   // Stop the live adapter first so polling actually halts even if the
   // .env write fails for some reason.
@@ -336,10 +334,8 @@ async function telegramTakeover(ctx: import('../commandRegistry').SlashCommandCo
         'Take over Telegram polling? This will boot any other Aiden instance off the bot.',
       )
     : true;
-  if (!proceed) {
-    display.dim('  Cancelled.');
-    return;
-  }
+  // v4.9.2 Slice 3 — confirm() now owns the rejection message.
+  if (!proceed) return;
 
   const spinner = display.startSpinner('Reclaiming Telegram polling…');
   let result: { ok: boolean; reason?: string };

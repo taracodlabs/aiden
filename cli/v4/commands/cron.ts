@@ -286,7 +286,14 @@ async function cmdRemove(ctx: SlashCommandContext, args: string[]): Promise<void
   } else if (ctx.confirm) {
     ok = await ctx.confirm(question);
   }
-  if (!ok) { ctx.display.dim('Cancelled.'); return; }
+  // v4.9.2 Slice 3 — when ctx.confirm was the source, the primitive
+  // already printed a per-input rejection message. The ctx.prompt
+  // branch above does its own y/N parsing, so it still owns its own
+  // "Cancelled." line.
+  if (!ok) {
+    if (ctx.prompt) ctx.display.dim('Cancelled.');
+    return;
+  }
   if (deleteJob(job.id)) {
     await awaitPendingSaves();
     ctx.display.success(`Removed ${job.description}.`);

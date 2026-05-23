@@ -191,10 +191,8 @@ export const plugins: SlashCommand = {
       const allow = await confirmFn(
         `Install ${manifest.name} with the listed permissions? [y/N] `,
       );
-      if (!allow) {
-        ctx.display.dim('Install cancelled.');
-        return {};
-      }
+      // v4.9.2 Slice 3 — confirm() now owns the rejection message.
+      if (!allow) return {};
 
       // Copy into the user plugins dir.
       const dst = path.join(ctx.paths.pluginsDir, manifest.name);
@@ -305,10 +303,8 @@ export const plugins: SlashCommand = {
           ? `Grant the listed permissions (including ${newPerms.length} new)? [y/N] `
           : `Grant the listed permissions? [y/N] `,
       );
-      if (!allow) {
-        ctx.display.dim('Grant cancelled.');
-        return {};
-      }
+      // v4.9.2 Slice 3 — confirm() now owns the rejection message.
+      if (!allow) return {};
       await saveGrantedPermissions(dir, entry.manifest.permissions);
       // Reload so the new state takes effect.
       await ctx.pluginLoader.teardown();

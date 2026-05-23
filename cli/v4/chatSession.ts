@@ -44,6 +44,7 @@ import {
   SESSION_SUMMARY_MIN_TURNS,
 } from './sessionSummaryGate';
 import aidenPrompt, { type SlashCommandLite } from './aidenPrompt';
+import { runConfirm } from './confirmPrompt';
 import { appendHistory, loadRecent } from './historyStore';
 import type { CliCallbacks } from './callbacks';
 import type { SessionManager } from '../../core/v4/sessionManager';
@@ -166,8 +167,18 @@ export function renderCommandLabel(cmd: SlashCommand): string {
 
 /** Lightweight readline / inquirer abstraction so tests can swap in stubs. */
 export interface ChatPromptApi {
-  /** Reads a free-form line of user input. Returns the raw string. */
-  readLine(prompt: string): Promise<string>;
+  /**
+   * Reads a free-form line of user input. Returns the raw string.
+   *
+   * `opts.suggestionsDisabled` (v4.9.2 Slice 3): when true, the call
+   * MUST route through a plain inquirer input — no ghost-text from
+   * the outer chat history, no slash-command dropdown. Confirmation
+   * prompts pass this; outer chat read loops do not.
+   */
+  readLine(
+    prompt: string,
+    opts?: { suggestionsDisabled?: boolean },
+  ): Promise<string>;
   /** Slash-command dropdown: returns the selected `/name` string,
    *  or `null` to cancel and fall back to free-form input. */
   selectSlashCommand(
@@ -662,16 +673,21 @@ export class ChatSession implements ChatSessionLike {
             agent: this.opts.agent,
             pluginLoader: this.opts.pluginLoader,
             channelManager: this.opts.channelManager,
-            confirm: async (msg: string) => {
-              // Phase 17.1: bug — was reading `this.opts.promptApi?` which is
-              // undefined when no override is passed; the chain silently
-              // resolved to undefined → returned false → "Grant cancelled"
-              // before the user could type anything. Use the resolved local
-              // promptApi (which falls back to readline-default) instead.
-              const r = await promptApi.readLine(msg);
-              if (typeof r !== 'string') return false;
-              return /^(y|yes)$/i.test(r.trim());
-            },
+            // v4.9.2 Slice 3 — UX-rebuilt confirmation primitive.
+            // The stdin/keypress mechanics worked correctly all along;
+            // users simply couldn't see the prompt was open. The
+            // extracted `runConfirm` helper now owns the canonical
+            // y/N hint, the warn-tinted '?' glyph, the
+            // suggestionsDisabled flag (so confirmations skip ghost-
+            // match against outer chat history), and the per-input
+            // honest cancellation message.
+            //
+            // Phase 17.1 anchor: the previous primitive read
+            // `this.opts.promptApi?` (undefined → silently returned
+            // false → "Grant cancelled" before user could type) —
+            // fixed by routing through the resolved local `promptApi`.
+            // That fix stands; Slice 3 adds the UX layer on top.
+            confirm: (msg: string) => runConfirm(msg, promptApi, this.opts.display),
             // Phase 18: raw text prompt for /auth login OAuth code paste.
             prompt: (msg: string) => promptApi.readLine(msg),
           });
@@ -2416,9 +2432,15 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
   const useLegacyPrompt = isNoUiMode() || !opts.commands;
 
   return {
-    async readLine(prompt) {
+    async readLine(prompt, readOpts) {
       try {
-        if (useLegacyPrompt) {
+        // v4.9.2 Slice 3 — confirmation prompts (suggestionsDisabled)
+        // always route through the legacy inquirer input path. No
+        // ghost-text (would autocomplete from outer chat history —
+        // wrong context for a y/n question), no slash dropdown
+        // (irrelevant for confirmations). Inquirer's plain input is
+        // the well-tested baseline for single-shot questions.
+        if (readOpts?.suggestionsDisabled || useLegacyPrompt) {
           return (await inq.input({ message: prompt, theme: promptTheme })) ?? '';
         }
         // Fetch history just-in-time so each read sees the latest
