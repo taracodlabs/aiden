@@ -45,6 +45,7 @@ import {
 } from './sessionSummaryGate';
 import aidenPrompt, { type SlashCommandLite } from './aidenPrompt';
 import { runConfirm } from './confirmPrompt';
+import { renderGreeter } from './greeter';
 import { appendHistory, loadRecent } from './historyStore';
 import type { CliCallbacks } from './callbacks';
 import type { SessionManager } from '../../core/v4/sessionManager';
@@ -1962,6 +1963,22 @@ export class ChatSession implements ChatSessionLike {
         await renderFirstRunHint({ paths: this.opts.paths, out: process.stdout });
       }
     } catch { /* never let a missing marker crash boot */ }
+
+    // v4.9.3 Slice 1b — boot greeter. Silent on first-ever launch (lets
+    // renderFirstRunHint above own boot #1), silent when /greeter off,
+    // silent when no offer wins. Lazy-required so test-harness sessions
+    // without `paths` wired skip the fs cost. Internal errors are
+    // already swallowed inside renderGreeter; outer try/catch is the
+    // belt-and-braces guarantee against a boot-crash regression.
+    try {
+      if (this.opts.paths) {
+        await renderGreeter({
+          paths:   this.opts.paths,
+          version: AIDEN_VERSION,
+          display: this.opts.display,
+        });
+      }
+    } catch { /* never let the greeter crash boot */ }
 
     // v4.9.0 pre-ship UI: hint moved BEFORE the closing rule so the
     // rule sits adjacent to the active prompt (it becomes the visual

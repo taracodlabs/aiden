@@ -65,6 +65,8 @@ import { walkthrough } from './walkthrough';
 // v4.9.1 amendment — REPL slash surfaces for memory + hooks (mirrors CLI).
 import { memory } from './memorySlash';
 import { hooks }  from './hooksSlash';
+// v4.9.3 Slice 1b — boot greeter management.
+import { greeter } from './greeter';
 
 export {
   help,
@@ -176,6 +178,8 @@ export const allCommands: SlashCommand[] = [
   // v4.9.1 amendment — REPL slash surfaces mirroring CLI subcommands.
   memory,
   hooks,
+  // v4.9.3 Slice 1b — boot greeter management.
+  greeter,
   clear,
   quit,
 ];

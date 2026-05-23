@@ -100,6 +100,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   // v4.9.1 amendment — REPL surfaces for memory + hooks (daemon already mapped).
   memory: 'System',
   hooks:  'System',
+  // v4.9.3 Slice 1b — boot greeter management.
+  greeter: 'System',
 
   // ── Authentication ──
   auth: 'Authentication',
