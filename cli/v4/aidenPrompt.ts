@@ -39,6 +39,7 @@ import {
   makeTheme,
   type Theme,
 } from '@inquirer/core';
+import ansiEscapes from 'ansi-escapes';
 
 import { findGhost } from './ghostMatch';
 import { getSkinEngine } from './skinEngine';
@@ -344,9 +345,22 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   let line: string;
   if (status === 'done') {
     line = `${message} ${theme.style.answer(value)}`;
+  } else if (ghost) {
+    // v4.9.2 Bug D — inline ghost confuses @inquirer/core's prompt-length
+    // math (screen-manager.js:28-32 strips rl.line.length bytes from the
+    // END of the rendered line to recover the prompt, but our ghost is
+    // there — so the cursor lands ghost.length cols past end-of-value,
+    // jumping to the next visual row on terminal-wrapped lines).
+    //
+    // Post-pending cursorBackward(ghost.length) walks the cursor back
+    // over the ghost AFTER it renders, so the visible suggestion stays
+    // inline while the cursor parks at end-of-value where the user is
+    // typing. Architecturally a hotfix; the proper save/restore refactor
+    // is deferred to v4.10 once this slice's test harness can guard it.
+    const ghostStr = dim(ghost);
+    line = `${prefix} ${message}${value}${ghostStr}${ansiEscapes.cursorBackward(ghost.length)}`;
   } else {
-    const ghostStr = ghost ? dim(ghost) : '';
-    line = `${prefix} ${message}${value}${ghostStr}`;
+    line = `${prefix} ${message}${value}`;
   }
 
   // Footer (dropdown). Returning a tuple `[line, footer]` adds the
