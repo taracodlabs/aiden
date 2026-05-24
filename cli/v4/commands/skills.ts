@@ -18,6 +18,9 @@ import { renderTable } from '../table';
 import { CandidateStore } from '../../../core/v4/skillMining/candidateStore';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import { parseSkillContent } from '../../../core/v4/skillSpec';
+// v4.9.5 Slice 1 — static import (vitest CJS resolver doesn't auto-
+// resolve `.ts` files via lazy require — same v4.9.3 Slice 1b lesson).
+import { runCuratedSetupFlow } from '../skills/curatedSetupFlow';
 
 export const skills: SlashCommand = {
   name: 'skills',
@@ -32,14 +35,33 @@ export const skills: SlashCommand = {
         return {};
       }
       const skills = await ctx.skillLoader.list();
-      // v4.8.0 Slice 3 — title + count in the top border replaces the
-      // separate `Installed skills (N):` info line. Empty state paints
-      // a framed message so layout weight matches populated tables.
+      // v4.9.5 Slice 1 — Author column added between Name and
+      // Description so attribution is visible at-a-glance. The
+      // "(uncredited)" marker fires when a community-trust skill
+      // omits the `author` frontmatter field. Builtin skills (Aiden's
+      // own bundled skills) show "(builtin)" in muted — they're
+      // self-attributed via the package LICENSE so no per-skill author
+      // is meaningful.
+      const authorFor = (s: { author?: string; trustLevel?: string }): string => {
+        if (s.author && s.author.trim().length > 0) return s.author;
+        return s.trustLevel === 'builtin' ? '(builtin)' : '(uncredited)';
+      };
       ctx.display.write(
         renderTable(
-          skills.map((s) => ({ name: s.name, description: s.description ?? '' })),
+          skills.map((s) => ({
+            name:        s.name,
+            author:      authorFor(s),
+            description: s.description ?? '',
+          })),
           [
             { key: 'name',        header: 'Name',        align: 'left', minWidth: 16 },
+            { key: 'author',      header: 'Author',      align: 'left', minWidth: 14,
+              color: (_v, row) => {
+                const a = (row as { author: string }).author;
+                if (a === '(uncredited)') return 'warn';
+                if (a === '(builtin)')    return 'muted';
+                return undefined;
+              } },
             { key: 'description', header: 'Description', align: 'left', flex: true },
           ],
           {
@@ -49,6 +71,33 @@ export const skills: SlashCommand = {
           },
         ),
       );
+      return {};
+    }
+
+    // v4.9.5 Slice 1 — /skills setup. Re-invokes the curated install
+    // flow used by the onboarding wizard. Per Phase B Q3 (cut #2):
+    // ships additive — installs missing skills, no reconciliation /
+    // update semantics (those land in v4.10's /skills update).
+    if (sub === 'setup') {
+      if (!ctx.skillsHub) {
+        ctx.display.warn('SkillsHub not wired.');
+        return {};
+      }
+      if (!ctx.confirm) {
+        ctx.display.printError('Cannot confirm in this context.');
+        return {};
+      }
+      await runCuratedSetupFlow({
+        hub:     ctx.skillsHub,
+        display: {
+          write:      (s) => ctx.display.write(s),
+          dim:        (s) => ctx.display.dim(s),
+          warn:       (s) => ctx.display.warn(s),
+          success:    (s) => ctx.display.success(s),
+          printError: (s, hint) => ctx.display.printError(s, hint),
+        },
+        confirm: (msg) => ctx.confirm!(msg),
+      });
       return {};
     }
     if (sub === 'view') {

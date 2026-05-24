@@ -51,6 +51,12 @@ import { boxBottom, boxLine, boxTopTitled } from './box';
 // the cost of broken unit tests under the test runtime.
 import { renderSuccessScreen } from './onboarding/successScreen';
 import { pickProvider } from './onboarding/providerPicker';
+// v4.9.5 Slice 1 — curated skills Step 4.
+import { runConfirm } from './confirmPrompt';
+import { runCuratedSetupFlow } from './skills/curatedSetupFlow';
+import { SkillsHub } from '../../core/v4/skillsHub';
+import { SkillSecurityScanner } from '../../core/v4/skillSecurityScanner';
+import { BundledManifest } from '../../core/v4/skillBundledManifest';
 // v4.8.0 Slice 10b — bar + chrome tokens for step headers.
 import { glyphs } from './design/tokens';
 import { fetchModels } from '../../core/v4/providers/modelFetch';
@@ -313,6 +319,14 @@ export interface SetupOptions {
   skipValidation?: boolean;
   /** Injectable validator for tests. Defaults to the real `validateProviderKey`. */
   validator?: typeof validateProviderKey;
+  /**
+   * v4.9.5 Slice 1 — skip the optional curated-skills Step 4. Tests
+   * that exercise the rest of the wizard but don't want a network
+   * call set this. Default undefined → step runs normally on real
+   * TTY boots (also auto-skipped when `prompts` is injected — see
+   * Step 4 site).
+   */
+  skipCuratedStep?: boolean;
 }
 
 /**
@@ -1231,7 +1245,50 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     await upsertEnvVar(paths.envFile, 'CUSTOM_BASE_URL', baseUrl);
   }
 
-  // Step 6: success — wizard drops straight into the REPL via the
+  // ── Step 4 (v4.9.5 Slice 1): optional curated skills ─────────────
+  // Hand-picked from the open-source ecosystem with full author
+  // attribution. Skippable (Enter alone = N), re-askable via
+  // /skills setup. The two-stage confirm (this stage 1 ask →
+  // manifest preview → stage 2 install confirm) lives in
+  // cli/v4/skills/curatedSetupFlow.ts and is shared with the slash
+  // command path.
+  //
+  // Test-harness gate: stubbed-prompts callers (unit tests) skip
+  // this step — the curated path needs the live confirm primitive
+  // and real fetch, neither of which the legacy prompts shim
+  // provides. The .test.ts for curated coverage drives the flow
+  // directly via runCuratedSetupFlow.
+  if (!opts.prompts && !opts.skipCuratedStep) {
+    try {
+      display.write(stepHeader(4));
+      display.write('  Optional: install curated skills?\n');
+      display.write(
+        `  ${kleur.dim('(Hand-picked from the open-source ecosystem with full author attribution.)')}\n\n`,
+      );
+
+      // Stage 1: opt-in confirm — uses v4.9.2 Slice 3 confirm primitive.
+      const proceedStage1 = await runConfirm(
+        'Install curated skills?',
+        { readLine: (msg) => prompts.input(msg) },
+        display,
+      );
+      if (proceedStage1) {
+        // Stage 2: fetch + preview + install via shared flow.
+        const hub = new SkillsHub(paths, new SkillSecurityScanner(), new BundledManifest(paths));
+        await runCuratedSetupFlow({
+          hub,
+          display,
+          confirm: (msg) => runConfirm(msg, { readLine: (m) => prompts.input(m) }, display),
+        });
+      }
+    } catch (err) {
+      // Curated install never crashes the wizard — surface the error
+      // as a warn and continue to the success screen.
+      display.warn(`Curated install skipped due to error: ${(err as Error).message}`);
+    }
+  }
+
+  // Step 5: success — wizard drops straight into the REPL via the
   // outer boot path. No "Try: aiden" advice needed; the user is
   // already on their way to chat.
   display.write(

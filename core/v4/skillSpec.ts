@@ -53,6 +53,35 @@ export interface SkillFrontmatter {
   category?: string;
   tags?: string[] | string;
   license?: string;
+  /**
+   * v4.9.5 Slice 1 — original author attribution.
+   *
+   * REQUIRED for skills installed from the taracod-curated 'official'
+   * source — strict-mode `validateAttribution` rejects install when
+   * missing, so a curated-repo bug surfaces at install time, not at
+   * `/skills list` render time.
+   *
+   * OPTIONAL for community sources (`github` / `url` / `well-known`).
+   * The `/skills list` view renders an "(uncredited)" marker in warn
+   * color when missing on a community-trust skill — asymmetric on
+   * purpose: curated skills MUST be credited; community skills MAY
+   * not be (and the user accepted that risk by side-loading).
+   *
+   * Single string for v4.9.5 (matches `license` precedent). v4.10+
+   * may extend to structured `{ name; url? }` via parser polymorphism.
+   */
+  author?: string;
+  /**
+   * v4.9.5 Slice 1 — upstream repo URL the curated snapshot was taken
+   * from. Distinct from `_source` (which is the install-time registry
+   * pointer like `official:pdf-extractor`); `upstream_source` points
+   * at the ORIGINAL author's repo so attribution is durable.
+   *
+   * REQUIRED for `official:` source (curated skills); OPTIONAL for
+   * community sources (a community install of an author's own repo
+   * is its own upstream).
+   */
+  upstream_source?: string;
   platforms?: Platform[];
   /**
    * Phase 23.1 (Bug B mechanical fix): tools the runtime must observe
@@ -158,4 +187,47 @@ export function serializeSkill(parsed: ParsedSkill): string {
 /** Best-effort sniff: is this content a SKILL.md? */
 export function looksLikeSkill(content: string): boolean {
   return /^---[\r\n][\s\S]*?[\r\n]---/.test(content.replace(/^﻿/, ''));
+}
+
+// ── v4.9.5 Slice 1 — attribution invariant ─────────────────────────────
+
+/**
+ * Fields the attribution validator may report missing. Closed union
+ * so callers can switch over the result without `string` branches.
+ */
+export type AttributionField = 'author' | 'license' | 'upstream_source';
+
+export interface ValidateAttributionResult {
+  ok:      boolean;
+  missing: readonly AttributionField[];
+  mode:    'strict' | 'permissive';
+}
+
+/**
+ * v4.9.5 Slice 1 — attribution invariant for curated skills.
+ *
+ * `mode: 'strict'` (called by SkillsHub.install for `official` source):
+ *   missing fields = caller MUST abort install. `author`, `license`,
+ *   and `upstream_source` are all required.
+ *
+ * `mode: 'permissive'` (called by /skills list for community-trust
+ *   skills): the result drives the "(uncredited)" marker; install is
+ *   never blocked. `upstream_source` is NOT required in permissive
+ *   mode because a community install of an author's own repo IS its
+ *   own upstream.
+ *
+ * Pure — no IO, no clock, no module-level state. Identical input ⇒
+ * identical output.
+ */
+export function validateAttribution(
+  fm:   SkillFrontmatter,
+  mode: 'strict' | 'permissive',
+): ValidateAttributionResult {
+  const missing: AttributionField[] = [];
+  if (!fm.author  || fm.author.trim()  === '') missing.push('author');
+  if (!fm.license || fm.license.trim() === '') missing.push('license');
+  if (mode === 'strict' && (!fm.upstream_source || fm.upstream_source.trim() === '')) {
+    missing.push('upstream_source');
+  }
+  return { ok: missing.length === 0, missing, mode };
 }

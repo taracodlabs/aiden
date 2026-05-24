@@ -51,6 +51,10 @@ export interface SkillSummary {
   trustLevel?: string;
   userModified?: boolean;
   filePath: string;
+  // v4.9.5 Slice 1 — surface attribution so /skills list can render
+  // it (and the "(uncredited)" warn-marker for community skills
+  // without an `author` field).
+  author?: string;
 }
 
 export interface SkillLoaderOptions {
@@ -147,6 +151,7 @@ export class SkillLoader {
       trustLevel: s.frontmatter._trustLevel,
       userModified: undefined, // SkillLoader doesn't know; BundledManifest does.
       filePath: s.filePath,
+      author: s.frontmatter.author,
     }));
   }
 
