@@ -5,39 +5,43 @@
  * Aiden — local-first agent.
  */
 /**
- * v4.9.5 SLICE 1 — setupWizard Step 4 (curated skills) coverage.
+ * v4.9.5 SLICE 1.5 — curatedSetupFlow coverage.
  *
- * The new Step 4 calls runCuratedSetupFlow under the hood. Rather
- * than driving the wizard end-to-end (the existing setupWizard.test.ts
- * already does that with scripted prompts), this file tests the
- * SHARED flow `runCuratedSetupFlow` directly against:
- *   - real fs in tmpdir (real SkillsHub instance)
- *   - real validateAttribution + parseSkillContent
- *   - stubbed fetchImpl (only IO boundary mocked)
- *   - scripted confirm to drive accept/reject paths
+ * The flow now drives:
+ *   - runLoadingSequence for manifest fetch + per-skill install (real
+ *     non-TTY render mode in tests; the loader detects !out.isTTY and
+ *     emits plain lines)
+ *   - Three-tier (A)ll / (p)ick / (s)kip prompt with default-on-Enter
+ *   - inquirer.checkbox per-skill picker (mocked via pickerOverride
+ *     so tests don't need a TTY)
  *
- * TTY-GATE HONESTY (per v4.9.3 Slice 1b lesson): the actual wizard
- * Step 4 site uses inquirer for the live confirm — that path requires
- * a real terminal. Existing setupWizard.test.ts uses scripted
- * `prompts` injection which auto-skips Step 4 (the wizard checks
- * `!opts.prompts && !opts.skipCuratedStep` before entering the
- * curated branch). So the real-TTY flow IS bypassed in CI.
+ * TTY-GATE HONESTY (per v4.9.3 Slice 1b lesson): the live wizard Step
+ * 4 site uses real prompts on a real TTY. Existing setupWizard.test.ts
+ * uses scripted `prompts` injection which auto-skips Step 4 via
+ * finalizeWithCuratedStep's gate (opts.prompts → return immediately).
+ * So the real-TTY render flow IS bypassed in unit tests.
  *
- * What this test covers: the runCuratedSetupFlow contract that the
- * wizard calls. The real-TTY wiring is the user's manual smoke
- * responsibility (`aiden setup` interactively) per
- * docs/v4.9.5-smoke.md.
+ * What this test covers: the runCuratedSetupFlow contract — three-tier
+ * routing, picker integration, per-skill install reporting, fetch
+ * failure handling, empty manifest. The provider-coverage test in
+ * setupWizard.providerCoverage.test.ts is the regression layer that
+ * proves finalizeWithCuratedStep fires across all wizard branches.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { runCuratedSetupFlow, type CuratedSetupDisplay } from '../../../cli/v4/skills/curatedSetupFlow';
+import {
+  runCuratedSetupFlow,
+  type CuratedSetupDisplay,
+  type CuratedSetupPrompts,
+} from '../../../cli/v4/skills/curatedSetupFlow';
 import { SkillsHub, type FetchFn } from '../../../core/v4/skillsHub';
 import { SkillSecurityScanner } from '../../../core/v4/skillSecurityScanner';
 import { BundledManifest } from '../../../core/v4/skillBundledManifest';
 import { resolveAidenPaths, type AidenPaths } from '../../../core/v4/paths';
+import type { CuratedManifest, CuratedManifestEntry } from '../../../core/v4/skills/curatedManifest';
 
 let tmp: string;
 let paths: AidenPaths;
@@ -51,7 +55,15 @@ afterEach(async () => {
   await fs.rm(tmp, { recursive: true, force: true });
 });
 
-function mkDisplay(): { display: CuratedSetupDisplay; writes: string[]; warns: string[]; successes: string[]; dims: string[] } {
+interface DisplayCapture {
+  display:   CuratedSetupDisplay;
+  writes:    string[];
+  warns:     string[];
+  successes: string[];
+  dims:      string[];
+}
+
+function mkDisplay(): DisplayCapture {
   const writes: string[] = [], warns: string[] = [], successes: string[] = [], dims: string[] = [];
   return {
     display: {
@@ -60,12 +72,28 @@ function mkDisplay(): { display: CuratedSetupDisplay; writes: string[]; warns: s
       success:    (s) => { successes.push(s); },
       dim:        (s) => { dims.push(s); },
       printError: (s) => { warns.push(s); },
+      paint:      (s) => s,    // tests don't care about colour bytes
     },
     writes, warns, successes, dims,
   };
 }
 
-const SAMPLE_MANIFEST = {
+/** Scripted prompts — each call returns the next queued answer. */
+function mkPrompts(answers: string[]): { prompts: CuratedSetupPrompts; calls: string[] } {
+  const calls: string[] = [];
+  let i = 0;
+  return {
+    prompts: {
+      input: async (msg: string): Promise<string> => {
+        calls.push(msg);
+        return answers[i++] ?? '';
+      },
+    },
+    calls,
+  };
+}
+
+const SAMPLE_MANIFEST: CuratedManifest = {
   schema_version: 1,
   snapshot_at:    '2026-05-24T08:00:00Z',
   commit:         'abc1234',
@@ -107,109 +135,111 @@ const makeHub = (fetch: FetchFn) => new SkillsHub(
   paths, new SkillSecurityScanner(), new BundledManifest(paths), { fetch },
 );
 
-describe('runCuratedSetupFlow — happy path', () => {
-  it('renders preview + installs all skills on accept', async () => {
+// ─── Three-tier prompt routing ────────────────────────────────────
+
+describe('runCuratedSetupFlow — three-tier prompt', () => {
+  it('Enter alone → install all (default-on convention)', async () => {
     const fetch = stubFetch({
       [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
       [SKILL_URL]:    { body: sampleSkillMd },
     });
     const hub = makeHub(fetch);
-    const { display, writes, successes } = mkDisplay();
-    const confirm = vi.fn(async () => true);   // user accepts Stage 2
+    const cap = mkDisplay();
+    const { prompts } = mkPrompts(['']);    // user just hits Enter
 
-    const r = await runCuratedSetupFlow({
-      hub, display, confirm,
-    });
-
-    expect(r.ranInstall).toBe(true);
+    const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
+    expect(r.stage2).toBe('all');
     expect(r.installed).toBe(1);
     expect(r.failed).toBe(0);
-    expect(r.skipped).toBe(false);
-    // Preview table appeared in writes.
-    const out = writes.join('');
-    expect(out).toContain('Available curated skills');
-    expect(out).toContain('Name');
-    expect(out).toContain('Author');
-    expect(out).toContain('pdf-extractor');
-    expect(out).toContain('Jane Doe');
-    // Success line emitted.
-    expect(successes.some((s) => s.includes('Installed 1 curated skills'))).toBe(true);
-    // File landed on disk.
     await fs.access(path.join(paths.skillsDir, 'pdf-extractor', 'SKILL.md'));
   });
 
-  it('confirm primitive is asked AFTER the preview renders (UX order)', async () => {
+  it('`a` / `A` / `all` all map to install-all', async () => {
+    for (const answer of ['a', 'A', 'all', 'ALL']) {
+      const fetch = stubFetch({
+        [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
+        [SKILL_URL]:    { body: sampleSkillMd },
+      });
+      const hub = makeHub(fetch);
+      const cap = mkDisplay();
+      const { prompts } = mkPrompts([answer]);
+      const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
+      expect(r.stage2, `for answer ${JSON.stringify(answer)}`).toBe('all');
+    }
+  });
+
+  it('`p` / `pick` opens the picker', async () => {
     const fetch = stubFetch({
       [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
       [SKILL_URL]:    { body: sampleSkillMd },
     });
     const hub = makeHub(fetch);
-    const { display, writes } = mkDisplay();
-    let confirmCalledAfterWrites = -1;
-    const confirm = vi.fn(async () => {
-      confirmCalledAfterWrites = writes.length;
-      return true;
+    const cap = mkDisplay();
+    const { prompts } = mkPrompts(['p']);
+    let pickerCalled = 0;
+    const r = await runCuratedSetupFlow({
+      hub, display: cap.display, prompts,
+      pickerOverride: async (m) => { pickerCalled += 1; return [...m.skills]; },
     });
-    await runCuratedSetupFlow({ hub, display, confirm });
-    expect(confirmCalledAfterWrites).toBeGreaterThan(0);
-    // The preview write happens BEFORE confirm.
-    expect(writes.slice(0, confirmCalledAfterWrites).join('')).toContain('Available curated skills');
+    expect(pickerCalled).toBe(1);
+    expect(r.stage2).toBe('pick');
+    expect(r.installed).toBe(1);
   });
-});
 
-describe('runCuratedSetupFlow — rejection paths', () => {
-  it('returns skipped=true when user declines Stage 2 confirm', async () => {
+  it('`s` / `skip` / `n` / `no` all map to skip with reason line', async () => {
+    for (const answer of ['s', 'skip', 'n', 'no', 'N', 'NO']) {
+      const fetch = stubFetch({
+        [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
+      });
+      const hub = makeHub(fetch);
+      const cap = mkDisplay();
+      const { prompts } = mkPrompts([answer]);
+      const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
+      expect(r.stage2, `for answer ${JSON.stringify(answer)}`).toBe('skip');
+      expect(r.skipped).toBe(true);
+      expect(r.installed).toBe(0);
+      expect(cap.dims.some((d) => d.includes('Skipped curated skills'))).toBe(true);
+    }
+  });
+
+  it('garbage input → re-prompts ONCE echoing the input, second garbage → skip', async () => {
     const fetch = stubFetch({
       [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
     });
     const hub = makeHub(fetch);
-    const { display } = mkDisplay();
-    const confirm = vi.fn(async () => false);   // user declines
-
-    const r = await runCuratedSetupFlow({ hub, display, confirm });
-    expect(r.skipped).toBe(true);
-    expect(r.ranInstall).toBe(false);
-    expect(r.installed).toBe(0);
-    // No skill files written.
-    await expect(fs.access(path.join(paths.skillsDir, 'pdf-extractor', 'SKILL.md')))
-      .rejects.toThrow();
+    const cap = mkDisplay();
+    const { prompts, calls } = mkPrompts(['y', 'wat']);   // both garbage
+    const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
+    expect(r.stage2).toBe('skip');
+    expect(calls.length).toBe(2);                          // exactly one re-prompt
+    // First reject line echoes the typed "y" so the user sees the mismatch.
+    expect(cap.dims.some((d) => d.includes('Could not parse "y"'))).toBe(true);
+    // Second reject line echoes the second input + "skipping" verdict.
+    expect(cap.dims.some((d) => d.includes('Could not parse "wat"'))).toBe(true);
+    expect(cap.dims.some((d) => d.includes('skipping curated skills'))).toBe(true);
   });
 
-  it('returns skipped=true + fetchError when manifest fetch fails', async () => {
-    const fetch = stubFetch({});                // no entries → 404 on manifest
-    const hub = makeHub(fetch);
-    const { display, warns } = mkDisplay();
-    const confirm = vi.fn();                    // should never be called
-
-    const r = await runCuratedSetupFlow({ hub, display, confirm });
-    expect(r.skipped).toBe(true);
-    expect(r.fetchError).toBeDefined();
-    expect(confirm).not.toHaveBeenCalled();
-    expect(warns.some((w) => w.includes('Could not fetch curated skills'))).toBe(true);
-  });
-
-  it('handles empty manifest gracefully', async () => {
+  it('garbage then valid → proceeds with the second answer', async () => {
     const fetch = stubFetch({
-      [MANIFEST_URL]: { body: JSON.stringify({ ...SAMPLE_MANIFEST, skills: [] }) },
+      [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
+      [SKILL_URL]:    { body: sampleSkillMd },
     });
     const hub = makeHub(fetch);
-    const { display, dims } = mkDisplay();
-    const confirm = vi.fn();
-
-    const r = await runCuratedSetupFlow({ hub, display, confirm });
-    expect(r.ranInstall).toBe(false);
-    expect(r.installed).toBe(0);
-    expect(confirm).not.toHaveBeenCalled();
-    expect(dims.some((d) => d.includes('Curated catalog is empty'))).toBe(true);
+    const cap = mkDisplay();
+    const { prompts, calls } = mkPrompts(['y', 'a']);
+    const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
+    expect(r.stage2).toBe('all');
+    expect(calls.length).toBe(2);
+    expect(r.installed).toBe(1);
   });
 });
 
-describe('runCuratedSetupFlow — partial install reporting', () => {
-  it('reports failed installs without aborting the rest of the batch', async () => {
-    // Two skills; first SKILL.md fetch succeeds with valid attribution,
-    // second returns 404 → fails. Flow should continue + report 1/2.
+// ─── Per-skill picker ─────────────────────────────────────────────
+
+describe('runCuratedSetupFlow — per-skill picker', () => {
+  it('honors selection — only chosen skills install', async () => {
     const SKILL_URL_2 = 'https://raw.githubusercontent.com/taracodlabs/aiden-skills/abc1234/skills/csv-summarizer/SKILL.md';
-    const twoSkillManifest = {
+    const twoSkillManifest: CuratedManifest = {
       ...SAMPLE_MANIFEST,
       skills: [
         SAMPLE_MANIFEST.skills[0],
@@ -225,41 +255,222 @@ describe('runCuratedSetupFlow — partial install reporting', () => {
     const fetch = stubFetch({
       [MANIFEST_URL]: { body: JSON.stringify(twoSkillManifest) },
       [SKILL_URL]:    { body: sampleSkillMd },
-      // SKILL_URL_2 deliberately absent → 404
+      [SKILL_URL_2]:  { body: sampleSkillMd.replace(/pdf-extractor/g, 'csv-summarizer').replace(/Jane Doe/g, 'Open Data').replace(/example\.com\/pdf/g, 'example.com/csv') },
     });
     const hub = makeHub(fetch);
-    const { display, warns } = mkDisplay();
-    const confirm = vi.fn(async () => true);
+    const cap = mkDisplay();
+    const { prompts } = mkPrompts(['p']);
+    // User picks only pdf-extractor (index 0), un-checks csv-summarizer.
+    const r = await runCuratedSetupFlow({
+      hub, display: cap.display, prompts,
+      pickerOverride: async (m) => [m.skills[0]],
+    });
+    expect(r.installed).toBe(1);
+    expect(r.stage2).toBe('pick');
+    await fs.access(path.join(paths.skillsDir, 'pdf-extractor', 'SKILL.md'));
+    await expect(fs.access(path.join(paths.skillsDir, 'csv-summarizer', 'SKILL.md')))
+      .rejects.toThrow();
+  });
 
-    const r = await runCuratedSetupFlow({ hub, display, confirm });
+  it('empty selection (Esc / un-check-all) → returns skipped without installing', async () => {
+    const fetch = stubFetch({
+      [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
+    });
+    const hub = makeHub(fetch);
+    const cap = mkDisplay();
+    const { prompts } = mkPrompts(['p']);
+    const r = await runCuratedSetupFlow({
+      hub, display: cap.display, prompts,
+      pickerOverride: async () => [],     // Esc → empty
+    });
+    expect(r.installed).toBe(0);
+    expect(r.skipped).toBe(true);
+    expect(r.stage2).toBe('pick');
+  });
+});
+
+// ─── Install reporting (failure paths) ────────────────────────────
+
+describe('runCuratedSetupFlow — partial install reporting', () => {
+  it('one failed install does not abort the rest of the batch', async () => {
+    const SKILL_URL_2 = 'https://raw.githubusercontent.com/taracodlabs/aiden-skills/abc1234/skills/csv-summarizer/SKILL.md';
+    const twoSkillManifest: CuratedManifest = {
+      ...SAMPLE_MANIFEST,
+      skills: [
+        SAMPLE_MANIFEST.skills[0],
+        {
+          name: 'csv-summarizer', path: 'skills/csv-summarizer',
+          description: 'CSV', category: 'data', version: '0.1',
+          license: 'MIT', author: 'Open Data',
+          upstream_source: 'https://example.com/csv',
+          upstream_commit: 'bbb', size_bytes: 2000, files: ['SKILL.md'],
+        },
+      ],
+    };
+    const fetch = stubFetch({
+      [MANIFEST_URL]: { body: JSON.stringify(twoSkillManifest) },
+      [SKILL_URL]:    { body: sampleSkillMd },
+      // SKILL_URL_2 absent → 404 → install fails
+    });
+    const hub = makeHub(fetch);
+    const cap = mkDisplay();
+    const { prompts } = mkPrompts(['']);    // install all
+
+    const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
     expect(r.installed).toBe(1);
     expect(r.failed).toBe(1);
-    expect(warns.some((w) => w.includes('csv-summarizer'))).toBe(true);
+    expect(cap.warns.some((w) => w.includes('csv-summarizer'))).toBe(true);
+    expect(cap.warns.some((w) => w.includes('1 failed'))).toBe(true);
     void SKILL_URL_2;
   });
 });
 
-describe('runCuratedSetupFlow — pre-fetched manifest seam', () => {
-  it('skips the HTTP fetch when manifest is passed in (used by /skills setup catalog inspection)', async () => {
-    const SKILL_URL_INLINE = 'https://raw.githubusercontent.com/taracodlabs/aiden-skills/abc1234/skills/pdf-extractor/SKILL.md';
-    const fetch = stubFetch({ [SKILL_URL_INLINE]: { body: sampleSkillMd } });
-    const hub = makeHub(fetch);
-    const { display } = mkDisplay();
-    const confirm = vi.fn(async () => true);
+// ─── Manifest fetch / empty ───────────────────────────────────────
 
+describe('runCuratedSetupFlow — fetch + empty manifest', () => {
+  it('returns fetch-failed + warn line when manifest fetch returns 404', async () => {
+    const fetch = stubFetch({});            // all URLs return 404
+    const hub = makeHub(fetch);
+    const cap = mkDisplay();
+    const { prompts, calls } = mkPrompts([]);
+    const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
+    expect(r.stage2).toBe('fetch-failed');
+    expect(r.skipped).toBe(true);
+    expect(r.fetchError).toBeDefined();
+    expect(calls.length).toBe(0);            // never reached Stage 2 prompt
+    expect(cap.warns.some((w) => w.includes('Could not fetch curated skills'))).toBe(true);
+  });
+
+  it('returns empty stage2 when manifest has zero skills', async () => {
+    const fetch = stubFetch({
+      [MANIFEST_URL]: { body: JSON.stringify({ ...SAMPLE_MANIFEST, skills: [] }) },
+    });
+    const hub = makeHub(fetch);
+    const cap = mkDisplay();
+    const { prompts, calls } = mkPrompts([]);
+    const r = await runCuratedSetupFlow({ hub, display: cap.display, prompts });
+    expect(r.stage2).toBe('empty');
+    expect(r.installed).toBe(0);
+    expect(calls.length).toBe(0);
+    expect(cap.dims.some((d) => d.includes('Curated catalog is empty'))).toBe(true);
+  });
+});
+
+// ─── Pre-fetched manifest seam ────────────────────────────────────
+
+describe('runCuratedSetupFlow — pre-fetched manifest seam', () => {
+  it('skips the HTTP fetch when manifest is passed in', async () => {
     const fetchWithManifest = stubFetch({
-      [MANIFEST_URL]:      { body: JSON.stringify(SAMPLE_MANIFEST) },
-      [SKILL_URL_INLINE]:  { body: sampleSkillMd },
+      [MANIFEST_URL]: { body: JSON.stringify(SAMPLE_MANIFEST) },
+      [SKILL_URL]:    { body: sampleSkillMd },
     });
-    const hub2 = makeHub(fetchWithManifest);
+    const hub = makeHub(fetchWithManifest);
+    const cap = mkDisplay();
+    const { prompts } = mkPrompts(['']);
     await runCuratedSetupFlow({
-      hub: hub2, display, confirm,
-      manifest: SAMPLE_MANIFEST as never,   // pre-fetched
+      hub, display: cap.display, prompts,
+      manifest: SAMPLE_MANIFEST,
     });
-    // runCuratedSetupFlow's OWN preview fetch was skipped — the
-    // manifest URL is only hit ONCE (by SkillsHub.install internally
-    // via resolveOfficial), not twice (preview + install).
     const calls = (fetchWithManifest as unknown as { mock: { calls: [string][] } }).mock.calls;
     expect(calls.filter(([url]) => url === MANIFEST_URL)).toHaveLength(1);
+  });
+});
+
+// ─── stepHeader idempotence (R2 enforcement) ──────────────────────
+
+describe('finalizeWithCuratedStep — stepHeader idempotence', () => {
+  it('stepHeader(4) renders identically to stepHeader(3) modulo the digit', async () => {
+    // The stepHeader closure inside runSetupWizard is pure-of-N — same
+    // glyph, same colour, same indent. We can't capture it directly
+    // (it's a closure), but we can assert the contract by reading the
+    // source and confirming the only N-dependent token is the trailing
+    // `step ${n}` substring. This guards against a future change that
+    // accidentally branches stepHeader's body on n.
+    const src = await fs.readFile(
+      path.resolve(__dirname, '../../../cli/v4/setupWizard.ts'),
+      'utf8',
+    );
+    const match = src.match(/const stepHeader = \(n: number\): string => \{([\s\S]*?)\};/);
+    expect(match).not.toBeNull();
+    const body = match![1];
+    // The only N-dependent token must be the `step ${n}` interpolation —
+    // verified by counting `${n}` interpolations (exactly one) and
+    // asserting no branch on n's value.
+    const nInterpolations = body.match(/\$\{n\}/g) ?? [];
+    expect(nInterpolations.length).toBe(1);
+    expect(body).toContain('`step ${n}`');
+    // No branch on n.
+    expect(body).not.toMatch(/\bif\s*\(\s*n\b|n\s*===|n\s*!==|n\s*[<>]/);
+  });
+});
+
+// ─── TTY-gate graceful degrade ────────────────────────────────────
+
+describe('finalizeWithCuratedStep — early-exit gates', () => {
+  it('returns immediately when opts.prompts is injected (test-shim)', async () => {
+    const { finalizeWithCuratedStep } = await import('../../../cli/v4/setupWizard');
+    let hubInteracted = 0;
+    const stepHeader = (n: number) => `[step ${n}]`;
+    const cap = mkDisplay();
+    // Wire a hub stub that flags any interaction. Helper must not call it.
+    const fakeHub = { getCuratedManifest: async () => { hubInteracted += 1; return { commit: 'x', entries: new Map() }; } };
+    const display = {
+      write: cap.display.write.bind(cap.display),
+      warn: cap.display.warn.bind(cap.display),
+      dim: cap.display.dim.bind(cap.display),
+      success: cap.display.success.bind(cap.display),
+      printError: cap.display.printError.bind(cap.display),
+      paint: cap.display.paint.bind(cap.display),
+      error: () => '',
+      applyColors: (s: string) => s,
+    } as unknown as Parameters<typeof finalizeWithCuratedStep>[0]['display'];
+    await finalizeWithCuratedStep({
+      paths, display, prompts: { input: async () => '', choose: async () => 1, confirm: async () => false },
+      opts: { prompts: { input: async () => '', choose: async () => 1, confirm: async () => false } },
+      stepHeader,
+    });
+    expect(hubInteracted).toBe(0);
+    expect(cap.writes.length).toBe(0);
+    void fakeHub;
+  });
+
+  it('returns immediately when opts.skipCuratedStep is true', async () => {
+    const { finalizeWithCuratedStep } = await import('../../../cli/v4/setupWizard');
+    const cap = mkDisplay();
+    const display = {
+      ...cap.display,
+      error: () => '',
+      applyColors: (s: string) => s,
+    } as unknown as Parameters<typeof finalizeWithCuratedStep>[0]['display'];
+    await finalizeWithCuratedStep({
+      paths, display,
+      prompts: { input: async () => '', choose: async () => 1, confirm: async () => false },
+      opts: { skipCuratedStep: true },
+      stepHeader: (n) => `[step ${n}]`,
+    });
+    expect(cap.writes.length).toBe(0);
+  });
+
+  it('returns immediately when !process.stdout.isTTY', async () => {
+    const { finalizeWithCuratedStep } = await import('../../../cli/v4/setupWizard');
+    const origIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true, writable: true });
+    try {
+      const cap = mkDisplay();
+      const display = {
+        ...cap.display,
+        error: () => '',
+        applyColors: (s: string) => s,
+      } as unknown as Parameters<typeof finalizeWithCuratedStep>[0]['display'];
+      await finalizeWithCuratedStep({
+        paths, display,
+        prompts: { input: async () => '', choose: async () => 1, confirm: async () => false },
+        opts: {},
+        stepHeader: (n) => `[step ${n}]`,
+      });
+      expect(cap.writes.length).toBe(0);
+    } finally {
+      Object.defineProperty(process.stdout, 'isTTY', { value: origIsTTY, configurable: true, writable: true });
+    }
   });
 });

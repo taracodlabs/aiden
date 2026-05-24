@@ -82,7 +82,10 @@ function stubFetch(extra: Record<string, { ok?: boolean; status?: number; body: 
 function mkCtx(over: {
   args?:    string[];
   hub?:     SkillsHub;
-  confirm?: (msg: string) => Promise<boolean>;
+  /** v4.9.5 Slice 1.5 — flow now drives via prompt (raw text input)
+   *  instead of confirm (boolean). Default `'' (Enter alone)` triggers
+   *  the install-all path. */
+  prompt?:  (msg: string) => Promise<string>;
   loader?:  SkillLoader;
 }): SlashCommandContext & { _writes: string[]; _warns: string[]; _successes: string[]; _errors: string[] } {
   const writes:    string[] = [];
@@ -95,7 +98,7 @@ function mkCtx(over: {
     paths,
     skillsHub:   over.hub,
     skillLoader: over.loader,
-    confirm:     over.confirm,
+    prompt:      over.prompt,
     display: {
       write:      (s: string) => { writes.push(s); },
       dim:        (s: string) => { writes.push(s); },
@@ -104,6 +107,9 @@ function mkCtx(over: {
       info:       (s: string) => { writes.push(s); },
       printError: (s: string) => { errors.push(s); },
       startSpinner: () => ({ stop: () => {} }),
+      // v4.9.5 Slice 1.5 — three-tier prompt needs `paint` for the
+      // warn-tinted `?` glyph. Tests don't care about colour bytes.
+      paint:      (s: string) => s,
     } as unknown as SlashCommandContext['display'],
     registry: {} as unknown as SlashCommandContext['registry'],
     _writes: writes, _warns: warns, _successes: successes, _errors: errors,
@@ -114,22 +120,24 @@ function mkCtx(over: {
 // ── /skills setup ────────────────────────────────────────────────────
 
 describe('/skills setup', () => {
-  it('installs curated skills on user accept', async () => {
+  it('installs curated skills on user accept (Enter = install all)', async () => {
     const fetch = stubFetch({ [SKILL_URL]: { body: sampleSkillMd } });
     const hub = new SkillsHub(paths, new SkillSecurityScanner(), new BundledManifest(paths), { fetch });
-    const ctx = mkCtx({ args: ['setup'], hub, confirm: vi.fn(async () => true) });
+    // v4.9.5 Slice 1.5: Stage 2 prompt is (A)ll/(p)ick/(s)kip — Enter
+    // alone is the default install-all path.
+    const ctx = mkCtx({ args: ['setup'], hub, prompt: vi.fn(async () => '') });
 
     await skillsCmd.handler(ctx as never);
 
-    expect(ctx._successes.some((s) => s.includes('Installed 1 curated skills'))).toBe(true);
+    expect(ctx._successes.some((s) => s.includes('Installed 1 of 1 curated skills'))).toBe(true);
     // File on disk.
     await fs.access(path.join(paths.skillsDir, 'pdf-extractor', 'SKILL.md'));
   });
 
-  it('declines cleanly when user rejects Stage 2 confirm', async () => {
+  it('declines cleanly when user types `s` at Stage 2 (skip path)', async () => {
     const fetch = stubFetch({});
     const hub = new SkillsHub(paths, new SkillSecurityScanner(), new BundledManifest(paths), { fetch });
-    const ctx = mkCtx({ args: ['setup'], hub, confirm: vi.fn(async () => false) });
+    const ctx = mkCtx({ args: ['setup'], hub, prompt: vi.fn(async () => 's') });
 
     await skillsCmd.handler(ctx as never);
 
@@ -140,17 +148,17 @@ describe('/skills setup', () => {
   });
 
   it('refuses to proceed when SkillsHub is not wired', async () => {
-    const ctx = mkCtx({ args: ['setup'], confirm: vi.fn(async () => true) });
+    const ctx = mkCtx({ args: ['setup'], prompt: vi.fn(async () => '') });
     await skillsCmd.handler(ctx as never);
     expect(ctx._warns.some((w) => w.includes('SkillsHub not wired'))).toBe(true);
   });
 
-  it('refuses to proceed when confirm primitive is not wired', async () => {
+  it('refuses to proceed when prompt primitive is not wired', async () => {
     const fetch = stubFetch({});
     const hub = new SkillsHub(paths, new SkillSecurityScanner(), new BundledManifest(paths), { fetch });
-    const ctx = mkCtx({ args: ['setup'], hub });   // no confirm
+    const ctx = mkCtx({ args: ['setup'], hub });   // no prompt
     await skillsCmd.handler(ctx as never);
-    expect(ctx._errors.some((e) => e.includes('Cannot confirm'))).toBe(true);
+    expect(ctx._errors.some((e) => e.includes('Cannot prompt'))).toBe(true);
   });
 
   it('surfaces manifest fetch failure as a warn (does not crash)', async () => {
@@ -159,7 +167,7 @@ describe('/skills setup', () => {
       ok: false, status: 404, async text() { return ''; },
     }));
     const hub = new SkillsHub(paths, new SkillSecurityScanner(), new BundledManifest(paths), { fetch });
-    const ctx = mkCtx({ args: ['setup'], hub, confirm: vi.fn(async () => true) });
+    const ctx = mkCtx({ args: ['setup'], hub, prompt: vi.fn(async () => '') });
 
     await skillsCmd.handler(ctx as never);
 

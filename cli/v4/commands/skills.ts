@@ -83,8 +83,13 @@ export const skills: SlashCommand = {
         ctx.display.warn('SkillsHub not wired.');
         return {};
       }
-      if (!ctx.confirm) {
-        ctx.display.printError('Cannot confirm in this context.');
+      // v4.9.5 Slice 1.5 — the flow now drives its own three-tier
+      // prompt + checkbox picker via ctx.prompt (raw text input),
+      // not ctx.confirm. The chat-session promptApi exposes
+      // readLine via ctx.prompt; we adapt it to the input(msg)
+      // shape CuratedSetupPrompts expects.
+      if (!ctx.prompt) {
+        ctx.display.printError('Cannot prompt in this context.');
         return {};
       }
       await runCuratedSetupFlow({
@@ -95,8 +100,11 @@ export const skills: SlashCommand = {
           warn:       (s) => ctx.display.warn(s),
           success:    (s) => ctx.display.success(s),
           printError: (s, hint) => ctx.display.printError(s, hint),
+          paint:      (s, kind) => ctx.display.paint(s, kind),
         },
-        confirm: (msg) => ctx.confirm!(msg),
+        prompts: {
+          input: (msg) => ctx.prompt!(msg),
+        },
       });
       return {};
     }
