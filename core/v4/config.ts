@@ -80,10 +80,20 @@ export const DEFAULT_CONFIG: AidenConfig = {
   },
   display: {
     skin: 'default',
-    // Phase 16c: opt-in for v4.0 launch. /streaming on flips this; the
-    // chat REPL reads `display.streaming` per turn so the toggle takes
-    // effect immediately without a session restart.
-    streaming: false,
+    // v4.10 Slice 10.9 — flipped from `false` (Phase 16c opt-in default
+    // since v4.0) to `true`. The Slice 10.9 Phase A audit caught that
+    // EVERY wizard install since v4.0 baked `streaming: false` into the
+    // written config.yaml via the wizard's `...DEFAULT_CONFIG` spread.
+    // chatSession.ts already had `true` as its runtime fallback when
+    // the key was absent — but the wizard never let that fallback fire
+    // for fresh installs. Users reported "feels slow" because they
+    // were waiting for full provider responses with no visible
+    // feedback. Fresh wizard installs now opt INTO streaming by
+    // default; existing users with explicit `streaming: false` in their
+    // config keep their setting (and see a one-time per-session
+    // disclosure from chatSession.ts — see runAgentTurn's
+    // streaming-warning logic).
+    streaming: true,
   },
   memory: {
     provider: 'default',

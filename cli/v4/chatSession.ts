@@ -517,6 +517,17 @@ export class ChatSession implements ChatSessionLike {
   private summarized = false;
 
   /**
+   * v4.10 Slice 10.9 — one-shot guard for the streaming-disabled
+   * disclosure. Flipped to true the first time runAgentTurn observes
+   * `display.streaming: false` in config; subsequent turns within
+   * the same session skip the warning so the user sees it exactly
+   * once per launch. Matches the Slice 10.7 `/channel telegram
+   * remove` shell-env-hint pattern: surface state Aiden can't
+   * silently fix for the user.
+   */
+  private streamingDisabledWarned = false;
+
+  /**
    * Phase v4.1.2-memory-D:
    * Last successful distillation, cached so the promotion-prompt flow
    * (`/quit` path only — SIGINT/SIGTERM skip) can extract candidates
@@ -1413,6 +1424,23 @@ export class ChatSession implements ChatSessionLike {
       typeof this.opts.config?.getValue === 'function'
         ? this.opts.config.getValue<boolean>('display.streaming', true) === true
         : false;
+
+    // v4.10 Slice 10.9 — perception-first disclosure when the user
+    // has streaming disabled. Slice 10.9 Phase A audit caught that
+    // pre-10.9 wizard installs baked `streaming: false` into
+    // config.yaml; the resulting "Aiden feels slow" complaint last
+    // sprint traced back to this. The DEFAULT_CONFIG flip ships in
+    // Slice 10.9 too, but existing users with explicit `false` keep
+    // their setting (Phase B Q1 — respect user config). This warning
+    // is the consent surface: tell them once per session what's
+    // happening + how to flip it. Same disclosure pattern as Slice
+    // 10.7's /channel telegram remove shell-env hint.
+    if (!streamingEnabled && !this.streamingDisabledWarned && this.opts.config) {
+      this.streamingDisabledWarned = true;
+      this.opts.display.dim(
+        '(streaming is disabled; responses will appear only when complete — set display.streaming: true in config.yaml for live chunks)',
+      );
+    }
 
     // v4.1.4 reply-quality polish — Part 1.6. Activity indicator
     // replaces the prior single-shot spinner. Pause/resume hooks make

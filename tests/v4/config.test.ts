@@ -28,8 +28,14 @@ describe('ConfigManager', () => {
     const cfg = await mgr.load();
     expect(cfg.model.provider).toBe(DEFAULT_CONFIG.model.provider);
     expect(cfg.agent.max_turns).toBe(DEFAULT_CONFIG.agent.max_turns);
-    // Phase 16c: streaming defaults to OFF for v4.0 launch (opt-in via /streaming on).
-    expect(cfg.display.streaming).toBe(false);
+    // v4.10 Slice 10.9 — streaming default flipped to ON. The
+    // Phase A audit caught that pre-10.9 the default was `false` and
+    // EVERY wizard install baked that into user configs, causing the
+    // "Aiden feels slow" perception bug. The flip ships the default
+    // users always expected. Existing users with explicit `false`
+    // keep their setting + see a one-shot disclosure (see
+    // chatSession.ts streamingDisabledWarned flag).
+    expect(cfg.display.streaming).toBe(true);
     expect(cfg.memory.provider).toBe('default');
   });
 
