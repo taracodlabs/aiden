@@ -87,12 +87,43 @@ async function defaultPrompts(): Promise<PromptApi> {
 // values, friendlier wording. Persistence to <aidenHome>/approvals.json
 // is wired in aidenCLI.ts via approvalEngine.callbacks.persistAllow
 // (Phase 16f); session-scope cache in approvalEngine.allowForSession.
-const DECISION_CHOICES: { name: string; value: ApprovalDecision }[] = [
-  { name: 'Once',    value: 'allow' },
-  { name: 'Session', value: 'allow_session' },
-  { name: 'Always',  value: 'allow_always' },
-  { name: 'Deny',    value: 'deny' },
-];
+/**
+ * v4.10 Slice 10.6c — dynamic qualifier for Session/Always labels.
+ *
+ * Pre-10.6c the picker offered bare `Session` and `Always`, which
+ * users read as TEMPORAL scopes ("for this conversation") but the
+ * engine treats as SIGNATURE scopes (this exact tool::primary-arg).
+ * A Session grant for `file_write test3.txt` does NOT cover
+ * `file_write test4.txt`, which surprised the smoke tester.
+ *
+ * Fix: surface what the scope actually covers. The qualifier
+ * mirrors `argSignature()`'s primary-arg extractor in
+ * `moat/approvalEngine.ts`, in priority order — `command` >
+ * `path` > `url` > `code`. Fallback "this call" covers tools that
+ * don't expose any of those as their primary arg.
+ *
+ * Behaviour change: zero. Same four decision verbs; only the
+ * picker labels differ. Users still get a Once / Session / Always
+ * / Deny choice; the qualifier just makes the scope concrete.
+ */
+function primaryArgKindFor(args: Record<string, unknown>): string {
+  // Order matches argSignature()'s priority chain.
+  if (typeof args.command === 'string') return 'this command';
+  if (typeof args.path    === 'string') return 'this path';
+  if (typeof args.url     === 'string') return 'this url';
+  if (typeof args.code    === 'string') return 'this code';
+  return 'this call';
+}
+
+function decisionChoicesFor(args: Record<string, unknown>): { name: string; value: ApprovalDecision }[] {
+  const kind = primaryArgKindFor(args);
+  return [
+    { name: 'Once',                     value: 'allow' },
+    { name: `Session (${kind})`,        value: 'allow_session' },
+    { name: `Always (${kind})`,         value: 'allow_always' },
+    { name: 'Deny',                     value: 'deny' },
+  ];
+}
 
 const KNOWN_TIERS: ReadonlySet<RiskTier> = new Set(['safe', 'caution', 'dangerous']);
 
@@ -486,9 +517,13 @@ export class CliCallbacks {
     const prompts = await this.promptsPromise;
     let choice: string;
     try {
+      // v4.10 Slice 10.6c — labels carry an arg-kind qualifier so
+      // users understand the scope is signature-bound, not temporal.
+      // Computed per-call from req.args (same priority order as
+      // argSignature's primary-arg extractor).
       choice = await prompts.select({
         message: 'Decision',
-        choices: DECISION_CHOICES,
+        choices: decisionChoicesFor(req.args),
       });
     } catch {
       // User hit Ctrl+C or otherwise cancelled — fail closed.

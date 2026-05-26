@@ -475,13 +475,24 @@ export class ApprovalEngine {
         tier = assessed.tier;
         rationale = assessed.rationale;
       }
+      // v4.10 Slice 10.6c — reassign req.riskTier to the
+      // gate's actual decided tier BEFORE firing onDecision on the
+      // safe/dangerous auto-paths. Pre-10.6c, req.riskTier was only
+      // mutated on the caution fallthrough (line just below), so the
+      // approval.decided audit row in run_events reported the
+      // pre-classification value (typically the 'caution' default
+      // because file_write doesn't pre-classify). That made
+      // /trace recent understate the gate's actual reasoning —
+      // "decision=allow, riskTier=caution" looked like a user picked
+      // Once on a caution prompt, when in fact the aux LLM had
+      // rated it safe and auto-allowed.
       if (tier === 'safe') {
-        this.callbacks.onDecision?.(req, 'allow');
+        this.callbacks.onDecision?.({ ...req, riskTier: tier, reason: rationale ?? req.reason }, 'allow');
         return true;
       }
       if (tier === 'dangerous') {
         this.callbacks.onDecision?.(
-          { ...req, reason: rationale ?? req.reason },
+          { ...req, riskTier: tier, reason: rationale ?? req.reason },
           'deny',
         );
         return false;

@@ -380,6 +380,63 @@ describe('ApprovalEngine — Slice 10.6 allowlist audit metadata', () => {
   });
 });
 
+describe('ApprovalEngine — Slice 10.6c riskTier reassignment on smart-mode auto-paths', () => {
+  // Pre-10.6c bug: smart-mode safe-auto-allow and dangerous-auto-deny
+  // fired onDecision with the request's PRE-classification riskTier
+  // (undefined → defaulted to 'caution' in callbacks). The
+  // approval.decided trace row therefore reported the wrong tier:
+  // "decision=allow, riskTier=caution" when the aux LLM had actually
+  // rated it 'safe'. Fix: reassign req.riskTier = tier BEFORE firing
+  // onDecision on both auto-paths. Behaviour change: zero (decision
+  // outcomes are identical); audit accuracy improves.
+  it('safe-auto-allow path fires onDecision with riskTier=`safe` (not undefined/caution)', async () => {
+    const onDecision = vi.fn();
+    const riskAssess = vi.fn(async () => ({ tier: 'safe' as const, rationale: 'aux says safe' }));
+    const engine = new ApprovalEngine('smart', { onDecision, riskAssess });
+    await engine.checkApproval({
+      toolName: 'mystery_tool',     // not in BUILTIN_SAFE_TOOLS, no pre-flagged tier
+      category: 'execute',
+      args:     { foo: 'bar' },
+    });
+    expect(onDecision).toHaveBeenCalledOnce();
+    const [decidedReq, verb] = onDecision.mock.calls[0];
+    expect(verb).toBe('allow');
+    expect(decidedReq.riskTier).toBe('safe');      // reassigned to gate's actual decision
+    expect(decidedReq.reason).toBe('aux says safe'); // rationale threaded through too
+  });
+
+  it('dangerous-auto-deny path fires onDecision with riskTier=`dangerous`', async () => {
+    const onDecision = vi.fn();
+    const riskAssess = vi.fn(async () => ({ tier: 'dangerous' as const, rationale: 'aux says dangerous' }));
+    const engine = new ApprovalEngine('smart', { onDecision, riskAssess });
+    await engine.checkApproval({
+      toolName: 'mystery_tool',
+      category: 'execute',
+      args:     { foo: 'bar' },
+    });
+    const [decidedReq, verb] = onDecision.mock.calls[0];
+    expect(verb).toBe('deny');
+    expect(decidedReq.riskTier).toBe('dangerous');
+    expect(decidedReq.reason).toBe('aux says dangerous');
+  });
+
+  it('caution-fallthrough still works (pre-existing behaviour preserved)', async () => {
+    const onDecision = vi.fn();
+    const promptUser = vi.fn(async () => 'allow' as const);
+    const riskAssess = vi.fn(async () => ({ tier: 'caution' as const, rationale: 'needs review' }));
+    const engine = new ApprovalEngine('smart', { onDecision, promptUser, riskAssess });
+    await engine.checkApproval({
+      toolName: 'mystery_tool',
+      category: 'execute',
+      args:     { foo: 'bar' },
+    });
+    expect(promptUser).toHaveBeenCalledOnce();
+    const [decidedReq] = onDecision.mock.calls[0];
+    expect(decidedReq.riskTier).toBe('caution');   // caution path already reassigned pre-10.6c
+    expect(decidedReq.reason).toBe('needs review');
+  });
+});
+
 describe('ApprovalEngine — Slice 10.6 effects metadata threads through', () => {
   it('checkApproval forwards `effects` to promptUser via ApprovalRequest', async () => {
     let seenReq: import('../../../moat/approvalEngine').ApprovalRequest | undefined;

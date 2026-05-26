@@ -102,6 +102,131 @@ describe('CliCallbacks.promptApproval', () => {
     });
     expect(d).toBe('deny');
   });
+
+  // ── v4.10 Slice 10.6c — dynamic Session/Always qualifier ─────────
+  //
+  // Pre-10.6c the picker labels were bare "Session" / "Always", read
+  // by users as temporal scopes but treated by the engine as
+  // signature scopes. Surfaced when a Session grant for
+  // `file_write test3.txt` failed to cover `file_write test4.txt` —
+  // working as designed by argSignature, misleading by label. Fix:
+  // the picker now appends "this path" / "this command" / "this url"
+  // / "this code" / "this call" based on which primary arg the
+  // signature is keyed on. The choices are computed per call via
+  // `decisionChoicesFor(req.args)`.
+
+  /**
+   * Helper — capture the `choices` list passed to prompts.select so
+   * we can assert on label shape without rendering the whole picker.
+   */
+  function captureChoices(): { capture: { last: Array<{name: string; value: string}> | null }; prompts: PromptApi } {
+    const capture: { last: Array<{name: string; value: string}> | null } = { last: null };
+    const prompts: PromptApi = {
+      async select(opts: any) {
+        capture.last = opts.choices as Array<{name: string; value: string}>;
+        // Return the first value so the call resolves; the picker
+        // result doesn't matter for label assertions.
+        return capture.last![0].value;
+      },
+      async confirm() { return false; },
+    };
+    return { capture, prompts };
+  }
+
+  it('Slice 10.6c — `command` arg yields "Session (this command)" / "Always (this command)"', async () => {
+    const { display } = makeDisplay();
+    const { capture, prompts } = captureChoices();
+    const cb = new CliCallbacks({ display, promptModule: prompts });
+    await cb.promptApproval({
+      toolName: 'shell_exec',
+      category: 'execute',
+      args:     { command: 'pytest', cwd: '/tmp' },
+    });
+    const names = (capture.last ?? []).map((c) => c.name);
+    expect(names).toEqual([
+      'Once',
+      'Session (this command)',
+      'Always (this command)',
+      'Deny',
+    ]);
+  });
+
+  it('Slice 10.6c — `path` arg yields "Session (this path)" / "Always (this path)"', async () => {
+    const { display } = makeDisplay();
+    const { capture, prompts } = captureChoices();
+    const cb = new CliCallbacks({ display, promptModule: prompts });
+    await cb.promptApproval({
+      toolName: 'file_write',
+      category: 'write',
+      args:     { path: '/tmp/x', content: 'hi' },
+    });
+    const names = (capture.last ?? []).map((c) => c.name);
+    expect(names).toEqual([
+      'Once',
+      'Session (this path)',
+      'Always (this path)',
+      'Deny',
+    ]);
+  });
+
+  it('Slice 10.6c — `url` arg yields "Session (this url)" / "Always (this url)"', async () => {
+    const { display } = makeDisplay();
+    const { capture, prompts } = captureChoices();
+    const cb = new CliCallbacks({ display, promptModule: prompts });
+    await cb.promptApproval({
+      toolName: 'fetch_url',
+      category: 'network',
+      args:     { url: 'https://example.com' },
+    });
+    const names = (capture.last ?? []).map((c) => c.name);
+    expect(names[1]).toBe('Session (this url)');
+    expect(names[2]).toBe('Always (this url)');
+  });
+
+  it('Slice 10.6c — `code` arg yields "Session (this code)" / "Always (this code)"', async () => {
+    const { display } = makeDisplay();
+    const { capture, prompts } = captureChoices();
+    const cb = new CliCallbacks({ display, promptModule: prompts });
+    await cb.promptApproval({
+      toolName: 'execute_code',
+      category: 'execute',
+      args:     { code: 'print(1)' },
+    });
+    const names = (capture.last ?? []).map((c) => c.name);
+    expect(names[1]).toBe('Session (this code)');
+    expect(names[2]).toBe('Always (this code)');
+  });
+
+  it('Slice 10.6c — fallback "this call" when no primary arg matches', async () => {
+    const { display } = makeDisplay();
+    const { capture, prompts } = captureChoices();
+    const cb = new CliCallbacks({ display, promptModule: prompts });
+    await cb.promptApproval({
+      toolName: 'mystery_tool',
+      category: 'execute',
+      args:     { foo: 'bar' },        // no command/path/url/code
+    });
+    const names = (capture.last ?? []).map((c) => c.name);
+    expect(names[1]).toBe('Session (this call)');
+    expect(names[2]).toBe('Always (this call)');
+  });
+
+  it('Slice 10.6c — priority order: command beats path beats url beats code', async () => {
+    // If multiple primary keys are present, the qualifier reflects
+    // the FIRST in argSignature's priority chain.
+    const { display } = makeDisplay();
+    const { capture, prompts } = captureChoices();
+    const cb = new CliCallbacks({ display, promptModule: prompts });
+    await cb.promptApproval({
+      toolName: 'odd_tool',
+      category: 'execute',
+      args:     { command: 'x', path: '/y', url: 'http://z', code: 'w' },
+    });
+    const names = (capture.last ?? []).map((c) => c.name);
+    // command wins per the priority chain.
+    expect(names[1]).toBe('Session (this command)');
+    expect(names[2]).toBe('Always (this command)');
+  });
 });
 
 describe('CliCallbacks.riskAssess', () => {
