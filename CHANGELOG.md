@@ -79,7 +79,7 @@ Aiden now has structured, persistent memory across conversations.
 - **Three namespaces:** `memory` (project & environment facts), `user` (your identity & preferences), `project` (per-repo context auto-detected from `.git`)
 - **CLI surface:** `aiden memory list/show/add/remove/edit/backup/restore/diff/namespaces`
 - **Post-turn reviewer:** Aiden quietly reviews each conversation for memory candidates, surfaces them in a pending section, you approve via `aiden memory approve <id>` or `reject <id>`
-- **Strict skip rules:** Sensitive-class filtering, negation rejection, duplicate detection — Hermes-style "don't store harmful inferences"
+- **Strict skip rules:** Sensitive-class filtering, negation rejection, duplicate detection — "don't store harmful inferences" guardrail layer
 - **Substrate-integrated:** Every memory op produces a `mem_<uuidv7>` span with full audit trail
 
 ### 🪝 Hook system

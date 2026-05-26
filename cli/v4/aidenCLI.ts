@@ -763,9 +763,10 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
  * default `process.cwd()` runs.
  *
  * Project root is FROZEN at REPL boot. Mid-session `git init` or cwd
- * change is not auto-detected — Hermes pattern + matches the cache
- * shape in projectRoot.ts. A `/memory project rescan` slash command
- * is planned as a future power-user escape hatch (separate slice).
+ * change is not auto-detected — matches the cache shape in
+ * projectRoot.ts (resolve once, reuse for the session). A
+ * `/memory project rescan` slash command is planned as a future
+ * power-user escape hatch (separate slice).
  */
 export function createBootMemoryManager(
   paths: AidenPaths,

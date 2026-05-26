@@ -212,3 +212,25 @@ scripts/smoke-*.ts
 # ── Server / test logs ──────────────────────────────────────────────────────
 *.log
 nse_swing_trading_poem.txt
+
+# ── v4.10 sprint cleanup (Slice 10.9 / pre-release) ─────────────────────────
+# Local-only working dirs that accumulated during the v4.10 sprint;
+# none of this should ship in the published tarball or live on the
+# public branch. Listed exhaustively rather than via broad globs so
+# `git status` stays informative for future intentional adds.
+.aiden/
+agent-bus/
+tmp/
+.env.backup-*
+footer-test.txt
+hello_world.py
+test.py
+plugins/aiden-plugin-cdp-browser/.granted-permissions.json
+scripts/smoke-prompt-bias-ab.last.json
+# Internal recon docs comparing Aiden against reference projects —
+# kept locally for design rationale, never shipped on the public branch.
+docs/v4.2-recon-report.md
+# Tab-completion artefacts where the literal Windows drive-letter path
+# got captured as a filename. Listed by their bytes so git matches.
+C*Tempaudit-out.txt
+C*UsersshivaDevOSrelease-notes.md

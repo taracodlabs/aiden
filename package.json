@@ -10,10 +10,10 @@
   "homepage": "https://aiden.taracod.com",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/taracodlabs/Aiden-v4.git"
+    "url": "git+https://github.com/taracodlabs/aiden.git"
   },
   "bugs": {
-    "url": "https://github.com/taracodlabs/Aiden-v4/issues"
+    "url": "https://github.com/taracodlabs/aiden/issues"
   },
   "keywords": [
     "ai",

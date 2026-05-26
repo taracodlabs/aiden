@@ -103,6 +103,10 @@ const ALLOWLIST: Allowlist[] = [
     reason: 'Provider catalog enumerates "Nous Portal" as a shipped subscription provider — same nous_portal allowlist exception as the CLI source',
   },
   {
+    path:   'docs/reference/env-vars.md',
+    reason: 'Env-var reference doc lists NOUS_PORTAL_API_KEY alongside other provider keys; the literal env-var name is the user-facing contract, same nous_portal allowlist exception as README.md and the CLI provider catalog',
+  },
+  {
     path:   'scripts/smoke-v4.1-attribution-sweep.ts',
     reason: 'Self-reference: this file IS the enforcement script. BANNED_TOKENS array enumerates the literal forbidden tokens it scans for, and ALLOWLIST `reason` strings describe exemptions using the token names. The hits in this file ARE the policy, not policy violations',
   },
@@ -138,6 +142,9 @@ const SKIP_DIRS = new Set([
   'dashboard-next',        // separate npm package, has own .next + node_modules
   '.cursor',
   '.claude',
+  'agent-bus',             // local-only inter-agent messaging working dir
+  '.aiden',                // local-only Aiden state (under-repo invocations)
+  'tmp',                   // throwaway working dir
   // Vendored / installed third-party content — their copyrights are
   // their copyrights; rewriting them would be incorrect attribution
   // (and a license violation).
