@@ -138,6 +138,22 @@ function findBundlePath(): string {
 }
 
 /**
+ * Resolve the child command used by `daemon start` / Windows restart.
+ *
+ * Dev checkouts often run the TypeScript CLI through tsx/ts-node while a
+ * stale dist-bundle exists. Spawning that stale bundle can crash before the
+ * daemon comes up. Prefer the current source invocation when it is available;
+ * otherwise keep the packaged dist-bundle path for installed builds.
+ */
+function resolveDaemonChildCommand(): string[] {
+  const currentEntry = process.argv[1];
+  if (currentEntry && /aidenCLI\.ts$/i.test(currentEntry)) {
+    return [process.execPath, ...process.execArgv, currentEntry];
+  }
+  return [process.execPath, findBundlePath()];
+}
+
+/**
  * Read the running daemon's PID from the runtime lock file.
  * Returns null when the file doesn't exist or is malformed.
  */
@@ -357,7 +373,7 @@ async function runStart(io: CtxIO): Promise<number> {
   io.out('Starting Aiden daemon in foreground (Ctrl+C to stop).\n');
   io.out('Tip: run `aiden daemon install` to register an OS service that\n');
   io.out('     survives logout + reboot (Linux/macOS).\n');
-  const cmd: string[] = [process.execPath, findBundlePath()];
+  const cmd: string[] = resolveDaemonChildCommand();
   const handle = startSupervisor({
     childCmd: cmd,
     env: {
@@ -451,7 +467,7 @@ async function runRestartWindows(io: CtxIO): Promise<number> {
   if (stopCode !== 0) return stopCode;
   await sleep(2_000);
   // Re-spawn detached so the CLI can return.
-  const cmd: string[] = [process.execPath, findBundlePath()];
+  const cmd: string[] = resolveDaemonChildCommand();
   const child = spawn(cmd[0], cmd.slice(1), {
     env:    { ...process.env, AIDEN_DAEMON: '1' },
     stdio:  'ignore',
