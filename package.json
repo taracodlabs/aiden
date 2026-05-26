@@ -1,6 +1,6 @@
 {
   "name": "aiden-runtime",
-  "version": "4.9.4",
+  "version": "4.9.6",
   "publishConfig": {
     "access": "public"
   },

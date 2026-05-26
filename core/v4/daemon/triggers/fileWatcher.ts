@@ -104,7 +104,7 @@ export function createFileWatcher(opts: CreateFileWatcherOptions): FileWatcherHa
   };
 
   // ── chokidar setup ──────────────────────────────────────────────────────
-  const watcher: FSWatcher = chokidar.watch(spec.paths, {
+  const watchOptions: Parameters<typeof chokidar.watch>[1] = {
     persistent:      true,
     ignoreInitial:   true,                   // boot-time reconciliation runs separately
     depth:           spec.recursive ? undefined : 0,
@@ -113,11 +113,19 @@ export function createFileWatcher(opts: CreateFileWatcherOptions): FileWatcherHa
       pollInterval:       100,
     },
     usePolling:      spec.polling?.enabled === true,
-    interval:        spec.polling?.intervalMs,
-    binaryInterval:  spec.polling?.binaryIntervalMs,
+    // chokidar validates these fields as numbers when present. Do not pass
+    // explicit undefined for `--polling` specs that rely on chokidar defaults.
+    ...(typeof spec.polling?.intervalMs === 'number'
+      ? { interval: spec.polling.intervalMs }
+      : {}),
+    ...(typeof spec.polling?.binaryIntervalMs === 'number'
+      ? { binaryInterval: spec.polling.binaryIntervalMs }
+      : {}),
     // chokidar 4.x removed built-in globs — we filter via picomatch
     // in handleEvent below.
-  });
+  };
+
+  const watcher: FSWatcher = chokidar.watch(spec.paths, watchOptions);
 
   // ── core event handler ──────────────────────────────────────────────────
   const handleEvent = (eventType: FileEventType, absPath: string): void => {
