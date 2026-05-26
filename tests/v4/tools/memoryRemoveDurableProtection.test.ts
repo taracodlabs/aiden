@@ -299,10 +299,10 @@ describe('memoryRemoveTool schema — model-facing primary guard', () => {
     expect(desc).toMatch(/do not propose autonomous/i);
   });
 
-  it('still allows file: memory|user (no schema regression)', () => {
+  it('allows file: memory|user|project (v4.10 Slice 10.1 — project added)', () => {
     const fileSpec = (
       memoryRemoveTool.schema.inputSchema.properties as Record<string, { enum?: string[] }>
     ).file;
-    expect(fileSpec?.enum).toEqual(['memory', 'user']);
+    expect(fileSpec?.enum).toEqual(['memory', 'user', 'project']);
   });
 });
