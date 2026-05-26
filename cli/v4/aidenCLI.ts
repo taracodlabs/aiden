@@ -837,9 +837,24 @@ export async function buildAgentRuntime(
   // through `resolveParentRunId` / `resolveParentSessionId`
   // callbacks so any child spawned mid-turn is linked back to the
   // live REPL parent row via `runs.spawned_from_run_id`.
-  const replParentRunRef: { runId: number | null; sessionId: string | null } = {
-    runId:     null,
-    sessionId: null,
+  //
+  // v4.10 Slice 10.2c — `chatSessionId` is the LONG-LIVED REPL session
+  // id (mirror of ChatSession.sessionId, set once during run() init,
+  // never cleared between turns). `sessionId` above is the turn-scoped
+  // mirror that gets nulled on turn completion — fine for emitter
+  // sites (they're called only during a turn) but wrong for read
+  // surfaces like /trace recent and trace_query, which want "this
+  // conversation" not "this turn." Tracked separately so the
+  // existing per-turn lifecycle of `runId` / `sessionId` stays
+  // unchanged.
+  const replParentRunRef: {
+    runId:         number | null;
+    sessionId:     string | null;
+    chatSessionId: string | null;
+  } = {
+    runId:         null,
+    sessionId:     null,
+    chatSessionId: null,
   };
 
   // Phase 16c.2: load `paths.envFile` (the aiden-managed `.env` that
@@ -2034,7 +2049,12 @@ export async function buildAgentRuntime(
   // but don't expose introspection (Phase B Q2: scope locked to REPL).
   toolRegistry.register(makeTraceQueryTool({
     runStore:         replRunStore,
-    resolveSessionId: () => replParentRunRef.sessionId,
+    // v4.10 Slice 10.2c — resolve to the long-lived chatSessionId
+    // (set once at ChatSession.run() init) so scope='current_session'
+    // works between turns. The pre-10.2c version read the turn-scoped
+    // sessionId which got nulled post-turn, making the model see "no
+    // session" while the conversation was clearly alive.
+    resolveSessionId: () => replParentRunRef.chatSessionId,
     // v4.10 Slice 10.2b — scope='current_run' resolves to the in-flight
     // turn's runId; null when no turn is active.
     resolveRunId:     () => replParentRunRef.runId,
@@ -2144,9 +2164,16 @@ export async function buildAgentRuntime(
         );
         return {};
       }
-      const sessionId = replParentRunRef.sessionId;
+      // v4.10 Slice 10.2c — read the long-lived chatSessionId (set
+      // once at ChatSession.run() init) rather than the turn-scoped
+      // sessionId (cleared between turns). The pre-10.2c gate fired
+      // "no active REPL session" between turns even though the chat
+      // session was alive, conflating "no in-flight turn" with "no
+      // session". Defensive guard remains for the post-/quit edge
+      // when the renderer outlives the chat lifecycle.
+      const sessionId = replParentRunRef.chatSessionId;
       if (!sessionId) {
-        ctx.display.dim('No active REPL session — start a turn first.');
+        ctx.display.dim('No REPL session active — start the chat first.');
         return {};
       }
       const limitArg = Number(ctx.args[1]);
@@ -2168,7 +2195,10 @@ export async function buildAgentRuntime(
         return {};
       }
       if (rows.length === 0) {
-        ctx.display.dim('(no events in this session yet — events appear after the first tool call)');
+        // Slice 10.2c — clearer message: the session IS active, just
+        // no events recorded yet. Common after a greeting turn where
+        // the model didn't fire any ui_* / tool_call_* events.
+        ctx.display.dim('(no events recorded yet in this conversation — events appear after the first tool call or ui_* emission)');
         return {};
       }
       ctx.display.info(`Recent events (${rows.length}, newest first):`);
@@ -2407,7 +2437,18 @@ export interface AgentRuntime {
    */
   replRunStore:     import('../../core/v4/daemon/runStore').RunStore;
   replInstanceId:   string;
-  replParentRunRef: { runId: number | null; sessionId: string | null };
+  /**
+   * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
+   * id (set once at ChatSession.run() init, never cleared between turns).
+   * `sessionId` is the per-turn mirror that gets nulled post-turn.
+   * Read surfaces (/trace recent, trace_query) must use `chatSessionId`;
+   * emitter sites (called during a turn) can use either.
+   */
+  replParentRunRef: {
+    runId:         number | null;
+    sessionId:     string | null;
+    chatSessionId: string | null;
+  };
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {

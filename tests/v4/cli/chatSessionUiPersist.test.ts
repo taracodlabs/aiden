@@ -249,4 +249,30 @@ describe('chatSession onUiEvent — production routes through createOnUiEventHan
     expect(src).toMatch(/categorizeEvent\(/);
     expect(src).toMatch(/emitEventRich\(/);
   });
+
+  it('Slice 10.2c — /trace recent + trace_query read chatSessionId, NOT the turn-scoped sessionId', async () => {
+    // Source-level guard. The pre-10.2c bug: both read surfaces
+    // consumed `replParentRunRef.sessionId` (turn-scoped, cleared
+    // post-turn), so reads failed mid-conversation between turns.
+    // Fix: route through the long-lived `chatSessionId` field on the
+    // same ref, written once at ChatSession.run() init.
+    //
+    // If a future refactor reverts either read site to `.sessionId`,
+    // this assertion catches it.
+    const src = await fs.readFile(
+      path.resolve(__dirname, '../../../cli/v4/aidenCLI.ts'),
+      'utf8',
+    );
+    // makeTraceQueryTool registration: resolveSessionId must read
+    // chatSessionId.
+    expect(src).toMatch(/resolveSessionId:\s*\(\)\s*=>\s*replParentRunRef\.chatSessionId/);
+    // /trace recent slash handler: must read chatSessionId.
+    expect(src).toMatch(/const sessionId = replParentRunRef\.chatSessionId/);
+    // ChatSession.run() must publish the long-lived id.
+    const sessSrc = await fs.readFile(
+      path.resolve(__dirname, '../../../cli/v4/chatSession.ts'),
+      'utf8',
+    );
+    expect(sessSrc).toMatch(/replParentRunRef\.chatSessionId\s*=\s*this\.sessionId/);
+  });
 });

@@ -381,7 +381,18 @@ export interface ChatSessionOptions {
    */
   replRunStore?:    import('../../core/v4/daemon/runStore').RunStore;
   replInstanceId?:  string;
-  replParentRunRef?: { runId: number | null; sessionId: string | null };
+  /**
+   * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
+   * id, written ONCE during run() init (after resumeSessionId resolves)
+   * and never cleared between turns. Read surfaces like /trace recent
+   * and trace_query need this — the turn-scoped `sessionId` field
+   * above gets nulled on turn completion and breaks between-turn reads.
+   */
+  replParentRunRef?: {
+    runId:         number | null;
+    sessionId:     string | null;
+    chatSessionId: string | null;
+  };
 }
 
 const STATUS_BAR_WIDTH = 10;
@@ -579,6 +590,17 @@ export class ChatSession implements ChatSessionLike {
         modelId: this.currentModelId,
       });
       this.sessionId = newSession.id;
+    }
+
+    // v4.10 Slice 10.2c — publish the long-lived session id to the
+    // shared ref so read surfaces (the `/trace recent` slash + the
+    // model-facing `trace_query` tool) can resolve "this conversation"
+    // between turns. Distinct from the turn-scoped `sessionId` field
+    // on the same ref, which is set+cleared per turn. Set once here
+    // and never cleared — the REPL process exits before this becomes
+    // stale.
+    if (this.opts.replParentRunRef) {
+      this.opts.replParentRunRef.chatSessionId = this.sessionId;
     }
 
     // 2. Boxed startup card.

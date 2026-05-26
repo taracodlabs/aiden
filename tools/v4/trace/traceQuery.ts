@@ -128,11 +128,17 @@ export function makeTraceQueryTool(opts: MakeTraceQueryOptions): ToolHandler {
           break;
         }
         case 'current_session': {
+          // v4.10 Slice 10.2c — resolveSessionId returns the long-lived
+          // REPL chat session id, populated at ChatSession.run() init
+          // and stable until the REPL exits. Pre-10.2c read the
+          // turn-scoped mirror which got nulled between turns,
+          // returning "no session" mid-conversation. The defensive
+          // null guard remains for the post-/quit edge.
           const sid = opts.resolveSessionId();
           if (!sid) {
             return {
               success: false,
-              error: 'No active REPL session — trace_query default scope requires a session in flight. Pass scope="last_hours" or scope="all" to query without a session.',
+              error: 'No REPL session active — trace_query default scope requires a chat session. Pass scope="last_hours" or scope="all" to query without one.',
             };
           }
           query = { scope: 'current_session', sessionId: sid, limit };

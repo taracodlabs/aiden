@@ -134,6 +134,37 @@ describe('trace_query tool', () => {
     expect(result.events[1].kind).toBe('task.update');
   });
 
+  // v4.10 Slice 10.2c — between-turn coverage. The pre-10.2c surface
+  // bug: resolveSessionId was wired to the turn-scoped ref, which got
+  // nulled between turns, so trace_query reported "no session" mid-
+  // conversation. This test asserts the new contract: the factory
+  // accepts a session-id callback that's stable across turn boundaries,
+  // and the tool happily returns events from prior turns when that
+  // callback yields a real id.
+  it('Slice 10.2c — works between turns when session-id callback returns a stable id', async () => {
+    // Pretend a turn already ran: emit some events under sess-stable,
+    // then mark the run completed. The session id stays valid even
+    // though there's no live turn.
+    const r = store.create({ sessionId: 'sess-stable', instanceId: 'test-inst', status: 'running' });
+    store.emitEventRich({ runId: r, category: 'task', kind: 'task.update', name: 'ui_task_update', sessionId: 'sess-stable', payload: {} });
+    store.emitEventRich({ runId: r, category: 'task', kind: 'task.done',   name: 'ui_task_done',   sessionId: 'sess-stable', payload: {} });
+    store.setStatus(r, 'completed', { finishReason: 'stop' });
+
+    // Production wires resolveSessionId to the long-lived chatSessionId.
+    // Simulate that here: callback returns the stable id even though
+    // no turn is in flight. resolveRunId returns null (no live turn).
+    const tool = makeTraceQueryTool({
+      runStore:         store,
+      resolveSessionId: () => 'sess-stable',
+      resolveRunId:     () => null,
+    });
+    const result = (await tool.execute!({}, { cwd: tmp, paths: {} as never })) as {
+      success: boolean; count: number;
+    };
+    expect(result.success).toBe(true);
+    expect(result.count).toBe(2);
+  });
+
   it('returns synthetic failure when no session is active (default scope)', async () => {
     const tool = makeTraceQueryTool({
       runStore:         store,
@@ -143,7 +174,10 @@ describe('trace_query tool', () => {
       success: boolean; error?: string;
     };
     expect(result.success).toBe(false);
-    expect(result.error).toMatch(/no active repl session/i);
+    // Slice 10.2c reworded the message — assert on the intent
+    // ("no session") rather than the exact phrase so a future tweak
+    // doesn't snap this test for a copywriting change.
+    expect(result.error).toMatch(/no repl session active/i);
   });
 
   it('scope="current_run" filters to a specific in-flight runId', async () => {
