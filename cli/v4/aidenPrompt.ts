@@ -345,17 +345,20 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   if (status === 'done') {
     line = `${message} ${theme.style.answer(value)}`;
   } else {
-    // Render ghost text as a terminal-side overlay, then move the
-    // cursor back over it. @inquirer/core computes readline's prompt
-    // by slicing `rl.line.length` chars from the *raw* rendered line;
-    // that means inline ghost text makes the prompt too long and parks
-    // the caret at the end of the suggestion. Keeping the backward
-    // sequence in the final line gives the terminal the correct visual
-    // caret position while preserving Enter semantics: `done(value)`
-    // still returns only the user-typed text.
+    // v4.9.2 Slice 2 (commit 0d0668f1) attempted to fix cursor
+    // misalignment by post-pending cursorBackward(ghost.length).
+    // Live-REPL diagnostic proved the fix is structurally inert:
+    // @inquirer/core's screen-manager.js:56 appends an ABSOLUTE
+    // cursorTo(this.cursorPos.cols) AFTER our content, overriding
+    // any cursor-positioning escape we emit inline. The real fix
+    // requires either rendering the ghost via a side-channel post-
+    // render write or moving it out of the inline line entirely —
+    // both need the proper save/restore refactor scheduled for v4.10
+    // once the prompt has a real screen-manager-aware test harness.
+    // Reverted here so the shipped v4.9.2 doesn't carry a "fix" that
+    // doesn't fix anything. Bug D status: known, deferred.
     const ghostStr = ghost ? dim(ghost) : '';
-    const ghostBack = ghost ? `\x1b[${vWidth(ghost)}D` : '';
-    line = `${prefix} ${message}${value}${ghostStr}${ghostBack}`;
+    line = `${prefix} ${message}${value}${ghostStr}`;
   }
 
   // Footer (dropdown). Returning a tuple `[line, footer]` adds the
