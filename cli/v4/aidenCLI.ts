@@ -73,6 +73,11 @@ import { PromptBuilder } from '../../core/v4/promptBuilder';
 import { PersonalityManager } from '../../core/v4/personality';
 import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 import { MemoryManager } from '../../core/v4/memoryManager';
+// v4.10 Slice 10.1b — boot-time project-root detection so the REPL's
+// MemoryManager can route memory_add file=project to the cwd's
+// project root. Without this wire, the tool always saw projectRoot=null
+// and threw via namespaceRegistry.resolve (bug found in smoke).
+import { findProjectRoot } from '../../core/v4/memory/projectRoot';
 
 import { ApprovalEngine } from '../../moat/approvalEngine';
 import {
@@ -741,6 +746,30 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
  * caller's job. It DOES read config + run the setup wizard if the install
  * is fresh, because both happen before the moat layers can be parameterised.
  */
+
+/**
+ * v4.10 Slice 10.1b — construct the REPL's MemoryManager with cwd-derived
+ * projectRoot. Single source of truth for the boot-time wiring so the
+ * integration test exercises the EXACT code path production uses (no
+ * `new MemoryManager({ paths, projectRoot })` shortcut in the test; if
+ * a future refactor severs the boot wire, the test fails).
+ *
+ * `cwd` parameter is test-only; production callers omit it and the
+ * default `process.cwd()` runs.
+ *
+ * Project root is FROZEN at REPL boot. Mid-session `git init` or cwd
+ * change is not auto-detected — Hermes pattern + matches the cache
+ * shape in projectRoot.ts. A `/memory project rescan` slash command
+ * is planned as a future power-user escape hatch (separate slice).
+ */
+export function createBootMemoryManager(
+  paths: AidenPaths,
+  cwd: string = process.cwd(),
+): MemoryManager {
+  const projectRoot = findProjectRoot(cwd);
+  return new MemoryManager({ paths, projectRoot });
+}
+
 export async function buildAgentRuntime(
   cliOpts: any,
   opts: MainOptions,
@@ -1127,7 +1156,13 @@ export async function buildAgentRuntime(
   registerAllTools(toolRegistry);
 
   // Memory + skill loader.
-  const memoryManager = new MemoryManager(paths);
+  // v4.10 Slice 10.1b — route through createBootMemoryManager so
+  // projectRoot is detected from cwd. The helper is exported below
+  // so the integration test exercises the SAME construction code path
+  // as production (Phase D: real boot wire, not a hand-assembled
+  // MemoryManager — the discipline gap that caused Slice 10.1's
+  // initial smoke failure).
+  const memoryManager = createBootMemoryManager(paths);
   // Phase 16b.2: malformed-skill warnings go to a file logger, not the
   // REPL spinner. The scan runs ONCE here and the result is cached on
   // the loader instance — every per-turn caller (chatSession banner,
