@@ -2,9 +2,16 @@
 
 ## Reporting a Vulnerability
 
+**Preferred:** Use GitHub Private Vulnerability Reporting:
+https://github.com/taracodlabs/aiden/security/advisories/new
+
+This gives us a private thread, attachment support, and proper tracking.
+
+**Email backup:** contact@taracod.com (monitored daily)
+
 **Please do not open a public GitHub issue for security vulnerabilities.**
 
-Email **security@taracod.com** with:
+Email **contact@taracod.com** with:
 
 - **Affected version** (from `aiden --version` or the About dialog)
 - **Reproduction steps** — the minimal sequence of actions to trigger the issue
