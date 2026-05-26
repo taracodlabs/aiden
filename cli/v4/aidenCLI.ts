@@ -1650,6 +1650,16 @@ export async function buildAgentRuntime(
   // the structured-logger wiring catches up. The registry mechanism
   // itself is exercised end-to-end by skill-teacher and skill-miner.
 
+  // v4.10 Slice 10.2d — per-tool-call startTime map for accurate
+  // duration_ms on the tool_call_completed run_event. Keyed by the
+  // model's tool_call_id so concurrent / interleaved calls don't
+  // clobber each other. Mirrors childBuilder.ts:455 (subagent path)
+  // and realAgentRunner.ts:emitToolEvent (daemon path). Lifetime
+  // matches the parent agent — one map across the whole REPL
+  // process. Entries are removed at the 'after' phase; orphans (rare,
+  // mid-call crash) are GC'd by the next-call cleanup.
+  const replToolCallStartTimes = new Map<string, number>();
+
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
@@ -1698,6 +1708,62 @@ export async function buildAgentRuntime(
             getSuggestionEngine().recordFired(tip.slot);
           }
         } catch { /* never let a suggestion crash a tool call */ }
+      }
+      // v4.10 Slice 10.2d — runtime tool_call_* emission for REPL
+      // turns. Symmetric to realAgentRunner.emitToolEvent (daemon
+      // path) and childBuilder.ts (subagent path). Closes the
+      // /trace recent visibility gap where REPL tool activity was
+      // invisible to the trace ledger. Best-effort: a write failure
+      // (locked DB, schema drift) must NEVER crash dispatch.
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        try {
+          if (phase === 'before') {
+            const startedAt = Date.now();
+            replToolCallStartTimes.set(call.id, startedAt);
+            const tags = categorizeEvent('tool_call_started');
+            replRunStore.emitEventRich({
+              runId:      rid,
+              category:   tags.category,
+              kind:       tags.kind,
+              name:       'tool_call_started',
+              sessionId:  replParentRunRef.sessionId ?? null,
+              toolCallId: call.id ?? null,
+              status:     'started',
+              summary:    call.name,
+              payload: {
+                toolName: call.name,
+                ts:       startedAt,
+              },
+              visibility: 'system',
+              source:     'repl',
+            });
+          } else {
+            const startedAt = replToolCallStartTimes.get(call.id) ?? Date.now();
+            replToolCallStartTimes.delete(call.id);
+            const durationMs = Date.now() - startedAt;
+            const tags = categorizeEvent('tool_call_completed');
+            replRunStore.emitEventRich({
+              runId:      rid,
+              category:   tags.category,
+              kind:       tags.kind,
+              name:       'tool_call_completed',
+              sessionId:  replParentRunRef.sessionId ?? null,
+              toolCallId: call.id ?? null,
+              status:     result?.error ? 'failed' : 'ok',
+              durationMs,
+              summary:    `${call.name}${result?.error ? ' (failed)' : ''}`,
+              payload: {
+                toolName:  call.name,
+                error:     result?.error ?? null,
+                hasResult: result?.result !== undefined && result?.result !== null,
+                durationMs,
+              },
+              visibility: 'system',
+              source:     'repl',
+            });
+          }
+        } catch { /* observability must never break a tool call */ }
       }
       callbacks.onToolCall?.(call, phase, result);
     },

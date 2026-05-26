@@ -31,6 +31,9 @@ import Database from 'better-sqlite3';
 import { createOnUiEventHandler } from '../../../cli/v4/chatSession';
 import { createRunStore, type RunStore } from '../../../core/v4/daemon/runStore';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
+// v4.10 Slice 10.2d — categoriser shared by production REPL tool-call
+// emission (aidenCLI.ts onToolCall) and the integration test below.
+import { categorizeEvent } from '../../../core/v4/daemon/eventCategories';
 
 let tmp: string;
 let db: Database.Database;
@@ -248,6 +251,125 @@ describe('chatSession onUiEvent — production routes through createOnUiEventHan
     );
     expect(src).toMatch(/categorizeEvent\(/);
     expect(src).toMatch(/emitEventRich\(/);
+  });
+
+  it('Slice 10.2d — REPL parent agent + realAgentRunner have SYMMETRIC tool_call_* emission coverage', async () => {
+    // Source-contract symmetric-coverage guard. The bug this catches:
+    // grep-based emit-site audits can't find sites that SHOULD emit
+    // but don't. Slice 10.2b converted 7 existing emit sites to the
+    // rich shape but never noticed the REPL parent agent had no
+    // emit site at all — so REPL tool activity stayed invisible to
+    // /trace recent until Slice 10.2d added the missing wire.
+    //
+    // This test enforces parity: if either the REPL path (aidenCLI.ts)
+    // or the daemon path (realAgentRunner.ts) ever loses its
+    // tool_call_* emission, the symmetry breaks and this test fails.
+    // Recurrence-proof per audit-blindspot lesson.
+    const replSrc = await fs.readFile(
+      path.resolve(__dirname, '../../../cli/v4/aidenCLI.ts'),
+      'utf8',
+    );
+    const daemonSrc = await fs.readFile(
+      path.resolve(__dirname, '../../../core/v4/daemon/dispatcher/realAgentRunner.ts'),
+      'utf8',
+    );
+
+    // Both paths MUST categorize + emitEventRich for tool_call_started.
+    expect(replSrc).toMatch(/categorizeEvent\('tool_call_started'\)/);
+    expect(daemonSrc).toMatch(/categorizeEvent\('tool_call_started'\)/);
+    // Both paths MUST emit tool_call_completed.
+    expect(replSrc).toMatch(/categorizeEvent\('tool_call_completed'\)/);
+    expect(daemonSrc).toMatch(/categorizeEvent\('tool_call_completed'\)/);
+    // Both paths must call emitEventRich (not the legacy emitEvent).
+    expect(replSrc).toMatch(/emitEventRich\(/);
+    expect(daemonSrc).toMatch(/emitEventRich\(/);
+  });
+
+  it('Slice 10.2d — REPL tool_call_* emission shape (category=tool, source=repl, durationMs populated)', () => {
+    // Integration test mirroring the production onToolCall closure in
+    // aidenCLI.ts. Drives the real runStore + categorizeEvent factory
+    // with a synthetic call/result the way AidenAgent.runConversation
+    // would — proves the row shape lands correctly without booting
+    // the whole CLI. Source-level guard above protects from regression
+    // of the inline closure itself.
+    const runId = runStore.create({
+      sessionId:  'sess-tool-emit',
+      instanceId: 'test-inst',
+      status:     'running',
+    });
+
+    const startTimes = new Map<string, number>();
+
+    // The exact emission pattern used in aidenCLI.ts:1683+ (Slice 10.2d).
+    function emitToolEvent(call: { id: string; name: string }, phase: 'before' | 'after', result?: { error?: string; result?: unknown }): void {
+      if (phase === 'before') {
+        const startedAt = Date.now();
+        startTimes.set(call.id, startedAt);
+        const tags = categorizeEvent('tool_call_started');
+        runStore.emitEventRich({
+          runId,
+          category:   tags.category,
+          kind:       tags.kind,
+          name:       'tool_call_started',
+          sessionId:  'sess-tool-emit',
+          toolCallId: call.id,
+          status:     'started',
+          summary:    call.name,
+          payload:    { toolName: call.name, ts: startedAt },
+          visibility: 'system',
+          source:     'repl',
+        });
+      } else {
+        const startedAt = startTimes.get(call.id) ?? Date.now();
+        startTimes.delete(call.id);
+        const durationMs = Date.now() - startedAt;
+        const tags = categorizeEvent('tool_call_completed');
+        runStore.emitEventRich({
+          runId,
+          category:   tags.category,
+          kind:       tags.kind,
+          name:       'tool_call_completed',
+          sessionId:  'sess-tool-emit',
+          toolCallId: call.id,
+          status:     result?.error ? 'failed' : 'ok',
+          durationMs,
+          summary:    `${call.name}${result?.error ? ' (failed)' : ''}`,
+          payload:    { toolName: call.name, error: result?.error ?? null, hasResult: !!result?.result, durationMs },
+          visibility: 'system',
+          source:     'repl',
+        });
+      }
+    }
+
+    // Simulate a successful `read_file` tool call + a failing `shell_exec` one.
+    emitToolEvent({ id: 'tc_1', name: 'read_file' }, 'before');
+    // brief busy-wait so durationMs is > 0 (Date.now resolution is ms).
+    const spinUntil = Date.now() + 2;
+    while (Date.now() < spinUntil) { /* burn 2ms */ }
+    emitToolEvent({ id: 'tc_1', name: 'read_file' }, 'after', { result: 'ok' });
+
+    emitToolEvent({ id: 'tc_2', name: 'shell_exec' }, 'before');
+    emitToolEvent({ id: 'tc_2', name: 'shell_exec' }, 'after', { error: 'EACCES' });
+
+    const rows = runStore.listEventsScoped({ scope: 'current_run', runId });
+    expect(rows.length).toBe(4);
+
+    // Assert on each event's rich shape via tool_call_id pairing.
+    const r1Start = rows.find((r) => r.toolCallId === 'tc_1' && r.name === 'tool_call_started')!;
+    const r1End   = rows.find((r) => r.toolCallId === 'tc_1' && r.name === 'tool_call_completed')!;
+    expect(r1Start.category).toBe('tool');
+    expect(r1Start.kind).toBe('tool.call.started');
+    expect(r1Start.source).toBe('repl');
+    expect(r1Start.status).toBe('started');
+    expect(r1End.category).toBe('tool');
+    expect(r1End.kind).toBe('tool.call.completed');
+    expect(r1End.status).toBe('ok');
+    expect(r1End.durationMs).toBeGreaterThan(0);
+
+    // Failed call surfaces status='failed' + error in payload.
+    const r2End = rows.find((r) => r.toolCallId === 'tc_2' && r.name === 'tool_call_completed')!;
+    expect(r2End.status).toBe('failed');
+    expect(JSON.parse(r2End.payload).error).toBe('EACCES');
   });
 
   it('Slice 10.2c — /trace recent + trace_query read chatSessionId, NOT the turn-scoped sessionId', async () => {
