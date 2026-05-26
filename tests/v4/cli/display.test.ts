@@ -1516,14 +1516,19 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     });
   });
 
-  it('wide (≥120 cols): 3 separators (full density minus turn counter)', () => {
+  it('wide (≥120 cols): 5 separators (v4.10 Slice 10.3 — brand + session-uptime + spelled "last")', () => {
     withCols(140, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
       // v4.9.0 pre-ship UI: turn counter retired; ⌛ hourglass remains.
       expect(out).not.toMatch(/↻/);
       expect(out).toContain('⌛');
-      expect(sepCount(out)).toBe(3);
+      // v4.10 Slice 10.3 — full-density tier now has 6 segments:
+      //   brand · provModel │ ctxSegFull │ sessionUptime │ last <elapsed> │ stateDot
+      // => 5 separators between 6 segments.
+      expect(out).toMatch(/Aiden v\d/);
+      expect(out).toMatch(/last\s+\d+s/);
+      expect(sepCount(out)).toBe(5);
     });
   });
 

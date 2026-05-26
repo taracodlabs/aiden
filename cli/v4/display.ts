@@ -34,6 +34,8 @@ import {
   TRAIL_DETAIL_CAP,
 } from './display/toolTrail';
 // v4.1.3-essentials — capability card renderer (auth/platform failures).
+// v4.10 Slice 10.3 — brand prefix in the full-density status bar tier.
+import { VERSION as AIDEN_VERSION } from '../../core/version';
 import { renderCapabilityCard } from './display/capabilityCard';
 import type { CapabilityCardData } from '../../providers/v4/types';
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
@@ -859,13 +861,33 @@ export class Display {
     const ctxSegFull = `${ctxRatio} ${bar} ${ctxPctText}`;
     const ctxSegCompact = `${bar} ${ctxPctText}`;
 
+    // v4.10 Slice 10.3 — full-density-tier extras:
+    //   - brand prefix `Aiden v4.X`
+    //   - spelled-out `last <elapsed>` for last-turn time
+    //   - session uptime `<elapsed>` from sessionMs (re-enabled; the
+    //     v4.9.0 comment retired it but Slice 10.3 brings it back
+    //     because it's signal users want during long sessions)
+    const brandSeg = `${sk.applyColors(`Aiden v${AIDEN_VERSION}`, 'brand')}`;
+    const lastTurnSpelled = args.elapsedMs !== undefined
+      ? `${sk.applyColors(glyphs.status.timer, 'success')} ${sk.applyColors(`last ${formatElapsedShort(args.elapsedMs)}`, 'success')}`
+      : '';
+    const sessionUptimeSeg = (typeof args.sessionMs === 'number' && args.sessionMs > 0)
+      ? sk.applyColors(formatElapsedShort(args.sessionMs), 'muted')
+      : '';
+
     let segments: string[];
     if (cols >= 120 && stateDot && sessionSeg) {
-      segments = [provModel, ctxSegFull, sessionSeg, stateDot];
+      // Full density — v4.10 Slice 10.3 adds brand + session uptime
+      // + spelled-out "last <elapsed>" for the per-turn timer. Order:
+      //   Aiden v4.X · provider · model │ ctx │ session-uptime │ last 18s │ state
+      segments = [brandSeg, provModel, ctxSegFull];
+      if (sessionUptimeSeg) segments.push(sessionUptimeSeg);
+      segments.push(lastTurnSpelled, stateDot);
     } else if (cols >= 100) {
       // v4.8.1 Slice 2 hotfix — sessionSeg keeps the ⌛ identity glyph
       // (single-cell, cheap) even at this tier. v4.9.0 pre-ship UI:
       // turn counter retired; mid tier collapses to 2 separators.
+      // v4.10 Slice 10.3: brand + spell-out withheld here (width budget).
       segments = [provModel, ctxSegFull, sessionSeg || elapsed];
     } else {
       segments = [provModel, ctxSegCompact, sessionSeg || elapsed];

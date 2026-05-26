@@ -2151,6 +2151,11 @@ export class ChatSession implements ChatSessionLike {
     // v4.8.0 Slice 7 hotfix — predictable 1-blank-line rhythm: one
     // blank above the footer (visual breath after the reply), one
     // blank below (before the next prompt).
+    //
+    // v4.10 Slice 10.3 — the footer's full-density tier was extended
+    // with brand prefix (`Aiden v<X.Y>`), session uptime (sessionMs
+    // re-enabled), and spelled-out `last <elapsed>` for the per-turn
+    // timer. Mid (≥100) and narrow (<100) tiers unchanged.
     display.write(
       '\n' + display.statusFooter({
         provider,
