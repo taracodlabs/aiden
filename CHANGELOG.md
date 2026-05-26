@@ -1,3 +1,20 @@
+## v4.9.6 — 2026-05-27
+
+Two-fix patch atop v4.9.4. **Note**: v4.9.5 contains separate curated-skills work (`v4.9.5-dev` branch) currently held pending the `taracodlabs/aiden-skills` catalog populating. v4.9.6 patches apply atop v4.9.4 and will be forward-merged into v4.9.5 before it ships.
+
+### Fixed
+- **`aiden daemon start` from a TS checkout** — Previously the supervisor spawned the packaged dist-bundle even when running from source, causing "stale dist crashes before daemon comes up" in dev iterations. New `resolveDaemonChildCommand()` helper prefers the current source invocation when `process.argv[1]` ends in `aidenCLI.ts`; installed builds (`node dist/cli/v4/aidenCLI.js`) continue to use the bundle. Both `daemon start` and Windows `daemon restart` route through the helper for parity.
+- **chokidar 4.x option validation error** — File watchers configured with `--polling` but no explicit `--polling-interval` / `--polling-binary-interval` tripped chokidar's number-type validation on undefined fields. Now uses conditional spread so unset intervals fall back to chokidar's own defaults (100ms / 300ms).
+
+### Reverted (not shipped)
+- An earlier attempt at fixing Bug D (REPL typing-suggestion cursor misalignment) was found inert via Windows PowerShell smoke and reverted. `@inquirer/core`'s `screen-manager.js` strips VT control characters from the prompt and emits an absolute `cursorTo()` after our content, defeating any inline cursor-back escape. The deferral marker test (`expect(line).not.toMatch(/\[\d+D/)`) is restored to catch any future structurally-inert "fix" as a changed test rather than silent regression.
+
+### Known follow-ups for v4.10
+- Bug D properly fixed via screen-manager-aware refactor + node-pty test harness (real TTY behavioral assertions, not string-content mocks).
+- Hooks subprocess runner + MCP install healthCheck still use the pre-v4.9.2 spawn pattern.
+
+---
+
 ## v4.9.4 — 2026-05-24
 
 Hotfix for tool-call protocol orphans.
