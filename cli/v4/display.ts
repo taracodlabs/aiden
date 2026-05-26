@@ -1241,6 +1241,13 @@ export class Display {
 
     const renderTick = (): void => {
       if (stopped || paused || !isTty) return;
+      // v4.11 Slice 1 — explicit frame-mode silence.
+      // When the frame composer is mounted it owns the screen; the
+      // legacy indicator MUST stay quiet. This is the audited pause
+      // path the renderer foundation requires — grep for the global
+      // and you see every site that touches the silence.
+      type GFlag = typeof globalThis & { __aiden_legacy_indicator_paused?: boolean };
+      if ((globalThis as GFlag).__aiden_legacy_indicator_paused) return;
       dotFrame = (dotFrame + 1) % 4;
       // v4.8.0 Slice 11 — shimmer slides 1 cell per tick. Same 250ms
       // cadence as the dot pulse, so block + dots move in visible

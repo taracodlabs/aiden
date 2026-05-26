@@ -51,6 +51,13 @@ export interface AidenConfig {
   display: {
     skin: string;
     streaming: boolean;
+    /**
+     * v4.11 Slice 1 — renderer selection.
+     *   undefined | 'legacy' → existing aidenPrompt path (default)
+     *   'frame'              → renderer-owned composer (cli/v4/frame)
+     * Env var `AIDEN_RENDERER` overrides this at runtime.
+     */
+    renderer?: 'legacy' | 'frame';
   };
   providers?: Record<
     string,

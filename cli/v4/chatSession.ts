@@ -1290,6 +1290,17 @@ export class ChatSession implements ChatSessionLike {
     // doesn't crowd the agent's actual reply). Engine handles
     // budget + dismissal.
     let _deferredTip: { slot: string; message: string } | null = null;
+    // v4.11 Slice 1 — explicit streaming handoff boundary. When
+    // frame mode is active the composer unmounts on submit (before
+    // this function is called); pauseFrame is advisory here so the
+    // boundary is grep-able and ready for the persistent-mount
+    // model later slices switch to. resumeFrame fires in the finally
+    // block below regardless of how the turn ended.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { isFrameModeRequested, pauseFrame } = require('./frame') as typeof import('./frame');
+      if (isFrameModeRequested()) await pauseFrame();
+    } catch { /* frame module is best-effort; never break a turn */ }
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { getSuggestionEngine } = require('../../core/v4/suggestionEngine');
@@ -1969,6 +1980,16 @@ export class ChatSession implements ChatSessionLike {
           this.opts.display.dim(`[loop-trace] wrote ${snapPath}`);
         }
       } catch { /* defensive */ }
+    } finally {
+      // v4.11 Slice 1 — explicit streaming-handoff boundary, exit
+      // side. Mirrors the pauseFrame at the top of runAgentTurn so
+      // the legacy indicator gate releases regardless of how the
+      // turn ended (success, error, throw).
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { isFrameModeRequested, resumeFrame } = require('./frame') as typeof import('./frame');
+        if (isFrameModeRequested()) await resumeFrame();
+      } catch { /* never break a turn on frame cleanup */ }
     }
   }
 
@@ -2675,6 +2696,15 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
   // aidenPrompt component (ghost text + slash dropdown + history nav).
   const useLegacyPrompt = isNoUiMode() || !opts.commands;
 
+  // v4.11 Slice 1 — opt-in frame renderer.
+  // When AIDEN_RENDERER=frame is set (or display.renderer === 'frame'
+  // in config), readLine routes through the renderer-owned composer
+  // (cli/v4/frame). Cursor + cell positioning is owned by Ink; the
+  // legacy aidenPrompt path is untouched and stays the default.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const frameMod = require('./frame') as typeof import('./frame');
+  const frameModeOn = frameMod.isFrameModeRequested();
+
   return {
     async readLine(prompt, readOpts) {
       try {
@@ -2690,6 +2720,20 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
         // Fetch history just-in-time so each read sees the latest
         // (the user's previous turn was just appended).
         const history = opts.loadHistory ? await opts.loadHistory() : [];
+        // v4.11 Slice 1 — frame-mode branch. Bypasses aidenPrompt
+        // entirely; the renderer-owned composer captures input and
+        // hands back the string on Enter. History prefetch above is
+        // intentionally still done (ghost text / history nav land
+        // here in later slices and the legacy fallback wants the
+        // same warm-cache shape).
+        if (frameModeOn) {
+          const value = await frameMod.readLineFramed({ prompt: `${prompt} ` });
+          const trimmed = (value ?? '').trim();
+          if (trimmed.length > 0) {
+            try { await appendHistory(trimmed); } catch { /* best-effort */ }
+          }
+          return value ?? '';
+        }
         const value = await aidenPrompt({
           message:  prompt,
           commands: opts.commands ?? [],
