@@ -275,10 +275,17 @@ export function createRealAgentRunner(
           // observability via tally(). Future enhancement: thread the
           // signal into the loop body via options.
           //
-          // v4.8.0 Phase 2.2 — uiOnly events on the daemon side are
-          // dropped here. Phase 2.4 will serialize them into the
-          // dispatcher's run_events stream.
-          onUiEvent: () => { /* no-op stub — Phase 2.4 serializes to run_events */ },
+          // v4.10 Slice 10.2 — closes the Phase 2.4 comment debt:
+          // serialize ui_* events to the dispatcher's run_events
+          // stream keyed on the active runId. Daemon-fired turns have
+          // no human watching, so no render call here (matches the
+          // pre-Slice-10.2 no-render contract). Persistence-only.
+          // try/catch matches the chatSession + aidenCLI sites — a
+          // locked DB or schema drift must not crash dispatch.
+          onUiEvent: (name: string, args: Record<string, unknown>) => {
+            try { opts.runStore.emitEvent(runId, name, args); }
+            catch { /* persistence faults must never break dispatch */ }
+          },
         });
         // Stamp the actual token usage onto the watcher for the
         // post-turn snapshot below.

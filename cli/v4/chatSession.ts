@@ -100,6 +100,47 @@ import { expand, hasInterpolation, countSpans } from './shellInterpolation';
 import { installResizeGuard } from './resizeGuard';
 
 /**
+ * v4.10 Slice 10.2 — extracted onUiEvent factory. Builds the per-turn
+ * closure that chatSession.runAgentTurn passes to the agent's
+ * runConversation. Production calls this from inline at the dispatch
+ * site (no shortcut); the integration test in
+ * tests/v4/cli/chatSessionUiPersist.test.ts drives THIS helper with
+ * controlled stubs to assert the persistence wire fires. Same
+ * mock-blindness fix shape as Slice 10.1b's createBootMemoryManager:
+ * test the real construction code path, not a hand-rolled equivalent.
+ *
+ * Three side effects (in order):
+ *   1. stopIndicator() — kill the "provider calling" spinner so the
+ *      painted ui row lands cleanly below it.
+ *   2. display.renderUiEvent(name, args) — TTY-gated render.
+ *   3. runStore.emitEvent(runId, name, args) — durable persistence,
+ *      gated on runStore + runId being present. try/catch so a DB
+ *      fault never breaks dispatch.
+ *
+ * Non-TTY note: renderUiEvent early-returns when !out.isTTY but the
+ * persistence step still runs. Matches v4.9.3 Slice 1b discipline
+ * (render off, persistence on).
+ */
+export interface OnUiEventDeps {
+  display:            { renderUiEvent(name: string, args: Record<string, unknown>): void };
+  runStore:           { emitEvent(runId: number, kind: string, payload: Record<string, unknown>): void } | undefined;
+  runId:              number | null;
+  stopIndicatorOnce:  () => void;
+}
+export function createOnUiEventHandler(
+  deps: OnUiEventDeps,
+): (name: string, args: Record<string, unknown>) => void {
+  return (name, args) => {
+    deps.stopIndicatorOnce();
+    deps.display.renderUiEvent(name, args);
+    if (deps.runStore && deps.runId !== null) {
+      try { deps.runStore.emitEvent(deps.runId, name, args); }
+      catch { /* persistence faults must never break dispatch */ }
+    }
+  };
+}
+
+/**
  * Phase v4.1.2 session-summary-followup: parse the auxiliary client's
  * JSON-array response into a clean `string[]` of bullets. Defensive —
  * tries direct JSON.parse first, then a fenced-code-block strip, then
@@ -1481,10 +1522,18 @@ export class ChatSession implements ChatSessionLike {
         // mirroring how a first regular tool call stops it. Phase 2.3
         // handles ui_task_update + ui_task_done; the other 5 event
         // names land in Phase 2.4 (renderer silent-ignores them).
-        onUiEvent: (name, args) => {
-          stopIndicatorOnce();
-          this.opts.display.renderUiEvent(name, args);
-        },
+        //
+        // v4.10 Slice 10.2 — persistence: tee every ui_* emission into
+        // run_events keyed on the current REPL turn's runId. Routed
+        // through createOnUiEventHandler so the integration test
+        // exercises the EXACT same code path production uses
+        // (mock-blindness fix; see Slice 10.1b retrospective).
+        onUiEvent: createOnUiEventHandler({
+          display:           this.opts.display,
+          runStore:          replRunStore,
+          runId:             replRunId,
+          stopIndicatorOnce,
+        }),
         onProgress: streamingEnabled
           ? (outputTokens: number, maxTokens?: number) => {
               if (indicatorStopped === false) return;

@@ -66,6 +66,9 @@ import { daemonDbPath } from '../../core/v4/daemon/daemonConfig';
 import { openDaemonDb } from '../../core/v4/daemon/db/connection';
 import { createRunStore } from '../../core/v4/daemon/runStore';
 import { makeSpawnSubAgentTool } from '../../tools/v4/subagent/spawnSubAgentTool';
+// v4.10 Slice 10.2 — trace_query tool (REPL-only). Factory pattern
+// matches spawn_sub_agent: dependencies injected at registration.
+import { makeTraceQueryTool } from '../../tools/v4/trace/traceQuery';
 import type { Message as ProviderMessage } from '../../providers/v4/types';
 import { SkillCommands } from '../../core/v4/skillCommands';
 import { AidenAgent } from '../../core/v4/aidenAgent';
@@ -1334,8 +1337,18 @@ export async function buildAgentRuntime(
     riskAssess: callbacks.riskAssess,
     // v4.8.0 Phase 2.5 — paint the structured approval row before the
     // existing y/n prompt runs. Additive; promptApproval flow unchanged.
-    onUiEvent: (name: string, args: Record<string, unknown>) =>
-      display.renderUiEvent(name, args),
+    // v4.10 Slice 10.2 — also tee into run_events when a parent run is
+    // in flight. Approval requests fired between turns (slash-command
+    // paths) skip persistence (no runId yet). Same try/catch shape as
+    // the chatSession site.
+    onUiEvent: (name: string, args: Record<string, unknown>) => {
+      display.renderUiEvent(name, args);
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        try { replRunStore.emitEvent(rid, name, args); }
+        catch { /* persistence faults must never break dispatch */ }
+      }
+    },
     // Phase 16f: append-on-disk for "Allow always" choices. Single-process
     // REPL — atomic write via tmp-then-rename.
     persistAllow: (tool: string, signature: string) => {
@@ -1938,8 +1951,19 @@ export async function buildAgentRuntime(
     // v4.8.0 Phase 2.5 — emit ui_task_update/ui_task_done events so
     // subagent activity surfaces as gutter-indented trail rows in the
     // parent's chat surface alongside its own tool trail.
-    onUiEvent: (name: string, args: Record<string, unknown>) =>
-      display.renderUiEvent(name, args),
+    // v4.10 Slice 10.2 — persistence: child agents render through
+    // this callback but childBuilder.ts only persists tool_call_*
+    // events, never ui_* events. Tee here keyed on the PARENT's
+    // runId (replParentRunRef.runId) so cross-agent ui_* trace is
+    // queryable in one place.
+    onUiEvent: (name: string, args: Record<string, unknown>) => {
+      display.renderUiEvent(name, args);
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        try { replRunStore.emitEvent(rid, name, args); }
+        catch { /* persistence faults must never break dispatch */ }
+      }
+    },
     runStore:            replRunStore,
     instanceId:          replInstanceId,
     // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the same
@@ -1959,6 +1983,18 @@ export async function buildAgentRuntime(
     instanceId: replInstanceId,
     dbPath:     daemonDbPath(paths.root),
   });
+
+  // ── v4.10 Slice 10.2 — trace_query (REPL only) ─────────────────────
+  //
+  // Registers the model-facing read-only trace_query tool. Wired AFTER
+  // replRunStore + replParentRunRef are in scope so the factory captures
+  // live references. Not registered in daemon agent builders — daemon
+  // turns persist their own trace via realAgentRunner's onUiEvent hook
+  // but don't expose introspection (Phase B Q2: scope locked to REPL).
+  toolRegistry.register(makeTraceQueryTool({
+    runStore:         replRunStore,
+    resolveSessionId: () => replParentRunRef.sessionId,
+  }));
 
   // ── Phase v4.1-2.1: gateway message processor ────────────────────
   //
@@ -2041,6 +2077,60 @@ export async function buildAgentRuntime(
   // Command registry.
   const commandRegistry = new CommandRegistry();
   for (const cmd of allCommands) commandRegistry.register(cmd);
+
+  // ── v4.10 Slice 10.2 — /trace recent slash command ────────────────
+  //
+  // User-facing introspection of the current REPL session's
+  // run_events stream. Mirrors `trace_query` (model-facing) but
+  // formats for human reading. Registered inline so it can capture
+  // replRunStore + replParentRunRef in closure without threading
+  // them through the static allCommands list (same pattern skill
+  // commands use below for SkillLoader access).
+  commandRegistry.register({
+    name: 'trace',
+    description: 'Inspect recent events from this REPL session. Usage: /trace recent [N]',
+    category: 'system',
+    icon: '⊙',
+    handler: async (ctx) => {
+      const sub = (ctx.args[0] ?? 'recent').toLowerCase();
+      if (sub !== 'recent') {
+        ctx.display.printError(
+          `Unknown subcommand: ${sub}`,
+          'Try: /trace recent [N]   (N defaults to 20, max 200)',
+        );
+        return {};
+      }
+      const sessionId = replParentRunRef.sessionId;
+      if (!sessionId) {
+        ctx.display.dim('No active REPL session — start a turn first.');
+        return {};
+      }
+      const limitArg = Number(ctx.args[1]);
+      const limit = Number.isFinite(limitArg) && limitArg > 0
+        ? Math.min(Math.floor(limitArg), 200)
+        : 20;
+      let rows;
+      try {
+        rows = replRunStore.listEventsForSession({ sessionId, limit });
+      } catch (e) {
+        ctx.display.printError(`trace query failed: ${(e as Error).message}`);
+        return {};
+      }
+      if (rows.length === 0) {
+        ctx.display.dim('(no events in this session yet — events appear after the first tool call)');
+        return {};
+      }
+      ctx.display.info(`Recent events (${rows.length}, newest first):`);
+      for (const r of rows) {
+        const tsIso = new Date(r.ts).toISOString().replace(/\.\d{3}Z$/, 'Z');
+        const preview = r.payload.length > 80
+          ? `${r.payload.slice(0, 77)}…`
+          : r.payload;
+        ctx.display.write(`  ${tsIso}  run=${r.runId}  ${r.kind}  ${preview}\n`);
+      }
+      return {};
+    },
+  });
 
   // Skill slash commands.
   try {

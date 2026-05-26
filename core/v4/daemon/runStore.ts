@@ -95,6 +95,26 @@ export interface RunStore {
   countChildren(parentRunId: number): { total: number; completed: number };
   /** List events for a run, ordered by ts ascending. */
   listEvents(runId: number, limit?: number): Array<{ ts: number; kind: string; payload: string }>;
+  /**
+   * v4.10 Slice 10.2 — list events for an entire REPL session, optionally
+   * filtered by event kind. Backs `trace_query` + `/trace recent`.
+   *
+   * Returns descending by ts (newest first) — the typical "what just
+   * happened" query shape. Each row carries the parent `run_id` so
+   * callers can correlate turn boundaries.
+   *
+   * Cross-session queries are NOT supported in this slice (Phase B Q2:
+   * deferred to v4.11). `sessionId` is required.
+   */
+  listEventsForSession(opts: {
+    sessionId: string;
+    /** Filter by event kind substring (e.g. `'ui_'` for all UI events). */
+    kindPrefix?: string;
+    /** Only events at or after this epoch ms. */
+    sinceMs?: number;
+    /** Cap rows (default 100, max 5000). */
+    limit?: number;
+  }): Array<{ runId: number; ts: number; kind: string; payload: string }>;
 }
 
 export interface CreateRunStoreOptions {
@@ -228,6 +248,38 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
         `SELECT ts, kind, payload FROM run_events WHERE run_id = ? ORDER BY ts ASC LIMIT ?`,
       ).all(runId, Math.max(1, Math.min(limit, 5000))) as Array<{ ts: number; kind: string; payload: string }>;
       return rows;
+    },
+    listEventsForSession(opts) {
+      // v4.10 Slice 10.2 — session-scoped event query for trace_query +
+      // /trace recent. Joins run_events to runs on run_id so we can
+      // filter by session_id without exposing a denormalized column.
+      // Newest-first (DESC) matches the "what just happened" usage.
+      const limit = Math.max(1, Math.min(opts.limit ?? 100, 5000));
+      const params: Array<string | number> = [opts.sessionId];
+      let where = 'r.session_id = ?';
+      if (typeof opts.sinceMs === 'number') {
+        where += ' AND e.ts >= ?';
+        params.push(opts.sinceMs);
+      }
+      if (typeof opts.kindPrefix === 'string' && opts.kindPrefix.length > 0) {
+        where += ' AND e.kind LIKE ?';
+        params.push(`${opts.kindPrefix}%`);
+      }
+      params.push(limit);
+      const rows = db.prepare(
+        `SELECT e.run_id AS run_id, e.ts AS ts, e.kind AS kind, e.payload AS payload
+           FROM run_events e
+           JOIN runs r ON r.id = e.run_id
+          WHERE ${where}
+          ORDER BY e.ts DESC
+          LIMIT ?`,
+      ).all(...params) as Array<{ run_id: number; ts: number; kind: string; payload: string }>;
+      return rows.map((r) => ({
+        runId:   r.run_id,
+        ts:      r.ts,
+        kind:    r.kind,
+        payload: r.payload,
+      }));
     },
   };
 }
