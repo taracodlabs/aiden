@@ -27,6 +27,11 @@ import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { LoopTracer } from '../../core/v4/loopTrace';
 import type { Display } from './display';
 import { summarizeChannelState, verbForActivity } from './display';
+// v4.10 Slice 10.7a — REPL-sacred defense-in-depth flag. Wired here so
+// any future stdout/stderr sink that wants to honor the
+// "user-is-typing" invariant can check isReplActive(). Pairs with the
+// StderrSink removal from cli-interactive in core/v4/logger/factory.ts.
+import { markReplActive, markReplInactive } from '../../core/v4/logger/factory';
 // v4.1.4 Part 1.6 — per-turn token progress bar. Fed by `onProgress`
 // events from the streaming adapter; hidden when the adapter doesn't
 // emit progress (honest degradation).
@@ -675,6 +680,11 @@ export class ChatSession implements ChatSessionLike {
             } catch { /* defensive — never break the resize listener */ }
           },
         });
+    // v4.10 Slice 10.7a — mark the REPL active for the entire chat
+    // loop lifetime. The flag is read by any sink / writer that wants
+    // to defer TTY writes while the prompt is up (defense-in-depth
+    // on top of the StderrSink removal from cli-interactive mode).
+    markReplActive();
     try {
       while (iter < max) {
         iter += 1;
@@ -777,6 +787,11 @@ export class ChatSession implements ChatSessionLike {
         await this.runAgentTurn(input);
       }
     } finally {
+      // v4.10 Slice 10.7a — REPL no longer active; any subsequent
+      // logger writes (e.g. SIGINT cleanup paths) can use stderr
+      // freely. Paired with markReplActive above; idempotent if the
+      // REPL exited before reaching the loop.
+      markReplInactive();
       if (sigintHandler)  process.off('SIGINT',  sigintHandler);
       if (sigtermHandler) process.off('SIGTERM', sigtermHandler);
       if (exitHandler)    process.off('exit',    exitHandler);

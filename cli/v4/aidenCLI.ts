@@ -1810,15 +1810,25 @@ export async function buildAgentRuntime(
 
   // v4.6 Phase 3A — startup probe for the spawn-pause kill-switch.
   // The state was initialised early (line ~740) before tool wiring.
-  // Now that bootLogger exists, emit a visible warning so an
-  // operator who forgot they paused in a prior session learns
-  // immediately rather than puzzling at silent rejected fanouts.
+  // Emit a visible warning so an operator who forgot they paused in
+  // a prior session learns immediately rather than puzzling at
+  // silent rejected fanouts.
+  //
+  // v4.10 Slice 10.7a — migrated from bootLogger.warn to
+  // display.warn so the user-visible message survives the StderrSink
+  // removal from cli-interactive mode. display.warn is TTY-aware
+  // and coordinates with the prompt lifecycle (the file log still
+  // captures the structured event via bootLogger.info below).
   if (spawnPauseBootStatus) {
     const s = spawnPauseBootStatus;
     const reasonSuffix = s.reason ? ` (reason: ${s.reason})` : '';
-    bootLogger.warn(
+    display.warn(
       `spawn_sub_agent / subagent_fanout are PAUSED${reasonSuffix}. ` +
       'Run /spawn-pause off to resume.',
+    );
+    // Also record to file log for postmortems (structured context).
+    bootLogger.info(
+      `spawn-pause active at boot${reasonSuffix}`,
       {
         pausedAt:   s.pausedAt   ?? null,
         pausedBy:   s.pausedBy   ?? null,

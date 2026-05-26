@@ -60,11 +60,23 @@ export interface BootLoggerResult {
 export function createBootLogger(opts: BootLoggerOptions): BootLoggerResult {
   switch (opts.mode) {
     case 'cli-interactive': {
-      // REPL invariant: zero stdout writes. Stderr is allowed for
-      // warn/error so a real failure isn't completely silent.
+      // v4.10 Slice 10.7a — REPL invariant: ZERO writes to the
+      // shared TTY. The pre-Slice-10.7a comment claimed "stderr is
+      // allowed for warn/error so a real failure isn't completely
+      // silent" — but for an interactive REPL, stderr IS the same
+      // TTY as stdin, so warn writes (Telegram polling 409s, channel
+      // adapter failures, etc.) splice into the user's typing line.
+      //
+      // Fix: file sink only. The one user-visible boot warning
+      // (spawn-pause notice at aidenCLI.ts:1819) was migrated to
+      // display.warn(...) — Display is TTY-aware and coordinates
+      // with the prompt lifecycle. Other warn callers are
+      // diagnostic and now land in <logsDir>/aiden.log only.
+      //
+      // The markReplActive() flag at the bottom of this file is
+      // additionally wired in chatSession as belt-and-suspenders.
       const sinks: import('./logger').LoggerSink[] = [];
       if (opts.logsDir) sinks.push(new FileSink({ dir: opts.logsDir, name: 'aiden' }));
-      sinks.push(new StderrSink({ minLevel: 'warn' }));
       return { logger: new CoreLogger({ sinks }) };
     }
 
