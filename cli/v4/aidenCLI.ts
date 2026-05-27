@@ -68,6 +68,7 @@ import { createRunStore } from '../../core/v4/daemon/runStore';
 // v4.10 Slice 10.2b — shared event taxonomy. Tool name → (category, kind).
 import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { makeSpawnSubAgentTool } from '../../tools/v4/subagent/spawnSubAgentTool';
+import { SubagentCoordinator } from '../../core/v4/subagent/coordinator';
 // v4.10 Slice 10.2 — trace_query tool (REPL-only). Factory pattern
 // matches spawn_sub_agent: dependencies injected at registration.
 import { makeTraceQueryTool } from '../../tools/v4/trace/traceQuery';
@@ -2096,10 +2097,25 @@ export async function buildAgentRuntime(
   // this block). The legacy per-call `runChild` closure that lived
   // here pre-2R has been deleted; the primitive owns child
   // construction now.
-  toolRegistry.register(makeSubagentFanoutTool({
-    logger: bootLogger.child('subagent'),
-    resolveActiveModel: () => ({ providerId, modelId }),
-    aggregatorAdapter: adapter,
+  // v4.11 Slice 4 — construct the SubagentCoordinator ONCE. Both tool
+  // facades (spawn_sub_agent + subagent_fanout) share the same
+  // coordinator instance so the active-children registry is
+  // process-wide, cost accumulators roll up into one parent's turn
+  // context, and a future operator surface can query/cancel without
+  // a per-tool plumbing pass.
+  //
+  // The coordinator wraps — does NOT replace — the existing
+  // `spawnSubAgent` primitive. The primitive still owns child agent
+  // construction (toolset intersection, ApprovalEngine auto-deny,
+  // provider clone, internal timeout cascade). The coordinator owns
+  // the BATCH abstraction layered above (id minting, linked controllers,
+  // bounded concurrency, ordered aggregation, lifecycle trace).
+  //
+  // spawnDeps is the SAME shape v4.6 wired: tool registry, parent
+  // tool context (memory / ssrf / tirith / skills), provider adapter,
+  // resolvers, run store. No widening — the coordinator's API
+  // accepts the existing SpawnSubAgentDeps verbatim.
+  const subagentCoordinator = new SubagentCoordinator({
     spawnDeps: {
       toolRegistry,
       parentToolContext: {
@@ -2108,6 +2124,9 @@ export async function buildAgentRuntime(
         sessions:       sessionManager,
         memory:         memoryManager,
         memoryGuard,
+        // approvalEngine intentionally OMITTED — the child builder
+        // constructs its own auto-deny ApprovalEngine. Listing it
+        // here would be ignored (childBuilder overrides via spread).
         ssrfProtection,
         tirithScanner,
         skillLoader,
@@ -2123,13 +2142,16 @@ export async function buildAgentRuntime(
       instanceId:          replInstanceId,
       logger:              bootLogger.child('subagent'),
     },
-    // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the shared
-    // `replParentRunRef` mutated by `ChatSession.runAgentTurn` so
-    // fanout children get `spawned_from_run_id` populated. Returns
-    // undefined between turns (ref cleared post-turn), matching the
-    // pre-2Q-B behaviour for slash-command-triggered spawns.
-    resolveParentRunId:     () => replParentRunRef.runId     ?? undefined,
-    resolveParentSessionId: () => replParentRunRef.sessionId ?? undefined,
+    logger: bootLogger.child('subagent'),
+  });
+
+  // ── v4.11 Slice 4 — register subagent_fanout (facade) ──────────────────
+  toolRegistry.register(makeSubagentFanoutTool({
+    resolveTurnContext: () => agent.getCurrentTurnContext(),
+    coordinator:        subagentCoordinator,
+    logger:             bootLogger.child('subagent'),
+    resolveActiveModel: () => ({ providerId, modelId }),
+    aggregatorAdapter:  adapter,
     resolveProviders: (): ProviderOption[] => {
       // When the parent uses FallbackAdapter, expose every key-present
       // slot's (providerId, modelId) so rotation can spread children
@@ -2157,60 +2179,26 @@ export async function buildAgentRuntime(
     fallback: adapter instanceof FallbackAdapter ? 'FallbackAdapter' : 'direct',
   });
 
-  // ── v4.6 Phase 1 — register spawn_sub_agent (REPL only) ────────────────
-  //
-  // The new single-child synchronous primitive. Coexists with
-  // subagent_fanout (Q9 — additive in Phase 1; Phase 2 will refactor
-  // fanout to call this primitive N times).
-  //
-  // Wired here, AFTER `agent` and `toolExecutor` are in scope, because
-  // the child builder needs the parent agent's reference (to read
-  // `getCurrentSignal()` at dispatch time per the agent-instance signal
-  // pattern) and the parent's tool context for ssrf/tirith/memory/etc.
-  //
+  // ── v4.11 Slice 4 — register spawn_sub_agent (facade, REPL only) ───────
   // Deliberately NOT registered in cli/v4/daemonAgentBuilder.ts —
   // daemon-fired agents don't expose spawn_sub_agent in their tool
-  // catalog (Q6 lock).
+  // catalog (Q6 lock from v4.6 Phase 1).
   toolRegistry.register(makeSpawnSubAgentTool({
-    parentAgent:         agent,
-    toolRegistry,
-    parentToolContext: {
-      cwd:            process.cwd(),
-      paths,
-      sessions:       sessionManager,
-      memory:         memoryManager,
-      memoryGuard,
-      // approvalEngine intentionally OMITTED — the child builder
-      // constructs its own auto-deny ApprovalEngine. Listing it here
-      // would be ignored (childBuilder overrides via spread), but
-      // keeping it out makes the intent explicit.
-      ssrfProtection,
-      tirithScanner,
-      skillLoader,
-    },
-    parentProvider:      adapter,
-    parentProviderId:    providerId,
-    parentModelId:       modelId,
-    resolveVerifiedFlag,
-    resolveToolset,
-    resolveMutates,
-    resolveUiOnly,
+    resolveTurnContext: () => agent.getCurrentTurnContext(),
+    coordinator:        subagentCoordinator,
+    logger:             bootLogger.child('subagent'),
     // v4.8.0 Phase 2.5 — emit ui_task_update/ui_task_done events so
     // subagent activity surfaces as gutter-indented trail rows in the
     // parent's chat surface alongside its own tool trail.
-    // v4.10 Slice 10.2 — persistence: child agents render through
-    // this callback but childBuilder.ts only persists tool_call_*
-    // events, never ui_* events. Tee here keyed on the PARENT's
-    // runId (replParentRunRef.runId) so cross-agent ui_* trace is
-    // queryable in one place.
+    // v4.10 Slice 10.2 — persistence: tee through the parent's runId
+    // (replParentRunRef.runId) so cross-agent ui_* trace co-locates
+    // with the parent's own ui events. The coordinator's own
+    // subagent.* lifecycle events are emitted separately via the
+    // TurnRuntimeContext's traceEmitter (wired in chatSession).
     onUiEvent: (name: string, args: Record<string, unknown>) => {
       display.renderUiEvent(name, args);
       const rid = replParentRunRef.runId;
       if (rid !== null) {
-        // v4.10 Slice 10.2b — rich emission. Source='subagent' here
-        // because the wire fires from a spawn_sub_agent child rendering
-        // through the parent's onUiEvent — the parent's run is the row
-        // owner but the originator is the child.
         try {
           const tags = categorizeEvent(name);
           replRunStore.emitEventRich({
@@ -2226,20 +2214,6 @@ export async function buildAgentRuntime(
         } catch { /* persistence faults must never break dispatch */ }
       }
     },
-    runStore:            replRunStore,
-    instanceId:          replInstanceId,
-    // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the same
-    // shared `replParentRunRef` the fanout factory above uses;
-    // ChatSession.runAgentTurn populates it before each turn
-    // dispatches. Returns undefined between turns so spawns from
-    // slash-command handlers stay top-level (consistent with
-    // pre-2Q-B observable behaviour).
-    resolveParentRunId:     () => replParentRunRef.runId     ?? undefined,
-    resolveParentSessionId: () => replParentRunRef.sessionId ?? undefined,
-    // v4.6 Phase 1 observability — info-level traces for spec at
-    // invocation, child-tools count, completion, and per-tool-call
-    // run_events on the child's runs row.
-    logger:              bootLogger.child('subagent'),
   }));
   bootLogger.child('subagent').info('spawn_sub_agent: wired (REPL only)', {
     instanceId: replInstanceId,

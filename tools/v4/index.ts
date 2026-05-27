@@ -188,12 +188,35 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
  *  dependencies. Returns the SAME schema as the real tool so MCP and
  *  /tools see a consistent surface. */
 function makeSubagentFanoutStub() {
-  // v4.6 Phase 2R — `runChild` removed from `SubagentFanoutFactoryOptions`.
-  // The stub returns a "no providers configured" error envelope on every
-  // call via `resolveProviders: () => []`. Production wires real
-  // `spawnDeps` post-runtime build (`cli/v4/aidenCLI.ts` for REPL,
-  // `cli/v4/commands/mcp.ts` for MCP serve).
+  // v4.11 Slice 4 — the stub returns the "tool not wired" error on
+  // every call because `resolveProviders: () => []` makes the
+  // facade short-circuit before ever touching the coordinator. The
+  // coordinator + turn context resolvers are minimal placeholders
+  // — they never run since the providers check fires first.
+  // Production wiring (`cli/v4/aidenCLI.ts` for REPL,
+  // `cli/v4/commands/mcp.ts` for MCP serve) replaces this stub with
+  // a fully-wired registration after `buildAgentRuntime` resolves
+  // the real deps.
   return makeSubagentFanoutTool({
+    resolveTurnContext: () => undefined,
+    coordinator:        {
+      // Bare-minimum shape — only the methods the facade's hot path
+      // would touch. Since `resolveProviders` returns [] first, the
+      // facade short-circuits before any coordinator method runs.
+      // The cast is intentional: the stub IS unreachable scaffolding.
+      spawnBatch:         async () => ({
+        fanoutId:        'stub',
+        status:          'failed',
+        results:         [],
+        aggregateUsage:  { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUSD: 0 },
+        traceId:         'stub',
+        startedAt:       Date.now(),
+        endedAt:         Date.now(),
+        durationMs:      0,
+      }),
+      cancelChild:        () => false,
+      listActiveChildren: () => [],
+    } as unknown as import('../../core/v4/subagent/coordinator').SubagentCoordinator,
     resolveProviders:    () => [],
     resolveActiveModel:  () => ({ providerId: 'unset', modelId: 'unset' }),
     aggregatorAdapter:   {

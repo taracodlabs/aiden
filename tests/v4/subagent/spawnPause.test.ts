@@ -196,15 +196,12 @@ describe('spawn_sub_agent handler — pause gate (v4.6 Phase 3A)', () => {
     // Stand up the spawn tool with deliberately broken deps —
     // the pause gate fires FIRST, so the deps never get touched.
     const { makeSpawnSubAgentTool } = await import('../../../tools/v4/subagent/spawnSubAgentTool');
+    // v4.11 Slice 4 — facade requires coordinator + turn ctx resolver.
+    // The pause gate fires FIRST so a minimal-shape coordinator/ctx
+    // is sufficient (neither is touched on this path).
     const tool = makeSpawnSubAgentTool({
-      parentAgent:       { getCurrentSignal: () => undefined } as never,
-      toolRegistry:      {} as never,
-      parentToolContext: {} as never,
-      parentProvider:    {} as never,
-      parentProviderId:  'mock',
-      parentModelId:     'mock',
-      runStore:          {} as never,
-      instanceId:        'inst-test',
+      resolveTurnContext: () => undefined,
+      coordinator:        {} as never,
     });
     const result = (await tool.execute({ goal: 'do thing' }, {} as never)) as {
       success: boolean; errorCode?: string; message?: string;
@@ -260,15 +257,12 @@ describe('spawn_sub_agent handler — pause gate (v4.6 Phase 3A)', () => {
     state.resume();
 
     const { makeSpawnSubAgentTool } = await import('../../../tools/v4/subagent/spawnSubAgentTool');
+    // v4.11 Slice 4 — facade requires coordinator + turn ctx resolver.
+    // The pause gate fires FIRST so a minimal-shape coordinator/ctx
+    // is sufficient (neither is touched on this path).
     const tool = makeSpawnSubAgentTool({
-      parentAgent:       { getCurrentSignal: () => undefined } as never,
-      toolRegistry:      {} as never,
-      parentToolContext: {} as never,
-      parentProvider:    {} as never,
-      parentProviderId:  'mock',
-      parentModelId:     'mock',
-      runStore:          {} as never,
-      instanceId:        'inst-test',
+      resolveTurnContext: () => undefined,
+      coordinator:        {} as never,
     });
     // Empty goal → handler proceeds to its OWN validation error.
     // Crucially, the error is NOT SUBAGENT_SPAWN_PAUSED.
@@ -284,13 +278,14 @@ describe('subagent_fanout handler — pause gate (v4.6 Phase 3A)', () => {
     state.pause({ reason: 'partial-fanout-prevention', pausedBy: 'repl' });
 
     const { makeSubagentFanoutTool } = await import('../../../tools/v4/subagent/subagentFanout');
+    // v4.11 Slice 4 — facade requires coordinator + turn-ctx resolver.
+    // Pause gate fires FIRST so minimal-shape coordinator suffices.
     const tool = makeSubagentFanoutTool({
+      resolveTurnContext:  () => undefined,
+      coordinator:         {} as never,
       resolveProviders:    () => [{ providerId: 'mock', modelId: 'mock', label: 'mock-0' }],
       resolveActiveModel:  () => ({ providerId: 'mock', modelId: 'mock' }),
       aggregatorAdapter:   {} as never,
-      // NOTE: deliberately no spawnDeps. Gate fires before any deps
-      // are used; if the gate were missing the test would fail with
-      // a "tool not wired" envelope instead.
     });
     const result = (await tool.execute({ mode: 'ensemble', query: 'q', n: 3, merge: 'all' }, {} as never)) as {
       success: boolean; errorCode?: string; message?: string; reason?: string | null;
@@ -309,6 +304,8 @@ describe('subagent_fanout handler — pause gate (v4.6 Phase 3A)', () => {
 
     const { makeSubagentFanoutTool } = await import('../../../tools/v4/subagent/subagentFanout');
     const tool = makeSubagentFanoutTool({
+      resolveTurnContext:  () => undefined,
+      coordinator:         {} as never,
       resolveProviders:    () => [],
       resolveActiveModel:  () => ({ providerId: 'mock', modelId: 'mock' }),
       aggregatorAdapter:   {} as never,

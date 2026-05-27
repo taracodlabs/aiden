@@ -3,106 +3,77 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  *
  * Aiden — local-first agent.
- */
-/**
- * tools/v4/subagent/subagentFanout.ts — `subagent_fanout` wrapper.
  *
- * Phase v4.1-subagent. Spawns N parallel agent instances against the
- * same problem (or a partition of it), then merges results via the
- * chosen strategy. The orchestrator lives at
- * `core/v4/subagent/fanout.ts`; this file is the agent-callable
- * adapter that:
+ * tools/v4/subagent/subagentFanout.ts — v4.11 Slice 4 facade.
  *
- *   1. Validates the LLM's call args against the schema.
- *   2. Builds a per-child runner (closure over the parent runtime)
- *      that wraps an AidenAgent run.
- *   3. Filters mutating tools out of each child's schema array
- *      unless `AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE=1`.
- *   4. Returns the merged output + raw N results + diagnostics.
+ * Thin LLM-callable wrapper for `subagent_fanout`. After Slice 4 the
+ * orchestration (concurrency, ordering, cancellation, cost rollup)
+ * lives in `SubagentCoordinator`; this file owns:
  *
- * The factory pattern (`makeSubagentFanoutTool`) mirrors
- * `lookup_tool_schema` — the runtime constructs it with a closure
- * over registry / providers / paths that the schema can't carry.
+ *   1. JSON-schema declaration (model-facing surface — unchanged)
+ *   2. Operator pause gate (v4.6 Phase 3A)
+ *   3. Arg validation + coercion into `SubagentTask[]`
+ *   4. Provider-rotation hint (per-task provider override)
+ *   5. Delegation to `SubagentCoordinator.spawnBatch`
+ *   6. Optional aggregator merge via the existing `mergeResults`
+ *   7. Re-shape into the legacy fanout return body
  *
- * Tool category is `network` not `write` — the tool itself doesn't
- * touch disk; it only spends LLM tokens. That keeps it default-
- * exposed in MCP under the read-only env (mutates: false).
+ * The N-children Promise.all that lived here pre-Slice-4 is gone;
+ * the coordinator owns it. The `runFanout` orchestrator in
+ * `core/v4/subagent/fanout.ts` stays available for the operator CLI
+ * (`aiden fanout`) — that path will migrate in a follow-up slice.
  *
- * The description bakes a hard-learned lesson from prior multi-agent
- * systems: "Self-reports are not verified facts" — the parent must
- * verify any side-effects children report rather than trust the
- * summary. Children's tool calls are executed in isolated contexts;
- * a child claiming "wrote file X" or "ran command Y" must be
- * verified by the parent before the parent acts on that claim.
+ * Self-reports lesson preserved verbatim in the schema description:
+ * children's tool-call CLAIMS are not verified facts — the parent
+ * agent must verify side-effects independently.
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import type { ProviderAdapter } from '../../../providers/v4/types';
 import type { Logger } from '../../../core/v4/logger/logger';
 import { noopLogger } from '../../../core/v4/logger/factory';
+import type { TurnRuntimeContext } from '../../../core/v4/turnRuntimeContext';
+import type {
+  SubagentCoordinator,
+  SubagentTask,
+  SubagentResultEnvelope,
+} from '../../../core/v4/subagent/coordinator';
 import {
-  runFanout,
-  type FanoutMode,
-  type FanoutOptions,
-  type PartitionTask,
-} from '../../../core/v4/subagent/fanout';
-import {
+  mergeResults,
   resolveAggregatorOverride,
   type MergeStrategy,
+  type SubagentResult as MergerSubagentResult,
 } from '../../../core/v4/subagent/merger';
-import type { ProviderOption } from '../../../core/v4/subagent/providerRotation';
-import type { SpawnSubAgentDeps } from '../../../core/v4/subagent/spawnSubAgent';
-// v4.6 Phase 3A — operator kill-switch. Same check the
-// `spawn_sub_agent` tool runs, applied here at fanout's handler
-// entry. Locked decision (§12): check ONCE at entry, not inside
-// the spawn loop — atomicity is per-call. A pause applied
-// mid-fanout leaves the in-flight Promise.all to complete
-// naturally; only the NEXT fanout call hits the rejection.
+import {
+  rotateProviders,
+  type ProviderOption,
+} from '../../../core/v4/subagent/providerRotation';
+import { AIDEN_SUBAGENT_BUILD, type FanoutDiagnostics } from '../../../core/v4/subagent/diagnostics';
 import { getSpawnPause } from '../../../core/v4/subagent/spawnPause';
 
-/** Caller-supplied factory inputs. The runtime supplies these once at
- *  boot from the closure scope (provider list, parent's active model,
- *  aggregator adapter, run-child callback). */
+// ── Factory inputs ────────────────────────────────────────────────────────
+
 export interface SubagentFanoutFactoryOptions {
-  /** Resolves provider options at call time — env may have changed
-   *  since boot. Caller is the runtime; production reads
-   *  `config.yaml` + env. */
+  /**
+   * Read at handler entry to resolve the live TurnRuntimeContext.
+   * REPL passes `() => agent.getCurrentTurnContext()`; MCP / other
+   * surfaces mint a fresh per-request context. Returning `undefined`
+   * fails the call with a structured envelope.
+   */
+  resolveTurnContext: () => TurnRuntimeContext | undefined;
+  /** Shared coordinator instance — owns all orchestration. */
+  coordinator: SubagentCoordinator;
+  /** Resolves provider options at call time — env may change since boot. */
   resolveProviders: () => ProviderOption[];
-  /** Resolves the parent's active model — used as default aggregator
-   *  unless `AIDEN_SUBAGENT_AGGREGATOR_MODEL` overrides. */
+  /** Parent's active model — default aggregator. */
   resolveActiveModel: () => { providerId: string; modelId: string };
-  /** Adapter used for aggregator calls. Production threads the
-   *  parent's adapter; tests inject a stub. */
+  /** Adapter used for aggregator calls (single-shot, no agent loop). */
   aggregatorAdapter: ProviderAdapter;
-  /**
-   * v4.6 Phase 2Q-A — deps for `spawnSubAgent` (the primitive the
-   * fanout layer calls N times). Same shape as
-   * `SpawnSubAgentFactoryOptions extends SpawnSubAgentDeps` in
-   * `spawnSubAgentTool.ts`. Production wires this from REPL boot.
-   *
-   * OPTIONAL at construction time so the boot-time stub (registered
-   * in `tools/v4/index.ts` before the runtime resolves real deps)
-   * can be created without fabricating placeholder deps. The handler
-   * fails loudly with a clear "tool not wired" error if `spawnDeps`
-   * is missing AND `resolveProviders()` returns providers — which
-   * only happens with a half-wired runtime.
-   */
-  spawnDeps?: SpawnSubAgentDeps;
-  /**
-   * v4.6 Phase 2Q — optional resolver for the parent's current
-   * `runs.id`. Mirror of `SpawnSubAgentFactoryOptions.resolveParentRunId`.
-   * Called at handler-dispatch time so REPL turns can populate
-   * child rows' `spawned_from_run_id` link.
-   */
-  resolveParentRunId?:     () => number | undefined;
-  /**
-   * v4.6 Phase 2Q — optional resolver for the parent's session id.
-   * Mirror of `SpawnSubAgentFactoryOptions.resolveParentSessionId`.
-   */
-  resolveParentSessionId?: () => string | undefined;
   /** Optional logger — defaults to noop. */
   logger?: Logger;
 }
+
+// ── Schema ────────────────────────────────────────────────────────────────
 
 const SCHEMA_DESC =
   'Spawn N parallel agent children against the same problem (ensemble) or a partitioned task list, ' +
@@ -137,37 +108,19 @@ export function makeSubagentFanoutTool(
           },
           query: {
             type: 'string',
-            description:
-              'Same input given to every child (ensemble mode only).',
+            description: 'Same input given to every child (ensemble mode only).',
           },
           tasks: {
             type: 'array',
             description:
               'Per-child task list (partition mode only). Length must equal n.',
-            // Schema mirrors PartitionTask interface in
-            // core/v4/subagent/fanout.ts:70-75. If you change one, change
-            // the other. OpenAI Codex backend strictly validates schemas
-            // and rejects `type: "array"` declarations missing `items`,
-            // so the inner shape must be explicit here.
             items: {
               type: 'object',
               description: 'One unit of work for a partition-mode child.',
               properties: {
-                goal: {
-                  type: 'string',
-                  description:
-                    'The task this child should accomplish.',
-                },
-                context: {
-                  type: 'string',
-                  description:
-                    'Optional shared context for the child.',
-                },
-                role: {
-                  type: 'string',
-                  description:
-                    'Optional role tag, diagnostic only.',
-                },
+                goal:    { type: 'string', description: 'The task this child should accomplish.' },
+                context: { type: 'string', description: 'Optional shared context for the child.' },
+                role:    { type: 'string', description: 'Optional role tag, diagnostic only.' },
               },
               required: ['goal'],
             },
@@ -191,19 +144,13 @@ export function makeSubagentFanoutTool(
         required: ['mode'],
       },
     },
-    // mutates: false because the tool itself only spends tokens — disk /
-    // process side-effects, if any, happen INSIDE child agents whose
-    // toolsets are filtered to read-only by default. This keeps the
-    // tool default-exposed in MCP under the read-only env.
     category: 'network',
-    mutates: false,
-    toolset: 'subagent',
-  riskTier: 'caution',   // v4.4 Phase 1
+    mutates:  false,
+    toolset:  'subagent',
+    riskTier: 'caution',
+
     async execute(args, _ctx) {
-      // ── Operator kill-switch (v4.6 Phase 3A) ────────────────────
-      // Top of handler — before parsing, provider resolution, or
-      // rotation. Reject the WHOLE call if paused; spawn loop never
-      // fires, so partial fanouts are impossible.
+      // ── Operator kill-switch (v4.6 Phase 3A — unchanged) ────────────
       try {
         const pauseStatus = getSpawnPause().status();
         if (pauseStatus.paused) {
@@ -220,45 +167,41 @@ export function makeSubagentFanoutTool(
             durationMs: pauseStatus.durationMs ?? null,
           };
         }
-      } catch {
-        // getSpawnPause() throws when not initialized — let the
-        // fanout proceed rather than blocking on a wiring bug.
-        // Production boot always inits before any tool handler
-        // can fire; this catch only matters for unit tests.
-      }
+      } catch { /* not initialised — let dispatch proceed */ }
 
       const logger = factory.logger ?? noopLogger();
 
-      // ── Coerce args ────────────────────────────────────────────
+      // ── Args ────────────────────────────────────────────────────────
       const mode = (args.mode === 'partition' || args.mode === 'ensemble')
-        ? args.mode as FanoutMode
+        ? (args.mode as 'partition' | 'ensemble')
         : null;
       if (!mode) {
-        return {
-          success: false,
-          error: "subagent_fanout: 'mode' must be 'partition' or 'ensemble'",
-        };
+        return { success: false, error: "subagent_fanout: 'mode' must be 'partition' or 'ensemble'" };
       }
-
-      const n = typeof args.n === 'number' && Number.isInteger(args.n)
-        ? args.n
-        : 3;
+      const n = typeof args.n === 'number' && Number.isInteger(args.n) ? args.n : 3;
       const merge: MergeStrategy =
         (args.merge === 'all' || args.merge === 'vote'
           || args.merge === 'pick-best' || args.merge === 'combine')
-          ? args.merge as MergeStrategy
-          : 'combine';
+          ? (args.merge as MergeStrategy) : 'combine';
+      const query = typeof args.query === 'string' ? args.query : undefined;
+      const rawTasks = Array.isArray(args.tasks) ? args.tasks : undefined;
+      const timeoutMs = typeof args.timeoutMs === 'number' && args.timeoutMs > 0
+        ? args.timeoutMs : undefined;
 
-      const query  = typeof args.query === 'string' ? args.query : undefined;
-      const tasks  = Array.isArray(args.tasks)
-        ? (args.tasks as PartitionTask[])
-        : undefined;
-      const timeoutMs = typeof args.timeoutMs === 'number'
-        && args.timeoutMs > 0
-        ? args.timeoutMs
-        : undefined;
+      if (mode === 'ensemble' && !query) {
+        return { success: false, error: 'subagent_fanout: ensemble mode requires a `query`' };
+      }
+      if (mode === 'partition' && (!rawTasks || rawTasks.length === 0)) {
+        return { success: false, error: 'subagent_fanout: partition mode requires `tasks[]`' };
+      }
+      if (mode === 'partition' && rawTasks!.length !== n) {
+        return {
+          success: false,
+          error: `subagent_fanout: partition tasks.length (${rawTasks!.length}) must equal n (${n})`,
+        };
+      }
 
-      // ── Resolve providers + aggregator at call time ───────────
+      // ── Provider rotation hint ─────────────────────────────────────
       const providers = factory.resolveProviders();
       if (providers.length === 0) {
         return {
@@ -266,58 +209,132 @@ export function makeSubagentFanoutTool(
           error: 'subagent_fanout: no providers configured — run `aiden setup` first',
         };
       }
+      const rotation = rotateProviders(n, providers);
+      if (rotation.singleProviderWarning) {
+        logger.warn?.('subagent_fanout: single-provider fanout — diversity ≈ temperature variation',
+          { providers: providers.length, n });
+      }
 
-      const aggOverride = resolveAggregatorOverride();
-      const aggregatorModel = aggOverride ?? factory.resolveActiveModel();
-
-      // v4.6 Phase 2Q — spawnDeps absent means we're still bound to
-      // the boot-time stub (the runtime hasn't replaced the
-      // registration with the real factory yet). Surface the same
-      // "tool not wired" failure shape MCP / REPL surface in their
-      // own pre-wired states.
-      if (!factory.spawnDeps) {
+      // ── Turn context (live, Flag 1) ────────────────────────────────
+      const turnContext = factory.resolveTurnContext();
+      if (!turnContext) {
         return {
           success: false,
           error:
-            'subagent_fanout: tool not wired — runtime did not supply spawnDeps. ' +
-            'Call register(makeSubagentFanoutTool({...spawnDeps})) after buildAgentRuntime.',
+            'subagent_fanout: no active TurnRuntimeContext — ' +
+            'caller must construct one in runConversation options (v4.11 Slice 4).',
         };
       }
 
-      // v4.6 Phase 2Q — resolve parent identity at dispatch time so
-      // REPL turns that opened a run row between boot and now still
-      // link children to the right parent.
-      const parentRunId     = factory.resolveParentRunId?.();
-      const parentSessionId = factory.resolveParentSessionId?.();
+      // ── Build coordinator tasks ────────────────────────────────────
+      const tasks: SubagentTask[] = [];
+      for (let i = 0; i < n; i += 1) {
+        const provider = rotation.assignments[i]!;
+        const partitionTask = mode === 'partition'
+          ? (rawTasks![i] as { goal: string; context?: string; role?: string })
+          : null;
+        const goal = mode === 'ensemble' ? query! : partitionTask!.goal;
+        const role = partitionTask?.role;
+        tasks.push({
+          // Prepend role tag when present so the child's system prompt
+          // carries it (mirrors the pre-Slice-4 `runFanout` shape).
+          goal:     role ? `[role: ${role}] ${goal}` : goal,
+          context:  partitionTask?.context,
+          timeoutMs,
+          // Only forward per-spawn provider override when rotation has
+          // real diversity — single-provider pools trip the v4.6 Phase
+          // 2P "single-provider configuration" rejection in non-
+          // FallbackAdapter parents. Mirrors the pre-Slice-4 guard
+          // (`fanout.ts:318-325`).
+          provider: rotation.singleProviderWarning ? undefined : provider.providerId,
+          role,
+        });
+      }
 
-      const fanoutOpts: FanoutOptions = {
-        mode,
-        query,
-        tasks,
-        n,
-        merge,
-        providers,
-        spawnDeps:          factory.spawnDeps,
-        parentRunId,
-        parentSessionId,
-        aggregatorAdapter:  factory.aggregatorAdapter,
+      logger.info?.('subagent_fanout: dispatching to coordinator', {
+        build: AIDEN_SUBAGENT_BUILD,
+        mode, n, merge,
+        singleProviderWarning: rotation.singleProviderWarning,
+      });
+
+      // ── Delegate to coordinator ────────────────────────────────────
+      const startedAt = Date.now();
+      const fanout    = await factory.coordinator.spawnBatch(turnContext, tasks, 'bestEffort');
+      const totalMs   = Date.now() - startedAt;
+
+      // ── Optional aggregator merge ──────────────────────────────────
+      // Reuse the existing single-shot merger — no agent loop, just a
+      // text-in / text-out judge call. Only completed children with
+      // non-empty summaries are usable; failures land as
+      // `output: ''` so the merger filters them out (same shape as
+      // v4.6).
+      const mergerInput: MergerSubagentResult[] = fanout.results.map((env) => ({
+        index:      env.taskIndex,
+        providerId: env.provider,
+        modelId:    env.model,
+        output:     env.status === 'completed' ? env.summary : '',
+        error:      env.error,
+        elapsedMs:  env.durationMs,
+      }));
+      const aggOverride     = resolveAggregatorOverride();
+      const aggregatorModel = aggOverride ?? factory.resolveActiveModel();
+      const userQuery       = mode === 'ensemble'
+        ? query!
+        : rawTasks!.map((t, i) => `(${i + 1}) ${(t as { goal: string }).goal}`).join('\n');
+
+      const mergeOutput = await mergeResults(mergerInput, {
+        strategy:          merge,
+        aggregatorAdapter: factory.aggregatorAdapter,
         aggregatorModel,
-        timeoutMs,
+        userQuery,
         logger,
+        signal:            turnContext.signal,
+      });
+
+      // ── Diagnostics (mirrors the pre-Slice-4 shape) ────────────────
+      const diagnostics: FanoutDiagnostics = {
+        build:                 AIDEN_SUBAGENT_BUILD,
+        launched:              fanout.results.length,
+        succeeded:             fanout.results.filter((r) => r.status === 'completed' && r.summary.length > 0).length,
+        failed:                fanout.results.filter((r) => r.status !== 'completed' || r.summary.length === 0).length,
+        totalMs,
+        perSubagentMs:         fanout.results.map((r) => r.durationMs),
+        providerDistribution:  fanout.results.map((r) => r.provider),
+        singleProviderWarning: rotation.singleProviderWarning,
+        aggregator:            mergeOutput.aggregator,
       };
 
-      try {
-        const result = await runFanout(fanoutOpts);
-        return {
-          success:    true,
-          merged:     result.merged,
-          results:    result.results,
-          diagnostics: result.diagnostics,
-        };
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        return { success: false, error: message };
-      }
+      return {
+        success:     true,
+        merged:      mergeOutput.merged,
+        results:     fanout.results.map(envelopeToLegacyChild),
+        diagnostics,
+      };
     },
+  };
+}
+
+/**
+ * Re-shape a coordinator envelope into the legacy `SubagentResult`
+ * the v4.1-subagent fanout return body carried. The model's downstream
+ * synthesis prompts have been seeing this shape since the
+ * v4.1-subagent ship; preserving it keeps the Slice 4 refactor
+ * model-transparent.
+ */
+function envelopeToLegacyChild(env: SubagentResultEnvelope): {
+  index:      number;
+  providerId: string;
+  modelId:    string;
+  output:     string;
+  error?:     string;
+  elapsedMs:  number;
+} {
+  return {
+    index:      env.taskIndex,
+    providerId: env.provider,
+    modelId:    env.model,
+    output:     env.status === 'completed' ? env.summary : '',
+    error:      env.error,
+    elapsedMs:  env.durationMs,
   };
 }

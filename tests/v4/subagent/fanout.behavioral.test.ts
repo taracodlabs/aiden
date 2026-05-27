@@ -60,6 +60,8 @@ import type {
   ProviderCallOutput,
 } from '../../../providers/v4/types';
 import { makeSubagentFanoutTool } from '../../../tools/v4/subagent/subagentFanout';
+import { SubagentCoordinator } from '../../../core/v4/subagent/coordinator';
+import { buildTurnRuntimeContext } from '../../../core/v4/turnRuntimeContext';
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -463,6 +465,8 @@ describe('runFanout — v4.6 Phase 2Q behavioral (routes through spawnSubAgent)'
 
   it('9. public schema unchanged: subagent_fanout inputSchema fields are stable', () => {
     const tool = makeSubagentFanoutTool({
+      resolveTurnContext:  () => undefined,
+      coordinator:         {} as never,
       resolveProviders:    () => [],
       resolveActiveModel:  () => ({ providerId: 's', modelId: 's' }),
       aggregatorAdapter:   {} as never,
@@ -575,11 +579,18 @@ describe('runFanout — v4.6 Phase 2Q behavioral (routes through spawnSubAgent)'
     try {
       const fb = buildFanoutFallback(['groq', 'openrouter']);
       const agg = makeAggregatorAdapter();
+      // v4.11 Slice 4 — facade now requires coordinator + turn ctx.
+      // The pause-gate fires BEFORE coordinator is touched, so a
+      // minimal wiring is sufficient for this test.
+      const coord = new SubagentCoordinator({ spawnDeps: makeSpawnDeps(fb) });
       const tool = makeSubagentFanoutTool({
+        coordinator:         coord,
+        resolveTurnContext:  () => buildTurnRuntimeContext({
+          turnId: 1, parentAgentId: 't', signal: new AbortController().signal,
+        }),
         resolveProviders:    () => makeProviderOptions(['groq', 'openrouter']),
         resolveActiveModel:  () => ({ providerId: 'groq', modelId: 'mock-model' }),
         aggregatorAdapter:   agg as never,
-        spawnDeps:           makeSpawnDeps(fb),
       });
       const result = (await tool.execute(
         { mode: 'ensemble', query: 'q', n: 3, merge: 'all' },
@@ -619,11 +630,15 @@ describe('runFanout — v4.6 Phase 2Q behavioral (routes through spawnSubAgent)'
     try {
       const fb = buildFanoutFallback(['groq', 'openrouter'], ['a', 'b']);
       const agg = makeAggregatorAdapter();
+      const coord = new SubagentCoordinator({ spawnDeps: makeSpawnDeps(fb) });
       const tool = makeSubagentFanoutTool({
+        coordinator:         coord,
+        resolveTurnContext:  () => buildTurnRuntimeContext({
+          turnId: 2, parentAgentId: 't', signal: new AbortController().signal,
+        }),
         resolveProviders:    () => makeProviderOptions(['groq', 'openrouter']),
         resolveActiveModel:  () => ({ providerId: 'groq', modelId: 'mock-model' }),
         aggregatorAdapter:   agg as never,
-        spawnDeps:           makeSpawnDeps(fb),
       });
       const result = (await tool.execute(
         { mode: 'ensemble', query: 'q', n: 2, merge: 'all' },

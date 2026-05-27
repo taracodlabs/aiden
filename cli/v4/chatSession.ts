@@ -20,6 +20,7 @@
  */
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
+import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 // v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
 // sequence + system prompt + memory hashes when a turn shows loop
 // symptoms (10+ calls OR 5+ consecutive same-name). Default off via
@@ -1521,6 +1522,39 @@ export class ChatSession implements ChatSessionLike {
       }
     }
 
+    // v4.11 Slice 4 — build the per-turn TurnRuntimeContext now that
+    // `replRunId` is resolved. The SubagentCoordinator reads this via
+    // `agent.getCurrentTurnContext()` when a spawn / fanout tool
+    // fires; threads the parent's AbortSignal + cost accumulator +
+    // trace emitter through to every child run. Cleared in the
+    // finally below regardless of how the turn ended.
+    //
+    // The trace emitter routes coordinator lifecycle events through
+    // `runStore.emitEventRich` keyed on the PARENT's runId so
+    // `aiden runs show` sees parent + children together. Failure to
+    // persist must never break the turn — every emit is wrapped in
+    // try/catch.
+    const turnContext = buildTurnRuntimeContext({
+      turnId,
+      parentAgentId: 'repl-parent',
+      signal:        turnAbort.signal,
+      traceEmitter:  (event) => {
+        if (!replRunStore || replRunId === null) return;
+        try {
+          replRunStore.emitEventRich({
+            runId:      replRunId,
+            category:   'subagent',
+            kind:       event.eventType,
+            name:       event.eventType,
+            sessionId:  this.sessionId ?? null,
+            payload:    event as unknown as Record<string, unknown>,
+            visibility: 'system',
+            source:     'subagent',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
+      },
+    });
+
     // v4.10 Slice 10.8 — durable Task-lite creation, alongside the
     // per-turn run row. Auto-create per user-message turn (Phase B
     // Q2/Q5 — one Task per turn keeps the model adherence concern
@@ -1758,6 +1792,11 @@ export class ChatSession implements ChatSessionLike {
         // already wired in v4.6 prep; this single line is the
         // upstream-side trigger.
         signal: turnAbort.signal,
+        // v4.11 Slice 4 — expose the per-turn runtime context to
+        // tools via `agent.getCurrentTurnContext()`. The spawn /
+        // fanout facades read it to thread parent signal + cost
+        // accumulator + trace emitter through to the coordinator.
+        turnContext,
         onFirstDelta: streamingEnabled
           ? wrapTurnId(() => {
               stopIndicatorOnce();
@@ -1861,6 +1900,18 @@ export class ChatSession implements ChatSessionLike {
       this.history = result.messages;
       this.totalUsage.inputTokens += result.totalUsage.inputTokens;
       this.totalUsage.outputTokens += result.totalUsage.outputTokens;
+      // v4.11 Slice 4 — roll subagent token spend into the parent
+      // turn's totalUsage so the post-turn footer + session totals
+      // reflect both parent and child cost. The coordinator pushed
+      // per-child contributions into `turnContext.costAccumulator`
+      // synchronously as children completed; reading it here (after
+      // runConversation returned) is race-free because the agent
+      // loop awaits every tool dispatch (including the spawn /
+      // fanout facade calls) before returning.
+      if (turnContext.costAccumulator.totalTokens > 0) {
+        this.totalUsage.inputTokens  += turnContext.costAccumulator.inputTokens;
+        this.totalUsage.outputTokens += turnContext.costAccumulator.outputTokens;
+      }
 
       // v4.6 Phase 2Q-B — finalize the REPL parent-run row on success.
       // `finishReason` from the agent loop maps directly into our DB

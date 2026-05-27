@@ -382,6 +382,19 @@ export interface RunConversationOptions {
    * by the dispatch branch so a bad listener cannot break the turn.
    */
   onUiEvent?:        (name: string, args: Record<string, unknown>) => void;
+  /**
+   * v4.11 Slice 4 — optional per-turn `TurnRuntimeContext`. When
+   * provided, the loop exposes it via `agent.getCurrentTurnContext()`
+   * so the spawn / fanout tool facades can route through the
+   * `SubagentCoordinator` (with the parent's signal + cost
+   * accumulator + trace emitter wired in). Cleared in the loop's
+   * finally before return so a stray between-turn tool dispatch
+   * sees `undefined`. Daemon agents + unit tests omit this; the
+   * legacy `parentAgent.getCurrentSignal()` path stays as the
+   * back-compat surface for callers that don't speak the new
+   * context shape yet.
+   */
+  turnContext?:      import('./turnRuntimeContext').TurnRuntimeContext;
 }
 
 interface EmptyResponseMetrics {
@@ -453,6 +466,16 @@ export class AidenAgent {
    * not shared across agents; a child agent has its own `_currentSignal`.
    */
   private _currentSignal: AbortSignal | undefined = undefined;
+  /**
+   * v4.11 Slice 4 — current per-turn `TurnRuntimeContext`. Same Flag 1
+   * pattern as `_currentSignal`: set at the top of `runTurnLoop` from
+   * `runOptions.turnContext`, cleared before the loop returns. Tools
+   * read via `getCurrentTurnContext()` to access the parent's
+   * costAccumulator, traceEmitter, and SubagentCoordinator-bound
+   * signal. Undefined when the caller didn't construct a context
+   * (back-compat for daemon agents + unit tests).
+   */
+  private _currentTurnContext: import('./turnRuntimeContext').TurnRuntimeContext | undefined = undefined;
   /** Cached system prompt — invalidated by setPersonalityOverlay/markMemoryDirty/explicit. */
   private cachedSystemPrompt:  string | null = null;
   private compressionEvents:    number        = 0;
@@ -670,6 +693,17 @@ export class AidenAgent {
    */
   getCurrentSignal(): AbortSignal | undefined {
     return this._currentSignal;
+  }
+
+  /**
+   * v4.11 Slice 4 — return the live TurnRuntimeContext for the active
+   * turn (or `undefined` if the agent is between turns / the caller
+   * didn't pass one). Used by the spawn / fanout tool facades to
+   * route through the SubagentCoordinator with the parent's signal,
+   * costAccumulator, and traceEmitter wired in.
+   */
+  getCurrentTurnContext(): import('./turnRuntimeContext').TurnRuntimeContext | undefined {
+    return this._currentTurnContext;
   }
 
   // ── Main entry: runConversation ──────────────────────────────────────
@@ -1012,6 +1046,11 @@ export class AidenAgent {
     // acceptable because the only consumer is in-flight tool dispatch,
     // which can only run while the loop is mid-execution.
     this._currentSignal = runOptions.signal;
+    // v4.11 Slice 4 — expose the turn context to tools. Same Flag 1
+    // lifecycle as `_currentSignal`: set at loop entry, cleared in
+    // the finally before return so a stray between-turn dispatch
+    // (impossible today, cheap insurance) sees `undefined`.
+    this._currentTurnContext = runOptions.turnContext;
 
     const messages: Message[]              = [...initialMessages];
     const toolCallTrace: HonestyTraceEntry[] = [];
@@ -1733,6 +1772,9 @@ export class AidenAgent {
     // call's `this._currentSignal = runOptions.signal` at the top will
     // overwrite the stale value before any tool can read it.
     this._currentSignal = undefined;
+    // v4.11 Slice 4 — pair-clear with `_currentSignal` so the same
+    // between-turn invariant holds for the turn context.
+    this._currentTurnContext = undefined;
 
     return {
       finalContent,
