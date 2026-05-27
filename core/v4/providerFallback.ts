@@ -276,6 +276,7 @@ export async function runFallbackChain<T>(
   requestFn:  (adapter: ProviderAdapter, slot: ProviderSlot) => Promise<T>,
   observers:  { onRateLimit?: (slotId: string, err: Error) => void } = {},
   cooldown?:  ChainCooldownState,
+  options?:   { signal?: AbortSignal },
 ): Promise<ChainRunResult<T>> {
   const now     = cooldown?.now ?? Date.now;
   const ordered = prioritiseSlots(slots, cooldown, now);
@@ -284,6 +285,19 @@ export async function runFallbackChain<T>(
   let   lastErr: Error | null = null;
 
   for (const slot of ordered) {
+    // v4.11 Slice 3 — A6.4 amendment per the Phase A audit: pre-flight
+    // signal check between slots so an abort that fires AFTER one
+    // slot's adapter throws (e.g. timed-out request) and BEFORE the
+    // next slot's adapter.call() starts does NOT spin into another
+    // wasted slot attempt. The synthetic AbortError uses the same
+    // `name: 'AbortError'` shape the v4 provider adapters surface on
+    // external abort, so aidenAgent's catch at line 1164 routes it
+    // identically (finishReason='interrupted', no fallback re-arm).
+    if (options?.signal?.aborted) {
+      const abortErr = new Error('Provider fallback chain aborted between slots');
+      abortErr.name = 'AbortError';
+      throw abortErr;
+    }
     const adapter = slot.build();
     if (!adapter) continue;
 
@@ -300,6 +314,10 @@ export async function runFallbackChain<T>(
       return { slotId: slot.id, value };
     } catch (raw) {
       const err = raw instanceof Error ? raw : new Error(String(raw));
+      // v4.11 Slice 3 — AbortError from a per-slot adapter call short-
+      // circuits the chain. We do NOT retry across slots after an
+      // explicit cancel; the user wants the turn dead.
+      if (err.name === 'AbortError') throw err;
       if (!isRateLimitError(err)) throw err;
       observers.onRateLimit?.(slot.id, err);
       markCooldown(cooldown, slot.id, now);
@@ -459,6 +477,10 @@ export class FallbackAdapter implements ProviderAdapter {
         onRateLimit: (slotId, err) => this.recordRateLimit(slotId, err),
       },
       this.cooldownState(),
+      // v4.11 Slice 3 — thread the external signal into the chain
+      // walker so the between-slot pre-flight check (A6.4 amendment)
+      // sees it without us having to refactor the requestFn shape.
+      { signal: input.signal },
     );
 
     this.recordSuccess(result.slotId);
@@ -476,6 +498,17 @@ export class FallbackAdapter implements ProviderAdapter {
     let   prevSlotId: string | null = null;
 
     for (const slot of ordered) {
+      // v4.11 Slice 3 — A6.4 amendment: between-slot pre-flight signal
+      // check, mirrored from runFallbackChain above. Mid-stream aborts
+      // are already covered by each adapter's internal AbortController
+      // wiring (lines 213/584 in ollama, 281 in chat completions, etc.)
+      // — this guard closes the BETWEEN-slot race where one slot's
+      // throw + the next slot's startup can sandwich a Ctrl+C.
+      if (input.signal?.aborted) {
+        const abortErr = new Error('Provider fallback chain (stream) aborted between slots');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
       const adapter = slot.build();
       if (!adapter) continue;
 
@@ -508,6 +541,10 @@ export class FallbackAdapter implements ProviderAdapter {
         return;
       } catch (raw) {
         const err = raw instanceof Error ? raw : new Error(String(raw));
+        // v4.11 Slice 3 — AbortError from a per-slot stream short-
+        // circuits. Even mid-stream: we want the cancel to surface
+        // immediately, not to re-arm fallback against the next slot.
+        if (err.name === 'AbortError') throw err;
         if (!isRateLimitError(err)) throw err;
         this.recordRateLimit(slot.id, err);
         markCooldown(cooldown, slot.id, this.clock);

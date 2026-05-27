@@ -543,6 +543,35 @@ export class ChatSession implements ChatSessionLike {
    */
   private lastDistillationPath: string | null = null;
 
+  /**
+   * v4.11 Slice 3 — mid-turn cancel state.
+   *
+   * `currentAbortController`: per-turn AbortController. Non-null ONLY
+   * while a turn is in flight (`runAgentTurn` constructs at entry,
+   * clears in finally). Read by the SIGINT dispatcher to decide
+   * between "abort the active turn" vs "graceful shutdown the REPL".
+   *
+   * `lastInterruptAt`: timestamp of the most recent first-press Ctrl+C
+   * during an active turn. Used to drive the two-press force-exit
+   * window (default 2s). Reset to 0 on turn settle and on window
+   * expiry so a stale first-press doesn't fast-path the next turn.
+   *
+   * `activeTurnId` / `nextTurnId`: monotonic per-turn id stamped on
+   * callback closures so late stream/tool events from a cancelled
+   * turn drop silently instead of painting into the next turn.
+   * R1 Tier-1 mitigation per the Phase A audit. Flat fields by design
+   * — the full TurnState refactor is a separate slice.
+   *
+   * `FORCE_EXIT_WINDOW_MS`: the window during which a second Ctrl+C
+   * is interpreted as "force exit the REPL" rather than "cancel a
+   * second turn". 2000ms matches the audit's A6.2 default.
+   */
+  private currentAbortController: AbortController | null = null;
+  private lastInterruptAt = 0;
+  private activeTurnId:   number | null = null;
+  private nextTurnId      = 0;
+  private static readonly FORCE_EXIT_WINDOW_MS = 2000;
+
   constructor(private opts: ChatSessionOptions) {
     this.currentProviderId = opts.initialProviderId;
     this.currentModelId = opts.initialModelId;
@@ -637,7 +666,13 @@ export class ChatSession implements ChatSessionLike {
     let sigtermHandler: (() => Promise<void>) | null = null;
     let exitHandler: (() => void) | null = null;
     if (this.opts.installSignalHandler !== false) {
-      const makeHandler = (sig: SessionExitPath) => async () => {
+      // v4.11 Slice 3 — graceful-shutdown helper extracted so the new
+      // SIGINT dispatcher can call it on the "second press" branch
+      // without duplicating the existing pre-flight + summary
+      // pipeline. Preserves the exact pre-Slice-3 SIGTERM behaviour
+      // (SIGTERM still routes here directly — no two-press semantics
+      // for SIGTERM, which has no human-typing context to disambiguate).
+      const gracefulShutdown = async (sig: SessionExitPath): Promise<void> => {
         this.opts.display.write('\n');
         this.opts.display.dim(`Got ${sig.toUpperCase()} — saving session before exit…`);
         // v4.10 Slice 10.7 — stop channel adapters BEFORE the
@@ -675,8 +710,61 @@ export class ChatSession implements ChatSessionLike {
         this.opts.display.dim('Goodbye.');
         process.exit(0);
       };
-      sigintHandler  = makeHandler('sigint');
-      sigtermHandler = makeHandler('sigterm');
+      // v4.11 Slice 3 — two-press SIGINT dispatcher (Phase A audit A6.2).
+      //
+      // State machine:
+      //   1. No active turn (composer idle)        → graceful shutdown
+      //      (preserves pre-Slice-3 behaviour exactly so the v4.10.0
+      //      muscle memory still applies at the prompt).
+      //   2. Active turn AND first press           → abort the live
+      //      AbortController + dim hint exposing the second-press
+      //      escape hatch. REPL stays alive; the agent loop sees
+      //      signal.aborted at its next iteration / pre-tool / mid-
+      //      fetch boundary and returns finishReason='interrupted'.
+      //   3. Active turn AND second press within
+      //      FORCE_EXIT_WINDOW_MS of the first        → graceful
+      //      shutdown. We honour the user's "I really mean it"
+      //      gesture; session_summary still runs with its existing
+      //      1s adapter-stop + 4s summary caps.
+      //   4. Active turn AND second press AFTER the window expires
+      //      → treat as a fresh first press (the previous turn must
+      //      have settled and started a new one; the lastInterruptAt
+      //      reset in runAgentTurn's finally already covers this,
+      //      but the window check is the belt-and-braces guard).
+      //
+      // SIGTERM keeps the legacy direct-to-graceful path — operators
+      // and supervisors expect immediate termination, not a two-press
+      // dance.
+      sigintHandler = async () => {
+        const now      = Date.now();
+        const ctrl     = this.currentAbortController;
+        const hasTurn  = ctrl !== null;
+        const inWindow = now - this.lastInterruptAt
+                       < ChatSession.FORCE_EXIT_WINDOW_MS;
+
+        if (!hasTurn) {
+          await gracefulShutdown('sigint');
+          return;
+        }
+        if (inWindow) {
+          // Second press inside the window — user really wants out.
+          await gracefulShutdown('sigint');
+          return;
+        }
+        // First press during an active turn — abort, surface the
+        // escape hatch, stay alive. The agent's catch will route
+        // the resulting AbortError to finishReason='interrupted'.
+        this.lastInterruptAt = now;
+        try {
+          ctrl?.abort();
+        } catch { /* defensive — abort() can't throw, but cheap insurance */ }
+        try {
+          this.opts.display.dim(
+            'Interrupting turn — press Ctrl+C again within 2s to force-quit.',
+          );
+        } catch { /* dim() should never throw; defensive */ }
+      };
+      sigtermHandler = async () => { await gracefulShutdown('sigterm'); };
       process.on('SIGINT',  sigintHandler);
       process.on('SIGTERM', sigtermHandler);
 
@@ -1324,6 +1412,49 @@ export class ChatSession implements ChatSessionLike {
       return;
     }
 
+    // v4.11 Slice 3 — mid-turn cancel plumbing (Phase A audit A6.1 + R1).
+    //
+    // (a) Mint a per-turn AbortController; expose it to the SIGINT
+    //     dispatcher via the shared `currentAbortController` field.
+    //     The signal threads through `agent.runConversation` →
+    //     `RunConversationOptions.signal` → `_currentSignal` → loop
+    //     iteration / pre-tool boundary checks → provider adapters'
+    //     forwarded fetch signal. All of those checkpoints already
+    //     existed in HEAD (v4.6 prep); this is the wake-up.
+    //
+    // (b) Mint a monotonic `turnId` and stamp it on every callback
+    //     closure we hand to `runConversation`. R1 Tier-1 mitigation:
+    //     a late stream/tool event from a CANCELLED turn arriving
+    //     after the next turn starts will see `this.activeTurnId`
+    //     advanced and silently no-op. Prevents stray paint /
+    //     transcript mutation from the race window between abort
+    //     and the underlying SSE reader's first dead-byte.
+    //
+    // The controller + turnId are cleared in the finally block at the
+    // bottom of this method (success, error, AND abort paths). The
+    // SIGINT dispatcher reads `currentAbortController` snapshotted at
+    // press time so a turn that settles mid-keypress is safe — the
+    // pre-snapshot reference is a no-op `.abort()` on a settled
+    // controller per the WHATWG spec.
+    const turnId    = ++this.nextTurnId;
+    const turnAbort = new AbortController();
+    this.currentAbortController = turnAbort;
+    this.activeTurnId           = turnId;
+    // Helper: wrap a callback so it only fires for the live turn.
+    // R1 guard — late events from a cancelled turn early-return.
+    // `wrapTurnId` accepts (callback, undefined) and returns
+    // undefined so the agent's optional-call site (`runOptions.onX?.()`)
+    // stays untouched when streaming is disabled.
+    const wrapTurnId = <Args extends unknown[]>(
+      fn: ((...args: Args) => void) | undefined,
+    ): ((...args: Args) => void) | undefined => {
+      if (!fn) return undefined;
+      return (...args: Args): void => {
+        if (this.activeTurnId !== turnId) return;
+        fn(...args);
+      };
+    };
+
     // Phase 22 Task 4: status bar reflects the live phase. Set on
     // entry, cleared in both success and error paths below.
     this.setStatusState({ kind: 'generating', sinceMs: Date.now() });
@@ -1621,8 +1752,14 @@ export class ChatSession implements ChatSessionLike {
     try {
       const result = await this.opts.agent.runConversation(baseHistory, {
         stream: streamingEnabled,
+        // v4.11 Slice 3 — wake the dead AbortSignal wire (Phase A
+        // audit A6.1). All downstream consumers (between-iter check,
+        // pre-tool check, callProvider forward into adapters) were
+        // already wired in v4.6 prep; this single line is the
+        // upstream-side trigger.
+        signal: turnAbort.signal,
         onFirstDelta: streamingEnabled
-          ? () => {
+          ? wrapTurnId(() => {
               stopIndicatorOnce();
               streamingActive = true;
               // v4.1.5 Phase 1d (Q-OBV-b) — separator emission MOVED
@@ -1631,10 +1768,10 @@ export class ChatSession implements ChatSessionLike {
               // callProvider invocation). The separator-emit now
               // lives in onDelta below, gated by `firstStreamByteSeen`
               // which only flips once per turn.
-            }
+            })
           : undefined,
         onDelta: streamingEnabled
-          ? (text: string) => {
+          ? wrapTurnId((text: string) => {
               // v4.1.5 Phase 1d (Q-OBV-b) — definitive separator
               // emission point. This is the FIRST text byte landing
               // on screen this turn. Fires the muted rule BEFORE
@@ -1658,12 +1795,12 @@ export class ChatSession implements ChatSessionLike {
               // frequently enough that the bar stays usefully visible).
               progressBar?.hide();
               this.opts.display.streamPartial(text);
-            }
+            })
           : undefined,
         onToolCallStart: streamingEnabled
-          ? (call) => {
+          ? wrapTurnId((call: import('../../providers/v4/types').ToolCallRequest) => {
               this.opts.display.streamToolIndicator(call.name);
-            }
+            })
           : undefined,
         // v4.8.0 Phase 2.3 fix-2 — uiOnly events route to the display
         // layer. The Phase 2.1 dispatch branch in aidenAgent.ts skips
@@ -1680,7 +1817,12 @@ export class ChatSession implements ChatSessionLike {
         // through createOnUiEventHandler so the integration test
         // exercises the EXACT same code path production uses
         // (mock-blindness fix; see Slice 10.1b retrospective).
-        onUiEvent: createOnUiEventHandler({
+        // v4.11 Slice 3 — also turnId-guard the ui-event handler. A
+        // late ui_task_update from a cancelled turn would otherwise
+        // paint a trail row attributed to the wrong turn. The factory
+        // returns a stateless closure; wrapping it preserves the
+        // existing renderer + run_events tee semantics for live events.
+        onUiEvent: wrapTurnId(createOnUiEventHandler({
           display:           this.opts.display,
           runStore:          replRunStore,
           runId:             replRunId,
@@ -1688,9 +1830,9 @@ export class ChatSession implements ChatSessionLike {
           // emit row gets session_id without the writer JOIN-ing to runs.
           sessionId:         this.sessionId ?? null,
           stopIndicatorOnce,
-        }),
+        })),
         onProgress: streamingEnabled
-          ? (outputTokens: number, maxTokens?: number) => {
+          ? wrapTurnId((outputTokens: number, maxTokens?: number) => {
               if (indicatorStopped === false) return;
               // Lazy-create on first event. The indicator must already
               // be stopped (first delta arrived) so the bar paints on
@@ -1707,7 +1849,7 @@ export class ChatSession implements ChatSessionLike {
                 );
               }
               progressBar.update(outputTokens, maxTokens);
-            }
+            })
           : undefined,
       });
       stopIndicatorOnce();
@@ -1781,6 +1923,21 @@ export class ChatSession implements ChatSessionLike {
       // (files_touched / tools_used) at exit.
       if (result.toolCallTrace && result.toolCallTrace.length > 0) {
         this.sessionToolTrace.push(...result.toolCallTrace);
+      }
+
+      // v4.11 Slice 3 — surface an explicit "(turn interrupted)"
+      // confirmation when the agent loop returned finishReason
+      // ='interrupted'. Without this, a cancelled turn drops the user
+      // back at a fresh prompt with no visible confirmation that the
+      // press took effect — easily mistaken for "Ctrl+C did nothing"
+      // and double-pressed into force-exit unintentionally. Dim so
+      // it sits between the tool trail and the post-turn footer
+      // without screaming. Skips when the model managed to emit
+      // partial finalContent before abort (rare; the regular reply
+      // path renders that content).
+      if (result.finishReason === 'interrupted' && !result.finalContent) {
+        emitToolReplySeparator();
+        this.opts.display.dim('(turn interrupted)');
       }
 
       // v4.1.6 spike (TCE) — tool-loop terminal surface. When the
@@ -1892,6 +2049,45 @@ export class ChatSession implements ChatSessionLike {
       // or the next prompt.
       progressBar?.hide();
       if (streamingActive) this.opts.display.streamComplete();
+      // v4.11 Slice 3 — abort-aware early return. If the thrown error
+      // is an AbortError (or the turn's signal aborted before the
+      // agent's own catch could route it), this is a USER ACTION not
+      // a system fault: skip the printError + capability-card chrome
+      // and just dim "(turn interrupted)" + cycle the status back to
+      // ready. Mirrors the success-path interrupted branch so a
+      // throw-on-cancel vs return-on-cancel race ends up at the same
+      // user-visible surface.
+      const _abortHit =
+        (err instanceof Error && err.name === 'AbortError') ||
+        turnAbort.signal.aborted;
+      if (_abortHit) {
+        this.opts.display.dim('(turn interrupted)');
+        // Status footer still renders so the user sees the elapsed
+        // pill — matches the success path's chrome.
+        if (replParentRunRef) {
+          replParentRunRef.runId     = null;
+          replParentRunRef.sessionId = null;
+        }
+        if (replRunStore && replRunId !== null) {
+          try {
+            replRunStore.setStatus(replRunId, 'interrupted', {
+              finishReason: 'interrupted',
+              completedAt:  Date.now(),
+            });
+          } catch { /* persistence faults must not crash REPL */ }
+        }
+        if (replTaskStore && replTaskId !== null) {
+          try { replTaskStore.setStatus(replTaskId, 'cancelled'); }
+          catch { /* persistence faults must not crash REPL */ }
+        }
+        this.setStatusState({ kind: 'ready' });
+        this.lastTurnElapsedMs = Date.now() - turnStartedAt;
+        this.turnCount += 1;
+        this.lastTurnOutcome = 'muted';
+        this.opts.display.write(`\n  ${this.opts.display.rule()}\n`);
+        this.renderStatusLine();
+        return;
+      }
       // v4.6 Phase 2Q-B — finalize REPL parent-run row on error.
       // Visible in `aiden runs list` as a failed top-level row so
       // operators can correlate a chat error with whatever children
@@ -1981,6 +2177,29 @@ export class ChatSession implements ChatSessionLike {
         }
       } catch { /* defensive */ }
     } finally {
+      // v4.11 Slice 3 — release the per-turn cancel handles. ORDER
+      // MATTERS:
+      //   1. Drop activeTurnId FIRST so any late callbacks already
+      //      in flight (race window between abort and SSE reader's
+      //      first dead byte) see a mismatch and silently no-op.
+      //   2. Null the controller ref next — a stray Ctrl+C arriving
+      //      between turns now sees `currentAbortController === null`
+      //      and routes to graceful shutdown (the v4.10.0 behaviour
+      //      at composer-idle).
+      //   3. Reset the two-press timestamp so a previous turn's
+      //      first-press doesn't fast-path force-exit on the next
+      //      turn's first Ctrl+C.
+      // Only clear when WE own the active slot — defensive against a
+      // race where a nested runAgentTurn (impossible in production
+      // today, cheap insurance for tests / future surfaces) re-armed.
+      if (this.activeTurnId === turnId) {
+        this.activeTurnId = null;
+      }
+      if (this.currentAbortController === turnAbort) {
+        this.currentAbortController = null;
+      }
+      this.lastInterruptAt = 0;
+
       // v4.11 Slice 1 — explicit streaming-handoff boundary, exit
       // side. Mirrors the pauseFrame at the top of runAgentTurn so
       // the legacy indicator gate releases regardless of how the

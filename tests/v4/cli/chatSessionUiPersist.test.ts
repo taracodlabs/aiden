@@ -233,7 +233,17 @@ describe('chatSession onUiEvent — production routes through createOnUiEventHan
     // the closure). If someone re-inlines `(name, args) => { ... }`,
     // they remove the call to this helper and this assertion catches
     // it.
-    expect(src).toMatch(/onUiEvent:\s*createOnUiEventHandler\(\s*\{/);
+    //
+    // v4.11 Slice 3 — accept an optional `wrapTurnId(...)` wrapping
+    // around the factory call. The Tier-1 callback-token guard
+    // (R1 mitigation) wraps the produced closure so late events from
+    // a cancelled turn no-op, but the dispatch site still calls
+    // `createOnUiEventHandler({...})` — the invariant this assertion
+    // protects (rich persistence wire, not an inline closure). Both
+    // forms match: bare call or `wrapTurnId(createOnUiEventHandler(...`.
+    expect(src).toMatch(
+      /onUiEvent:\s*(?:wrapTurnId\(\s*)?createOnUiEventHandler\(\s*\{/,
+    );
     // And the helper itself must route through the shared categoriser
     // + emitEventRich — the actual rich persistence wire.
     expect(src).toMatch(/categorizeEvent\(/);
