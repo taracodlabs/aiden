@@ -1061,7 +1061,13 @@ export class AidenAgent {
     const failureClassifier = buildDefaultClassifier();
     let toolLoopCard: AidenAgentResult['toolLoopCard'] = undefined;
 
+    // v4.11 perf — opt-in per-iteration timing. Zero-overhead when the
+    // env var is unset (one `process.env` read per iteration entry).
+    // Stderr bypasses any frame/display guards; format `[perf:...]`
+    // greps cleanly out of the test runner / smoke logs.
+    const _perfDiag = process.env.AIDEN_PERF_DIAG === '1';
     while (true) {
+      const _iterStartedAt = _perfDiag ? Date.now() : 0;
       // v4.6 prep — between-iteration cooperative-cancellation check.
       // When the caller passed an AbortSignal that has aborted, exit
       // immediately with `finishReason: 'interrupted'`. Delta accumulation
@@ -1111,6 +1117,7 @@ export class AidenAgent {
       }
 
       let output: ProviderCallOutput;
+      const _llmStartedAt = _perfDiag ? Date.now() : 0;
       try {
         // v4.9.0 Slice 6 — wrap the provider call in an LLM span when
         // the daemon foundation is up AND a runWithContext frame is
@@ -1136,6 +1143,15 @@ export class AidenAgent {
           );
         } else {
           output = await this.callProvider(messages, effectiveTools, runOptions);
+        }
+        if (_perfDiag) {
+          const llmMs = Date.now() - _llmStartedAt;
+          const tokIn = output.usage?.inputTokens ?? 0;
+          const tokOut = output.usage?.outputTokens ?? 0;
+          const nTools = output.toolCalls?.length ?? 0;
+          process.stderr.write(
+            `[perf:iter=${turnCount + 1} llm=${llmMs}ms tokens_in=${tokIn} tokens_out=${tokOut} toolCalls=${nTools}]\n`,
+          );
         }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -1274,6 +1290,63 @@ export class AidenAgent {
       // TurnState internals + pushes a corrective system message,
       // then continues the outer iteration loop from a clean baseline.
       let rollbackDecision: RecoveryDecision | null = null;
+      // v4.11 perf — pre-execute consecutive read-only tool calls in
+      // parallel. The for-of loop below stays sequential (it threads
+      // verifier / classifier / TurnState updates that depend on each
+      // prior call's outcome); we only hoist the NETWORK/IO portion
+      // (handler.execute) out for batches of pure-read tools so they
+      // run concurrently instead of serialized.
+      //
+      // Read-only classification: `resolveMutates(name) !== true` AND
+      // not a uiOnly signal (those have their own branch below).
+      // Maximal consecutive batches preserve any read-after-write
+      // ordering the model may have intended (we never reorder across
+      // a mutating call).
+      //
+      // Results land in `preComputedResults` keyed by call.id. The
+      // for-of loop checks this map at the toolExecutor dispatch site
+      // and uses the pre-computed result when available, falling
+      // through to live execution otherwise (mutating calls always,
+      // single-call read-only batches that we don't bother batching).
+      //
+      // Errors caught per-call so one failure doesn't abort the
+      // Promise.all — each cell of the batch returns a synthesized
+      // error ToolCallResult that the downstream verifier path
+      // handles identically to a live-execution error.
+      const preComputedResults = new Map<string, ToolCallResult>();
+      {
+        const toolCalls = output.toolCalls;
+        const isReadOnly = (name: string): boolean =>
+          this.resolveMutates?.(name) !== true &&
+          this.resolveUiOnly?.(name) !== true;
+        let i = 0;
+        while (i < toolCalls.length) {
+          if (!isReadOnly(toolCalls[i].name)) { i += 1; continue; }
+          // Find the maximal consecutive read-only batch starting at i.
+          let j = i;
+          while (j < toolCalls.length && isReadOnly(toolCalls[j].name)) j += 1;
+          const batch = toolCalls.slice(i, j);
+          // Skip the parallel path for solo batches — no benefit, and
+          // keeps the live-execution path on the sequential loop where
+          // its existing timing instrumentation can still observe it.
+          if (batch.length > 1) {
+            const batchResults = await Promise.all(
+              batch.map((c) =>
+                this.toolExecutor(c).catch((err: unknown): ToolCallResult => ({
+                  id:     c.id,
+                  name:   c.name,
+                  result: null,
+                  error:  err instanceof Error ? err.message : String(err),
+                })),
+              ),
+            );
+            for (let k = 0; k < batch.length; k += 1) {
+              preComputedResults.set(batch[k].id, batchResults[k]);
+            }
+          }
+          i = j;
+        }
+      }
       // v4.9.4 Slice 1 — `.entries()` so the surface + abort fill sites
       // can slice from `callIndex + 1` to compute the un-dispatched tail.
       for (const [callIndex, call] of output.toolCalls.entries()) {
@@ -1335,15 +1408,35 @@ export class AidenAgent {
           turnState.markMutationOnLiveCheckpoint(call.name);
         }
         let result: ToolCallResult;
-        try {
-          result = await this.toolExecutor(call);
-        } catch (err) {
-          result = {
-            id:     call.id,
-            name:   call.name,
-            result: null,
-            error:  err instanceof Error ? err.message : String(err),
-          };
+        const _toolStartedAt = _perfDiag ? Date.now() : 0;
+        // v4.11 perf — use the pre-computed result from the parallel
+        // batch above when available; falls through to live execution
+        // for mutating calls + solo read-only batches. The error
+        // shape from the batch matches what live execution would
+        // produce, so the verifier / classifier paths below are
+        // indifferent to the source.
+        const _preComputed = preComputedResults.get(call.id);
+        if (_preComputed) {
+          result = _preComputed;
+        } else {
+          try {
+            result = await this.toolExecutor(call);
+          } catch (err) {
+            result = {
+              id:     call.id,
+              name:   call.name,
+              result: null,
+              error:  err instanceof Error ? err.message : String(err),
+            };
+          }
+        }
+        if (_perfDiag) {
+          const toolMs = Date.now() - _toolStartedAt;
+          const ok = result.error == null;
+          const src = _preComputed ? 'parallel' : 'live';
+          process.stderr.write(
+            `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok}]\n`,
+          );
         }
         toolCallCount += 1;
         // v4.2 Phase 1 — verifier classification. Runs only when TCE

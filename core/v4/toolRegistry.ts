@@ -33,6 +33,11 @@ import type {
   ToolCallRequest,
   ToolCallResult,
 } from '../../providers/v4/types';
+// v4.11 perf — wire the legacy v3 responseCache into the v4 hot path.
+// Cache is keyed by (tool name, arguments hash); has its own per-tool
+// TTL table + NO_CACHE_TOOLS deny list internally, so the v4 wire
+// just adds the get/set bookend around handler.execute.
+import { responseCache } from '../responseCache';
 import type { AidenPaths } from './paths';
 import type { SessionManager } from './sessionManager';
 import type { MemoryManager } from './memoryManager';
@@ -392,6 +397,21 @@ export class ToolRegistry {
         }
       }
 
+      // v4.11 perf — pre-execute responseCache lookup. responseCache
+      // internally consults its NO_CACHE_TOOLS deny list and per-tool
+      // TTL table; the v4 wire just forwards (name, args). A cache hit
+      // short-circuits BEFORE the daemon span / hooks fire — those
+      // surfaces are pre-flight observability for actual execution,
+      // and a cache-hit is by definition not a fresh execution.
+      const _cached = responseCache.get(call.name, args);
+      if (_cached !== null) {
+        // The cache stores a serialised string. Tools that produce
+        // structured objects had their output stringified at set-time
+        // below; we keep the cached envelope shape (no JSON.parse) so
+        // the consumer (aidenAgent dispatch) sees the same
+        // ToolCallResult shape it would on a fresh run.
+        return { id: call.id, name: call.name, result: _cached };
+      }
       // v4.9.0 Slice 6 — wrap the handler call in a tool span when the
       // daemon foundation is up AND an ExecutionContext is active. NOOP
       // outside daemon mode or outside a runWithContext frame. Lazy
@@ -443,6 +463,21 @@ export class ToolRegistry {
           if (typeof inner.degradedReason === 'string') {
             out.degradedReason = inner.degradedReason;
           }
+        }
+        // v4.11 perf — populate responseCache on success (non-degraded,
+        // serialisable result). responseCache internally gates on its
+        // NO_CACHE_TOOLS deny list + per-tool TTL table; if either says
+        // skip, this call is a no-op. We stringify so the cache stores
+        // a normalised string form — the get-side returns the same
+        // shape so the consumer sees consistent ToolCallResult.result
+        // whether cache hit or fresh execution.
+        if (!out.degraded && out.result != null) {
+          try {
+            const serialised = typeof out.result === 'string'
+              ? out.result
+              : JSON.stringify(out.result);
+            responseCache.set(call.name, args, serialised);
+          } catch { /* serialisation failure: skip cache, never break the call */ }
         }
         return out;
       } catch (err) {
