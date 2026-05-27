@@ -2143,6 +2143,32 @@ export async function buildAgentRuntime(
       logger:              bootLogger.child('subagent'),
     },
     logger: bootLogger.child('subagent'),
+    // v4.11 regression patch — display sink for per-child UI events.
+    // Coordinator is the single source of truth post-Slice-4; the
+    // pre-Slice-4 spawn_sub_agent facade no longer emits its own
+    // pair. This restores the gutter-indented `[task] <goal> ·
+    // running…` / `· done` trail rows for BOTH spawn_sub_agent
+    // (1 pair) AND subagent_fanout (N pairs), which Slice 4 had
+    // silently dropped from fanout.
+    onUiEvent: (name: string, args: Record<string, unknown>) => {
+      display.renderUiEvent(name, args);
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        try {
+          const tags = categorizeEvent(name);
+          replRunStore.emitEventRich({
+            runId:     rid,
+            category:  tags.category,
+            kind:      tags.kind,
+            name,
+            sessionId: replParentRunRef.sessionId ?? null,
+            payload:   args,
+            visibility:'model',
+            source:    'subagent',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
+      }
+    },
   });
 
   // ── v4.11 Slice 4 — register subagent_fanout (facade) ──────────────────
@@ -2187,33 +2213,12 @@ export async function buildAgentRuntime(
     resolveTurnContext: () => agent.getCurrentTurnContext(),
     coordinator:        subagentCoordinator,
     logger:             bootLogger.child('subagent'),
-    // v4.8.0 Phase 2.5 — emit ui_task_update/ui_task_done events so
-    // subagent activity surfaces as gutter-indented trail rows in the
-    // parent's chat surface alongside its own tool trail.
-    // v4.10 Slice 10.2 — persistence: tee through the parent's runId
-    // (replParentRunRef.runId) so cross-agent ui_* trace co-locates
-    // with the parent's own ui events. The coordinator's own
-    // subagent.* lifecycle events are emitted separately via the
-    // TurnRuntimeContext's traceEmitter (wired in chatSession).
-    onUiEvent: (name: string, args: Record<string, unknown>) => {
-      display.renderUiEvent(name, args);
-      const rid = replParentRunRef.runId;
-      if (rid !== null) {
-        try {
-          const tags = categorizeEvent(name);
-          replRunStore.emitEventRich({
-            runId:     rid,
-            category:  tags.category,
-            kind:      tags.kind,
-            name,
-            sessionId: replParentRunRef.sessionId ?? null,
-            payload:   args,
-            visibility:'model',
-            source:    'subagent',
-          });
-        } catch { /* persistence faults must never break dispatch */ }
-      }
-    },
+    // v4.11 regression patch — `onUiEvent` removed from the spawn
+    // facade. The coordinator (constructed above) owns the single
+    // ui_task_update / ui_task_done pair per child for BOTH
+    // spawn_sub_agent (1 task) AND subagent_fanout (N tasks), so
+    // the display sink is wired ONCE at coordinator construction
+    // instead of duplicated across two facades.
   }));
   bootLogger.child('subagent').info('spawn_sub_agent: wired (REPL only)', {
     instanceId: replInstanceId,

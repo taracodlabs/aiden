@@ -137,8 +137,11 @@ export function makeSubagentFanoutTool(
           timeoutMs: {
             type: 'number',
             description:
-              'Per-child wall-clock timeout (ms). Default 90000. ' +
-              'Outer wall-clock cap is 5x this value.',
+              'Per-child wall-clock timeout (ms). Default 600000 (10 minutes). ' +
+              'Operators can override the runtime default with the ' +
+              'AIDEN_SUBAGENT_TIMEOUT_MS env var; this field overrides both. ' +
+              'Tight bounds (5000-60000) suit narrow lookups; default suits ' +
+              'research / multi-tool synthesis.',
           },
         },
         required: ['mode'],

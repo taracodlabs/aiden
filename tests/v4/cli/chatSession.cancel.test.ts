@@ -292,6 +292,58 @@ describe('ChatSession — mid-turn cancel (v4.11 Slice 3)', () => {
     expect(calls).toBe(2);
   });
 
+  it('R2: AbortError throw path stops the indicator BEFORE rendering "(turn interrupted)"', async () => {
+    // Slice 3 introduced the abort-aware catch branch but missed
+    // calling stopIndicatorOnce() before the dim line. Result: the
+    // setInterval kept ticking after the cancel confirmation, painting
+    // a stale "calling provider… (Ns)" row on top of the dim line.
+    // This test enforces the stop order: indicator.stop() MUST fire
+    // before display.dim('(turn interrupted)').
+    //
+    // We spy on the Display methods to capture call order, then make
+    // the agent throw an AbortError. Verify `stop` ran before `dim`.
+    const agent = {
+      runConversation: vi.fn(async () => {
+        const e = new Error('aborted by parent'); e.name = 'AbortError';
+        throw e;
+      }),
+      setProvider:    vi.fn(),
+      setActiveModel: vi.fn(() => true),
+    };
+    const { display, out } = mkDisplay();
+    // Spy on indicator.stop AND display.dim by intercepting display.
+    // The activityIndicator handle is constructed inside chatSession;
+    // we observe via output side-effects.
+    const callOrder: string[] = [];
+    // Wrap activityIndicator to record stop()
+    const realActivityIndicator = display.activityIndicator.bind(display);
+    vi.spyOn(display, 'activityIndicator').mockImplementation((...args) => {
+      const handle = realActivityIndicator(...args);
+      const realStop = handle.stop.bind(handle);
+      handle.stop = () => { callOrder.push('stop'); realStop(); };
+      return handle;
+    });
+    // Spy on dim but call through so the real text reaches stdout
+    // — lets us verify both ordering AND user-visible output.
+    const realDim = display.dim.bind(display);
+    vi.spyOn(display, 'dim').mockImplementation((line: string) => {
+      if (line.includes('(turn interrupted)')) callOrder.push('dim');
+      return realDim(line);
+    });
+    const session = new ChatSession(buildBaseOpts({
+      agent:     agent as never,
+      display,
+      promptApi: mkPromptApi(['cancel-me', '/quit']),
+    }));
+    await session.run();
+    // stop() MUST have been called, and BEFORE the dim line.
+    expect(callOrder).toContain('stop');
+    expect(callOrder).toContain('dim');
+    expect(callOrder.indexOf('stop')).toBeLessThan(callOrder.indexOf('dim'));
+    // Also: the dim text actually rendered (chrome flowed through).
+    expect(out.join('')).toContain('(turn interrupted)');
+  });
+
   it('B4 / R1: a stale-turn callback dropped silently (no display mutation)', async () => {
     // We capture an onDelta callback from turn 1, run turn 2, then
     // invoke the captured callback AFTER turn 2 settles. The

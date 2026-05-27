@@ -174,6 +174,26 @@ export interface SubagentCoordinatorOptions {
   maxChildrenPerFanout?: number;
   /** Optional logger — defaults to noop. */
   logger?: Logger;
+  /**
+   * v4.11 regression patch — display surface for per-child
+   * `ui_task_update` / `ui_task_done` events. Wired once at REPL
+   * boot to the SAME closure the spawn_sub_agent factory used pre-
+   * Slice-4 (route through `display.renderUiEvent` + tee into
+   * `runStore.emitEventRich` on the parent's runId).
+   *
+   * Before this restore, the coordinator's introduction (Slice 4)
+   * silently dropped per-child UI events for `subagent_fanout`,
+   * removing the gutter-indented trail rows users saw during
+   * fanouts pre-Slice-4. Single-child `spawn_sub_agent` kept its
+   * pair only because the facade emitted them directly; we now
+   * remove that duplicate emission so the coordinator is the
+   * single source of truth for subagent UI events (one pair per
+   * child, regardless of which facade dispatched).
+   *
+   * Optional — tests + MCP paths that don't expose a display
+   * surface pass undefined and the emission is silently dropped.
+   */
+  onUiEvent?: (name: string, args: Record<string, unknown>) => void;
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────
@@ -200,6 +220,8 @@ export class SubagentCoordinator {
   private readonly spawnDeps:            SpawnSubAgentDeps;
   private readonly maxChildrenPerFanout: number;
   private readonly logger:               Logger;
+  /** v4.11 regression patch — display sink for per-child UI events. */
+  private readonly onUiEvent?:           (name: string, args: Record<string, unknown>) => void;
 
   /**
    * Process-wide registry — keyed by subagentRunId. Survives across
@@ -216,6 +238,19 @@ export class SubagentCoordinator {
       1, MAX_CHILDREN_GLOBAL,
     );
     this.logger = opts.logger ?? noopLogger();
+    this.onUiEvent = opts.onUiEvent;
+  }
+
+  /**
+   * v4.11 regression patch — safe emitter for UI events. Swallows
+   * any exception from the display sink so a buggy renderer can
+   * never break dispatch. No-op when no `onUiEvent` was wired
+   * (unit tests / MCP path).
+   */
+  private emitUi(name: string, args: Record<string, unknown>): void {
+    if (!this.onUiEvent) return;
+    try { this.onUiEvent(name, args); }
+    catch { /* display sink exceptions must not propagate */ }
   }
 
   /**
@@ -256,10 +291,36 @@ export class SubagentCoordinator {
       };
     }
 
+    // v4.11 regression patch — resolve the env-var default ONCE per
+    // batch. Pre-Slice-4 the legacy `runFanout` orchestrator read
+    // `AIDEN_SUBAGENT_TIMEOUT_MS` via `resolveBudget`; Slice 4's
+    // refactor silently dropped that path because the new facade
+    // passes `args.timeoutMs` straight through. Users with the env
+    // var in `.env` lost the override without warning. Restore the
+    // precedence chain here so it applies UNIFORMLY to spawn_sub_agent
+    // and subagent_fanout (the coordinator is the single dispatch
+    // funnel for both).
+    //
+    // Precedence (highest first):
+    //   1. explicit `task.timeoutMs` (model-supplied, per call)
+    //   2. AIDEN_SUBAGENT_TIMEOUT_MS env var (operator-set, per process)
+    //   3. undefined → spawnSubAgent primitive's DEFAULT_TIMEOUT_MS
+    //      (600 000 ms / 10 min, clamped to [MIN, MAX])
+    //
+    // Same regex shape as the v4.1-subagent budget.ts parser so the
+    // env-var contract is byte-equivalent to the pre-Slice-4 wire.
+    const envTimeoutRaw = process.env.AIDEN_SUBAGENT_TIMEOUT_MS;
+    const envTimeoutMs  = envTimeoutRaw && /^\d+$/.test(envTimeoutRaw)
+      ? Number.parseInt(envTimeoutRaw, 10)
+      : undefined;
+
     // Mint per-task subagentRunIds up-front so trace events can carry
     // a stable id from `spawned` onward.
     const taskRecords = tasks.map((task, taskIndex) => ({
-      task,
+      // v4.11 regression patch — normalise the task's effective
+      // timeoutMs in-place so the registry / spawn primitive both
+      // see the resolved value (not undefined fallback).
+      task: { ...task, timeoutMs: task.timeoutMs ?? envTimeoutMs },
       taskIndex,
       subagentRunId: makeSubagentRunId(fanoutId, taskIndex),
       conversationId: randomUUID(),
@@ -438,6 +499,12 @@ export class SubagentCoordinator {
         outputTokens:   0,
         reason:         'parent_cancel',
       });
+      // v4.11 regression patch — even on the pre-abort short-circuit,
+      // surface a single ui_task_done so the display's gutter trail
+      // reflects "this child never started". We skip the ui_task_update
+      // pair entry here because there was no running window — Display's
+      // renderUiTaskDone tolerates a `done` without a preceding `update`.
+      this.emitUiDone(record, env);
       return env;
     }
     parentCascade = () => {
@@ -457,6 +524,20 @@ export class SubagentCoordinator {
       timestamp:      Date.now(),
       provider:       record.task.provider ?? this.spawnDeps.parentProviderId,
       model:          this.spawnDeps.parentModelId,
+    });
+
+    // v4.11 regression patch — emit the display-facing `ui_task_update`
+    // so the user sees a gutter-indented `[task] <goal> · running…` row
+    // for THIS child. Mirrors the v4.6 spawn_sub_agent emission shape
+    // (`task_id`, `label`, `status: 'running'`, `kind: 'subagent'`,
+    // `depth: 1`) so the existing display.renderUiTaskUpdate path
+    // handles it without any rendering-side change.
+    this.emitUi('ui_task_update', {
+      task_id: record.subagentRunId,
+      label:   goalPreview(record.task.goal),
+      status:  'running',
+      kind:    'subagent',
+      depth:   1,
     });
 
     // ── Dispatch the primitive ─────────────────────────────────────────
@@ -522,6 +603,8 @@ export class SubagentCoordinator {
 
       // Emit terminal event matching the envelope status.
       this.emitTerminal(turnContext, fanoutId, record, envelope, child);
+      // v4.11 regression patch — display-facing close-out.
+      this.emitUiDone(record, envelope);
     } catch (err) {
       // spawnSubAgent contract says it never throws — defensive only.
       const endedAt    = Date.now();
@@ -556,6 +639,9 @@ export class SubagentCoordinator {
         error:          envelope.error ?? message,
         exitReason:     envelope.exitReason,
       });
+      // v4.11 regression patch — even on the rare primitive-throw path
+      // the user sees the gutter trail close.
+      this.emitUiDone(record, envelope);
     } finally {
       child.settled = true;
       if (parentCascade) {
@@ -631,6 +717,29 @@ export class SubagentCoordinator {
     if (!ctx.traceEmitter) return;
     try { ctx.traceEmitter(event); }
     catch { /* emitter exceptions must not propagate */ }
+  }
+
+  /**
+   * v4.11 regression patch — emit the display-facing `ui_task_done`
+   * for a child whose envelope has settled. Centralised so the three
+   * terminal paths (success, primitive-throw, pre-abort short-circuit)
+   * stay in sync. Status mapping mirrors what the v4.6 spawn_sub_agent
+   * facade emitted — `'success' | 'failure' | 'blocked'` — so the
+   * display renderer needs no awareness of the new envelope vocabulary.
+   */
+  private emitUiDone(
+    record:   { subagentRunId: string },
+    envelope: SubagentResultEnvelope,
+  ): void {
+    const status: 'success' | 'failure' | 'blocked' =
+      envelope.status === 'completed' ? 'success' :
+      envelope.status === 'cancelled' ? 'blocked' :
+      envelope.status === 'timeout'   ? 'blocked' : 'failure';
+    this.emitUi('ui_task_done', {
+      task_id: record.subagentRunId,
+      status,
+      summary: `${envelope.usage.totalTokens} tokens · ${envelope.exitReason}`,
+    });
   }
 }
 
@@ -717,4 +826,15 @@ function makeSubagentRunId(fanoutId: string, taskIndex: number): string {
 function clamp(n: number, lo: number, hi: number): number {
   if (!Number.isFinite(n)) return lo;
   return Math.max(lo, Math.min(hi, Math.floor(n)));
+}
+
+/**
+ * v4.11 regression patch — short label shown in the gutter
+ * `ui_task_update` row. Mirrors the pre-Slice-4 spawn_sub_agent
+ * goal-truncation rule (cap at 200 chars + ellipsis) so display
+ * output reads identically to v4.6 for single-child spawns and now
+ * extends the same surface to fanout children.
+ */
+function goalPreview(goal: string): string {
+  return goal.length > 200 ? goal.slice(0, 200) + '…' : goal;
 }

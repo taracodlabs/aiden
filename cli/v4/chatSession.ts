@@ -2112,6 +2112,14 @@ export class ChatSession implements ChatSessionLike {
         (err instanceof Error && err.name === 'AbortError') ||
         turnAbort.signal.aborted;
       if (_abortHit) {
+        // v4.11 regression patch — stop the indicator BEFORE printing
+        // the dim line so the setInterval can't paint a stray
+        // "calling provider… (Ns)" line on top of our cancel
+        // confirmation. The success-path interrupted branch already
+        // had this implicit (stopIndicatorOnce fired right after
+        // runConversation returned cleanly); the throw-path was the
+        // gap. Idempotent — safe even if onFirstDelta already stopped.
+        stopIndicatorOnce();
         this.opts.display.dim('(turn interrupted)');
         // Status footer still renders so the user sees the elapsed
         // pill — matches the success path's chrome.

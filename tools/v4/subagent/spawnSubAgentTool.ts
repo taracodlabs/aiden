@@ -58,9 +58,12 @@ import { getSpawnPause } from '../../../core/v4/subagent/spawnPause';
 export interface SpawnSubAgentFactoryOptions {
   resolveTurnContext: () => TurnRuntimeContext | undefined;
   coordinator: SubagentCoordinator;
-  onUiEvent?: (name: string, args: Record<string, unknown>) => void;
   /** Optional logger for handler-level info traces. Defaults noop. */
   logger?: Logger;
+  // v4.11 regression patch — `onUiEvent` removed. UI emission is now
+  // owned by the coordinator (single source of truth); the boot
+  // wiring passes the display sink directly into
+  // `new SubagentCoordinator({ ..., onUiEvent })`.
 }
 
 // ── Pause helper (v4.6 Phase 3A) ──────────────────────────────────────────
@@ -148,9 +151,11 @@ export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
       timeoutMs: {
         type: 'integer',
         description:
-          'Hard wall-clock timeout in milliseconds. Default 10 minutes. The ' +
-          "child is signalled to interrupt on timeout; if it doesn't yield " +
-          'cooperatively, the worker leaks but the parent stays responsive.',
+          'Hard wall-clock timeout in milliseconds. Default 600000 (10 minutes); ' +
+          'operators can override via AIDEN_SUBAGENT_TIMEOUT_MS env var, and ' +
+          'this field overrides both. The child is signalled to interrupt on ' +
+          "timeout; if it doesn't yield cooperatively, the worker leaks but " +
+          'the parent stays responsive.',
       },
       provider: {
         type: 'string',
@@ -265,19 +270,17 @@ export function makeSpawnSubAgentTool(
         });
       }
 
-      // ── 4. Logger + UI surface ─────────────────────────────────────────
-      const logger      = factory.logger ?? noopLogger();
-      const goalPreview = goal.length > 200 ? goal.slice(0, 200) + '…' : goal;
-      const subTaskId   = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      factory.onUiEvent?.('ui_task_update', {
-        task_id: subTaskId,
-        label:   goalPreview,
-        status:  'running',
-        kind:    'subagent',
-        depth:   1,
-      });
+      // ── 4. Logger ──────────────────────────────────────────────────────
+      // v4.11 regression patch — UI event emission MOVED into the
+      // SubagentCoordinator (single source of truth). The pre-Slice-4
+      // pair this facade used to emit (`subagent-${ts}-${rand}` task_id)
+      // collided with the gap that left fanout children unannounced.
+      // Now BOTH facades route their per-child UI events through the
+      // coordinator's emitUi*; the task_id is the coordinator's
+      // `subagentRunId` so display rows correlate to trace events.
+      const logger = factory.logger ?? noopLogger();
 
-      // ── 5. Delegate to coordinator ─────────────────────────────────────
+      // ── 5. Delegate to coordinator (it emits the UI pair internally) ──
       const fanout = await factory.coordinator.spawnBatch(
         turnContext,
         [task],
@@ -285,22 +288,7 @@ export function makeSpawnSubAgentTool(
       );
       const envelope = fanout.results[0];
 
-      // ── 6. UI done event ───────────────────────────────────────────────
-      const uiStatus: 'success' | 'failure' | 'blocked' =
-        !envelope                              ? 'failure' :
-        envelope.status === 'completed'        ? 'success' :
-        envelope.status === 'cancelled'        ? 'blocked' :
-        envelope.status === 'timeout'          ? 'blocked' :
-                                                 'failure';
-      factory.onUiEvent?.('ui_task_done', {
-        task_id: subTaskId,
-        status:  uiStatus,
-        summary: envelope
-          ? `${envelope.usage.totalTokens} tokens · ${envelope.exitReason}`
-          : 'no result',
-      });
-
-      // ── 7. Re-shape into the legacy SubAgentResult contract ────────────
+      // ── 6. Re-shape into the legacy SubAgentResult contract ───────────
       // The parent's LLM has seen the v4.6 envelope shape since Phase 1;
       // preserving it keeps the model-facing surface stable across the
       // Slice 4 refactor. Future slice may upgrade to expose the new

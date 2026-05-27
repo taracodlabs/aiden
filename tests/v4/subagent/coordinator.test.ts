@@ -108,6 +108,8 @@ function makeCoordinator(opts?: {
   delaysMs?: number[];
   /** Throw inside the provider after this many calls. */
   throwAfter?: number;
+  /** v4.11 regression patch — capture UI events for assertions. */
+  onUiEvent?: (name: string, args: Record<string, unknown>) => void;
 }): { coord: SubagentCoordinator; delayLog: number[] } {
   const delays = opts?.delaysMs ?? [0];
   const delayLog: number[] = [];
@@ -145,6 +147,7 @@ function makeCoordinator(opts?: {
       instanceId:        INST,
     },
     maxChildrenPerFanout: opts?.maxChildrenPerFanout,
+    onUiEvent: opts?.onUiEvent,
   });
   return { coord, delayLog };
 }
@@ -411,5 +414,191 @@ describe('SubagentCoordinator — v4.11 Slice 4', () => {
       expect(r.status).toBe('cancelled');
       expect(r.usage.totalTokens).toBe(0);
     }
+  });
+});
+
+// ── v4.11 regression patch tests ────────────────────────────────────────
+
+describe('SubagentCoordinator — v4.11 regression patch (R1 + R3)', () => {
+  it('R1: emits one ui_task_update + one ui_task_done per child', async () => {
+    // Slice 4 introduced the coordinator and silently dropped per-child
+    // UI emission from subagent_fanout. The regression patch makes the
+    // coordinator the single source of truth: ONE update + ONE done
+    // per child for both the spawn_sub_agent (1 task) and the
+    // subagent_fanout (N task) facades.
+    const events: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const { coord } = makeCoordinator({
+      onUiEvent: (name, args) => events.push({ name, args }),
+    });
+    const ctx = makeTurnContext();
+    await coord.spawnBatch(ctx, [
+      { goal: 'task A' },
+      { goal: 'task B' },
+      { goal: 'task C' },
+    ]);
+    const updates = events.filter((e) => e.name === 'ui_task_update');
+    const dones   = events.filter((e) => e.name === 'ui_task_done');
+    expect(updates).toHaveLength(3);
+    expect(dones).toHaveLength(3);
+    // Each pair shares a task_id; ids are the coordinator's subagentRunId.
+    const updateIds = updates.map((e) => e.args.task_id as string).sort();
+    const doneIds   = dones.map((e) => e.args.task_id as string).sort();
+    expect(updateIds).toEqual(doneIds);
+    for (const id of updateIds) {
+      expect(id).toMatch(/^sa-f-[a-f0-9]{8}-\d+-[a-f0-9]{8}$/);
+    }
+    // Update shape mirrors pre-Slice-4 spawn_sub_agent emission.
+    for (const u of updates) {
+      expect(u.args.status).toBe('running');
+      expect(u.args.kind).toBe('subagent');
+      expect(u.args.depth).toBe(1);
+      expect(typeof u.args.label).toBe('string');
+    }
+    // Done shape: status maps via envelope, summary carries metrics.
+    for (const d of dones) {
+      expect(['success', 'failure', 'blocked']).toContain(d.args.status);
+      expect(typeof d.args.summary).toBe('string');
+    }
+  });
+
+  it('R1: single-task batch (spawn_sub_agent path) still emits 1 pair', async () => {
+    // The spawn_sub_agent facade dispatches a 1-task batch through the
+    // same coordinator. Verify the pair count matches the model-facing
+    // contract pre-Slice-4 (which was 1 pair via the facade's own
+    // onUiEvent — now replaced by the coordinator's single-pair emit).
+    const events: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const { coord } = makeCoordinator({
+      onUiEvent: (name, args) => events.push({ name, args }),
+    });
+    const ctx = makeTurnContext();
+    await coord.spawnBatch(ctx, [{ goal: 'solo' }]);
+    expect(events.filter((e) => e.name === 'ui_task_update')).toHaveLength(1);
+    expect(events.filter((e) => e.name === 'ui_task_done')).toHaveLength(1);
+  });
+
+  it('R1: omitting onUiEvent is a clean no-op (back-compat)', async () => {
+    // MCP path + unit tests omit the display sink. Coordinator must
+    // not throw when onUiEvent is undefined; spawnBatch still returns
+    // a well-formed FanoutResult.
+    const { coord } = makeCoordinator();  // no onUiEvent
+    const ctx = makeTurnContext();
+    const result = await coord.spawnBatch(ctx, [{ goal: 'a' }, { goal: 'b' }]);
+    expect(result.status).toBe('completed');
+    expect(result.results).toHaveLength(2);
+  });
+
+  it('R1: pre-aborted parent emits ui_task_done (no update — child never started)', async () => {
+    // Edge case: parent signal aborted before spawnBatch could
+    // dispatch. Coordinator should still close the gutter trail
+    // (otherwise the display row would hang as "running" forever).
+    // We skip the `update` for this path because there was no
+    // running window; display.renderUiTaskDone tolerates a `done`
+    // without a preceding `update`.
+    const ctrl = new AbortController();
+    ctrl.abort();
+    const events: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const { coord } = makeCoordinator({
+      onUiEvent: (name, args) => events.push({ name, args }),
+    });
+    const ctx = buildTurnRuntimeContext({
+      turnId: 99, parentAgentId: 'P', signal: ctrl.signal,
+    });
+    await coord.spawnBatch(ctx, [{ goal: 'a' }]);
+    expect(events.filter((e) => e.name === 'ui_task_update')).toHaveLength(0);
+    expect(events.filter((e) => e.name === 'ui_task_done')).toHaveLength(1);
+    expect(events.find((e) => e.name === 'ui_task_done')!.args.status).toBe('blocked');
+  });
+
+  it('R3: AIDEN_SUBAGENT_TIMEOUT_MS env var resolves task.timeoutMs default', async () => {
+    // When the model omits timeoutMs, the env var should fill in.
+    // The coordinator-side resolution writes the effective value into
+    // the task record (so spawnSubAgent sees the resolved value, not
+    // undefined). We can't introspect spawnSubAgent's internal timer
+    // directly, but we can verify the resolution path by checking
+    // that an env-supplied tight timeout (say, 5ms) actually fires
+    // and produces a 'timeout' envelope — proves the env value made
+    // it to the primitive.
+    const original = process.env.AIDEN_SUBAGENT_TIMEOUT_MS;
+    process.env.AIDEN_SUBAGENT_TIMEOUT_MS = '1000';
+    try {
+      // Provider that hangs forever (signal-honouring sleep).
+      const { coord } = makeCoordinator({ delaysMs: [30_000] });
+      const ctx = makeTurnContext();
+      const result = await coord.spawnBatch(ctx, [{ goal: 'will-timeout' }]);
+      expect(result.results[0].status).toBe('timeout');
+    } finally {
+      if (original === undefined) delete process.env.AIDEN_SUBAGENT_TIMEOUT_MS;
+      else process.env.AIDEN_SUBAGENT_TIMEOUT_MS = original;
+    }
+  });
+
+  it('R3: explicit task.timeoutMs overrides AIDEN_SUBAGENT_TIMEOUT_MS env var', async () => {
+    // Precedence: explicit > env > primitive default. With env at 1ms
+    // (would fire immediately) but task.timeoutMs at 30_000, the
+    // task value should win and the child should complete normally.
+    const original = process.env.AIDEN_SUBAGENT_TIMEOUT_MS;
+    process.env.AIDEN_SUBAGENT_TIMEOUT_MS = '1';
+    try {
+      const { coord } = makeCoordinator({ delaysMs: [20] });  // fast provider
+      const ctx = makeTurnContext();
+      const result = await coord.spawnBatch(ctx, [
+        { goal: 'wins-over-env', timeoutMs: 30_000 },
+      ]);
+      expect(result.results[0].status).toBe('completed');
+    } finally {
+      if (original === undefined) delete process.env.AIDEN_SUBAGENT_TIMEOUT_MS;
+      else process.env.AIDEN_SUBAGENT_TIMEOUT_MS = original;
+    }
+  });
+
+  it('R3: malformed env var falls through to primitive default', async () => {
+    // Regex gate: AIDEN_SUBAGENT_TIMEOUT_MS = "abc" should NOT parse
+    // as a number, so the resolver leaves the value undefined and
+    // the primitive's DEFAULT_TIMEOUT_MS (600_000ms / 10min) applies.
+    // Verify by running a fast-completing task — should NOT time out.
+    const original = process.env.AIDEN_SUBAGENT_TIMEOUT_MS;
+    process.env.AIDEN_SUBAGENT_TIMEOUT_MS = 'not-a-number';
+    try {
+      const { coord } = makeCoordinator({ delaysMs: [5] });
+      const ctx = makeTurnContext();
+      const result = await coord.spawnBatch(ctx, [{ goal: 'fast' }]);
+      expect(result.results[0].status).toBe('completed');
+    } finally {
+      if (original === undefined) delete process.env.AIDEN_SUBAGENT_TIMEOUT_MS;
+      else process.env.AIDEN_SUBAGENT_TIMEOUT_MS = original;
+    }
+  });
+});
+
+// ── R4 — schema description accuracy ────────────────────────────────────
+
+describe('subagent schema descriptions — v4.11 regression patch (R4)', () => {
+  it('R4: subagent_fanout timeoutMs description states 600000 default + env var', async () => {
+    const { makeSubagentFanoutTool } = await import(
+      '../../../tools/v4/subagent/subagentFanout'
+    );
+    const tool = makeSubagentFanoutTool({
+      resolveTurnContext:  () => undefined,
+      coordinator:         {} as never,
+      resolveProviders:    () => [],
+      resolveActiveModel:  () => ({ providerId: 'x', modelId: 'x' }),
+      aggregatorAdapter:   {} as never,
+    });
+    const props = (tool.schema.inputSchema.properties as Record<string, { description?: string }>);
+    const desc  = props.timeoutMs?.description ?? '';
+    expect(desc).toMatch(/600000/);
+    expect(desc).toMatch(/AIDEN_SUBAGENT_TIMEOUT_MS/);
+    // The stale "Default 90000" string MUST be gone.
+    expect(desc).not.toMatch(/90000/);
+  });
+
+  it('R4: spawn_sub_agent timeoutMs description states 600000 default + env var', async () => {
+    const { SPAWN_SUB_AGENT_SCHEMA } = await import(
+      '../../../tools/v4/subagent/spawnSubAgentTool'
+    );
+    const props = (SPAWN_SUB_AGENT_SCHEMA.inputSchema.properties as Record<string, { description?: string }>);
+    const desc  = props.timeoutMs?.description ?? '';
+    expect(desc).toMatch(/600000/);
+    expect(desc).toMatch(/AIDEN_SUBAGENT_TIMEOUT_MS/);
   });
 });
