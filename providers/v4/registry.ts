@@ -251,6 +251,28 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
       'qwen/qwen-2.5-72b-instruct',
     ],
   },
+  requesty: {
+    id: 'requesty',
+    displayName: 'Requesty',
+    apiMode: 'chat_completions',
+    baseUrl: 'https://router.requesty.ai/v1',
+    apiKeyEnvVar: 'REQUESTY_API_KEY',
+    description: 'Requesty — OpenAI-compatible LLM gateway routing many models through one API.',
+    tier: 'paid',
+    hasFreeTier: false,
+    extraHeaders: {
+      'HTTP-Referer': 'https://aiden.ai',
+      'X-Title': 'Aiden',
+    },
+    docsUrl: 'https://docs.requesty.ai',
+    supportsToolCalling: true,
+    modelIds: [
+      'openai/gpt-4o-mini',
+      'openai/gpt-4o',
+      'anthropic/claude-sonnet-4-5',
+      'deepseek/deepseek-chat',
+    ],
+  },
   together: {
     id: 'together',
     displayName: 'Together AI',

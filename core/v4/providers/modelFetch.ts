@@ -188,6 +188,10 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
         // available subset — we use the public list to populate the picker.
         raws = await fetchOpenAICompat('https://openrouter.ai/api/v1/models', { apiKey: apiKey || 'anon', timeoutMs, fetchImpl });
         break;
+      case 'requesty':
+        if (!apiKey) return fallbackFor('requesty', 'no API key');
+        raws = await fetchOpenAICompat('https://router.requesty.ai/v1/models', { apiKey, timeoutMs, fetchImpl });
+        break;
       case 'gemini':
         if (!apiKey) return fallbackFor('gemini', 'no API key');
         raws = await fetchGemini({ apiKey, timeoutMs, fetchImpl });

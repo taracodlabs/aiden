@@ -563,6 +563,56 @@ export const MODEL_CATALOG: ModelEntry[] = [
     tier: 'standard',
   },
 
+  // ─── requesty ────────────────────────────────────────────────────────────
+  // Requesty — OpenAI-compatible LLM gateway. provider/model naming.
+  {
+    id: 'openai/gpt-4o-mini',
+    displayName: 'GPT-4o mini (via Requesty)',
+    providerId: 'requesty',
+    contextLength: 128_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: false,
+    pricing: { inputPerM: 0.15, outputPerM: 0.6 },
+    isDefault: true,
+    tier: 'standard',
+  },
+  {
+    id: 'openai/gpt-4o',
+    displayName: 'GPT-4o (via Requesty)',
+    providerId: 'requesty',
+    contextLength: 128_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: false,
+    pricing: { inputPerM: 2.5, outputPerM: 10.0 },
+    isDefault: false,
+    tier: 'flagship',
+  },
+  {
+    id: 'anthropic/claude-sonnet-4-5',
+    displayName: 'Claude Sonnet 4.5 (via Requesty)',
+    providerId: 'requesty',
+    contextLength: 200_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    pricing: { inputPerM: 3.0, outputPerM: 15.0 },
+    isDefault: false,
+    tier: 'flagship',
+  },
+  {
+    id: 'deepseek/deepseek-chat',
+    displayName: 'DeepSeek Chat (via Requesty)',
+    providerId: 'requesty',
+    contextLength: 64_000,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: false,
+    isDefault: false,
+    tier: 'standard',
+  },
+
   // ─── together ────────────────────────────────────────────────────────────
   // Phase 16f: Qwen3-235B is the new Together default — strong tool-calling,
   // MoE 22B active params, throughput tier ~$0.20/M. Replaces Groq Llama-3.3

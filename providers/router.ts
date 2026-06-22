@@ -10,6 +10,7 @@ import { loadConfig, saveConfig, APIEntry, CustomProviderEntry } from './index'
 import { ollamaProvider } from './ollama'
 import { createGroqProvider } from './groq'
 import { createOpenRouterProvider } from './openrouter'
+import { createRequestyProvider } from './requesty'
 import { createGeminiProvider } from './gemini'
 import { createCerebrasProvider } from './cerebras'
 import { createNvidiaProvider } from './nvidia'
@@ -26,6 +27,7 @@ const RATE_LIMIT_WINDOWS: Record<string, number> = {
   groq:       15  * 1000,  // Groq free tier resets in ~10–15 s
   gemini:     90  * 1000,  // Gemini resets in ~60–90 s
   openrouter: 30  * 1000,  // OpenRouter rarely rate-limits; 30 s is safe
+  requesty:   30  * 1000,  // Requesty gateway — rarely rate-limits; 30 s is safe
   together:   30  * 1000,
   mistral:    60  * 1000,
   cohere:     60  * 1000,
@@ -113,6 +115,7 @@ function buildProvider(entry: APIEntry): Provider {
   switch (entry.provider) {
     case 'groq':       return createGroqProvider(key)
     case 'openrouter': return createOpenRouterProvider(key)
+    case 'requesty':   return createRequestyProvider(key)
     case 'gemini':     return createGeminiProvider(key)
     case 'cerebras':   return createCerebrasProvider(key)
     case 'nvidia':     return createNvidiaProvider(key)

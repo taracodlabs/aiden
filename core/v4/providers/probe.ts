@@ -118,6 +118,10 @@ function buildAuthRequest(o: ProbeOptions): ProbeRequest | null {
       return { url: 'https://api.groq.com/openai/v1/models', method: 'GET', headers: { Authorization: `Bearer ${apiKey}` } };
     case 'openrouter':
       return { url: 'https://openrouter.ai/api/v1/auth/key', method: 'GET', headers: { Authorization: `Bearer ${apiKey}` } };
+    case 'requesty':
+      // Requesty has no /auth/key endpoint — use the generic OpenAI-compatible
+      // /models GET (like the openai/groq path) to validate the key.
+      return { url: 'https://router.requesty.ai/v1/models', method: 'GET', headers: { Authorization: `Bearer ${apiKey}` } };
     case 'gemini':
       return { url: `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`, method: 'GET', headers: {} };
     case 'together':
@@ -182,6 +186,7 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
     case 'openai':
     case 'groq':
     case 'openrouter':
+    case 'requesty':
     case 'together':
     case 'nvidia':
       return {
@@ -191,9 +196,11 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
             ? 'https://api.groq.com/openai/v1/chat/completions'
             : o.providerId === 'openrouter'
               ? 'https://openrouter.ai/api/v1/chat/completions'
-              : o.providerId === 'together'
-                ? 'https://api.together.xyz/v1/chat/completions'
-                : 'https://integrate.api.nvidia.com/v1/chat/completions',
+              : o.providerId === 'requesty'
+                ? 'https://router.requesty.ai/v1/chat/completions'
+                : o.providerId === 'together'
+                  ? 'https://api.together.xyz/v1/chat/completions'
+                  : 'https://integrate.api.nvidia.com/v1/chat/completions',
         method: 'POST',
         headers: { Authorization: `Bearer ${o.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({
