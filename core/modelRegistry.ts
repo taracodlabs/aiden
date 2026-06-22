@@ -103,6 +103,41 @@ export const MODEL_REGISTRY: Record<string, ModelConfig[]> = {
     },
   ],
 
+  requesty: [
+    {
+      id: 'openai/gpt-4o-mini',
+      contextWindow: 128_000,
+      pricing: 'paid',
+      quality: 'high',
+      speed: 'fast',
+      notes: 'Cheap, fast default via Requesty gateway',
+    },
+    {
+      id: 'openai/gpt-4o',
+      contextWindow: 128_000,
+      pricing: 'paid',
+      quality: 'high',
+      speed: 'medium',
+      notes: 'Flagship OpenAI model via Requesty',
+    },
+    {
+      id: 'anthropic/claude-sonnet-4-5',
+      contextWindow: 200_000,
+      pricing: 'paid',
+      quality: 'high',
+      speed: 'medium',
+      notes: 'Strong reasoning + tool calling via Requesty',
+    },
+    {
+      id: 'deepseek/deepseek-chat',
+      contextWindow: 64_000,
+      pricing: 'paid',
+      quality: 'high',
+      speed: 'medium',
+      notes: 'Low-cost capable model via Requesty',
+    },
+  ],
+
   together: [
     {
       id: 'meta-llama/llama-3.1-405b-instruct',
