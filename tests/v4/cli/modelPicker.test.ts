@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { runModelPicker, type PickerPrompts } from '../../../cli/v4/commands/modelPicker';
 import { CredentialResolver } from '../../../providers/v4/credentialResolver';
 import { RuntimeResolver } from '../../../providers/v4/runtimeResolver';
@@ -30,6 +30,18 @@ function isStage1(message: string): boolean {
 }
 
 describe('runModelPicker', () => {
+  // v4.11 — the table layout depends on terminal width. Pin a wide width
+  // so the column/price assertions are deterministic regardless of the
+  // dev's real terminal (CI has no TTY → 80; we pin 100 = full table).
+  let origCols: number | undefined;
+  beforeEach(() => {
+    origCols = process.stdout.columns;
+    (process.stdout as { columns?: number }).columns = 100;
+  });
+  afterEach(() => {
+    (process.stdout as { columns?: number }).columns = origCols;
+  });
+
   it('parses provider:model spec without prompting', async () => {
     const result = await runModelPicker({
       resolver: realResolver(),
@@ -313,8 +325,62 @@ describe('runModelPicker', () => {
       resolver: realResolver(),
       promptModule: { select },
     });
-    const recommended = modelChoices.filter((c) => /⭐ recommended/.test(c.name));
+    // v4.11 — the recommended flag is now a compact trailing ⭐ (was
+    // "⭐ recommended") in the padded table.
+    const recommended = modelChoices.filter((c) => /⭐/.test(c.name));
     // At least one model in any provider's catalog must be the default.
     expect(recommended.length).toBeGreaterThan(0);
+  });
+
+  // ── v4.11 — table formatting ──────────────────────────────────────────
+  it('full-width: stage-2 message carries an aligned column header', async () => {
+    let stage2Message = '';
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) return 'anthropic';
+      stage2Message = opts.message;
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({ resolver: realResolver(), promptModule: { select } });
+    // Header is the second line of the message.
+    const header = stage2Message.split('\n')[1] ?? '';
+    expect(header).toMatch(/Name/);
+    expect(header).toMatch(/Context/);
+    expect(header).toMatch(/In\/Out \$\/M/);
+    expect(header).toMatch(/Tools/);
+  });
+
+  it('strips "(deprecating …)" from the name cell into a trailing ⚠ flag', async () => {
+    let modelChoices: any[] = [];
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) return 'deepseek';
+      modelChoices = opts.choices;
+      return 'deepseek-chat';
+    });
+    await runModelPicker({ resolver: realResolver(), promptModule: { select } });
+    const chat = modelChoices.find((c) => c.value === 'deepseek-chat')!;
+    expect(chat).toBeDefined();
+    // The marker is a trailing flag, not inside the (padded) name cell.
+    expect(chat.name).toMatch(/⚠ deprecating 2026-07-24/);
+    expect(chat.name).not.toMatch(/\(deprecating/);
+    // Tools ✓ present (supportsToolCalling).
+    expect(chat.name).toMatch(/✓/);
+  });
+
+  it('narrow terminal falls back to single-line rows (no header, no wrap)', async () => {
+    (process.stdout as { columns?: number }).columns = 50;
+    let stage2Message = '';
+    let modelChoices: any[] = [];
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) return 'anthropic';
+      stage2Message = opts.message;
+      modelChoices = opts.choices;
+      return 'claude-opus-4-7';
+    });
+    await runModelPicker({ resolver: realResolver(), promptModule: { select } });
+    // No header line appended in plain mode.
+    expect(stage2Message.split('\n').length).toBe(1);
+    // Rows keep the legacy "<N>K ctx" concat shape.
+    const opus = modelChoices.find((c) => c.value === 'claude-opus-4-7')!;
+    expect(opus.name).toMatch(/200K ctx/);
   });
 });

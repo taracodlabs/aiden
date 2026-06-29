@@ -145,6 +145,21 @@ describe('TaskStore.appendTraceId', () => {
   });
 });
 
+describe('TaskStore.appendArtifactId (v4.11 — closes the reserved field)', () => {
+  it('appends artifact ids to artifactIds atomically + de-dupes', () => {
+    const id = store.create({ title: 't', goal: 't', sessionId: 's' });
+    expect(store.get(id)!.artifactIds).toEqual([]);   // reserved-empty at create
+    store.appendArtifactId(id, 'art_1');
+    store.appendArtifactId(id, 'art_2');
+    store.appendArtifactId(id, 'art_1');              // duplicate
+    expect(store.get(id)!.artifactIds).toEqual(['art_1', 'art_2']);
+  });
+
+  it('silently no-ops on missing task id', () => {
+    expect(() => store.appendArtifactId('task_missing', 'art_x')).not.toThrow();
+  });
+});
+
 describe('TaskStore.listRecent', () => {
   it('returns newest-first by createdAt', async () => {
     const a = store.create({ title: 'first', goal: 'a', sessionId: 's' });
@@ -163,6 +178,35 @@ describe('TaskStore.listRecent', () => {
     const onlyA = store.listRecent({ sessionId: 'sess-A' });
     expect(onlyA.length).toBe(2);
     expect(onlyA.every((r) => r.sessionId === 'sess-A')).toBe(true);
+  });
+
+  it('omitting sessionId lists across ALL sessions (the /tasks all opt-in)', () => {
+    // Mechanism behind `/tasks all`: the handler drops the sessionId
+    // filter so boot-swept orphans from dead sessions become visible.
+    store.create({ title: 'a', goal: 'a', sessionId: 'sess-A' });
+    store.create({ title: 'b', goal: 'b', sessionId: 'sess-B' });
+    store.create({ title: 'c', goal: 'c', sessionId: 'sess-C' });
+    const all = store.listRecent();                        // no sessionId
+    expect(all.length).toBe(3);
+    expect(new Set(all.map((r) => r.sessionId))).toEqual(
+      new Set(['sess-A', 'sess-B', 'sess-C']),
+    );
+    // Scoped query still isolates a single session — default unchanged.
+    expect(store.listRecent({ sessionId: 'sess-B' }).map((r) => r.title)).toEqual(['b']);
+  });
+
+  it('cross-session listing surfaces interrupted orphans a scoped query hides', () => {
+    // End-to-end of the Slice 0 value: a dead session's swept orphan is
+    // invisible to a fresh session's scoped /tasks, but visible to /tasks all.
+    const orphan = store.create({ title: 'stuck', goal: 'stuck', sessionId: 'sess-DEAD' });
+    store.setStatus(orphan, 'interrupted');
+    store.create({ title: 'live', goal: 'live', sessionId: 'sess-NEW' });
+    // Fresh session's default /tasks — orphan NOT shown.
+    const scoped = store.listRecent({ sessionId: 'sess-NEW' });
+    expect(scoped.some((r) => r.id === orphan)).toBe(false);
+    // /tasks all interrupted — orphan IS shown.
+    const crossInterrupted = store.listRecent({ status: 'interrupted' });
+    expect(crossInterrupted.map((r) => r.id)).toEqual([orphan]);
   });
 
   it('filters by status (composes with sessionId via AND)', () => {
@@ -223,5 +267,60 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
     // Re-run is idempotent (CREATE TABLE IF NOT EXISTS + version bump
     // already applied so this is effectively a no-op).
     expect(() => runMigrations(db)).not.toThrow();
+  });
+});
+
+describe('TaskStore.sweepOrphaned (v4.11 Slice 0)', () => {
+  /** Insert a row with explicit created_at + status, bypassing create()'s
+   *  Date.now() so the boot-cutoff boundary is deterministic. */
+  function seed(id: string, status: string, createdAt: number): void {
+    db.prepare(
+      `INSERT INTO tasks (
+         id, title, goal, status, created_at, updated_at,
+         channel_id, session_id, parent_task_id, trace_ids, artifact_ids
+       ) VALUES (?, ?, ?, ?, ?, ?, 'repl', 'sess-x', NULL, '[]', '[]')`,
+    ).run(id, id, id, status, createdAt, createdAt);
+  }
+
+  it('retires pre-boot active rows to interrupted and returns the count', () => {
+    const boot = 10_000;
+    seed('task_old1', 'active', boot - 100);
+    seed('task_old2', 'active', boot - 1);
+    const swept = store.sweepOrphaned(boot);
+    expect(swept).toBe(2);
+    expect(store.get('task_old1')!.status).toBe('interrupted');
+    expect(store.get('task_old2')!.status).toBe('interrupted');
+    // updated_at is bumped on the swept rows.
+    expect(store.get('task_old1')!.updatedAt).toBeGreaterThanOrEqual(boot - 100);
+  });
+
+  it('NEVER touches rows at/after the cutoff — the current-session guard', () => {
+    const boot = 10_000;
+    seed('task_now',    'active', boot);       // exactly at boot — strict < excludes it
+    seed('task_future', 'active', boot + 500); // created after boot (current session)
+    const swept = store.sweepOrphaned(boot);
+    expect(swept).toBe(0);
+    expect(store.get('task_now')!.status).toBe('active');
+    expect(store.get('task_future')!.status).toBe('active');
+  });
+
+  it('only active rows are eligible — terminal statuses are left alone', () => {
+    const boot = 10_000;
+    seed('task_done',   'completed',   boot - 100);
+    seed('task_cancel', 'cancelled',   boot - 100);
+    seed('task_fail',   'failed',      boot - 100);
+    seed('task_int',    'interrupted', boot - 100);
+    seed('task_live',   'active',      boot - 100);
+    const swept = store.sweepOrphaned(boot);
+    expect(swept).toBe(1);                                  // only the active one
+    expect(store.get('task_live')!.status).toBe('interrupted');
+    expect(store.get('task_done')!.status).toBe('completed');
+    expect(store.get('task_cancel')!.status).toBe('cancelled');
+    expect(store.get('task_fail')!.status).toBe('failed');
+    expect(store.get('task_int')!.status).toBe('interrupted');
+  });
+
+  it('returns 0 when nothing is eligible', () => {
+    expect(store.sweepOrphaned(Date.now())).toBe(0);
   });
 });

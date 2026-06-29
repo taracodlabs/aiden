@@ -35,6 +35,26 @@ describe('MODEL_CATALOG', () => {
     expect(findModel('nope', 'llama-3.3-70b-versatile')).toBeUndefined();
   });
 
+  it('v4.11 — DeepSeek V4 Pro/Flash resolve via findModel (selectable in /model)', () => {
+    const pro = findModel('deepseek', 'deepseek-v4-pro');
+    expect(pro).toBeDefined();
+    expect(pro!.displayName).toBe('DeepSeek V4 Pro');
+    expect(pro!.supportsReasoning).toBe(true);
+    expect(pro!.isDefault).toBe(false);          // selectable, not default
+    const flash = findModel('deepseek', 'deepseek-v4-flash');
+    expect(flash).toBeDefined();
+    expect(flash!.supportsReasoning).toBe(true);
+    expect(flash!.isDefault).toBe(false);
+    // pricing omitted (unknown — not cited in-repo).
+    expect(pro!.pricing).toBeUndefined();
+    expect(flash!.pricing).toBeUndefined();
+    // default stays on deepseek-chat (unchanged), which now flags deprecation.
+    const chat = findModel('deepseek', 'deepseek-chat');
+    expect(chat!.isDefault).toBe(true);
+    expect(chat!.displayName).toMatch(/deprecating 2026-07-24/);
+    expect(findModel('deepseek', 'deepseek-reasoner')!.displayName).toMatch(/deprecating 2026-07-24/);
+  });
+
   it('findProvidersForModelId surfaces all providers serving a bare model id', () => {
     // Phase 21 #5: claude-opus-4-7 is offered by both anthropic and the
     // canonical OAuth provider claude-pro (legacy claude_subscription

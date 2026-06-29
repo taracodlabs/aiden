@@ -117,6 +117,11 @@ import { getRecoveryStore } from './selfimprovement/recoveryStore';
 // TCE is opted out via AIDEN_TCE=0 — capture / mark / find /
 // restore all short-circuit.
 import { buildRollbackMessage } from './checkpoint';
+// v4.11 — silently scrub hallucinated `<ui_NAME{...}</ui_NAME>` text
+// emitted by weak instruct models. `shouldInjectUiEventsGuidance`
+// (promptBuilder) gates the prompt off for known-weak IDs; this is
+// the safety net for any model that slips past that gate.
+import { stripLeakedUiMarkup, createStreamingUiLeakFilter } from './uiLeakSanitizer';
 import type { MemorySnapshot } from './memoryProvider';
 import {
   SkillEnforcementTracker,
@@ -382,6 +387,19 @@ export interface RunConversationOptions {
    * by the dispatch branch so a bad listener cannot break the turn.
    */
   onUiEvent?:        (name: string, args: Record<string, unknown>) => void;
+  /**
+   * v4.11 Slice 4 — optional per-turn `TurnRuntimeContext`. When
+   * provided, the loop exposes it via `agent.getCurrentTurnContext()`
+   * so the spawn / fanout tool facades can route through the
+   * `SubagentCoordinator` (with the parent's signal + cost
+   * accumulator + trace emitter wired in). Cleared in the loop's
+   * finally before return so a stray between-turn tool dispatch
+   * sees `undefined`. Daemon agents + unit tests omit this; the
+   * legacy `parentAgent.getCurrentSignal()` path stays as the
+   * back-compat surface for callers that don't speak the new
+   * context shape yet.
+   */
+  turnContext?:      import('./turnRuntimeContext').TurnRuntimeContext;
 }
 
 interface EmptyResponseMetrics {
@@ -453,6 +471,16 @@ export class AidenAgent {
    * not shared across agents; a child agent has its own `_currentSignal`.
    */
   private _currentSignal: AbortSignal | undefined = undefined;
+  /**
+   * v4.11 Slice 4 — current per-turn `TurnRuntimeContext`. Same Flag 1
+   * pattern as `_currentSignal`: set at the top of `runTurnLoop` from
+   * `runOptions.turnContext`, cleared before the loop returns. Tools
+   * read via `getCurrentTurnContext()` to access the parent's
+   * costAccumulator, traceEmitter, and SubagentCoordinator-bound
+   * signal. Undefined when the caller didn't construct a context
+   * (back-compat for daemon agents + unit tests).
+   */
+  private _currentTurnContext: import('./turnRuntimeContext').TurnRuntimeContext | undefined = undefined;
   /** Cached system prompt — invalidated by setPersonalityOverlay/markMemoryDirty/explicit. */
   private cachedSystemPrompt:  string | null = null;
   private compressionEvents:    number        = 0;
@@ -672,6 +700,17 @@ export class AidenAgent {
     return this._currentSignal;
   }
 
+  /**
+   * v4.11 Slice 4 — return the live TurnRuntimeContext for the active
+   * turn (or `undefined` if the agent is between turns / the caller
+   * didn't pass one). Used by the spawn / fanout tool facades to
+   * route through the SubagentCoordinator with the parent's signal,
+   * costAccumulator, and traceEmitter wired in.
+   */
+  getCurrentTurnContext(): import('./turnRuntimeContext').TurnRuntimeContext | undefined {
+    return this._currentTurnContext;
+  }
+
   // ── Main entry: runConversation ──────────────────────────────────────
 
   async runConversation(
@@ -717,20 +756,49 @@ export class AidenAgent {
 
     // 7. Compression pass — call .compress() which itself short-circuits
     //    when below threshold (returns refused:true, original messages).
+    //
+    // v4.11 preflight retrofit:
+    //   - Pass `narrowedTools` so the threshold check includes tool-schema
+    //     tokens (principle #2 from preflight audit). The 68-tool catalog ~6-13K tokens was
+    //     previously invisible to the trigger.
+    //   - Fire `onCompression` on EVERY outcome (success, refused, error)
+    //     so the chatSession callback can surface a dim status line.
+    //     Pre-v4.11 the callback only fired on success and the error/
+    //     refused paths silently shipped a stale-but-full context
+    //     (principle #12 visible-abort from preflight audit).
+    //   - The OUTER try/catch catches genuinely-thrown exceptions
+    //     (network reset mid-summary, etc.); it now synthesises an
+    //     error envelope + fires the callback so the user sees the
+    //     abort rather than wondering why nothing happened.
     if (this.contextCompressor) {
       try {
         const result = await this.contextCompressor.compress(
           messages,
           this.providerId,
           this.modelId,
+          narrowedTools,
         );
         if (!result.refused && !result.error) {
           messages = result.compressedMessages;
           this.compressionEvents += 1;
-          this.onCompression?.(result);
         }
-      } catch {
-        /* compression failures are silent — the loop runs as if it didn't fire */
+        // Always surface to the callback — success, refused, AND error.
+        // Pre-v4.11 fired only on success; the refused/error paths
+        // dropped on the floor. chatSession's callbacks.ts:onCompression
+        // already differentiates the three outcomes.
+        this.onCompression?.(result);
+      } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        this.onCompression?.({
+          compressedMessages:    messages,
+          removedMessageCount:   0,
+          summaryTokens:         0,
+          preservedRecentCount:  messages.length,
+          error:                 true,
+          refused:               true,
+          errorMessage:          `Compression threw: ${errorMessage}`,
+          invariantViolation:    'auxiliary_threw',
+        });
       }
     }
 
@@ -758,6 +826,7 @@ export class AidenAgent {
           finalContent,
           loopResult.messages,
           loopResult.toolCallTrace,
+          loopResult.uiClaims,
         );
         honestyFindings = scan.findings;
         if (scan.footer) {
@@ -1000,6 +1069,12 @@ export class AidenAgent {
     totalUsage:         { inputTokens: number; outputTokens: number };
     toolCallTrace:      HonestyTraceEntry[];
     fullTrace:          Array<{ name: string; args: Record<string, unknown> }>;
+    /**
+     * v4.11 Slice 2 — structured ui-event claims emitted this turn
+     * (ui_test_result, ui_task_done, …). Honesty cross-checks success
+     * claims here against the verifier verdicts in toolCallTrace.
+     */
+    uiClaims:           Array<{ name: string; args: unknown }>;
     /** v4.1.6 spike (TCE) — populated when finishReason === 'tool_loop'. */
     toolLoopCard?:      AidenAgentResult['toolLoopCard'];
   }> {
@@ -1012,9 +1087,17 @@ export class AidenAgent {
     // acceptable because the only consumer is in-flight tool dispatch,
     // which can only run while the loop is mid-execution.
     this._currentSignal = runOptions.signal;
+    // v4.11 Slice 4 — expose the turn context to tools. Same Flag 1
+    // lifecycle as `_currentSignal`: set at loop entry, cleared in
+    // the finally before return so a stray between-turn dispatch
+    // (impossible today, cheap insurance) sees `undefined`.
+    this._currentTurnContext = runOptions.turnContext;
 
     const messages: Message[]              = [...initialMessages];
     const toolCallTrace: HonestyTraceEntry[] = [];
+    // v4.11 Slice 2 — structured ui-event claims emitted this turn, for
+    // the post-loop honesty claim-contradiction check.
+    const uiClaims: Array<{ name: string; args: unknown }> = [];
     // v4.6 Phase 3b — per-turn signature tracker for failure → success
     // transitions. Each entry records the signatureId + failure count
     // observed so far for a given signature THIS turn. When a verifier
@@ -1061,7 +1144,13 @@ export class AidenAgent {
     const failureClassifier = buildDefaultClassifier();
     let toolLoopCard: AidenAgentResult['toolLoopCard'] = undefined;
 
+    // v4.11 perf — opt-in per-iteration timing. Zero-overhead when the
+    // env var is unset (one `process.env` read per iteration entry).
+    // Stderr bypasses any frame/display guards; format `[perf:...]`
+    // greps cleanly out of the test runner / smoke logs.
+    const _perfDiag = process.env.AIDEN_PERF_DIAG === '1';
     while (true) {
+      const _iterStartedAt = _perfDiag ? Date.now() : 0;
       // v4.6 prep — between-iteration cooperative-cancellation check.
       // When the caller passed an AbortSignal that has aborted, exit
       // immediately with `finishReason: 'interrupted'`. Delta accumulation
@@ -1111,6 +1200,7 @@ export class AidenAgent {
       }
 
       let output: ProviderCallOutput;
+      const _llmStartedAt = _perfDiag ? Date.now() : 0;
       try {
         // v4.9.0 Slice 6 — wrap the provider call in an LLM span when
         // the daemon foundation is up AND a runWithContext frame is
@@ -1136,6 +1226,15 @@ export class AidenAgent {
           );
         } else {
           output = await this.callProvider(messages, effectiveTools, runOptions);
+        }
+        if (_perfDiag) {
+          const llmMs = Date.now() - _llmStartedAt;
+          const tokIn = output.usage?.inputTokens ?? 0;
+          const tokOut = output.usage?.outputTokens ?? 0;
+          const nTools = output.toolCalls?.length ?? 0;
+          process.stderr.write(
+            `[perf:iter=${turnCount + 1} llm=${llmMs}ms tokens_in=${tokIn} tokens_out=${tokOut} toolCalls=${nTools}]\n`,
+          );
         }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -1231,7 +1330,11 @@ export class AidenAgent {
         }
         // 'no-skill-armed', 'satisfied', 'incomplete-cap-exceeded' all end
         // the loop. Tracker handles its own recovered/failed counters.
-        finalContent = output.content ?? '';
+        // v4.11 — strip hallucinated `<ui_NAME{...}</ui_NAME>` text
+        // emissions from weak instruct models BEFORE finalContent
+        // lands in the archived/persisted record. Streaming display
+        // is cleaned separately via the per-call delta filter (below).
+        finalContent = stripLeakedUiMarkup(output.content ?? '');
         finishReason = 'stop';
         break;
       }
@@ -1274,6 +1377,63 @@ export class AidenAgent {
       // TurnState internals + pushes a corrective system message,
       // then continues the outer iteration loop from a clean baseline.
       let rollbackDecision: RecoveryDecision | null = null;
+      // v4.11 perf — pre-execute consecutive read-only tool calls in
+      // parallel. The for-of loop below stays sequential (it threads
+      // verifier / classifier / TurnState updates that depend on each
+      // prior call's outcome); we only hoist the NETWORK/IO portion
+      // (handler.execute) out for batches of pure-read tools so they
+      // run concurrently instead of serialized.
+      //
+      // Read-only classification: `resolveMutates(name) !== true` AND
+      // not a uiOnly signal (those have their own branch below).
+      // Maximal consecutive batches preserve any read-after-write
+      // ordering the model may have intended (we never reorder across
+      // a mutating call).
+      //
+      // Results land in `preComputedResults` keyed by call.id. The
+      // for-of loop checks this map at the toolExecutor dispatch site
+      // and uses the pre-computed result when available, falling
+      // through to live execution otherwise (mutating calls always,
+      // single-call read-only batches that we don't bother batching).
+      //
+      // Errors caught per-call so one failure doesn't abort the
+      // Promise.all — each cell of the batch returns a synthesized
+      // error ToolCallResult that the downstream verifier path
+      // handles identically to a live-execution error.
+      const preComputedResults = new Map<string, ToolCallResult>();
+      {
+        const toolCalls = output.toolCalls;
+        const isReadOnly = (name: string): boolean =>
+          this.resolveMutates?.(name) !== true &&
+          this.resolveUiOnly?.(name) !== true;
+        let i = 0;
+        while (i < toolCalls.length) {
+          if (!isReadOnly(toolCalls[i].name)) { i += 1; continue; }
+          // Find the maximal consecutive read-only batch starting at i.
+          let j = i;
+          while (j < toolCalls.length && isReadOnly(toolCalls[j].name)) j += 1;
+          const batch = toolCalls.slice(i, j);
+          // Skip the parallel path for solo batches — no benefit, and
+          // keeps the live-execution path on the sequential loop where
+          // its existing timing instrumentation can still observe it.
+          if (batch.length > 1) {
+            const batchResults = await Promise.all(
+              batch.map((c) =>
+                this.toolExecutor(c).catch((err: unknown): ToolCallResult => ({
+                  id:     c.id,
+                  name:   c.name,
+                  result: null,
+                  error:  err instanceof Error ? err.message : String(err),
+                })),
+              ),
+            );
+            for (let k = 0; k < batch.length; k += 1) {
+              preComputedResults.set(batch[k].id, batchResults[k]);
+            }
+          }
+          i = j;
+        }
+      }
       // v4.9.4 Slice 1 — `.entries()` so the surface + abort fill sites
       // can slice from `callIndex + 1` to compute the un-dispatched tail.
       for (const [callIndex, call] of output.toolCalls.entries()) {
@@ -1318,6 +1478,11 @@ export class AidenAgent {
           } catch {
             // defensive — UI listener faults must never break dispatch
           }
+          // v4.11 Slice 2 — record the structured ui-event claim so the
+          // post-loop honesty check can cross-reference success claims
+          // (ui_test_result{failed:0}, ui_task_done{status:'success'})
+          // against the verifier verdicts in toolCallTrace.
+          uiClaims.push({ name: call.name, args: call.arguments });
           continue;
         }
         this.onToolCall?.(call, 'before');
@@ -1335,15 +1500,35 @@ export class AidenAgent {
           turnState.markMutationOnLiveCheckpoint(call.name);
         }
         let result: ToolCallResult;
-        try {
-          result = await this.toolExecutor(call);
-        } catch (err) {
-          result = {
-            id:     call.id,
-            name:   call.name,
-            result: null,
-            error:  err instanceof Error ? err.message : String(err),
-          };
+        const _toolStartedAt = _perfDiag ? Date.now() : 0;
+        // v4.11 perf — use the pre-computed result from the parallel
+        // batch above when available; falls through to live execution
+        // for mutating calls + solo read-only batches. The error
+        // shape from the batch matches what live execution would
+        // produce, so the verifier / classifier paths below are
+        // indifferent to the source.
+        const _preComputed = preComputedResults.get(call.id);
+        if (_preComputed) {
+          result = _preComputed;
+        } else {
+          try {
+            result = await this.toolExecutor(call);
+          } catch (err) {
+            result = {
+              id:     call.id,
+              name:   call.name,
+              result: null,
+              error:  err instanceof Error ? err.message : String(err),
+            };
+          }
+        }
+        if (_perfDiag) {
+          const toolMs = Date.now() - _toolStartedAt;
+          const ok = result.error == null;
+          const src = _preComputed ? 'parallel' : 'live';
+          process.stderr.write(
+            `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok}]\n`,
+          );
         }
         toolCallCount += 1;
         // v4.2 Phase 1 — verifier classification. Runs only when TCE
@@ -1352,15 +1537,23 @@ export class AidenAgent {
         // no network, no side effects.
         let verification: VerificationResult | undefined;
         let classification: ClassificationResult | null = null;
+        // v4.11 Slice 1 (verifier→honesty bridge) — compute the per-tool
+        // verification ALWAYS. It is pure / synchronous / side-effect-free
+        // (verifier.ts), so the post-loop honesty footer can reflect real
+        // outcomes (shell exit code, file-write confirmation, low-signal
+        // web) independent of whether TCE/recovery is active. Everything
+        // inside the `turnState.isEnabled()` gate below — the failure
+        // classifier and recovery-store writes — stays gated, so
+        // error-recovery behaviour is byte-for-byte unchanged.
+        try {
+          verification = verifierRegistry.resolve(call.name)(
+            call.name, call.arguments, result,
+          );
+        } catch {
+          // Defensive — a buggy verifier never breaks the agent loop.
+          verification = undefined;
+        }
         if (turnState.isEnabled()) {
-          try {
-            verification = verifierRegistry.resolve(call.name)(
-              call.name, call.arguments, result,
-            );
-          } catch {
-            // Defensive — a buggy verifier never breaks the agent loop.
-            verification = undefined;
-          }
           // v4.2 Phase 2 — classify WHY when the verifier said !ok.
           // classify(...) returns null for ok results, so happy-path
           // calls incur zero classifier work.
@@ -1640,6 +1833,9 @@ export class AidenAgent {
     // call's `this._currentSignal = runOptions.signal` at the top will
     // overwrite the stale value before any tool can read it.
     this._currentSignal = undefined;
+    // v4.11 Slice 4 — pair-clear with `_currentSignal` so the same
+    // between-turn invariant holds for the turn context.
+    this._currentTurnContext = undefined;
 
     return {
       finalContent,
@@ -1651,6 +1847,7 @@ export class AidenAgent {
       totalUsage,
       toolCallTrace,
       fullTrace,
+      uiClaims,
       toolLoopCard,
     };
   }
@@ -1703,6 +1900,16 @@ export class AidenAgent {
 
     let firstDeltaFired = false;
     let finalOutput: ProviderCallOutput | null = null;
+    // v4.11 — per-call ui-leak filter. Live deltas get scrubbed
+    // before reaching `runOptions.onDelta` so the display layer
+    // never paints a hallucinated `<ui_NAME{…}</ui_NAME>` block.
+    // The post-stream `finalContent` sanitiser at the loop's "no
+    // tool calls → terminal turn" branch cleans the archived /
+    // persisted output independently. Both paths are needed: the
+    // adapter accumulates `output.content` from the raw deltas, so
+    // cleaning the live stream alone doesn't clean the saved
+    // record, and vice versa.
+    const uiLeakFilter = createStreamingUiLeakFilter();
     const stream = (this.provider.callStream as NonNullable<ProviderAdapter['callStream']>)({
       messages,
       tools,
@@ -1718,7 +1925,8 @@ export class AidenAgent {
           firstDeltaFired = true;
           runOptions.onFirstDelta?.();
         }
-        runOptions.onDelta?.(evt.content);
+        const safe = uiLeakFilter.feed(evt.content);
+        if (safe.length > 0) runOptions.onDelta?.(safe);
       } else if (evt.type === 'tool_call') {
         runOptions.onToolCallStart?.(evt.toolCall);
       } else if (evt.type === 'progress') {
@@ -1732,6 +1940,12 @@ export class AidenAgent {
         finalOutput = evt.output;
       }
     }
+    // v4.11 — flush any buffered tail from the ui-leak filter.
+    // (e.g. a delta that ended mid `<ui` partial gets held back; if
+    // the stream ends without ever completing the tag, the held
+    // content is real text and must be emitted.)
+    const tail = uiLeakFilter.flush();
+    if (tail.length > 0) runOptions.onDelta?.(tail);
     if (!finalOutput) {
       // v4.6 prep — if the stream consumer exited without a `done`
       // event because the signal was aborted mid-stream, surface a

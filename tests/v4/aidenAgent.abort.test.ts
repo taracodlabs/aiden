@@ -165,10 +165,19 @@ describe('AidenAgent abort plumbing (v4.6 prep)', () => {
       // because we break out after the for-of detects interruption.
       MockProviderAdapter.stop('should not be reached'),
     ]);
+    // v4.11 — consecutive READ-ONLY tool calls now pre-execute together
+    // via Promise.all before the per-call abort check (see
+    // aidenAgent.parallel.test.ts), so an abort fired mid-batch can't stop
+    // a sibling read-only call that already started — harmless, no side
+    // effects. The abort-skip guarantee that matters is for MUTATING
+    // tools, which stay on the sequential dispatch path. Mark these tools
+    // mutating so this test exercises that path: tool 1 runs + aborts,
+    // tool 2 is skipped by the pre-tool check.
     const agent = new AidenAgent({
       provider,
       toolExecutor: trackingExecutor,
       tools:        NO_TOOLS,
+      resolveMutates: () => true,
     });
 
     const result = await agent.runConversation([userMsg('go')], {
@@ -176,7 +185,7 @@ describe('AidenAgent abort plumbing (v4.6 prep)', () => {
     });
 
     expect(result.finishReason).toBe('interrupted');
-    expect(toolCallsDispatched).toBe(1);   // ONLY the first call ran
+    expect(toolCallsDispatched).toBe(1);   // first mutating call ran; 2nd skipped by pre-tool abort
     expect(provider.capturedInputs).toHaveLength(1);  // no 2nd iteration
   });
 

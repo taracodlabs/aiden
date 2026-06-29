@@ -362,3 +362,41 @@ export function summarizeDetection(d: ProviderDetection): string {
   }
   return 'No AI provider configured yet.';
 }
+
+/**
+ * Pure gate decision: should the first-run wizard fire? Extracted from
+ * cli/v4/aidenCLI.ts:buildAgentRuntime so the logic is unit-testable.
+ *
+ * Fires when:
+ *   - the caller forced it (`aiden setup`), OR
+ *   - no provider credentials exist anywhere (env / OAuth / Ollama /
+ *     inline config) — `!hasAnyProvider`, OR
+ *   - config.yaml NAMES a provider but that provider has no usable
+ *     credentials (points at a broken setup), OR
+ *   - the config is effectively empty (`configEmpty`, from isFreshInstall)
+ *     AND it does NOT already name a provider that HAS working credentials.
+ *
+ * v4.11 bug fix: the last clause's `&& !haveUsableConfiguredProvider`
+ * guard is the fix. Previously the boot gate OR'd in `isFreshInstall`
+ * raw, so a LIVE config whose credentials live OUTSIDE the config.yaml
+ * `providers:` map — OAuth tokens in the auth store, or an env API key —
+ * was mis-classified as fresh: the wizard auto-fired and offered to
+ * overwrite a working config (the footgun). `configuredProviderHasCredentials`
+ * already knows the config's provider is usable via env/OAuth/inline, so
+ * we now honour it instead of letting the providers-section-only check
+ * override it.
+ */
+export function shouldRunWizard(
+  detection: ProviderDetection,
+  opts: { forceSetup: boolean; configEmpty: boolean },
+): boolean {
+  if (opts.forceSetup) return true;
+  if (!detection.hasAnyProvider) return true;
+  const configuredProviderBroken =
+    !!detection.configProvider && !detection.configuredProviderHasCredentials;
+  if (configuredProviderBroken) return true;
+  const haveUsableConfiguredProvider =
+    !!detection.configProvider && detection.configuredProviderHasCredentials;
+  if (opts.configEmpty && !haveUsableConfiguredProvider) return true;
+  return false;
+}

@@ -187,6 +187,10 @@ export async function runMemorySubcommand(
     case 'approve':  return cmdApprove(positional[0], args, paths, guard, mgr, out, err, json);
     case 'reject':   return cmdReject(positional[0], args, paths, out, err, json);
     case 'review':   return cmdReview(args, paths, opts, out, err, json);
+    // v4.11 Obsidian vault mirror — `/memory vault link <path>` +
+    // `/memory vault status` + `/memory vault sync`. Pure side-channel:
+    // never touches the memory write path. positional[0] is the sub-op.
+    case 'vault':    return cmdVault(positional, paths, projectRoot, out, err, json);
     case '--help':
     case 'help':     return cmdHelp(out);
     default: {
@@ -217,7 +221,10 @@ function cmdHelp(write: (s: string) => void): number {
     '  pending                              List candidates from `## Pending review` blocks.\n' +
     '  approve <mem_id> | --all             Promote a pending candidate to a live entry.\n' +
     '  reject <mem_id> | --all              Discard a pending candidate (logged).\n' +
-    '  review --now | --status              Run / inspect the post-turn memory reviewer.\n',
+    '  review --now | --status              Run / inspect the post-turn memory reviewer.\n' +
+    '  vault link <path>                    Persist agent.vault_path (Obsidian-compatible mirror).\n' +
+    '  vault status                         Show resolved vault path + source (env|config|unset).\n' +
+    '  vault sync                           One-shot full export to the configured vault now.\n',
   );
   return 0;
 }
@@ -726,5 +733,135 @@ async function cmdReview(
     }
   }
   return 0;
+}
+
+/**
+ * v4.11 Obsidian vault mirror — `/memory vault {link|status|sync}`.
+ *
+ *   /memory vault link <path>   — write `agent.vault_path` to config
+ *                                 (persists across restarts). Caller
+ *                                 still needs to restart for the live
+ *                                 mutation listener to attach.
+ *   /memory vault status        — show resolved vault path + source
+ *                                 (env / config / unset).
+ *   /memory vault sync          — run a one-shot full export NOW
+ *                                 against the resolved vault path.
+ *
+ * Pure side-channel: never touches MEMORY.md / USER.md / etc. The
+ * exporter itself lives in `core/v4/memory/vaultExporter.ts` and is
+ * the same code path the boot listener fires.
+ */
+/**
+ * v4.11 — defensive strip of one layer of matching surrounding quotes.
+ * The `_argTokens` tokenizer already removes quotes it parses, but a path
+ * pasted with mismatched/partial quoting (or reached via a non-tokenized
+ * path) may still arrive wrapped. Only strips when both ends match.
+ */
+function stripSurroundingQuotes(s: string): string {
+  if (s.length >= 2) {
+    const first = s[0];
+    const last = s[s.length - 1];
+    if ((first === '"' || first === "'") && first === last) {
+      return s.slice(1, -1);
+    }
+  }
+  return s;
+}
+
+async function cmdVault(
+  positional:  string[],
+  paths:       import('../../../core/v4/paths').AidenPaths,
+  projectRoot: string | null,
+  out:         (s: string) => void,
+  err:         (s: string) => void,
+  json:        boolean,
+): Promise<number> {
+  const sub = (positional[0] ?? 'status').toLowerCase();
+  const { resolveVaultPath, exportAll } = await import('../../../core/v4/memory/vaultExporter');
+
+  if (sub === 'status') {
+    const envVal = process.env.AIDEN_VAULT_PATH;
+    let cfgVal: string | undefined;
+    try {
+      const { ConfigManager } = await import('../../../core/v4/config');
+      const cm = new ConfigManager(paths);
+      await cm.load();
+      cfgVal = cm.getValue<string>('agent.vault_path');
+    } catch { /* missing config = no-op */ }
+    const resolved = resolveVaultPath(envVal, cfgVal);
+    if (json) {
+      out(JSON.stringify({
+        env:      envVal ?? null,
+        config:   cfgVal ?? null,
+        resolved: resolved,
+        source:   resolved ? (envVal ? 'env' : 'config') : 'unset',
+      }, null, 2) + '\n');
+      return 0;
+    }
+    out(`vault.env:      ${envVal ?? '(unset)'}\n`);
+    out(`vault.config:   ${cfgVal ?? '(unset)'}\n`);
+    out(`vault.resolved: ${resolved ?? '(off — no export running)'}\n`);
+    return 0;
+  }
+
+  if (sub === 'link') {
+    // v4.11 — positional[1] arrives quote-aware-tokenized (internal
+    // spaces preserved, surrounding quotes stripped by `_argTokens`).
+    // Strip any residual quotes defensively, and treat an absolute path
+    // as absolute so we never prepend cwd — the bug that produced
+    // `…\DevOS\"C:\Users\…\Obsidian`.
+    const target = stripSurroundingQuotes((positional[1] ?? '').trim());
+    if (!target) {
+      err('Usage: /memory vault link <absolute-path>\n');
+      return 1;
+    }
+    const abs = path.isAbsolute(target) ? path.normalize(target) : path.resolve(target);
+    try {
+      const { ConfigManager } = await import('../../../core/v4/config');
+      const cm = new ConfigManager(paths);
+      await cm.load();
+      cm.set('agent.vault_path', abs);
+      await cm.save();
+      out(`vault path saved: ${abs}\n`);
+      out('Restart Aiden for the live mutation listener to attach (or run `/memory vault sync` for a one-shot export now).\n');
+      return 0;
+    } catch (e) {
+      err(`failed to persist vault path: ${(e as Error).message}\n`);
+      return 1;
+    }
+  }
+
+  if (sub === 'sync') {
+    const envVal = process.env.AIDEN_VAULT_PATH;
+    let cfgVal: string | undefined;
+    try {
+      const { ConfigManager } = await import('../../../core/v4/config');
+      const cm = new ConfigManager(paths);
+      await cm.load();
+      cfgVal = cm.getValue<string>('agent.vault_path');
+    } catch { /* noop */ }
+    const resolved = resolveVaultPath(envVal, cfgVal);
+    if (!resolved) {
+      err('no vault path configured — run `/memory vault link <path>` first or set AIDEN_VAULT_PATH\n');
+      return 1;
+    }
+    const summary = await exportAll({
+      paths,
+      vaultPath:   resolved,
+      projectRoot,
+      log: (level, msg) => (level === 'warn' ? err : out)(`${msg}\n`),
+    });
+    if (json) { out(JSON.stringify(summary, null, 2) + '\n'); return 0; }
+    out(`vault sync → ${resolved}\n`);
+    out(`  written: ${summary.written}  removed: ${summary.removed}  skipped: ${summary.skipped}\n`);
+    if (summary.errors.length > 0) {
+      err(`  errors:\n`);
+      for (const e of summary.errors) err(`    - ${e}\n`);
+    }
+    return 0;
+  }
+
+  err(`Unknown vault subcommand: ${sub}. Try: link <path> | status | sync\n`);
+  return 1;
 }
 

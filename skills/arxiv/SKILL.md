@@ -67,7 +67,7 @@ Write-Host "Abstract:" $entry.summary
 ```powershell
 $arxivId = "2305.17333"
 $pdfUrl  = "https://arxiv.org/pdf/$arxivId.pdf"
-$outPath = "C:\Users\shiva\Downloads\paper_$arxivId.pdf"
+$outPath = "C:\Users\<you>\Downloads\paper_$arxivId.pdf"
 Invoke-WebRequest -Uri $pdfUrl -OutFile $outPath
 Write-Host "Downloaded to $outPath"
 ```

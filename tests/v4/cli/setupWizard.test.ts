@@ -14,6 +14,7 @@ import {
 } from '../../../cli/v4/setupWizard';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+import { BACK } from '../../../cli/v4/onboarding/backNavInput';
 import type { AidenPaths } from '../../../core/v4/paths';
 
 function makePaths(root: string): AidenPaths {
@@ -40,7 +41,9 @@ type ScriptedPromptIO = PromptIO & { defaultIndexCalls: (number | undefined)[] }
 /** Build a scripted PromptIO: each method dequeues from a queue. */
 function scriptedPrompts(answers: {
   choose?: number[];
-  input?: string[];
+  // v4.11 — `input` may yield the BACK sentinel to drive back-navigation
+  // (the value-returning harness can't simulate the actual backspace key).
+  input?: (string | typeof BACK)[];
   confirm?: boolean[];
 }): ScriptedPromptIO {
   const choose = [...(answers.choose ?? [])];
@@ -143,6 +146,47 @@ describe('SetupWizard', () => {
     expect(result.ran).toBe(true);
     expect(result.config?.model.provider).toBe('groq');
     expect(prompts.defaultIndexCalls[0]).toBe(expectedIdx);
+  });
+
+  // ── v4.11 — back-navigation (Approach B, hybrid) ─────────────────
+  it('model-pick "← Back" returns to the provider picker', async () => {
+    const groqIdx = PROVIDERS.findIndex((p) => p.id === 'groq') + 1;
+    const groq = PROVIDERS.find((p) => p.id === 'groq')!;
+    // "← Back" is appended last → its 1-based index = models.length + 1.
+    const backChoice = (groq.models?.length ?? 0) + 1;
+    const { display } = sinkDisplay();
+    // iter 1: provider=groq, key, model=BACK → loop to provider pick.
+    // iter 2: provider=groq, key, model=1 → configured.
+    const prompts = scriptedPrompts({
+      choose: [groqIdx, backChoice, groqIdx, 1],
+      input:  ['gsk-first', 'gsk-second'],
+    });
+    const result = await runSetupWizard({ paths, display, prompts, skipValidation: true });
+    expect(result.status).toBe('configured');
+    expect(result.config?.model.provider).toBe('groq');
+    // 4 choose calls (2 provider + 2 model) prove the back loop re-ran step 1.
+    expect(prompts.defaultIndexCalls).toHaveLength(4);
+  });
+
+  it('BACK from key entry (backspace-on-empty) returns to the provider picker', async () => {
+    // The back-aware prompt resolves BACK on backspace-when-empty; here we
+    // inject BACK directly to exercise the wizard's BACK → `continue outer`
+    // WIRING (the keypress→BACK detection is unit-tested in
+    // backNavInput.test.ts; it can't be driven by this value-returning harness).
+    const groqIdx = PROVIDERS.findIndex((p) => p.id === 'groq') + 1;
+    const { display } = sinkDisplay();
+    // iter 1: provider=groq, key=BACK → loop (model pick NOT reached).
+    // iter 2: provider=groq, key, model=1 → configured.
+    const prompts = scriptedPrompts({
+      choose: [groqIdx, groqIdx, 1],
+      input:  [BACK, 'gsk-real'],
+    });
+    const result = await runSetupWizard({ paths, display, prompts, skipValidation: true });
+    expect(result.status).toBe('configured');
+    expect(result.config?.model.provider).toBe('groq');
+    // 3 choose calls (provider, provider-again, model) — back skipped the
+    // first model pick by re-entering at provider selection.
+    expect(prompts.defaultIndexCalls).toHaveLength(3);
   });
 
   it('wizard prints the "Press Enter to accept Groq" hint', async () => {

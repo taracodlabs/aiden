@@ -130,6 +130,24 @@ describe('ToolRegistry', () => {
     expect(registry.getSchemas(['none'])).toEqual([]);
   });
 
+  it('8b. getSchemas() excludeToolsets removes named toolsets (v4.11)', () => {
+    registry.register(makeHandler('a', { toolset: 'web' }));
+    registry.register(makeHandler('u1', { toolset: 'ui' }));
+    registry.register(makeHandler('b', { toolset: 'files' }));
+    registry.register(makeHandler('u2', { toolset: 'ui' }));
+    // Exclude wins even with NO include filter (the `full` profile case).
+    expect(registry.getSchemas(undefined, undefined, ['ui']).map((s) => s.name))
+      .toEqual(['a', 'b']);
+    // Exclude composes with an include filter.
+    expect(registry.getSchemas(['web', 'ui'], undefined, ['ui']).map((s) => s.name))
+      .toEqual(['a']);
+    // Empty / omitted exclude is a no-op (back-compat).
+    expect(registry.getSchemas(undefined, undefined, []).map((s) => s.name))
+      .toEqual(['a', 'u1', 'b', 'u2']);
+    expect(registry.getSchemas().map((s) => s.name))
+      .toEqual(['a', 'u1', 'b', 'u2']);
+  });
+
   it('9. byCategory returns handlers matching the requested category', () => {
     registry.register(makeHandler('r1', { category: 'read' }));
     registry.register(makeHandler('w1', { category: 'write', mutates: true }));

@@ -335,7 +335,56 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
     );
   }
 
+  // v4.11 Slice 4 — construct a SubagentCoordinator for the MCP
+  // server. MCP-mode parentToolContext is intentionally lean (no
+  // approvalEngine — server has no REPL human to prompt; no
+  // ssrf/tirith/memoryGuard — MCP's slim runtime never wired them).
+  // Each MCP tool invocation arrives discrete from the client; we
+  // mint a fresh per-call TurnRuntimeContext (turnId from a local
+  // counter, fresh AbortController) inside `resolveTurnContext`.
+  // The fresh signal means MCP-side spawns can't be cancelled from
+  // outside (no parent turn to abort) — operators rely on the
+  // per-child timeout cascade inside the spawn primitive instead.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { SubagentCoordinator: McpSubagentCoordinator } =
+    require('../../../core/v4/subagent/coordinator') as
+    typeof import('../../../core/v4/subagent/coordinator');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { buildTurnRuntimeContext: mcpBuildTurnRuntimeContext } =
+    require('../../../core/v4/turnRuntimeContext') as
+    typeof import('../../../core/v4/turnRuntimeContext');
+  const mcpCoordinator = new McpSubagentCoordinator({
+    spawnDeps: {
+      toolRegistry:     opts.registry,
+      parentToolContext: {
+        cwd:           process.cwd(),
+        paths:         opts.paths,
+        sessions:      opts.sessionManager,
+        memory:        opts.memoryManager,
+        skillLoader:   opts.skillLoader,
+      },
+      parentProvider:   finalAdapter,
+      parentProviderId: providerId,
+      parentModelId:    modelId,
+      runStore:         mcpRunStore,
+      instanceId:       mcpInstanceId,
+      logger:           opts.logger,
+    },
+    logger: opts.logger,
+  });
+  let mcpTurnCounter = 0;
   opts.registry.register(makeSubagentFanoutTool({
+    coordinator: mcpCoordinator,
+    resolveTurnContext: () => mcpBuildTurnRuntimeContext({
+      turnId:        ++mcpTurnCounter,
+      parentAgentId: 'mcp-server',
+      // Each MCP tool invocation is independent; a fresh
+      // (never-aborted) signal makes the coordinator's cascade a
+      // no-op and the per-child timeouts inside the spawn primitive
+      // the only termination guarantee. Matches the pre-Slice-4
+      // shape (MCP fanout was never externally cancellable).
+      signal:        new AbortController().signal,
+    }),
     logger: opts.logger,
     resolveActiveModel: () => ({ providerId, modelId }),
     aggregatorAdapter: finalAdapter,
@@ -353,34 +402,6 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
       }
       return [{ providerId, modelId }];
     },
-    // v4.6 Phase 2R — `spawnDeps` mirrors the REPL wiring in
-    // `cli/v4/aidenCLI.ts` (2Q-A). The MCP-mode parentToolContext
-    // is intentionally lean: no approvalEngine (a server has no
-    // human at the REPL to prompt — children's mutating tools are
-    // gated by AIDEN_SUBAGENT_ALLOW_DESTRUCTIVE in childBuilder),
-    // no ssrfProtection/tirithScanner/memoryGuard (MCP's slim
-    // runtime never wired them — see header comment §9).
-    spawnDeps: {
-      toolRegistry:     opts.registry,
-      parentToolContext: {
-        cwd:           process.cwd(),
-        paths:         opts.paths,
-        sessions:      opts.sessionManager,
-        memory:        opts.memoryManager,
-        skillLoader:   opts.skillLoader,
-      },
-      parentProvider:   finalAdapter,
-      parentProviderId: providerId,
-      parentModelId:    modelId,
-      runStore:         mcpRunStore,
-      instanceId:       mcpInstanceId,
-      logger:           opts.logger,
-    },
-    // No resolveParentRunId / resolveParentSessionId for MCP — the
-    // MCP server doesn't run a turn loop with its own `runs` row;
-    // each tool invocation arrives discrete from the client. Child
-    // rows therefore have NULL spawned_from_run_id, which is the
-    // honest representation (no MCP-side parent to link to).
   }));
   opts.logger.info('subagent_fanout: wired (replaces stub) [mcp serve]', {
     providerId,

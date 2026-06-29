@@ -31,6 +31,7 @@ import {
   type ProviderRegistryEntry,
 } from '../../../providers/v4/registry';
 import { listModelsForProvider } from '../../../providers/v4/modelCatalog';
+import { termWidth } from '../../../core/v4/ui/theme';
 
 export type ProviderTier = 'pro' | 'free' | 'paid' | 'local' | 'subscription';
 
@@ -108,29 +109,96 @@ function providerChoice(
   };
 }
 
+// v4.11 — model-picker table layout. Stock @inquirer/prompts select renders
+// each choice's `name` as one line, so the "table" is pad-aligned strings.
+// The layout is computed ONCE per picker invocation from termWidth() and
+// shared by the header + every row so columns line up; it degrades by
+// dropping the price column on medium widths and falling back to a
+// single-line concat on narrow terminals (never wraps into a mess).
+const CTX_W = 8;     // "131K" / "Context"
+const PRICE_W = 13;  // "$0.55/$2.19" / "In/Out $/M"
+const NAME_MIN = 16;
+const NAME_MAX = 30;
+
+interface PickerLayout {
+  mode:  'full' | 'noprice' | 'plain';
+  nameW: number;
+}
+
+/** Decide columns + name width from terminal width. Robust at any size. */
+function pickerLayout(width: number): PickerLayout {
+  if (width < 52) return { mode: 'plain', nameW: NAME_MAX };
+  const full = width >= 76;
+  // Reserve: 2-space row indent + gaps + ctx + [price] + tools + slack.
+  const reserve = full ? 32 : 18;
+  const nameW = Math.max(NAME_MIN, Math.min(NAME_MAX, width - reserve));
+  return { mode: full ? 'full' : 'noprice', nameW };
+}
+
+/** Hard-truncate to `n` cols with a trailing ellipsis. */
+function truncate(s: string, n: number): string {
+  return s.length <= n ? s : `${s.slice(0, Math.max(1, n - 1))}…`;
+}
+
+/**
+ * Aligned column header for the stage-2 select message. Uses the SAME
+ * layout as the rows; 2-space indent aligns it under inquirer's `❯ `/`  `
+ * row prefix. Null in `plain` mode (no table to head).
+ */
+function modelTableHeader(layout: PickerLayout): string | null {
+  if (layout.mode === 'plain') return null;
+  const name = 'Name'.padEnd(layout.nameW);
+  const ctx  = 'Context'.padEnd(CTX_W);
+  const cols = layout.mode === 'full'
+    ? `${name} ${ctx} ${'In/Out $/M'.padEnd(PRICE_W)} Tools`
+    : `${name} ${ctx} Tools`;
+  return `  ${cols}`;
+}
+
 function modelChoice(
   modelId: string,
   providerId: string,
   isCurrent: boolean,
+  layout: PickerLayout,
 ): { name: string; value: string; description?: string } {
   const m = listModelsForProvider(providerId).find((x) => x.id === modelId);
   if (!m) {
     return { name: modelId, value: modelId };
   }
-  const ctx = m.contextLength ? ` ${(m.contextLength / 1000).toFixed(0)}K ctx` : '';
-  let pricing = '';
-  if (m.pricing) {
-    pricing = ` $${m.pricing.inputPerM}/$${m.pricing.outputPerM} per M`;
+
+  // Strip "(deprecating <date>)" from the Name cell → trailing flag, so the
+  // marker doesn't bloat the padded Name column.
+  const depM = m.displayName.match(/^(.*?)\s*\(deprecating\s+([\d-]+)\)\s*$/);
+  const baseName = depM ? depM[1] : m.displayName;
+
+  const flags: string[] = [];
+  if (depM)         flags.push(`⚠ deprecating ${depM[2]}`);
+  // Phase 22 Task 3: ModelEntry.isDefault is the catalog's "recommended" signal.
+  if (m.isDefault)  flags.push('⭐');
+  if (isCurrent)    flags.push('← current');
+  const trail = flags.length ? `  ${flags.join('  ')}` : '';
+
+  if (layout.mode === 'plain') {
+    // Narrow-terminal fallback — single-line concat (legacy shape) so a
+    // tight terminal never wraps a padded table into a mess.
+    const ctx = ` ${(m.contextLength / 1000).toFixed(0)}K ctx`;
+    const pricing = m.pricing ? ` $${m.pricing.inputPerM}/$${m.pricing.outputPerM} per M` : '';
+    return { name: `${baseName}${ctx}${pricing}${trail}`, value: m.id, description: m.notes };
   }
-  // Phase 22 Task 3: ModelEntry.isDefault is the catalog's "recommended"
-  // signal. No separate `recommended` field exists.
-  const star = m.isDefault ? ' ⭐ recommended' : '';
-  const current = isCurrent ? '  ← current' : '';
-  return {
-    name: `${m.displayName}${ctx}${pricing}${star}${current}`,
-    value: m.id,
-    description: m.notes,
-  };
+
+  const name = truncate(baseName, layout.nameW).padEnd(layout.nameW);
+  const ctx  = `${(m.contextLength / 1000).toFixed(0)}K`.padEnd(CTX_W);
+  // Tools: plain ✓/✗ from supportsToolCalling. NOTE (v4.11): this is
+  // provider-DECLARED, not live-verified — e.g. deepseek-v4-pro shows ✓
+  // optimistically (tool-calling in its mandatory reasoning mode is
+  // unconfirmed, key-blocked). An honest ✓-vs-✓* split needs a
+  // ModelEntry.toolCallingVerified field — tracked as a follow-up chip.
+  const tools = m.supportsToolCalling ? '✓' : '✗';
+
+  const row = layout.mode === 'full'
+    ? `${name} ${ctx} ${(m.pricing ? `$${m.pricing.inputPerM}/$${m.pricing.outputPerM}` : '—').padEnd(PRICE_W)} ${tools}`
+    : `${name} ${ctx} ${tools}`;
+  return { name: `${row}${trail}`, value: m.id, description: m.notes };
 }
 
 /** Resolve `@inquirer/prompts` lazily so unit tests can swap it out. */
@@ -210,13 +278,20 @@ export async function runModelPicker(
     // Stage 2 — model picker with breadcrumb.
     const providerEntry = PROVIDER_REGISTRY[providerId];
     const breadcrumb = providerEntry?.displayName ?? providerId;
-    const stage2Message = `⚙ Model Picker — ${breadcrumb} · Select a model (${models.length} available)`;
+    // v4.11 — compute the table layout ONCE so the header + all rows share
+    // the same column widths; degrades by terminal width.
+    const layout = pickerLayout(termWidth());
+    const header = modelTableHeader(layout);
+    const stage2Message = header
+      ? `⚙ Model Picker — ${breadcrumb} · Select a model (${models.length} available)\n${header}`
+      : `⚙ Model Picker — ${breadcrumb} · Select a model (${models.length} available)`;
 
     const modelChoices = models.map((m) =>
       modelChoice(
         m.id,
         providerId,
         providerId === currentProviderId && m.id === currentModelId,
+        layout,
       ),
     );
     modelChoices.push({ name: '← Back', value: BACK_VALUE });

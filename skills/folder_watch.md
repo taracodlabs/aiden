@@ -43,7 +43,7 @@ tags: watch, folder, files, automation, downloads, monitor
 {
   "tool": "watch_folder",
   "input": {
-    "folder": "C:\\Users\\shiva\\Documents\\Inbox",
+    "folder": "C:\\Users\\<you>\\Documents\\Inbox",
     "goal": "Move the new file to the correct subfolder based on its name and extension"
   }
 }

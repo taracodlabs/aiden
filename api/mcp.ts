@@ -57,7 +57,7 @@ const TOOL_SCHEMAS: Record<string, object> = {
   get_market_data:  { type: 'object', properties: { symbol: { type: 'string', description: 'Stock symbol e.g. AAPL' } }, required: ['symbol'] },
   get_company_info: { type: 'object', properties: { symbol: { type: 'string', description: 'Stock/company symbol' } }, required: ['symbol'] },
   social_research:  { type: 'object', properties: { query: { type: 'string', description: 'Person or company to research' } }, required: ['query'] },
-  screenshot:    { type: 'object', properties: { outputPath: { type: 'string', description: 'Absolute path to save screenshot (e.g. C:\\Users\\shiva\\Desktop\\shot.png). If omitted, saves to workspace/screenshots/.' } } },
+  screenshot:    { type: 'object', properties: { outputPath: { type: 'string', description: 'Absolute path to save screenshot (e.g. C:\\Users\\<you>\\Desktop\\shot.png). If omitted, saves to workspace/screenshots/.' } } },
   screen_read:   { type: 'object', properties: {} },
   system_info:   { type: 'object', properties: {} },
   clipboard_read: { type: 'object', properties: {} },

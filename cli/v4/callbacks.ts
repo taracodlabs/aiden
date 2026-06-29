@@ -67,6 +67,8 @@ export interface PromptApi {
     choices: { name: string; value: string }[];
   }): Promise<string>;
   confirm(opts: { message: string; default?: boolean }): Promise<boolean>;
+  /** v4.11 — free-text line input (for the clarify tool's open answers). */
+  input(opts: { message: string; default?: string }): Promise<string>;
 }
 
 async function defaultPrompts(): Promise<PromptApi> {
@@ -78,6 +80,9 @@ async function defaultPrompts(): Promise<PromptApi> {
     },
     async confirm(opts) {
       return inq.confirm(opts);
+    },
+    async input(opts) {
+      return inq.input(opts);
     },
   };
 }
@@ -532,6 +537,37 @@ export class CliCallbacks {
     return choice as ApprovalDecision;
   };
 
+  /**
+   * v4.11 Slice 1 — ToolContext.clarify. The `clarify` tool calls this to
+   * ask the user a question and await an answer. Mirrors promptApproval:
+   * pauses the turn on the same prompt path, returns the answer, and on
+   * Ctrl-C / cancel returns null (the tool then tells the model to
+   * proceed with a labelled default — never hangs). With `options`, shows
+   * a menu plus an "Other" escape to free text.
+   */
+  promptClarify = async (question: string, options?: string[]): Promise<string | null> => {
+    const prompts = await this.promptsPromise;
+    const OTHER = '__clarify_other__';
+    try {
+      if (options && options.length > 0) {
+        const choices = options
+          .slice(0, 4)
+          .map((o) => ({ name: o, value: o }));
+        choices.push({ name: 'Other (type a custom answer)…', value: OTHER });
+        const picked = await prompts.select({ message: question, choices });
+        if (picked !== OTHER) return picked;
+        const typed = await prompts.input({ message: 'Your answer' });
+        return typed.trim().length > 0 ? typed : null;
+      }
+      const typed = await prompts.input({ message: question });
+      return typed.trim().length > 0 ? typed : null;
+    } catch {
+      // Ctrl+C / cancel — mirror approval's fail path. Return null so the
+      // tool reports cancellation and the model proceeds with a default.
+      return null;
+    }
+  };
+
   /** ApprovalEngine.callbacks.riskAssess */
   riskAssess = async (
     req: ApprovalRequest,
@@ -632,12 +668,23 @@ Reply with ONE word: safe, caution, or dangerous.`;
 
   /** ContextCompressor sink — always shows. */
   onCompression = (result: CompressionResult): void => {
-    if (result.refused) {
-      this.display.dim('[compress] refused — conversation too short');
+    // v4.11 — visible-abort path (principle #12 from audit). The compressor now
+    // populates `errorMessage` + `invariantViolation` on every
+    // refused/error envelope so this callback can surface a
+    // specific explanation instead of the generic pre-v4.11 line.
+    // Cases:
+    //   - refused (too short)           → quiet dim line (technical detail)
+    //   - error + invariantViolation    → warn with the specific cause
+    //   - error (auxiliary throw)       → warn with the wrapped message
+    //   - success                       → verbose-only dim line
+    if (result.refused && !result.error) {
+      const detail = result.errorMessage ?? 'conversation too short';
+      this.display.dim(`[compress] refused — ${detail}`);
       return;
     }
     if (result.error) {
-      this.display.warn('[compress] auxiliary call failed; history unchanged');
+      const detail = result.errorMessage ?? 'unknown failure';
+      this.display.warn(`[compress] aborted — ${detail} (using full history)`);
       return;
     }
     // v4.8.0 Slice 5 — successful auto-compress is technical telemetry

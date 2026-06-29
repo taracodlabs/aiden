@@ -349,7 +349,13 @@ describe('AidenAgent runConversation stream:true', () => {
         firstFiredCount += 1;
       },
     });
-    expect(collected).toEqual(['Hel', 'lo']);
+    // The agent-layer streaming UI-leak sanitizer (createStreamingUiLeakFilter,
+    // consumed in aidenAgent callProvider) buffers deltas to catch `<ui_…>`
+    // tags split across chunk boundaries, then flushes the accumulated safe
+    // text — so onDelta sees one coalesced 'Hello', not the raw 'Hel'/'lo'
+    // split. (Adapter-level delta tests above still see the raw split; the
+    // filter lives in the agent, not the adapter.)
+    expect(collected).toEqual(['Hello']);
     expect(firstFiredCount).toBe(1);
     expect(result.finalContent).toBe('Hello');
     expect(result.finishReason).toBe('stop');

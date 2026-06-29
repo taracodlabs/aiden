@@ -10,7 +10,7 @@ license: Apache-2.0
 
 When executing code on Windows:
 1. Use PowerShell syntax for shell commands
-2. Full paths always: C:\Users\shiva\DevOS\workspace\
+2. Full paths always: C:\Users\<you>\DevOS\workspace\
 3. For Python: verify python is in PATH first with shell_exec
 4. For Node.js: check node version before running
 5. Always capture and return stdout + stderr

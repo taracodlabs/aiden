@@ -105,6 +105,40 @@ export interface ChildBuilderDeps {
   childRunId?:  number;
   /** Optional logger; emits per-tool-call info lines when present. */
   logger?:      Logger;
+  /**
+   * v4.11 toolset grouping — the parent agent's resolved profile
+   * toolset list. When supplied, the child inherits the SAME profile
+   * narrowing the parent uses (then applies the blocklist + any
+   * `requestedToolsets` intersection on top). Mirrors the audit
+   * invariant "subagent children inherit parent profile + blocklist".
+   *
+   * Shape:
+   *   - `undefined`         — child inherits every toolset the
+   *                           registry knows (pre-v4.11 behaviour;
+   *                           used when parent's profile is `full`
+   *                           or when childBuilder is called without
+   *                           profile context, e.g. unit tests).
+   *   - `readonly string[]` — child's base toolset list is exactly
+   *                           this set (a parent on `minimal` only
+   *                           ever spawns children seeing the
+   *                           minimal toolsets).
+   *
+   * The existing `requestedToolsets` filter still runs on top —
+   * `chosenToolsets = parentResolved ∩ requestedToolsets`, with the
+   * zero-tools fallback recovering to `parentResolved` (NOT to the
+   * full registry surface, which would silently widen the catalog
+   * past the parent's profile).
+   */
+  parentProfileToolsets?: readonly string[];
+  /**
+   * v4.11 — toolsets to strip from the child catalog regardless of the
+   * include set above. Set to `['ui']` by the REPL when the parent runs
+   * a known-weak model (core/v4/modelCapability.ts:isWeakModel) so the
+   * child — which shares the parent's display — can't leak ui_* markup.
+   * Applied uniformly even when `parentProfileToolsets` is undefined
+   * (the `full` profile), via getSchemas' excludeToolsets param.
+   */
+  parentExcludeToolsets?: readonly string[];
 }
 
 /** One spawn's parameters, validated by the tool wrapper. */
@@ -195,12 +229,29 @@ export function buildChildAgent(
   // If the spec named toolsets, intersect with the parent's known set.
   // Otherwise the child gets the parent's full enabled set (which on
   // REPL means every toolset the registry knows).
+  //
+  // v4.11 toolset grouping — when `deps.parentProfileToolsets` is
+  // provided, the "parent's known set" is that profile's resolved
+  // toolsets (NOT every toolset in the registry). This is what makes
+  // children inherit the parent's profile narrowing — a `minimal`
+  // parent spawns children that also only see `minimal` toolsets.
+  // When the field is omitted (legacy callers, unit tests, the
+  // `full` profile case), the original "every toolset the registry
+  // knows" semantics apply unchanged.
   const allHandlers = deps.toolRegistry.list();
-  const parentToolsetNames = new Set<string>();
+  const registryToolsetNames = new Set<string>();
   for (const name of allHandlers) {
     const handler = deps.toolRegistry.get(name);
-    if (handler?.toolset) parentToolsetNames.add(handler.toolset);
+    if (handler?.toolset) registryToolsetNames.add(handler.toolset);
   }
+  const parentToolsetNames: Set<string> = deps.parentProfileToolsets
+    ? new Set<string>(
+        // Defensive: filter to toolsets that actually exist in the
+        // registry. A typo in `agent.tool_profile_toolsets` shouldn't
+        // crash spawn; it just means the child gets a smaller set.
+        deps.parentProfileToolsets.filter((t) => registryToolsetNames.has(t)),
+      )
+    : registryToolsetNames;
   let chosenToolsets: string[] = input.requestedToolsets && input.requestedToolsets.length > 0
     ? input.requestedToolsets.filter((t) => parentToolsetNames.has(t))
     : [...parentToolsetNames];
@@ -213,11 +264,12 @@ export function buildChildAgent(
   // entries → `chosenToolsets` is `[]` → child gets ZERO tools → it
   // hallucinates an answer rather than admit it can't do the work.
   //
-  // Recover by inheriting the full parent set when the requested
-  // names ALL miss. Logs a warning so the operator sees what the
-  // model asked for and what real names exist. Partial intersections
-  // (some valid, some invalid) keep the valid subset — that's the
-  // user's explicit narrowing intent, not a bug.
+  // Recover by inheriting the parent's set (profile-narrowed when
+  // v4.11 grouping is wired, full-registry otherwise) — NEVER widen
+  // past the parent's profile. Logs a warning so the operator sees
+  // what the model asked for and what real names exist. Partial
+  // intersections (some valid, some invalid) keep the valid subset
+  // — that's the user's explicit narrowing intent, not a bug.
   if (
     input.requestedToolsets && input.requestedToolsets.length > 0 &&
     chosenToolsets.length === 0
@@ -238,7 +290,12 @@ export function buildChildAgent(
   // Phase 3+ may extend the child builder to receive the parent's
   // context dynamically; for now, 'repl' is the only path.
   const candidateSchemas: ToolSchema[] = chosenToolsets.length > 0
-    ? deps.toolRegistry.getSchemas(chosenToolsets, 'repl')
+    ? deps.toolRegistry.getSchemas(
+        chosenToolsets,
+        'repl',
+        // v4.11 — parent-based weak-model strip (e.g. ['ui']).
+        deps.parentExcludeToolsets ? [...deps.parentExcludeToolsets] : undefined,
+      )
     : [];  // No matching toolsets means an empty child toolset.
 
   // Step 4c — strip the hard blocklist (with v4.6 Phase 2P legacy

@@ -9,8 +9,8 @@
 // Sprint 24: Hardware Detection + First-boot Setup checks.
 //
 // NOTE: This is the sandbox stub. The full implementation (with LLM provider,
-// Docker, database, and tool-registry checks) lives at C:\Users\shiva\DevOS\core\doctor.ts
-// and will be merged on the host machine.
+// Docker, database, and tool-registry checks) lives at core/doctor.ts in the
+// repo root and will be merged on the host machine.
 
 import fs   from 'fs'
 import path from 'path'
@@ -40,7 +40,7 @@ export interface DoctorReport {
 const CORRUPTED_SKILL_NAMES = [
   'digital_ledger_app', 'open_batman_com', 'open_esquire_com',
   'clear_converastion', 'skills_skills', 'which_skill_you',
-  'check_any_those', 'fetch_https_httpbin', 'read_users_shiva',
+  'check_any_those', 'fetch_https_httpbin',
   'run_node_console', 'identify_skill_skills', 'open_instagram_com',
   'open_google_chrome', 'what', 'how_register_trademark',
   'what_hsn_code', 'what_just_happened', 'give_full_system',

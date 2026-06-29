@@ -64,9 +64,14 @@ describe('v4.2 Phase 1 — verifier + TCE integration', () => {
   beforeEach(() => { delete process.env.AIDEN_TCE; });
   afterEach(()  => { delete process.env.AIDEN_TCE; });
 
-  it('AIDEN_TCE=0 opt-out: verifier records nothing, no recovery fires', async () => {
+  it('AIDEN_TCE=0 opt-out: verifier still records verdicts (honesty), but no recovery fires', async () => {
     // v4.2 Phase 6 — TCE is ON by default; explicit `=0` opts out.
-    // Renamed from "default off" to reflect the new semantics.
+    // v4.11 Slice 1 — the per-tool verifier compute is now decoupled from
+    // TCE: it runs regardless so the honesty footer can reflect real
+    // outcomes even with recovery off. What `AIDEN_TCE=0` gates is
+    // RECOVERY — the failure classifier, recovery-store writes, and
+    // corrective `[tce]` messages. So `verification` is now populated, but
+    // `classification` stays undefined and no loop intervention fires.
     process.env.AIDEN_TCE = '0';
     const provider = new LoopingMockProvider({
       mode: 'same-signature', loopTool: 'shell_exec', loopCount: 5,
@@ -80,9 +85,12 @@ describe('v4.2 Phase 1 — verifier + TCE integration', () => {
     // No TCE → loop terminates normally via the mock's loopCount budget.
     expect(result.finishReason).toBe('stop');
     expect(result.toolLoopCard).toBeUndefined();
-    // Verification fields are undefined on every trace entry.
+    // v4.11 Slice 1 — verifier verdict is now present on every entry (it
+    // feeds the honesty footer), but recovery stayed gated: the failure
+    // classifier never ran, so `classification` is undefined throughout.
     for (const entry of result.toolCallTrace) {
-      expect(entry.verification).toBeUndefined();
+      expect(entry.verification).toBeDefined();
+      expect(entry.classification).toBeUndefined();
     }
     // No corrective system messages.
     const systemMsgs = result.messages.filter(

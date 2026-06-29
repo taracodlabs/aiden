@@ -1,6 +1,6 @@
 {
   "name": "aiden-runtime",
-  "version": "4.10.0",
+  "version": "4.11.0",
   "publishConfig": {
     "access": "public"
   },
@@ -41,7 +41,6 @@
   "main": "./dist/cli/v4/aidenCLI.js",
   "files": [
     "dist/",
-    "config/",
     "skills/",
     "themes/",
     "plugins/aiden-plugin-cdp-browser/",
@@ -255,6 +254,7 @@
     "express": "^4.18.2",
     "form-data": "^4.0.4",
     "imap-simple": "^5.1.0",
+    "ink": "^5.2.1",
     "js-tiktoken": "^1.0.21",
     "js-yaml": "^4.1.1",
     "jsonc-parser": "^3.3.1",
@@ -265,7 +265,7 @@
     "marked-terminal": "^7.3.0",
     "multer": "^2.1.1",
     "node-telegram-bot-api": "0.67.0",
-    "nodemailer": "^8.0.3",
+    "nodemailer": "^8.0.11",
     "open": "^11.0.0",
     "ora": "^9.3.0",
     "pdf-parse": "^1.1.1",
@@ -274,6 +274,7 @@
     "proper-lockfile": "^4.1.2",
     "puppeteer": "^24.39.1",
     "qrcode-terminal": "^0.12.0",
+    "react": "^18.3.1",
     "screenshot-desktop": "^1.15.3",
     "sql.js": "^1.14.1",
     "string-width": "^4.2.3",
@@ -317,6 +318,7 @@
     "@types/nodemailer": "^7.0.11",
     "@types/pdf-parse": "^1.1.4",
     "@types/qrcode-terminal": "^0.12.2",
+    "@types/react": "^18.3.29",
     "@types/supertest": "^7.2.0",
     "@types/tar-stream": "^3.1.4",
     "@types/uuid": "^9.0.0",

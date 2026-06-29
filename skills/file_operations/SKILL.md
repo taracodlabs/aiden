@@ -9,7 +9,7 @@ license: Apache-2.0
 # File Operations
 
 When writing files on Windows:
-1. Always use full absolute paths: C:\Users\shiva\Desktop\filename.ext
+1. Always use full absolute paths: C:\Users\<you>\Desktop\filename.ext
 2. For reports: use .md extension for markdown, .txt for plain text
 3. Verify file was written with fs.existsSync after write
 4. For research reports: include sections — Overview, Findings, Comparison, Verdict

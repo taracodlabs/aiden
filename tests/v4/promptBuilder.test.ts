@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PromptBuilder } from '../../core/v4/promptBuilder';
+import { PromptBuilder, narrowSkillDesc, SKILL_DESC_CAP } from '../../core/v4/promptBuilder';
 import type { AidenPaths } from '../../core/v4/paths';
 import type { MemorySnapshot } from '../../core/v4/memoryProvider';
 import type { ToolSchema } from '../../providers/v4/types';
@@ -207,6 +207,36 @@ describe('PromptBuilder', () => {
     expect(out).toContain('- review: review a PR');
   });
 
+  it('7b. weak-match nudge line follows the skill list (v4.11 narrowing)', async () => {
+    // When skills are present the model is told to fall back to the full
+    // descriptions via skills_list if the narrowed index is too thin to
+    // disambiguate. The nudge must sit AFTER the closing tag.
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      skillsList: [{ name: 'graphify', description: 'knowledge-graph any input' }],
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).toMatch(/no skill above clearly matches/i);
+    expect(out).toContain('`skills_list`');
+    const idxClose = out.indexOf('</available_skills>');
+    const idxNudge = out.search(/no skill above clearly matches/i);
+    expect(idxClose).toBeGreaterThan(-1);
+    expect(idxNudge).toBeGreaterThan(idxClose);
+  });
+
+  it('7c. nudge omitted entirely when no skills supplied', async () => {
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      skillsList: [],
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).not.toMatch(/no skill above clearly matches/i);
+  });
+
   it('8. personality overlay applied after SOUL', async () => {
     const pb = new PromptBuilder();
     const out = await pb.build({
@@ -294,5 +324,53 @@ describe('PromptBuilder', () => {
     const out = await pb.build({ paths: makePaths(root), platform: 'linux' });
     expect(out).toContain('艾登');
     expect(out).toContain('🧠');
+  });
+});
+
+describe('narrowSkillDesc (v4.11 Skill Injection Narrowing)', () => {
+  it('leaves a short single-sentence description unchanged', () => {
+    expect(narrowSkillDesc('knowledge-graph any input')).toBe('knowledge-graph any input');
+    expect(narrowSkillDesc('review a PR')).toBe('review a PR');
+  });
+
+  it('keeps only the first sentence of a multi-sentence description', () => {
+    const out = narrowSkillDesc('Reconcile accounts. Use when performing bank recs.');
+    expect(out).toBe('Reconcile accounts');
+    expect(out).not.toMatch(/Use when/);
+  });
+
+  it('splits on a newline as a sentence boundary too', () => {
+    expect(narrowSkillDesc('Audit accessibility\nWCAG 2.1 AA checks')).toBe('Audit accessibility');
+  });
+
+  it('hard-caps a long first sentence and marks it with an ellipsis', () => {
+    const long =
+      'Generate financial statements with period-over-period comparison and variance analysis for leadership';
+    const out = narrowSkillDesc(long);
+    // The cap actually fires (the pre-v4.11 slice(0,120) never did).
+    expect(out.length).toBeLessThanOrEqual(SKILL_DESC_CAP + 1); // +1 for the ellipsis char
+    expect(out.endsWith('…')).toBe(true);
+    expect(long.startsWith(out.slice(0, -1).trimEnd())).toBe(true);
+  });
+
+  it('does not append an ellipsis when the first sentence is exactly at the cap', () => {
+    const exact = 'x'.repeat(SKILL_DESC_CAP);
+    const out = narrowSkillDesc(exact);
+    expect(out).toBe(exact);
+    expect(out.endsWith('…')).toBe(false);
+  });
+
+  it('is idempotent — narrowing already-narrowed text is a no-op', () => {
+    const once = narrowSkillDesc(
+      'Generate financial statements with period-over-period comparison and variance analysis',
+    );
+    expect(narrowSkillDesc(once)).toBe(once);
+  });
+
+  it('returns empty string for empty / whitespace / non-string input', () => {
+    expect(narrowSkillDesc('')).toBe('');
+    expect(narrowSkillDesc('   ')).toBe('');
+    // @ts-expect-error — guarding the runtime path that maps `description ?? ''`
+    expect(narrowSkillDesc(undefined)).toBe('');
   });
 });

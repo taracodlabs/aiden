@@ -3000,7 +3000,7 @@ export const TOOL_DESCRIPTIONS: Record<string, string> = {
   mouse_click:             'Click the mouse at screen coordinates',
   keyboard_type:           'Type text using the keyboard',
   keyboard_press:          'Press a keyboard key or shortcut (e.g. ctrl+c)',
-  screenshot:              'Take a screenshot of the entire screen. Optional: outputPath (absolute path, e.g. C:\\Users\\shiva\\Desktop\\shot.png) to save to a specific location; defaults to workspace/screenshots/.',
+  screenshot:              'Take a screenshot of the entire screen. Optional: outputPath (absolute path, e.g. C:\\Users\\<you>\\Desktop\\shot.png) to save to a specific location; defaults to workspace/screenshots/.',
   screen_read:             'Read and describe the current screen contents',
   vision_loop:             'Autonomously control the computer using vision to complete a goal',
   wait:                    'Pause execution for a specified number of milliseconds',
@@ -3522,7 +3522,7 @@ export const TOOL_REGISTRY: Record<string, ToolRegistryMeta> = {
 
   // ── Screen / vision / input ──────────────────────────────────────────────────
   screenshot: {
-    description: 'Take a screenshot of the entire screen. Optional param: outputPath (absolute path, e.g. C:\\Users\\shiva\\Desktop\\shot.png) — if omitted, saves to workspace/screenshots/.',
+    description: 'Take a screenshot of the entire screen. Optional param: outputPath (absolute path, e.g. C:\\Users\\<you>\\Desktop\\shot.png) — if omitted, saves to workspace/screenshots/.',
     tier: 4, category: ['screen'], timeoutMs: 10000,
     parallel: 'sequential', // agentLoop.ts:1965 SEQUENTIAL_ONLY
     mcp: 'safe',             // api/mcp.ts:25

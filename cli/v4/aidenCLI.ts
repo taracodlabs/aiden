@@ -68,15 +68,23 @@ import { createRunStore } from '../../core/v4/daemon/runStore';
 // v4.10 Slice 10.2b — shared event taxonomy. Tool name → (category, kind).
 import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { makeSpawnSubAgentTool } from '../../tools/v4/subagent/spawnSubAgentTool';
+import { SubagentCoordinator } from '../../core/v4/subagent/coordinator';
 // v4.10 Slice 10.2 — trace_query tool (REPL-only). Factory pattern
 // matches spawn_sub_agent: dependencies injected at registration.
 import { makeTraceQueryTool } from '../../tools/v4/trace/traceQuery';
 import type { Message as ProviderMessage } from '../../providers/v4/types';
 import { SkillCommands } from '../../core/v4/skillCommands';
 import { AidenAgent } from '../../core/v4/aidenAgent';
-import { PromptBuilder } from '../../core/v4/promptBuilder';
+import { PromptBuilder, narrowSkillDesc } from '../../core/v4/promptBuilder';
 import { PersonalityManager } from '../../core/v4/personality';
 import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
+// v4.11 preflight compression — wire the dormant Phase 13 compressor
+// into production. Both modules existed pre-v4.11 but ContextCompressor
+// was never constructed at boot, so the `if (this.contextCompressor)`
+// branch at aidenAgent.ts:754 stayed dead at runtime and `/compress`
+// reported "Compressor or session not wired."
+import { ContextCompressor } from '../../core/v4/contextCompressor';
+import { ModelMetadata } from '../../core/v4/modelMetadata';
 import { MemoryManager } from '../../core/v4/memoryManager';
 // v4.10 Slice 10.1b — boot-time project-root detection so the REPL's
 // MemoryManager can route memory_add file=project to the cwd's
@@ -105,7 +113,8 @@ import {
 } from '../../core/v4/subsystemHealth';
 import { SkillOutcomeTracker } from '../../core/v4/skillOutcomeTracker';
 import { resolveBootProvider } from './providerBootSelector';
-import { enumerateConfiguredProviders } from './doctorLiveness';
+import { enumerateConfiguredProviders, pickProbeModel } from './doctorLiveness';
+import { PROVIDER_REGISTRY } from '../../providers/v4/registry';
 import { isMcpServeMode } from './uiBuild';
 import { MemoryGuard } from '../../moat/memoryGuard';
 import { SSRFProtection } from '../../moat/ssrfProtection';
@@ -127,6 +136,7 @@ import {
 import {
   detectAvailableProviders,
   summarizeDetection,
+  shouldRunWizard,
 } from '../../core/v4/firstRun/providerDetection';
 import { createFileLogger } from '../../core/v4/aidenLogger';
 import {
@@ -150,6 +160,15 @@ import { createBootLogger } from '../../core/v4/logger';
 
 import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
+// v4.11 toolset grouping — boot-time profile resolution. Picks
+// `minimal`/`standard`/`full`/`custom` from env or config and feeds
+// the resulting toolset list to `toolRegistry.getSchemas` so the
+// agent ships a deterministic, cache-stable tool catalog.
+import {
+  resolveBootProfile,
+  type ResolvedProfile,
+} from '../../core/v4/toolProfiles';
+import { isWeakModel } from '../../core/v4/modelCapability';
 
 import { createSkillCommandHandler } from './commands/skillCommandHandler';
 
@@ -776,6 +795,78 @@ export function createBootMemoryManager(
   return new MemoryManager({ paths, projectRoot });
 }
 
+/**
+ * v4.11 provider-auth resilience — boot fallback.
+ *
+ * The persisted/selected provider failed to resolve (expired OAuth
+ * token, missing key, …). Find the first OTHER provider that actually
+ * resolves so boot can continue into the REPL instead of hard-exiting
+ * and locking the user out of `/auth` and `/model`.
+ *
+ * "Resolvable" is decided by `RuntimeResolver.resolve` itself — the
+ * authority on credential presence + OAuth expiry. There is no
+ * hardcoded priority list: the first candidate that resolves wins.
+ * Candidates:
+ *   1. providers `enumerateConfiguredProviders` reports as configured
+ *      (env key present, OAuth token valid, or local daemon reachable);
+ *   2. any provider carrying an `apiKey` in config.yaml — the enumerator
+ *      inspects env vars only, so a config-only key (e.g. Together) would
+ *      otherwise be missed.
+ * Each candidate is then put through `resolve()`, which rejects a down
+ * local daemon / stale key, so neither source produces a false positive.
+ */
+async function resolveFirstWorkingProvider(
+  resolver: RuntimeResolver,
+  config: ConfigManager,
+  paths: AidenPaths,
+  excludeProviderId: string,
+): Promise<{ adapter: import('../../providers/v4/types').ProviderAdapter; providerId: string; modelId: string } | null> {
+  const candidates: Array<{ id: string; model: string }> = [];
+  const seen = new Set<string>([excludeProviderId]);
+
+  // 1. Enumerator-confirmed providers (env key / valid OAuth / live local).
+  let enumerated: Awaited<ReturnType<typeof enumerateConfiguredProviders>> = [];
+  try {
+    enumerated = await enumerateConfiguredProviders({ paths, env: process.env });
+  } catch {
+    enumerated = [];
+  }
+  for (const c of enumerated) {
+    if (c.configured && !seen.has(c.entry.id)) {
+      candidates.push({ id: c.entry.id, model: c.model });
+      seen.add(c.entry.id);
+    }
+  }
+
+  // 2. Config-only api keys (the enumerator checks env vars only, so a
+  //    key living in config.yaml — like Together's — is added here).
+  for (const entry of Object.values(PROVIDER_REGISTRY)) {
+    if (seen.has(entry.id)) continue;
+    const key = config.get(`providers.${entry.id}.apiKey`);
+    if (key && key.length > 0) {
+      candidates.push({ id: entry.id, model: pickProbeModel(entry) });
+      seen.add(entry.id);
+    }
+  }
+
+  // 3. resolve() is the authority — first that builds an adapter wins.
+  for (const cand of candidates) {
+    if (!cand.model) continue;
+    try {
+      const adapter = await resolver.resolve({
+        providerId: cand.id,
+        modelId: cand.model,
+        config,
+        paths,
+      });
+      return { adapter, providerId: cand.id, modelId: cand.model };
+    } catch {
+      // not resolvable — try the next candidate
+    }
+  }
+  return null;
+}
+
 export async function buildAgentRuntime(
   cliOpts: any,
   opts: MainOptions,
@@ -810,6 +901,28 @@ export async function buildAgentRuntime(
   // see the same WAL view chatSession's runAgentTurn writes through.
   const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
   const replTaskStore = createTaskStore({ db: replDb });
+  // v4.11 Slice 0 — orphan sweep. A REPL that crashed mid-turn left its
+  // task row stuck at 'active' (the completed/failed transition never
+  // fired). Retire those pre-boot rows to 'interrupted' so /tasks doesn't
+  // accrue phantom in-flight tasks from dead sessions. The current
+  // session's tasks are all created AFTER this point, so the boot-time
+  // cutoff is the session guard (session id isn't assigned yet here).
+  // Best-effort — a sweep failure must never block boot.
+  try {
+    const swept = replTaskStore.sweepOrphaned(Date.now());
+    if (swept > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[tasks] swept ${swept} orphaned active task(s) from prior session(s) → interrupted`);
+    }
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn('[tasks] orphan sweep failed:',
+      err instanceof Error ? err.message : String(err));
+  }
+  // v4.11 — artifact registry. Shares the same daemon.db handle so
+  // /artifacts listing + chatSession's per-turn capture see one WAL view.
+  const { createArtifactStore } = await import('../../core/v4/daemon/artifactStore');
+  const replArtifactStore = createArtifactStore({ db: replDb });
 
   // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
   // Initialised as early as possible so any subsequent tool wiring
@@ -948,11 +1061,16 @@ export async function buildAgentRuntime(
   const configuredProviderBroken =
     !!detection.configProvider &&
     !detection.configuredProviderHasCredentials;
-  const wizardNeeded =
-    !!opts.forceSetup ||
-    !detection.hasAnyProvider ||
-    configuredProviderBroken ||
-    (await isFreshInstall(paths));
+  // v4.11 bug fix — was: `... || (await isFreshInstall(paths))` raw,
+  // which auto-fired the wizard for a LIVE config whose creds live
+  // outside the config.yaml `providers:` map (OAuth tokens / env key),
+  // risking overwrite of a working setup. `shouldRunWizard` honours
+  // `configuredProviderHasCredentials` so a config that already names a
+  // usable provider is NOT treated as fresh. See providerDetection.ts.
+  const wizardNeeded = shouldRunWizard(detection, {
+    forceSetup: !!opts.forceSetup,
+    configEmpty: await isFreshInstall(paths),
+  });
 
   // Phase 30.2.1: when the wizard returns 'skipped' (explore mode) we
   // boot the REPL with a NullAdapter instead of trying to resolve a
@@ -1134,11 +1252,33 @@ export async function buildAgentRuntime(
     try {
       adapter = await resolver.resolve({ providerId, modelId, config, paths });
     } catch (err) {
-      display.printError(
-        `Could not resolve provider '${providerId}' / model '${modelId}': ${(err as Error).message}`,
-        'Run `aiden model` to pick a valid provider, or `aiden doctor`.',
+      // v4.11 provider-auth resilience: the selected default failed to
+      // resolve (expired OAuth token, missing key, …). Hard-exiting here
+      // locked the user out of the very commands that fix it (/auth,
+      // /model). Instead: warn, fall back to the first OTHER provider that
+      // actually resolves, and only drop to a NullAdapter (recovery mode)
+      // if nothing resolves — the REPL must still load either way.
+      display.warn(
+        `Provider '${providerId}' unavailable: ${(err as Error).message}`,
       );
-      process.exit(1);
+      const fb = await resolveFirstWorkingProvider(resolver, config, paths, providerId);
+      if (fb) {
+        adapter    = fb.adapter;
+        providerId = fb.providerId;
+        modelId    = fb.modelId;
+        display.dim(
+          `[boot] fell back to ${providerId} · ${modelId}  (previous default unavailable)`,
+        );
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { NullAdapter } = require('../../providers/v4/nullAdapter');
+        adapter = new NullAdapter();
+        display.warn(
+          'No working provider found — starting in recovery mode. Run ' +
+          '`/auth login <provider>` or `/auth refresh <provider>`, or `/model` ' +
+          'to pick a configured provider, then restart.',
+        );
+      }
     }
     // Phase v4.1.2-bug1: surface the auto-pick in the boot log when
     // neither CLI flags nor persisted config specified the choice.
@@ -1180,6 +1320,33 @@ export async function buildAgentRuntime(
   // Tool registry + executor.
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
+
+  // v4.11 toolset grouping — resolve the active tool profile ONCE at
+  // boot. The profile name comes from (env > config > 'standard')
+  // and the concrete toolset list is what `toolRegistry.getSchemas`
+  // filters on at the AidenAgent construction site below. Resolved
+  // here (early, before the agent is built) so the boot dim line
+  // shows the user which catalog they're getting before the model
+  // ever sees it.
+  //
+  // The profile is STATIC for the session — flip via /tools <name>
+  // or AIDEN_TOOL_PROFILE env override on the next boot. The runtime
+  // never auto-swaps profiles per turn; that would thrash the
+  // provider prefix cache (the absorbed pattern from the reference
+  // implementation we studied explicitly rejected per-turn churn).
+  const toolProfile: ResolvedProfile = resolveBootProfile(
+    process.env.AIDEN_TOOL_PROFILE,
+    config.getValue<string>('agent.tool_profile'),
+    config.getValue<string[]>('agent.tool_profile_toolsets'),
+  );
+  {
+    const filterDesc = toolProfile.toolsets === undefined
+      ? 'all toolsets'
+      : `[${[...toolProfile.toolsets].join(', ')}]`;
+    display.dim(
+      `[tools] profile=${toolProfile.name} (${toolProfile.source}) → ${filterDesc}`,
+    );
+  }
 
   // Memory + skill loader.
   // v4.10 Slice 10.1b — route through createBootMemoryManager so
@@ -1667,6 +1834,10 @@ export async function buildAgentRuntime(
     ssrfProtection,
     tirithScanner,
     skillLoader,
+    // v4.11 Slice 1 — interactive clarify callback for the `clarify` tool
+    // (REPL only; reuses the approval prompt path). Absent from the daemon
+    // executor, so headless agents get the tool's "unavailable" degrade.
+    clarify: callbacks.promptClarify,
   });
 
   // Resolve verified-flag from memory tool results (Phase 9 wrappers
@@ -1718,18 +1889,20 @@ export async function buildAgentRuntime(
   }
   let skillsList: Array<{ name: string; description: string }> = [];
   try {
-    // Phase 16g: drop the slice(0,32) cap.
-    // installed skill (prompt_builder.py:929-931) — the model needs
-    // the full inventory to find a partially-relevant match for fuzzy
-    // intents. 71 skills × ~120 chars ≈ 8.5KB; well within prompt
-    // budget for 131k-context models. If the user has hundreds of
-    // skills and prompt size becomes a real concern, the next polish
-    // is lazy-loading via skill_view () — but that's
-    // future work, not 16g.
+    // Phase 16g kept the full inventory (one entry per installed skill)
+    // so weak models can find a partially-relevant match for fuzzy
+    // intents. v4.11 Skill Injection Narrowing cashes in the lazy-load
+    // note left here: we still emit one entry per skill (skillsList.length
+    // feeds /skills, the status bar, and "Skills bundled: N"), but each
+    // description is narrowed to a first-sentence teaser via
+    // narrowSkillDesc — the ~1.5k-token block was ~75% description text,
+    // none of which the old .slice(0, 120) ever trimmed (avg desc ~62
+    // chars). Full descriptions stay available on demand via skills_list
+    // / skill_view; those paths are deliberately NOT narrowed.
     const loaded = await skillLoader.list();
     skillsList = loaded.map((s) => ({
       name: (s as { name: string }).name,
-      description: ((s as { description?: string }).description ?? '').slice(0, 120),
+      description: narrowSkillDesc((s as { description?: string }).description ?? ''),
     }));
   } catch {
     skillsList = [];
@@ -1785,14 +1958,56 @@ export async function buildAgentRuntime(
   // mid-call crash) are GC'd by the next-call cleanup.
   const replToolCallStartTimes = new Map<string, number>();
 
+  // ── v4.11 preflight compression: construct ModelMetadata +
+  // ContextCompressor ONCE so the agent's auto-trigger path AND the
+  // /compress slash command share state. The compressor's
+  // shouldCompress() reads model limits per (provider, model); auto
+  // compression fires at the 50% utilization threshold inside
+  // agent.runConversation. The dedicated SubsystemHealthTracker lets
+  // `aiden doctor` surface auxiliary-call failures so a degraded
+  // summarizer is visible operationally (same pattern as
+  // skillMinerHealth / skillTeacherHealth above).
+  const compressionHealth = new SubsystemHealthTracker('context-compressor');
+  subsystemHealthRegistry.register('context-compressor',
+    () => compressionHealth.snapshot());
+  const modelMetadata     = new ModelMetadata();
+  const contextCompressor = new ContextCompressor(
+    modelMetadata,
+    auxiliaryClient,
+    /*compressionThreshold=*/ 0.5,
+    compressionHealth,
+  );
+
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
+    // v4.11 preflight compression — wire the compressor so
+    // runConversation step 7 actually runs at the 50% threshold.
+    contextCompressor,
     // v4.6 Phase 1 — 'repl' context filter excludes tools tagged
     // daemon-only (none today) and INCLUDES tools tagged repl-only
     // (e.g. spawn_sub_agent, registered after this line). Tools with
     // no `contexts` field default to visible in both contexts.
-    tools: toolRegistry.getSchemas(undefined, 'repl'),
+    //
+    // v4.11 toolset grouping — `toolProfile.toolsets` narrows the
+    // catalog by toolset tag. `undefined` (the `full` profile)
+    // preserves byte-identical pre-v4.11 behaviour; any other
+    // profile ships only handlers whose `toolset` matches one of
+    // the resolved tags. Filter is applied ONCE at construction —
+    // the agent's `this.tools` is frozen for the session so prefix
+    // caching stays warm. Switching profiles via `/tools <name>`
+    // requires a session restart (the slash command surfaces a
+    // clear note explaining why).
+    // v4.11 — strip the `ui` toolset for known-weak models that leak
+    // ui_* markup instead of firing real tool_calls (the cause-level fix
+    // for the UI-leak class; the sanitizer stays as defense-in-depth).
+    // isWeakModel (core/v4/modelCapability.ts) is the single predicate
+    // shared with the prompt-guidance gate, so guidance + tools agree.
+    tools: toolRegistry.getSchemas(
+      toolProfile.toolsets as string[] | undefined,
+      'repl',
+      isWeakModel(modelId) ? ['ui'] : undefined,
+    ),
     toolExecutor,
     maxTurns: config.getValue<number>('agent.max_turns', 90)!,
     auxiliaryClient,
@@ -1960,6 +2175,63 @@ export async function buildAgentRuntime(
     agent.markMemoryDirty(file === 'user' ? 'user' : 'memory');
   });
 
+  // v4.11 Obsidian vault mirror — additive side-channel. Resolves the
+  // vault path from env > config; null = feature off (no-op listener
+  // never registered). Boot-time full export catches up any drift
+  // from offline edits; subsequent mutations fan out per-namespace.
+  //
+  // The exporter NEVER touches the memory write path — it reads the
+  // freshly-written files and mirrors them into the vault. Listener
+  // errors are swallowed by memoryManager's fireMutation guard, so a
+  // vault disk-full / permission glitch can't break a memory write.
+  {
+    const { resolveVaultPath, exportAll, exportNamespace, exportSoul, exportSessions } =
+      await import('../../core/v4/memory/vaultExporter');
+    const vaultPath = resolveVaultPath(
+      process.env.AIDEN_VAULT_PATH,
+      config.getValue<string>('agent.vault_path'),
+    );
+    if (vaultPath !== null) {
+      const vaultDeps = {
+        paths,
+        vaultPath,
+        projectRoot: memoryManager.projectRoot,
+        log: (level: 'info' | 'warn', msg: string) => {
+          // File-only — vault export progress is not a chat surface.
+          if (level === 'warn') bootLogger.child('vault').warn(msg);
+          else bootLogger.child('vault').info(msg);
+        },
+      };
+      // Boot-time full export — catches up after offline edits.
+      // Fire-and-forget; never block the boot path.
+      exportAll(vaultDeps).catch((e) => {
+        bootLogger.child('vault').warn(`boot export failed: ${(e as Error).message}`);
+      });
+      // Per-mutation incremental export. The listener never throws.
+      memoryManager.onMutation((file) => {
+        const summary = { written: 0, removed: 0, skipped: 0, errors: [] as string[] };
+        const namespace = file === 'user' ? 'user' : file === 'project' ? 'project' : 'memory';
+        const sourcePath = namespace === 'user'
+          ? paths.userMd
+          : namespace === 'project'
+          ? (memoryManager.projectRoot
+              ? `${memoryManager.projectRoot}/.aiden/PROJECT.md`
+              : null)
+          : paths.memoryMd;
+        if (!sourcePath) return;
+        exportNamespace(vaultDeps, namespace, sourcePath, summary).catch(() => {
+          /* swallow — vault failures must never break memory mutation */
+        });
+      });
+      // SOUL.md + distillation fan-out is deferred to boot-time + the
+      // explicit `/memory vault sync` command — those sources don't
+      // emit per-mutation events. exportSoul/exportSessions covered
+      // by the initial exportAll above; intentional reference suppresses
+      // the unused-import warning on the dynamic import.
+      void exportSoul; void exportSessions;
+    }
+  }
+
   // v4.5 Phase 7b — daemon agent builder. Captures the references
   // above so the dispatcher can construct a fresh AidenAgent per
   // daemon-claimed trigger. Strategy B (closure capture) — REPL
@@ -2096,10 +2368,25 @@ export async function buildAgentRuntime(
   // this block). The legacy per-call `runChild` closure that lived
   // here pre-2R has been deleted; the primitive owns child
   // construction now.
-  toolRegistry.register(makeSubagentFanoutTool({
-    logger: bootLogger.child('subagent'),
-    resolveActiveModel: () => ({ providerId, modelId }),
-    aggregatorAdapter: adapter,
+  // v4.11 Slice 4 — construct the SubagentCoordinator ONCE. Both tool
+  // facades (spawn_sub_agent + subagent_fanout) share the same
+  // coordinator instance so the active-children registry is
+  // process-wide, cost accumulators roll up into one parent's turn
+  // context, and a future operator surface can query/cancel without
+  // a per-tool plumbing pass.
+  //
+  // The coordinator wraps — does NOT replace — the existing
+  // `spawnSubAgent` primitive. The primitive still owns child agent
+  // construction (toolset intersection, ApprovalEngine auto-deny,
+  // provider clone, internal timeout cascade). The coordinator owns
+  // the BATCH abstraction layered above (id minting, linked controllers,
+  // bounded concurrency, ordered aggregation, lifecycle trace).
+  //
+  // spawnDeps is the SAME shape v4.6 wired: tool registry, parent
+  // tool context (memory / ssrf / tirith / skills), provider adapter,
+  // resolvers, run store. No widening — the coordinator's API
+  // accepts the existing SpawnSubAgentDeps verbatim.
+  const subagentCoordinator = new SubagentCoordinator({
     spawnDeps: {
       toolRegistry,
       parentToolContext: {
@@ -2108,6 +2395,9 @@ export async function buildAgentRuntime(
         sessions:       sessionManager,
         memory:         memoryManager,
         memoryGuard,
+        // approvalEngine intentionally OMITTED — the child builder
+        // constructs its own auto-deny ApprovalEngine. Listing it
+        // here would be ignored (childBuilder overrides via spread).
         ssrfProtection,
         tirithScanner,
         skillLoader,
@@ -2122,14 +2412,56 @@ export async function buildAgentRuntime(
       runStore:            replRunStore,
       instanceId:          replInstanceId,
       logger:              bootLogger.child('subagent'),
+      // v4.11 toolset grouping — children inherit the parent's
+      // resolved profile narrowing (then apply the 5-name blocklist
+      // + any `requestedToolsets` intersection on top). For the
+      // `full` profile, `toolProfile.toolsets` is undefined → the
+      // childBuilder falls back to "every toolset the registry
+      // knows" (the pre-v4.11 behaviour). The `as readonly string[]`
+      // cast is safe — childBuilder treats this list as read-only.
+      parentProfileToolsets: toolProfile.toolsets as readonly string[] | undefined,
+      // v4.11 — parent-based ui strip: when the REPL parent runs a
+      // known-weak model, its children (which share the REPL display)
+      // also drop the `ui` toolset. Mirrors the parent catalog strip
+      // above so a weak session can't leak ui_* markup from a subagent.
+      parentExcludeToolsets: isWeakModel(modelId) ? ['ui'] : undefined,
     },
-    // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the shared
-    // `replParentRunRef` mutated by `ChatSession.runAgentTurn` so
-    // fanout children get `spawned_from_run_id` populated. Returns
-    // undefined between turns (ref cleared post-turn), matching the
-    // pre-2Q-B behaviour for slash-command-triggered spawns.
-    resolveParentRunId:     () => replParentRunRef.runId     ?? undefined,
-    resolveParentSessionId: () => replParentRunRef.sessionId ?? undefined,
+    logger: bootLogger.child('subagent'),
+    // v4.11 regression patch — display sink for per-child UI events.
+    // Coordinator is the single source of truth post-Slice-4; the
+    // pre-Slice-4 spawn_sub_agent facade no longer emits its own
+    // pair. This restores the gutter-indented `[task] <goal> ·
+    // running…` / `· done` trail rows for BOTH spawn_sub_agent
+    // (1 pair) AND subagent_fanout (N pairs), which Slice 4 had
+    // silently dropped from fanout.
+    onUiEvent: (name: string, args: Record<string, unknown>) => {
+      display.renderUiEvent(name, args);
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        try {
+          const tags = categorizeEvent(name);
+          replRunStore.emitEventRich({
+            runId:     rid,
+            category:  tags.category,
+            kind:      tags.kind,
+            name,
+            sessionId: replParentRunRef.sessionId ?? null,
+            payload:   args,
+            visibility:'model',
+            source:    'subagent',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
+      }
+    },
+  });
+
+  // ── v4.11 Slice 4 — register subagent_fanout (facade) ──────────────────
+  toolRegistry.register(makeSubagentFanoutTool({
+    resolveTurnContext: () => agent.getCurrentTurnContext(),
+    coordinator:        subagentCoordinator,
+    logger:             bootLogger.child('subagent'),
+    resolveActiveModel: () => ({ providerId, modelId }),
+    aggregatorAdapter:  adapter,
     resolveProviders: (): ProviderOption[] => {
       // When the parent uses FallbackAdapter, expose every key-present
       // slot's (providerId, modelId) so rotation can spread children
@@ -2157,89 +2489,20 @@ export async function buildAgentRuntime(
     fallback: adapter instanceof FallbackAdapter ? 'FallbackAdapter' : 'direct',
   });
 
-  // ── v4.6 Phase 1 — register spawn_sub_agent (REPL only) ────────────────
-  //
-  // The new single-child synchronous primitive. Coexists with
-  // subagent_fanout (Q9 — additive in Phase 1; Phase 2 will refactor
-  // fanout to call this primitive N times).
-  //
-  // Wired here, AFTER `agent` and `toolExecutor` are in scope, because
-  // the child builder needs the parent agent's reference (to read
-  // `getCurrentSignal()` at dispatch time per the agent-instance signal
-  // pattern) and the parent's tool context for ssrf/tirith/memory/etc.
-  //
+  // ── v4.11 Slice 4 — register spawn_sub_agent (facade, REPL only) ───────
   // Deliberately NOT registered in cli/v4/daemonAgentBuilder.ts —
   // daemon-fired agents don't expose spawn_sub_agent in their tool
-  // catalog (Q6 lock).
+  // catalog (Q6 lock from v4.6 Phase 1).
   toolRegistry.register(makeSpawnSubAgentTool({
-    parentAgent:         agent,
-    toolRegistry,
-    parentToolContext: {
-      cwd:            process.cwd(),
-      paths,
-      sessions:       sessionManager,
-      memory:         memoryManager,
-      memoryGuard,
-      // approvalEngine intentionally OMITTED — the child builder
-      // constructs its own auto-deny ApprovalEngine. Listing it here
-      // would be ignored (childBuilder overrides via spread), but
-      // keeping it out makes the intent explicit.
-      ssrfProtection,
-      tirithScanner,
-      skillLoader,
-    },
-    parentProvider:      adapter,
-    parentProviderId:    providerId,
-    parentModelId:       modelId,
-    resolveVerifiedFlag,
-    resolveToolset,
-    resolveMutates,
-    resolveUiOnly,
-    // v4.8.0 Phase 2.5 — emit ui_task_update/ui_task_done events so
-    // subagent activity surfaces as gutter-indented trail rows in the
-    // parent's chat surface alongside its own tool trail.
-    // v4.10 Slice 10.2 — persistence: child agents render through
-    // this callback but childBuilder.ts only persists tool_call_*
-    // events, never ui_* events. Tee here keyed on the PARENT's
-    // runId (replParentRunRef.runId) so cross-agent ui_* trace is
-    // queryable in one place.
-    onUiEvent: (name: string, args: Record<string, unknown>) => {
-      display.renderUiEvent(name, args);
-      const rid = replParentRunRef.runId;
-      if (rid !== null) {
-        // v4.10 Slice 10.2b — rich emission. Source='subagent' here
-        // because the wire fires from a spawn_sub_agent child rendering
-        // through the parent's onUiEvent — the parent's run is the row
-        // owner but the originator is the child.
-        try {
-          const tags = categorizeEvent(name);
-          replRunStore.emitEventRich({
-            runId:     rid,
-            category:  tags.category,
-            kind:      tags.kind,
-            name,
-            sessionId: replParentRunRef.sessionId ?? null,
-            payload:   args,
-            visibility:'model',
-            source:    'subagent',
-          });
-        } catch { /* persistence faults must never break dispatch */ }
-      }
-    },
-    runStore:            replRunStore,
-    instanceId:          replInstanceId,
-    // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the same
-    // shared `replParentRunRef` the fanout factory above uses;
-    // ChatSession.runAgentTurn populates it before each turn
-    // dispatches. Returns undefined between turns so spawns from
-    // slash-command handlers stay top-level (consistent with
-    // pre-2Q-B observable behaviour).
-    resolveParentRunId:     () => replParentRunRef.runId     ?? undefined,
-    resolveParentSessionId: () => replParentRunRef.sessionId ?? undefined,
-    // v4.6 Phase 1 observability — info-level traces for spec at
-    // invocation, child-tools count, completion, and per-tool-call
-    // run_events on the child's runs row.
-    logger:              bootLogger.child('subagent'),
+    resolveTurnContext: () => agent.getCurrentTurnContext(),
+    coordinator:        subagentCoordinator,
+    logger:             bootLogger.child('subagent'),
+    // v4.11 regression patch — `onUiEvent` removed from the spawn
+    // facade. The coordinator (constructed above) owns the single
+    // ui_task_update / ui_task_done pair per child for BOTH
+    // spawn_sub_agent (1 task) AND subagent_fanout (N tasks), so
+    // the display sink is wired ONCE at coordinator construction
+    // instead of duplicated across two facades.
   }));
   bootLogger.child('subagent').info('spawn_sub_agent: wired (REPL only)', {
     instanceId: replInstanceId,
@@ -2440,10 +2703,13 @@ export async function buildAgentRuntime(
   //   /tasks completed     → filter status='completed'
   //   /tasks cancelled     → filter status='cancelled'
   //   /tasks failed        → filter status='failed'
+  //   /tasks interrupted   → filter status='interrupted' (boot-swept orphans)
+  //   /tasks all           → cross-session: every session, not just this one
+  //   /tasks all <status>  → cross-session + status filter (e.g. all interrupted)
   //   /tasks <N>           → numeric arg sets the limit (1..200)
   commandRegistry.register({
     name: 'tasks',
-    description: 'List durable tasks for this REPL session. Usage: /tasks [active|completed|cancelled|failed|<N>]',
+    description: 'List durable tasks for this REPL session. Usage: /tasks [all] [active|completed|cancelled|failed|interrupted|<N>]',
     category: 'system',
     icon: '⊡',
     handler: async (ctx) => {
@@ -2452,8 +2718,14 @@ export async function buildAgentRuntime(
         ctx.display.dim('No REPL session active — start the chat first.');
         return {};
       }
-      const arg = (ctx.args[0] ?? '').toLowerCase();
-      const validStatuses = new Set(['pending', 'active', 'completed', 'failed', 'cancelled']);
+      // v4.11 Slice 0 — `/tasks all` is the explicit cross-session opt-in:
+      // lists across every session (including boot-swept `interrupted`
+      // orphans left by dead sessions, which the default session-scoped
+      // view can't show). Default stays session-scoped — unchanged. A
+      // status/limit arg may follow `all`, e.g. `/tasks all interrupted`.
+      const crossSession = (ctx.args[0] ?? '').toLowerCase() === 'all';
+      const arg = (ctx.args[crossSession ? 1 : 0] ?? '').toLowerCase();
+      const validStatuses = new Set(['pending', 'active', 'completed', 'failed', 'cancelled', 'interrupted']);
       let filterStatus: string | undefined;
       let limit = 20;
       if (arg && validStatuses.has(arg)) {
@@ -2465,7 +2737,8 @@ export async function buildAgentRuntime(
       let rows;
       try {
         rows = replTaskStore.listRecent({
-          sessionId,
+          // Omitting sessionId widens the query to all sessions.
+          ...(crossSession ? {} : { sessionId }),
           ...(filterStatus ? { status: filterStatus as any } : {}),
           limit,
         });
@@ -2473,21 +2746,93 @@ export async function buildAgentRuntime(
         ctx.display.printError(`/tasks query failed: ${(e as Error).message}`);
         return {};
       }
+      const scopeNoun = crossSession ? 'across all sessions' : 'in this conversation';
       if (rows.length === 0) {
         ctx.display.dim(filterStatus
-          ? `(no ${filterStatus} tasks in this conversation)`
-          : '(no tasks recorded yet in this conversation)');
+          ? `(no ${filterStatus} tasks ${scopeNoun})`
+          : `(no tasks recorded yet ${scopeNoun})`);
         return {};
       }
       const filterSuffix = filterStatus ? ` (${filterStatus})` : '';
-      ctx.display.info(`Tasks${filterSuffix} — ${rows.length} row${rows.length === 1 ? '' : 's'}, newest first:`);
+      const scopeSuffix = crossSession ? ' [all sessions]' : '';
+      ctx.display.info(`Tasks${filterSuffix}${scopeSuffix} — ${rows.length} row${rows.length === 1 ? '' : 's'}, newest first:`);
       for (const r of rows) {
         const tsIso = new Date(r.createdAt).toISOString().replace(/\.\d{3}Z$/, 'Z');
         // Title is already capped at 80 chars on insert (Slice 10.8
         // B2 createTaskStore); render compact for the listing.
         const trim = r.title.length > 60 ? `${r.title.slice(0, 57)}…` : r.title;
+        // Cross-session mode tags the owning session so rows from
+        // different conversations are distinguishable; default mode
+        // omits it (output byte-identical to pre-Slice-0).
+        const sess = crossSession ? `  ${r.sessionId.slice(0, 8).padEnd(8)}` : '';
         ctx.display.write(
-          `  ${tsIso}  ${r.id}  [${r.status.padEnd(9)}]  ${trim}\n`,
+          `  ${tsIso}${sess}  ${r.id}  [${r.status.padEnd(9)}]  ${trim}\n`,
+        );
+      }
+      return {};
+    },
+  });
+
+  // ── v4.11 — /artifacts slash command ───────────────────────────────
+  //
+  // Read-only listing of the artifact registry (files Aiden produced,
+  // with provenance). Mirrors /tasks: default session-scoped, `all`
+  // drops the filter. Each row shows time, action+kind, path, the tool,
+  // and the originating task goal (resolved via replTaskStore).
+  //
+  //   /artifacts            → this session, newest first, default 20
+  //   /artifacts all        → cross-session: every session
+  //   /artifacts <N>        → numeric arg sets the limit (1..200)
+  //   /artifacts all <N>    → cross-session + limit
+  commandRegistry.register({
+    name: 'artifacts',
+    description: 'List artifacts Aiden produced (files written) with provenance. Usage: /artifacts [all] [<N>]',
+    category: 'system',
+    icon: '⊟',
+    handler: async (ctx) => {
+      const sessionId = replParentRunRef.chatSessionId;
+      if (!sessionId) {
+        ctx.display.dim('No REPL session active — start the chat first.');
+        return {};
+      }
+      const crossSession = (ctx.args[0] ?? '').toLowerCase() === 'all';
+      const arg = (ctx.args[crossSession ? 1 : 0] ?? '').toLowerCase();
+      let limit = 20;
+      if (arg) {
+        const n = Number(arg);
+        if (Number.isFinite(n) && n > 0) limit = Math.min(Math.floor(n), 200);
+      }
+      let rows;
+      try {
+        rows = replArtifactStore.listRecent({
+          ...(crossSession ? {} : { sessionId }),
+          limit,
+        });
+      } catch (e) {
+        ctx.display.printError(`/artifacts query failed: ${(e as Error).message}`);
+        return {};
+      }
+      const scopeNoun = crossSession ? 'across all sessions' : 'in this conversation';
+      if (rows.length === 0) {
+        ctx.display.dim(`(no artifacts recorded yet ${scopeNoun})`);
+        return {};
+      }
+      const scopeSuffix = crossSession ? ' [all sessions]' : '';
+      ctx.display.info(`Artifacts${scopeSuffix} — ${rows.length} row${rows.length === 1 ? '' : 's'}, newest first:`);
+      for (const r of rows) {
+        const tsIso = new Date(r.createdAt).toISOString().replace(/\.\d{3}Z$/, 'Z');
+        // Resolve the originating task goal for provenance (best-effort).
+        let goal = '';
+        if (r.taskId) {
+          try {
+            const t = replTaskStore.get(r.taskId);
+            if (t?.goal) goal = t.goal.length > 50 ? `${t.goal.slice(0, 47)}…` : t.goal;
+          } catch { /* provenance is best-effort */ }
+        }
+        const sess = crossSession ? `  ${r.sessionId.slice(0, 8).padEnd(8)}` : '';
+        const goalSuffix = goal ? `  ${ctx.display.applyColors(`← ${goal}`, 'muted')}` : '';
+        ctx.display.write(
+          `  ${tsIso}${sess}  [${`${r.action}/${r.kind}`.padEnd(15)}]  ${r.path}  ${ctx.display.applyColors(r.tool, 'muted')}${goalSuffix}\n`,
         );
       }
       return {};
@@ -2682,6 +3027,11 @@ export async function buildAgentRuntime(
     honestyMode,
     skillTeacherTier,
     agent,
+    // v4.11 preflight compression — expose the wired compressor so
+    // the REPL session can hand it to the /compress slash command
+    // context AND so tests can introspect that production has a
+    // non-undefined instance (formerly dormant in Phase 13).
+    contextCompressor,
     commandRegistry,
     mcpClient,
     providerId,
@@ -2705,6 +3055,8 @@ export async function buildAgentRuntime(
     replParentRunRef,
     // v4.10 Slice 10.8 — durable Task-lite store.
     replTaskStore,
+    // v4.11 — artifact registry store.
+    replArtifactStore,
   };
 }
 
@@ -2737,6 +3089,8 @@ export interface AgentRuntime {
   honestyMode: HonestyMode;
   skillTeacherTier: SkillTeacherTier;
   agent: AidenAgent;
+  /** v4.11 preflight compression — production-wired (no longer dormant). */
+  contextCompressor: ContextCompressor;
   commandRegistry: CommandRegistry;
   mcpClient: ReturnType<typeof setupMcpFromConfig> extends Promise<infer R>
     ? R extends { client: infer C }
@@ -2804,6 +3158,7 @@ export interface AgentRuntime {
    * writes.
    */
   replTaskStore:    import('../../core/v4/daemon/taskStore').TaskStore;
+  replArtifactStore: import('../../core/v4/daemon/artifactStore').ArtifactStore;
   /**
    * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
    * id (set once at ChatSession.run() init, never cleared between turns).
@@ -2888,6 +3243,13 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // when /quit fires the auto-summary path.
     memoryManager: runtime.memoryManager,
     memoryGuard:   runtime.memoryGuard,
+    // v4.11 preflight compression — give the REPL session the SAME
+    // ContextCompressor instance the AidenAgent received above. The
+    // `/compress` slash command (`cli/v4/commands/compress.ts`) reads
+    // `ctx.compressor` from this field; before this wire it was
+    // permanently undefined and the command reported "Compressor or
+    // session not wired."
+    compressor:    runtime.contextCompressor,
     // v4.6 Phase 2Q-B — REPL parent-run wiring. ChatSession.runAgentTurn
     // writes a runs row per turn and stores its id into
     // `replParentRunRef`; the spawn / fanout factories above read the
@@ -2901,6 +3263,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // status on success/failure. /tasks and /adjust slash commands
     // read/write through this same handle.
     replTaskStore:    runtime.replTaskStore,
+    replArtifactStore: runtime.replArtifactStore,
   };
 
   if (cliOpts.tui) {

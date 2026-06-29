@@ -253,6 +253,14 @@ describe('AidenAgent — abort-signal orphan prevention (v4.9.4 Slice 1)', () =>
       provider:     adapter,
       toolExecutor: abortingExecutor,
       tools:        NO_TOOLS,
+      // v4.11 — file_write is mutating, so it stays on the SEQUENTIAL
+      // dispatch path (not the parallel read-only batch). Without this,
+      // unknown tools default to read-only → all 3 pre-execute via
+      // Promise.all, the abort fires mid-batch, and call-1's real result
+      // gets overwritten with a synthetic 'interrupted'. Mark mutating to
+      // exercise the path this test is actually about: call-1 keeps its
+      // result, call-2 interrupted, call-3 skipped.
+      resolveMutates: () => true,
     });
 
     const result = await agent.runConversation(

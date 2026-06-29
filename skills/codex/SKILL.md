@@ -38,7 +38,7 @@ $env:OPENAI_API_KEY = "sk-..."
 ### 2. Run a coding task interactively
 
 ```powershell
-Set-Location "C:\Users\shiva\myproject"
+Set-Location "C:\Users\<you>\myproject"
 codex "Add input validation to all form fields in the React components"
 ```
 

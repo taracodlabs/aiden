@@ -20,6 +20,7 @@
  */
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
+import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 // v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
 // sequence + system prompt + memory hashes when a turn shows loop
 // symptoms (10+ calls OR 5+ consecutive same-name). Default off via
@@ -105,6 +106,7 @@ import { expand, hasInterpolation, countSpans } from './shellInterpolation';
 import { installResizeGuard } from './resizeGuard';
 // v4.10 Slice 10.2b — shared event taxonomy. UI tool name → (category, kind).
 import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
+import { captureArtifactFromTrace } from '../../core/v4/daemon/artifactStore';
 
 /**
  * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
@@ -390,6 +392,13 @@ export interface ChatSessionOptions {
    */
   replTaskStore?:   import('../../core/v4/daemon/taskStore').TaskStore;
   /**
+   * v4.11 — artifact registry. When wired, `runAgentTurn` captures files
+   * this turn produced (successful, verifier-ok file-producing tools) from
+   * the toolCallTrace, with provenance back to the run + task. Optional,
+   * same as replTaskStore.
+   */
+  replArtifactStore?: import('../../core/v4/daemon/artifactStore').ArtifactStore;
+  /**
    * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
    * id, written ONCE during run() init (after resumeSessionId resolves)
    * and never cleared between turns. Read surfaces like /trace recent
@@ -422,6 +431,17 @@ const STATUS_BAR_WIDTH = 10;
  * still respected.
  */
 const SUMMARY_TIMEOUT_MS_DEFAULT = 12_000;
+
+// v4.11 Slice 1 — streaming delta coalescer (logic layer). The first
+// delta of each stream segment paints immediately (TTFT untouched);
+// subsequent deltas batch until STREAM_COALESCE_MS elapses OR
+// STREAM_COALESCE_MAX_CHARS accumulate, then flush as one streamPartial
+// write. Cuts ~124 per-token writes on a fast provider to ~15-25
+// flushes. Tunable here. The render layer (streamPartial /
+// tryRerenderInPlace) is intentionally NOT touched.
+const STREAM_COALESCE_MS = 33;
+const STREAM_COALESCE_MAX_CHARS = 256;
+
 function resolveSummaryTimeoutMs(): number {
   const raw = process.env.AIDEN_SUMMARY_TIMEOUT_MS;
   if (!raw) return SUMMARY_TIMEOUT_MS_DEFAULT;
@@ -543,6 +563,43 @@ export class ChatSession implements ChatSessionLike {
    */
   private lastDistillationPath: string | null = null;
 
+  /**
+   * v4.11 Slice 3 — mid-turn cancel state.
+   *
+   * `currentAbortController`: per-turn AbortController. Non-null ONLY
+   * while a turn is in flight (`runAgentTurn` constructs at entry,
+   * clears in finally). Read by the SIGINT dispatcher to decide
+   * between "abort the active turn" vs "graceful shutdown the REPL".
+   *
+   * `lastInterruptAt`: timestamp of the most recent first-press Ctrl+C
+   * during an active turn. Used to drive the two-press force-exit
+   * window (default 2s). Reset to 0 on turn settle and on window
+   * expiry so a stale first-press doesn't fast-path the next turn.
+   *
+   * `activeTurnId` / `nextTurnId`: monotonic per-turn id stamped on
+   * callback closures so late stream/tool events from a cancelled
+   * turn drop silently instead of painting into the next turn.
+   * R1 Tier-1 mitigation per the Phase A audit. Flat fields by design
+   * — the full TurnState refactor is a separate slice.
+   *
+   * `FORCE_EXIT_WINDOW_MS`: the window during which a second Ctrl+C
+   * is interpreted as "force exit the REPL" rather than "cancel a
+   * second turn". 2000ms matches the audit's A6.2 default.
+   */
+  private currentAbortController: AbortController | null = null;
+  private lastInterruptAt = 0;
+  private activeTurnId:   number | null = null;
+  private nextTurnId      = 0;
+
+  /**
+   * v4.11 Slice B — bounded per-turn history snapshot stack for /undo.
+   * A copy of `history` is pushed at the start of each turn (capped at
+   * UNDO_MAX_SNAPSHOTS, oldest dropped). In-memory only.
+   */
+  private static readonly UNDO_MAX_SNAPSHOTS = 20;
+  private undoStack: Message[][] = [];
+  private static readonly FORCE_EXIT_WINDOW_MS = 2000;
+
   constructor(private opts: ChatSessionOptions) {
     this.currentProviderId = opts.initialProviderId;
     this.currentModelId = opts.initialModelId;
@@ -557,6 +614,43 @@ export class ChatSession implements ChatSessionLike {
   }
   clearHistory(): void {
     this.history = [];
+    // v4.11 Slice B — a full wipe invalidates the per-turn undo stack;
+    // resurrecting pre-clear turns via /undo would be surprising.
+    this.undoStack = [];
+  }
+  /**
+   * v4.11 Slice B — restore the history captured before the most recent
+   * turn (in-memory only). Returns false when there's nothing to undo.
+   * The persisted session (`SessionManager.recordTurn`) is intentionally
+   * NOT reverted — resuming a saved session restores full history.
+   */
+  undoLastTurn(): boolean {
+    const snapshot = this.undoStack.pop();
+    if (!snapshot) return false;
+    this.history = snapshot;
+    return true;
+  }
+  /**
+   * v4.11 Slice C — recover the last turn's user prompt, then revert to
+   * before that turn (reusing the /undo snapshot stack). Returns the
+   * prompt text for the caller to re-dispatch, or null when there is no
+   * prior turn (empty stack) or the last prompt is unrecoverable
+   * (non-string / empty content). Memory writes are NOT reverted — same
+   * in-memory-only contract as /undo.
+   */
+  retryLastTurn(): string | null {
+    if (this.undoStack.length === 0) return null;
+    // The most recent user message is the last turn's prompt (each turn
+    // adds exactly one role:'user' message at its start).
+    const lastUser = [...this.history]
+      .reverse()
+      .find((m) => m.role === 'user' && typeof m.content === 'string');
+    if (!lastUser || typeof lastUser.content !== 'string' || lastUser.content.length === 0) {
+      return null;
+    }
+    const input = lastUser.content;
+    this.undoLastTurn();
+    return input;
   }
   getCurrentProvider(): string {
     return this.currentProviderId;
@@ -637,7 +731,13 @@ export class ChatSession implements ChatSessionLike {
     let sigtermHandler: (() => Promise<void>) | null = null;
     let exitHandler: (() => void) | null = null;
     if (this.opts.installSignalHandler !== false) {
-      const makeHandler = (sig: SessionExitPath) => async () => {
+      // v4.11 Slice 3 — graceful-shutdown helper extracted so the new
+      // SIGINT dispatcher can call it on the "second press" branch
+      // without duplicating the existing pre-flight + summary
+      // pipeline. Preserves the exact pre-Slice-3 SIGTERM behaviour
+      // (SIGTERM still routes here directly — no two-press semantics
+      // for SIGTERM, which has no human-typing context to disambiguate).
+      const gracefulShutdown = async (sig: SessionExitPath): Promise<void> => {
         this.opts.display.write('\n');
         this.opts.display.dim(`Got ${sig.toUpperCase()} — saving session before exit…`);
         // v4.10 Slice 10.7 — stop channel adapters BEFORE the
@@ -675,8 +775,61 @@ export class ChatSession implements ChatSessionLike {
         this.opts.display.dim('Goodbye.');
         process.exit(0);
       };
-      sigintHandler  = makeHandler('sigint');
-      sigtermHandler = makeHandler('sigterm');
+      // v4.11 Slice 3 — two-press SIGINT dispatcher (Phase A audit A6.2).
+      //
+      // State machine:
+      //   1. No active turn (composer idle)        → graceful shutdown
+      //      (preserves pre-Slice-3 behaviour exactly so the v4.10.0
+      //      muscle memory still applies at the prompt).
+      //   2. Active turn AND first press           → abort the live
+      //      AbortController + dim hint exposing the second-press
+      //      escape hatch. REPL stays alive; the agent loop sees
+      //      signal.aborted at its next iteration / pre-tool / mid-
+      //      fetch boundary and returns finishReason='interrupted'.
+      //   3. Active turn AND second press within
+      //      FORCE_EXIT_WINDOW_MS of the first        → graceful
+      //      shutdown. We honour the user's "I really mean it"
+      //      gesture; session_summary still runs with its existing
+      //      1s adapter-stop + 4s summary caps.
+      //   4. Active turn AND second press AFTER the window expires
+      //      → treat as a fresh first press (the previous turn must
+      //      have settled and started a new one; the lastInterruptAt
+      //      reset in runAgentTurn's finally already covers this,
+      //      but the window check is the belt-and-braces guard).
+      //
+      // SIGTERM keeps the legacy direct-to-graceful path — operators
+      // and supervisors expect immediate termination, not a two-press
+      // dance.
+      sigintHandler = async () => {
+        const now      = Date.now();
+        const ctrl     = this.currentAbortController;
+        const hasTurn  = ctrl !== null;
+        const inWindow = now - this.lastInterruptAt
+                       < ChatSession.FORCE_EXIT_WINDOW_MS;
+
+        if (!hasTurn) {
+          await gracefulShutdown('sigint');
+          return;
+        }
+        if (inWindow) {
+          // Second press inside the window — user really wants out.
+          await gracefulShutdown('sigint');
+          return;
+        }
+        // First press during an active turn — abort, surface the
+        // escape hatch, stay alive. The agent's catch will route
+        // the resulting AbortError to finishReason='interrupted'.
+        this.lastInterruptAt = now;
+        try {
+          ctrl?.abort();
+        } catch { /* defensive — abort() can't throw, but cheap insurance */ }
+        try {
+          this.opts.display.dim(
+            'Interrupting turn — press Ctrl+C again within 2s to force-quit.',
+          );
+        } catch { /* dim() should never throw; defensive */ }
+      };
+      sigtermHandler = async () => { await gracefulShutdown('sigterm'); };
       process.on('SIGINT',  sigintHandler);
       process.on('SIGTERM', sigtermHandler);
 
@@ -855,6 +1008,14 @@ export class ChatSession implements ChatSessionLike {
             break;
           }
           if (result.clearHistory) this.history = [];
+          // v4.11 Slice C — /retry re-dispatch. The command already
+          // reverted the last turn and handed back its prompt; run it as
+          // a normal fresh turn (with the same bottom rule the direct
+          // chat path emits below).
+          if (typeof result.rerun === 'string' && result.rerun.length > 0) {
+            this.opts.display.write(`  ${this.opts.display.rule()}\n`);
+            await this.runAgentTurn(result.rerun);
+          }
           // Phase 23.6 — v3 doesn't print a status footer after slash
           // commands; the footer belongs to agent turns only.
           continue;
@@ -1283,6 +1444,13 @@ export class ChatSession implements ChatSessionLike {
   }
 
   private async runAgentTurn(userInput: string): Promise<void> {
+    // v4.11 Slice B — snapshot pre-turn history for /undo (in-memory,
+    // bounded). Captured before any mutation; `this.history` is only
+    // reassigned at end-of-turn, so this copy is the true pre-turn state.
+    this.undoStack.push([...this.history]);
+    if (this.undoStack.length > ChatSession.UNDO_MAX_SNAPSHOTS) {
+      this.undoStack.shift();
+    }
     // v4.5 Phase 8b — daemon-scheduling intent check on the user's
     // initial message. Classifies regex hits like "every day at",
     // "watch this folder", "when an email arrives" — and queues a
@@ -1290,6 +1458,17 @@ export class ChatSession implements ChatSessionLike {
     // doesn't crowd the agent's actual reply). Engine handles
     // budget + dismissal.
     let _deferredTip: { slot: string; message: string } | null = null;
+    // v4.11 Slice 1 — explicit streaming handoff boundary. When
+    // frame mode is active the composer unmounts on submit (before
+    // this function is called); pauseFrame is advisory here so the
+    // boundary is grep-able and ready for the persistent-mount
+    // model later slices switch to. resumeFrame fires in the finally
+    // block below regardless of how the turn ended.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { isFrameModeRequested, pauseFrame } = require('./frame') as typeof import('./frame');
+      if (isFrameModeRequested()) await pauseFrame();
+    } catch { /* frame module is best-effort; never break a turn */ }
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const { getSuggestionEngine } = require('../../core/v4/suggestionEngine');
@@ -1312,6 +1491,49 @@ export class ChatSession implements ChatSessionLike {
       this.opts.display.write('\n');
       return;
     }
+
+    // v4.11 Slice 3 — mid-turn cancel plumbing (Phase A audit A6.1 + R1).
+    //
+    // (a) Mint a per-turn AbortController; expose it to the SIGINT
+    //     dispatcher via the shared `currentAbortController` field.
+    //     The signal threads through `agent.runConversation` →
+    //     `RunConversationOptions.signal` → `_currentSignal` → loop
+    //     iteration / pre-tool boundary checks → provider adapters'
+    //     forwarded fetch signal. All of those checkpoints already
+    //     existed in HEAD (v4.6 prep); this is the wake-up.
+    //
+    // (b) Mint a monotonic `turnId` and stamp it on every callback
+    //     closure we hand to `runConversation`. R1 Tier-1 mitigation:
+    //     a late stream/tool event from a CANCELLED turn arriving
+    //     after the next turn starts will see `this.activeTurnId`
+    //     advanced and silently no-op. Prevents stray paint /
+    //     transcript mutation from the race window between abort
+    //     and the underlying SSE reader's first dead-byte.
+    //
+    // The controller + turnId are cleared in the finally block at the
+    // bottom of this method (success, error, AND abort paths). The
+    // SIGINT dispatcher reads `currentAbortController` snapshotted at
+    // press time so a turn that settles mid-keypress is safe — the
+    // pre-snapshot reference is a no-op `.abort()` on a settled
+    // controller per the WHATWG spec.
+    const turnId    = ++this.nextTurnId;
+    const turnAbort = new AbortController();
+    this.currentAbortController = turnAbort;
+    this.activeTurnId           = turnId;
+    // Helper: wrap a callback so it only fires for the live turn.
+    // R1 guard — late events from a cancelled turn early-return.
+    // `wrapTurnId` accepts (callback, undefined) and returns
+    // undefined so the agent's optional-call site (`runOptions.onX?.()`)
+    // stays untouched when streaming is disabled.
+    const wrapTurnId = <Args extends unknown[]>(
+      fn: ((...args: Args) => void) | undefined,
+    ): ((...args: Args) => void) | undefined => {
+      if (!fn) return undefined;
+      return (...args: Args): void => {
+        if (this.activeTurnId !== turnId) return;
+        fn(...args);
+      };
+    };
 
     // Phase 22 Task 4: status bar reflects the live phase. Set on
     // entry, cleared in both success and error paths below.
@@ -1378,6 +1600,39 @@ export class ChatSession implements ChatSessionLike {
         replRunId = null;
       }
     }
+
+    // v4.11 Slice 4 — build the per-turn TurnRuntimeContext now that
+    // `replRunId` is resolved. The SubagentCoordinator reads this via
+    // `agent.getCurrentTurnContext()` when a spawn / fanout tool
+    // fires; threads the parent's AbortSignal + cost accumulator +
+    // trace emitter through to every child run. Cleared in the
+    // finally below regardless of how the turn ended.
+    //
+    // The trace emitter routes coordinator lifecycle events through
+    // `runStore.emitEventRich` keyed on the PARENT's runId so
+    // `aiden runs show` sees parent + children together. Failure to
+    // persist must never break the turn — every emit is wrapped in
+    // try/catch.
+    const turnContext = buildTurnRuntimeContext({
+      turnId,
+      parentAgentId: 'repl-parent',
+      signal:        turnAbort.signal,
+      traceEmitter:  (event) => {
+        if (!replRunStore || replRunId === null) return;
+        try {
+          replRunStore.emitEventRich({
+            runId:      replRunId,
+            category:   'subagent',
+            kind:       event.eventType,
+            name:       event.eventType,
+            sessionId:  this.sessionId ?? null,
+            payload:    event as unknown as Record<string, unknown>,
+            visibility: 'system',
+            source:     'subagent',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
+      },
+    });
 
     // v4.10 Slice 10.8 — durable Task-lite creation, alongside the
     // per-turn run row. Auto-create per user-message turn (Phase B
@@ -1607,23 +1862,57 @@ export class ChatSession implements ChatSessionLike {
     // trigger creation — honest degradation, no fake estimates.
     let progressBar: ReturnType<typeof createProgressBar> | null = null;
 
+    // v4.11 Slice 1 — per-turn delta coalescer (logic layer). Batches
+    // subsequent deltas into one streamPartial write; the first delta of
+    // each segment still paints immediately (see onDelta below).
+    // `flushStreamDeltas` is the single sink that reaches the renderer —
+    // every paint still goes through display.streamPartial unchanged.
+    let coalesceBuf = '';
+    let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+    let streamSegmentPainted = false;
+    const flushStreamDeltas = (): void => {
+      if (coalesceTimer !== null) { clearTimeout(coalesceTimer); coalesceTimer = null; }
+      if (coalesceBuf.length === 0) return;
+      const batch = coalesceBuf;
+      coalesceBuf = '';
+      progressBar?.hide();
+      this.opts.display.streamPartial(batch);
+    };
+
     try {
       const result = await this.opts.agent.runConversation(baseHistory, {
         stream: streamingEnabled,
+        // v4.11 Slice 3 — wake the dead AbortSignal wire (Phase A
+        // audit A6.1). All downstream consumers (between-iter check,
+        // pre-tool check, callProvider forward into adapters) were
+        // already wired in v4.6 prep; this single line is the
+        // upstream-side trigger.
+        signal: turnAbort.signal,
+        // v4.11 Slice 4 — expose the per-turn runtime context to
+        // tools via `agent.getCurrentTurnContext()`. The spawn /
+        // fanout facades read it to thread parent signal + cost
+        // accumulator + trace emitter through to the coordinator.
+        turnContext,
         onFirstDelta: streamingEnabled
-          ? () => {
+          ? wrapTurnId(() => {
               stopIndicatorOnce();
               streamingActive = true;
+              // v4.11 Slice 1 — a new stream segment is starting (this
+              // fires per provider-call iteration). Flush any residual
+              // from the prior segment and arm the immediate first paint
+              // so each segment's first token lands without batching delay.
+              flushStreamDeltas();
+              streamSegmentPainted = false;
               // v4.1.5 Phase 1d (Q-OBV-b) — separator emission MOVED
               // out of onFirstDelta because that callback fires per
               // provider-call iteration (firstDeltaFired resets each
               // callProvider invocation). The separator-emit now
               // lives in onDelta below, gated by `firstStreamByteSeen`
               // which only flips once per turn.
-            }
+            })
           : undefined,
         onDelta: streamingEnabled
-          ? (text: string) => {
+          ? wrapTurnId((text: string) => {
               // v4.1.5 Phase 1d (Q-OBV-b) — definitive separator
               // emission point. This is the FIRST text byte landing
               // on screen this turn. Fires the muted rule BEFORE
@@ -1640,19 +1929,34 @@ export class ChatSession implements ChatSessionLike {
                 firstStreamByteSeen = true;
                 emitToolReplySeparator();
               }
-              // v4.1.4 Part 1.6: bar lives ABOVE streamed text. Hide
-              // it before each delta writes so the stream output
-              // doesn't land on the bar's line. The bar repaints on
-              // the next `onProgress` event (which Anthropic emits
-              // frequently enough that the bar stays usefully visible).
-              progressBar?.hide();
-              this.opts.display.streamPartial(text);
-            }
+              // v4.11 Slice 1 — first delta of the segment paints
+              // immediately (TTFT untouched); subsequent deltas batch
+              // until the timer or size threshold, then flush as one
+              // streamPartial write. progressBar.hide() runs on every
+              // paint path (here and in flushStreamDeltas) — the bar
+              // lives ABOVE streamed text and repaints on the next
+              // onProgress event.
+              if (!streamSegmentPainted) {
+                streamSegmentPainted = true;
+                progressBar?.hide();
+                this.opts.display.streamPartial(text);
+              } else {
+                coalesceBuf += text;
+                if (coalesceBuf.length >= STREAM_COALESCE_MAX_CHARS) {
+                  flushStreamDeltas();
+                } else if (coalesceTimer === null) {
+                  coalesceTimer = setTimeout(flushStreamDeltas, STREAM_COALESCE_MS);
+                }
+              }
+            })
           : undefined,
         onToolCallStart: streamingEnabled
-          ? (call) => {
+          ? wrapTurnId((call: import('../../providers/v4/types').ToolCallRequest) => {
+              // v4.11 Slice 1 — segment boundary: flush buffered prose
+              // before the tool indicator paints, preserving order.
+              flushStreamDeltas();
               this.opts.display.streamToolIndicator(call.name);
-            }
+            })
           : undefined,
         // v4.8.0 Phase 2.3 fix-2 — uiOnly events route to the display
         // layer. The Phase 2.1 dispatch branch in aidenAgent.ts skips
@@ -1669,7 +1973,12 @@ export class ChatSession implements ChatSessionLike {
         // through createOnUiEventHandler so the integration test
         // exercises the EXACT same code path production uses
         // (mock-blindness fix; see Slice 10.1b retrospective).
-        onUiEvent: createOnUiEventHandler({
+        // v4.11 Slice 3 — also turnId-guard the ui-event handler. A
+        // late ui_task_update from a cancelled turn would otherwise
+        // paint a trail row attributed to the wrong turn. The factory
+        // returns a stateless closure; wrapping it preserves the
+        // existing renderer + run_events tee semantics for live events.
+        onUiEvent: wrapTurnId(createOnUiEventHandler({
           display:           this.opts.display,
           runStore:          replRunStore,
           runId:             replRunId,
@@ -1677,9 +1986,9 @@ export class ChatSession implements ChatSessionLike {
           // emit row gets session_id without the writer JOIN-ing to runs.
           sessionId:         this.sessionId ?? null,
           stopIndicatorOnce,
-        }),
+        })),
         onProgress: streamingEnabled
-          ? (outputTokens: number, maxTokens?: number) => {
+          ? wrapTurnId((outputTokens: number, maxTokens?: number) => {
               if (indicatorStopped === false) return;
               // Lazy-create on first event. The indicator must already
               // be stopped (first delta arrived) so the bar paints on
@@ -1696,18 +2005,30 @@ export class ChatSession implements ChatSessionLike {
                 );
               }
               progressBar.update(outputTokens, maxTokens);
-            }
+            })
           : undefined,
       });
       stopIndicatorOnce();
       // Hide the progress bar before any post-stream content
       // (statusFooter, the next prompt) lands on its line.
       progressBar?.hide();
-      if (streamingActive) this.opts.display.streamComplete();
+      if (streamingActive) { flushStreamDeltas(); this.opts.display.streamComplete(); }
 
       this.history = result.messages;
       this.totalUsage.inputTokens += result.totalUsage.inputTokens;
       this.totalUsage.outputTokens += result.totalUsage.outputTokens;
+      // v4.11 Slice 4 — roll subagent token spend into the parent
+      // turn's totalUsage so the post-turn footer + session totals
+      // reflect both parent and child cost. The coordinator pushed
+      // per-child contributions into `turnContext.costAccumulator`
+      // synchronously as children completed; reading it here (after
+      // runConversation returned) is race-free because the agent
+      // loop awaits every tool dispatch (including the spawn /
+      // fanout facade calls) before returning.
+      if (turnContext.costAccumulator.totalTokens > 0) {
+        this.totalUsage.inputTokens  += turnContext.costAccumulator.inputTokens;
+        this.totalUsage.outputTokens += turnContext.costAccumulator.outputTokens;
+      }
 
       // v4.6 Phase 2Q-B — finalize the REPL parent-run row on success.
       // `finishReason` from the agent loop maps directly into our DB
@@ -1770,6 +2091,54 @@ export class ChatSession implements ChatSessionLike {
       // (files_touched / tools_used) at exit.
       if (result.toolCallTrace && result.toolCallTrace.length > 0) {
         this.sessionToolTrace.push(...result.toolCallTrace);
+      }
+
+      // v4.11 — artifact registry capture. Register files this turn
+      // produced (successful, verifier-ok file-producing tools) with
+      // provenance back to the run + task. Reuses the already-walked
+      // toolCallTrace; best-effort so a capture failure never breaks the
+      // turn (same discipline as the per-turn task create).
+      const artifactStore = this.opts.replArtifactStore;
+      if (artifactStore && this.sessionId && result.toolCallTrace) {
+        for (const t of result.toolCallTrace) {
+          try {
+            const a = captureArtifactFromTrace(t);
+            if (!a) continue;
+            const artifactId = artifactStore.create({
+              path:      a.path,
+              kind:      a.kind,
+              tool:      t.name,
+              action:    a.action,
+              sessionId: this.sessionId,
+              runId:     replRunId ?? null,
+              taskId:    replTaskId ?? null,
+              bytes:     a.bytes,
+            });
+            // Close the reserved tasks.artifactIds field.
+            if (replTaskId && this.opts.replTaskStore) {
+              this.opts.replTaskStore.appendArtifactId(replTaskId, artifactId);
+            }
+          } catch (err) {
+            // eslint-disable-next-line no-console
+            console.warn('[artifacts] capture failed:',
+              err instanceof Error ? err.message : String(err));
+          }
+        }
+      }
+
+      // v4.11 Slice 3 — surface an explicit "(turn interrupted)"
+      // confirmation when the agent loop returned finishReason
+      // ='interrupted'. Without this, a cancelled turn drops the user
+      // back at a fresh prompt with no visible confirmation that the
+      // press took effect — easily mistaken for "Ctrl+C did nothing"
+      // and double-pressed into force-exit unintentionally. Dim so
+      // it sits between the tool trail and the post-turn footer
+      // without screaming. Skips when the model managed to emit
+      // partial finalContent before abort (rare; the regular reply
+      // path renders that content).
+      if (result.finishReason === 'interrupted' && !result.finalContent) {
+        emitToolReplySeparator();
+        this.opts.display.dim('(turn interrupted)');
       }
 
       // v4.1.6 spike (TCE) — tool-loop terminal surface. When the
@@ -1880,7 +2249,54 @@ export class ChatSession implements ChatSessionLike {
       // so it doesn't leak across the boundary into the error chrome
       // or the next prompt.
       progressBar?.hide();
-      if (streamingActive) this.opts.display.streamComplete();
+      if (streamingActive) { flushStreamDeltas(); this.opts.display.streamComplete(); }
+      // v4.11 Slice 3 — abort-aware early return. If the thrown error
+      // is an AbortError (or the turn's signal aborted before the
+      // agent's own catch could route it), this is a USER ACTION not
+      // a system fault: skip the printError + capability-card chrome
+      // and just dim "(turn interrupted)" + cycle the status back to
+      // ready. Mirrors the success-path interrupted branch so a
+      // throw-on-cancel vs return-on-cancel race ends up at the same
+      // user-visible surface.
+      const _abortHit =
+        (err instanceof Error && err.name === 'AbortError') ||
+        turnAbort.signal.aborted;
+      if (_abortHit) {
+        // v4.11 regression patch — stop the indicator BEFORE printing
+        // the dim line so the setInterval can't paint a stray
+        // "calling provider… (Ns)" line on top of our cancel
+        // confirmation. The success-path interrupted branch already
+        // had this implicit (stopIndicatorOnce fired right after
+        // runConversation returned cleanly); the throw-path was the
+        // gap. Idempotent — safe even if onFirstDelta already stopped.
+        stopIndicatorOnce();
+        this.opts.display.dim('(turn interrupted)');
+        // Status footer still renders so the user sees the elapsed
+        // pill — matches the success path's chrome.
+        if (replParentRunRef) {
+          replParentRunRef.runId     = null;
+          replParentRunRef.sessionId = null;
+        }
+        if (replRunStore && replRunId !== null) {
+          try {
+            replRunStore.setStatus(replRunId, 'interrupted', {
+              finishReason: 'interrupted',
+              completedAt:  Date.now(),
+            });
+          } catch { /* persistence faults must not crash REPL */ }
+        }
+        if (replTaskStore && replTaskId !== null) {
+          try { replTaskStore.setStatus(replTaskId, 'cancelled'); }
+          catch { /* persistence faults must not crash REPL */ }
+        }
+        this.setStatusState({ kind: 'ready' });
+        this.lastTurnElapsedMs = Date.now() - turnStartedAt;
+        this.turnCount += 1;
+        this.lastTurnOutcome = 'muted';
+        this.opts.display.write(`\n  ${this.opts.display.rule()}\n`);
+        this.renderStatusLine();
+        return;
+      }
       // v4.6 Phase 2Q-B — finalize REPL parent-run row on error.
       // Visible in `aiden runs list` as a failed top-level row so
       // operators can correlate a chat error with whatever children
@@ -1969,6 +2385,39 @@ export class ChatSession implements ChatSessionLike {
           this.opts.display.dim(`[loop-trace] wrote ${snapPath}`);
         }
       } catch { /* defensive */ }
+    } finally {
+      // v4.11 Slice 3 — release the per-turn cancel handles. ORDER
+      // MATTERS:
+      //   1. Drop activeTurnId FIRST so any late callbacks already
+      //      in flight (race window between abort and SSE reader's
+      //      first dead byte) see a mismatch and silently no-op.
+      //   2. Null the controller ref next — a stray Ctrl+C arriving
+      //      between turns now sees `currentAbortController === null`
+      //      and routes to graceful shutdown (the v4.10.0 behaviour
+      //      at composer-idle).
+      //   3. Reset the two-press timestamp so a previous turn's
+      //      first-press doesn't fast-path force-exit on the next
+      //      turn's first Ctrl+C.
+      // Only clear when WE own the active slot — defensive against a
+      // race where a nested runAgentTurn (impossible in production
+      // today, cheap insurance for tests / future surfaces) re-armed.
+      if (this.activeTurnId === turnId) {
+        this.activeTurnId = null;
+      }
+      if (this.currentAbortController === turnAbort) {
+        this.currentAbortController = null;
+      }
+      this.lastInterruptAt = 0;
+
+      // v4.11 Slice 1 — explicit streaming-handoff boundary, exit
+      // side. Mirrors the pauseFrame at the top of runAgentTurn so
+      // the legacy indicator gate releases regardless of how the
+      // turn ended (success, error, throw).
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { isFrameModeRequested, resumeFrame } = require('./frame') as typeof import('./frame');
+        if (isFrameModeRequested()) await resumeFrame();
+      } catch { /* never break a turn on frame cleanup */ }
     }
   }
 
@@ -2675,6 +3124,15 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
   // aidenPrompt component (ghost text + slash dropdown + history nav).
   const useLegacyPrompt = isNoUiMode() || !opts.commands;
 
+  // v4.11 Slice 1 — opt-in frame renderer.
+  // When AIDEN_RENDERER=frame is set (or display.renderer === 'frame'
+  // in config), readLine routes through the renderer-owned composer
+  // (cli/v4/frame). Cursor + cell positioning is owned by Ink; the
+  // legacy aidenPrompt path is untouched and stays the default.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const frameMod = require('./frame') as typeof import('./frame');
+  const frameModeOn = frameMod.isFrameModeRequested();
+
   return {
     async readLine(prompt, readOpts) {
       try {
@@ -2690,6 +3148,20 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
         // Fetch history just-in-time so each read sees the latest
         // (the user's previous turn was just appended).
         const history = opts.loadHistory ? await opts.loadHistory() : [];
+        // v4.11 Slice 1 — frame-mode branch. Bypasses aidenPrompt
+        // entirely; the renderer-owned composer captures input and
+        // hands back the string on Enter. History prefetch above is
+        // intentionally still done (ghost text / history nav land
+        // here in later slices and the legacy fallback wants the
+        // same warm-cache shape).
+        if (frameModeOn) {
+          const value = await frameMod.readLineFramed({ prompt: `${prompt} ` });
+          const trimmed = (value ?? '').trim();
+          if (trimmed.length > 0) {
+            try { await appendHistory(trimmed); } catch { /* best-effort */ }
+          }
+          return value ?? '';
+        }
         const value = await aidenPrompt({
           message:  prompt,
           commands: opts.commands ?? [],

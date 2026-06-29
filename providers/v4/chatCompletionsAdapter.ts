@@ -96,6 +96,47 @@ const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_MAX_TOKENS  = 4096;
 const BACKOFF_BASE_MS     = 1000;
 
+/**
+ * v4.11 hi-budget fix — per-provider `max_tokens` cap.
+ *
+ * Most providers (Anthropic, OpenAI) bill rate limits on actual
+ * completion tokens, so `DEFAULT_MAX_TOKENS = 4096` costs nothing
+ * unless the model genuinely emits that much. **Groq is the
+ * exception**: its TPM (tokens-per-minute) accounting charges
+ * `prompt_tokens + max_tokens` — i.e. the *reserved* output budget
+ * is billed up front whether the model uses it or not.
+ *
+ * On the 12K free tier this turns into a fixed 4K/call tax that
+ * pushes a bare `"hi"` over the cap even on the `standard` tool
+ * profile. Capping Groq at 2048 frees ~2K TPM headroom per request
+ * without truncating realistic responses (most turns reply in
+ * under 1K tokens; the few that need more can be served by a
+ * different provider).
+ *
+ * Keyed by lowercase provider name (matches
+ * `ChatCompletionsAdapterOptions.providerName` after normalisation).
+ * Per-call `input.maxTokens` still wins over this map — callers
+ * stay in control when they need a different bound.
+ */
+const GROQ_MAX_OUTPUT_TOKENS = 2048;
+const MAX_TOKENS_BY_PROVIDER: Readonly<Record<string, number>> = {
+  groq: GROQ_MAX_OUTPUT_TOKENS,
+};
+
+/**
+ * Resolve the default `max_tokens` for this adapter instance.
+ * Resolution order (highest wins):
+ *   1. Per-call `input.maxTokens` (handled at the call site)
+ *   2. Provider-specific cap from `MAX_TOKENS_BY_PROVIDER`
+ *   3. `DEFAULT_MAX_TOKENS` (4096)
+ *
+ * Exposed for tests + the cli `/doctor` surface.
+ */
+export function resolveDefaultMaxTokens(providerName: string): number {
+  const key = providerName.trim().toLowerCase();
+  return MAX_TOKENS_BY_PROVIDER[key] ?? DEFAULT_MAX_TOKENS;
+}
+
 // ── Wire types (private, narrow on purpose) ─────────────────────────────
 
 interface WireToolFunction {
@@ -229,7 +270,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     const body: WireRequestBody = {
       model:      this.model,
       messages:   encodeMessages(input.messages),
-      max_tokens: input.maxTokens ?? DEFAULT_MAX_TOKENS,
+      max_tokens: input.maxTokens ?? resolveDefaultMaxTokens(this.providerName),
     };
     if (input.tools && input.tools.length > 0) {
       body.tools       = input.tools.map(toWireTool);

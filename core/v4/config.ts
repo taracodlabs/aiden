@@ -47,10 +47,43 @@ export interface AidenConfig {
     max_turns: number;
     approval_mode: ApprovalMode;
     personalities?: Record<string, string>;
+    /**
+     * v4.11 toolset grouping — selects which built-in tool profile the
+     * REPL agent loads at boot. One of `minimal`, `standard`, `full`,
+     * `custom`. Default `standard`. Env override:
+     * `AIDEN_TOOL_PROFILE=…` wins over this value. See
+     * `core/v4/toolProfiles.ts` for the toolset-list each profile
+     * resolves to.
+     */
+    tool_profile?: string;
+    /**
+     * v4.11 toolset grouping — only consulted when `tool_profile` is
+     * `custom`. Explicit list of toolset tags (e.g.
+     * `['files', 'terminal', 'web']`) that override every built-in
+     * profile. Malformed / empty falls back to the `standard` profile.
+     */
+    tool_profile_toolsets?: string[];
+    /**
+     * v4.11 Obsidian-compatible vault mirror. When set, Aiden's memory
+     * artifacts (MEMORY.md / USER.md / PROJECT.md entries + session
+     * distillations + SOUL.md mirror) export as per-entry markdown
+     * notes under `<vault_path>/aiden-memory/`. Read-only export —
+     * vault edits do NOT flow back into Aiden's memory in v1.
+     * Env override: `AIDEN_VAULT_PATH=...` wins over this value.
+     * Empty / unset disables the exporter entirely (no-op).
+     */
+    vault_path?: string;
   };
   display: {
     skin: string;
     streaming: boolean;
+    /**
+     * v4.11 Slice 1 — renderer selection.
+     *   undefined | 'legacy' → existing aidenPrompt path (default)
+     *   'frame'              → renderer-owned composer (cli/v4/frame)
+     * Env var `AIDEN_RENDERER` overrides this at runtime.
+     */
+    renderer?: 'legacy' | 'frame';
   };
   providers?: Record<
     string,

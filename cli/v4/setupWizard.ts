@@ -51,6 +51,7 @@ import { boxBottom, boxLine, boxTopTitled } from './box';
 // the cost of broken unit tests under the test runtime.
 import { renderSuccessScreen } from './onboarding/successScreen';
 import { pickProvider } from './onboarding/providerPicker';
+import { backNavInput, BACK, type BackSentinel } from './onboarding/backNavInput';
 // v4.9.5 Slice 1 — curated skills Step 4.
 import { runConfirm } from './confirmPrompt';
 import { runCuratedSetupFlow } from './skills/curatedSetupFlow';
@@ -178,11 +179,11 @@ export const PROVIDERS: ProviderOption[] = [
     kind: 'key',
     envVar: 'TOGETHER_API_KEY',
     keyUrl: 'https://api.together.xyz/settings/api-keys',
-    defaultModel: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput',
+    defaultModel: 'openai/gpt-oss-120b',
     models: [
-      'Qwen/Qwen3-235B-A22B-Instruct-2507-tput',
+      'openai/gpt-oss-120b',
       'meta-llama/Llama-3.3-70B-Instruct-Turbo',
-      'deepseek-ai/DeepSeek-V3',
+      'openai/gpt-oss-20b',
     ],
   },
   // ── Subscription sign-ins ──
@@ -291,8 +292,12 @@ export interface PromptIO {
    * fastest path to a working REPL.
    */
   choose(question: string, choices: string[], defaultIndex?: number): Promise<number>;
-  /** Free-text input. */
-  input(question: string, opts?: { default?: string; mask?: boolean }): Promise<string>;
+  /**
+   * Free-text input. v4.11 — resolves the BACK sentinel when the user
+   * backspaces out of an empty field (custom @inquirer/core prompt). The
+   * test harnesses return plain strings, which remain valid.
+   */
+  input(question: string, opts?: { default?: string; mask?: boolean }): Promise<string | BackSentinel>;
   /** Yes/no confirmation. */
   confirm(question: string, defaultValue?: boolean): Promise<boolean>;
 }
@@ -411,7 +416,12 @@ export async function finalizeWithCuratedStep(deps: FinalizeCuratedDeps): Promis
     // Stage 1: opt-in confirm — v4.9.2 Slice 3 confirm primitive.
     const proceedStage1 = await runConfirm(
       'Install curated skills?',
-      { readLine: (msg) => deps.prompts.input(msg) },
+      // BACK doesn't apply post-config (curated step runs after save);
+      // coerce the sentinel to an empty line.
+      { readLine: async (msg) => {
+        const a = await deps.prompts.input(msg);
+        return a === BACK ? '' : a;
+      } },
       deps.display,
     );
     if (!proceedStage1) return;
@@ -425,7 +435,15 @@ export async function finalizeWithCuratedStep(deps: FinalizeCuratedDeps): Promis
     await runCuratedSetupFlow({
       hub,
       display: deps.display,
-      prompts: deps.prompts,
+      // Curated step runs AFTER save — the BACK sentinel doesn't apply;
+      // coerce it to an empty line so the prompt shape stays Promise<string>.
+      prompts: {
+        ...deps.prompts,
+        input: async (q, opts) => {
+          const a = await deps.prompts.input(q, opts);
+          return a === BACK ? '' : a;
+        },
+      },
     });
   } catch (err) {
     // Curated install NEVER crashes the wizard — surface as warn and
@@ -459,10 +477,13 @@ async function defaultPrompts(): Promise<PromptIO> {
       return Number.parseInt(ans, 10);
     },
     async input(question, opts) {
-      if (opts?.mask) {
-        return inq.password({ message: question, mask: true });
-      }
-      return inq.input({ message: question, default: opts?.default });
+      // v4.11 — back-aware custom prompt (backspace-on-empty → BACK).
+      // Replaces stock inq.input/inq.password; masking handled in-prompt.
+      return backNavInput({
+        message: question,
+        default: opts?.default,
+        mask:    opts?.mask,
+      });
     },
     async confirm(question, defaultValue = false) {
       return inq.confirm({ message: question, default: defaultValue });
@@ -497,7 +518,10 @@ function wizardUserAgent(prompts: PromptIO, display: Display): OAuthUserAgent {
     log: (line: string) => display.write(line + '\n'),
     openBrowser: openOAuthBrowserUrl,
     async prompt(question: string) {
-      return prompts.input(question);
+      // OAuth has its own flow; the BACK sentinel doesn't apply here —
+      // coerce to an empty answer.
+      const a = await prompts.input(question);
+      return a === BACK ? '' : a;
     },
     async sleep(ms: number) {
       return new Promise<void>((r) => setTimeout(r, ms));
@@ -792,6 +816,27 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     return `\n  ${bar}  ${title}  ${sub}\n`;
   };
 
+  // v4.11 — back-navigation (Approach B, hybrid). Each step uses its most
+  // natural affordance: a visible "← Back" choice on the model MENU, and
+  // BACKSPACE-on-empty on text inputs (the back-aware `prompts.input`
+  // resolves the BACK sentinel — see onboarding/backNavInput.ts). Both
+  // return to the provider picker via `continue outer`. The flow's state
+  // (apiKey/modelId/baseUrl) is loop-scoped, so re-entry clears prior
+  // input automatically — no manual reset. Nothing is persisted until
+  // finalize (writes live at the tail, past every back point), so back
+  // needs no rollback. Step 1 (provider pick) has no back — nothing is
+  // behind it.
+  const BACK_CHOICE = '← Back (switch provider)';
+  // v4.11 — discoverable menu footer (dim), matching the approval-box
+  // hint style. The back affordance on a menu is the "← Back" row above
+  // (selected with Enter), so the hint reads `← back` — NOT `⌫ back`:
+  // stock selects ignore Backspace, so advertising it would mislead.
+  // Only used on the model picker (step 3); step 1 (provider) omits it.
+  const modelMenuHint = display.applyColors(
+    '↑↓ navigate · enter select · ← back',
+    'muted',
+  );
+
   display.write(stepHeader(1));
   display.write('  Welcome — let\'s pick a provider.\n');
   display.write(
@@ -1021,7 +1066,9 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     }
   } else if (provider.kind === 'key' || provider.kind === 'subscription') {
     if (provider.envVar) {
-      apiKey = await prompts.input(`API key for ${provider.shortLabel}`, { mask: true });
+      const ans = await prompts.input(`API key for ${provider.shortLabel}`, { mask: true });
+      if (ans === BACK) continue outer;
+      apiKey = ans;
     }
   }
   // provider.kind === 'custom' — defer credential prompts until AFTER
@@ -1041,16 +1088,21 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     // Legacy curated path — unchanged from pre-Slice-B behaviour.
     if (provider.models && provider.models.length > 1) {
       const modelIndex = await prompts.choose(
-        `Pick a model for ${provider.shortLabel}`,
-        provider.models,
+        `Pick a model for ${provider.shortLabel}\n  ${modelMenuHint}`,
+        [...provider.models, BACK_CHOICE],
       );
+      if (modelIndex === provider.models.length + 1) continue outer; // ← Back
       modelId = provider.models[modelIndex - 1];
     } else if (provider.kind === 'local') {
-      modelId = await prompts.input('Ollama model id', {
+      const ans = await prompts.input('Ollama model id', {
         default: provider.defaultModel ?? 'llama3.1:8b',
       });
+      if (ans === BACK) continue outer;
+      modelId = ans;
     } else if (!modelId) {
-      modelId = await prompts.input('Model id', { default: '' });
+      const ans = await prompts.input('Model id', { default: '' });
+      if (ans === BACK) continue outer;
+      modelId = ans;
     }
   } else {
     const spinner = display.startSpinner(`Fetching available models for ${provider.shortLabel}…`);
@@ -1074,11 +1126,15 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     if (fetchResult.models.length === 0) {
       // No models from live or static catalog — fall back to a free-text input.
       if (provider.kind === 'local') {
-        modelId = await prompts.input('Ollama model id', {
+        const ans = await prompts.input('Ollama model id', {
           default: provider.defaultModel ?? 'llama3.1:8b',
         });
+        if (ans === BACK) continue outer;
+        modelId = ans;
       } else {
-        modelId = await prompts.input('Model id', { default: provider.defaultModel ?? '' });
+        const ans = await prompts.input('Model id', { default: provider.defaultModel ?? '' });
+        if (ans === BACK) continue outer;
+        modelId = ans;
       }
     } else if (fetchResult.models.length === 1) {
       modelId = fetchResult.models[0].id;
@@ -1091,11 +1147,13 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
       );
       const recIdx = fetchResult.models.findIndex((m) => m.recommended);
       const defaultIdx = recIdx >= 0 ? recIdx + 1 : 1;
+      const labelsWithBack = [...labels, BACK_CHOICE];
       const idx = await prompts.choose(
-        `Pick a model for ${provider.shortLabel}`,
-        labels,
+        `Pick a model for ${provider.shortLabel}\n  ${modelMenuHint}`,
+        labelsWithBack,
         defaultIdx,
       );
+      if (idx === labelsWithBack.length) continue outer; // ← Back
       modelId = fetchResult.models[idx - 1].id;
     }
   }
@@ -1103,8 +1161,12 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   // Custom-provider credentials: deferred from step 2 above so the
   // legacy input order (model → baseUrl → apiKey) is preserved.
   if (provider.kind === 'custom') {
-    baseUrl = await prompts.input('Base URL (e.g. https://api.example.com/v1)');
-    apiKey = await prompts.input('API key', { mask: true });
+    const burl = await prompts.input('Base URL (e.g. https://api.example.com/v1)');
+    if (burl === BACK) continue outer;
+    baseUrl = burl;
+    const akey = await prompts.input('API key', { mask: true });
+    if (akey === BACK) continue outer;
+    apiKey = akey;
   }
 
   // Step 3.5: validate the API key against the provider endpoint.
@@ -1240,16 +1302,22 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
           // Reset the attempt counter and re-prompt for a fresh key.
           attempt = 1;
           if (provider.kind === 'custom') {
-            baseUrl = await prompts.input(
+            const burl = await prompts.input(
               'Base URL (e.g. https://api.example.com/v1)',
               { default: baseUrl },
             );
-            apiKey = await prompts.input('API key', { mask: true });
+            if (burl === BACK) continue outer;
+            baseUrl = burl;
+            const akey = await prompts.input('API key', { mask: true });
+            if (akey === BACK) continue outer;
+            apiKey = akey;
           } else {
-            apiKey = await prompts.input(
+            const akey = await prompts.input(
               `API key for ${provider.shortLabel}`,
               { mask: true },
             );
+            if (akey === BACK) continue outer;
+            apiKey = akey;
           }
           continue validation;
         }
@@ -1275,12 +1343,18 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
 
       // Re-prompt for credentials (only reached when attempt < maxAttempts).
       if (provider.kind === 'custom') {
-        baseUrl = await prompts.input('Base URL (e.g. https://api.example.com/v1)', {
+        const burl = await prompts.input('Base URL (e.g. https://api.example.com/v1)', {
           default: baseUrl,
         });
-        apiKey = await prompts.input('API key', { mask: true });
+        if (burl === BACK) continue outer;
+        baseUrl = burl;
+        const akey = await prompts.input('API key', { mask: true });
+        if (akey === BACK) continue outer;
+        apiKey = akey;
       } else {
-        apiKey = await prompts.input(`API key for ${provider.shortLabel}`, { mask: true });
+        const akey = await prompts.input(`API key for ${provider.shortLabel}`, { mask: true });
+        if (akey === BACK) continue outer;
+        apiKey = akey;
       }
       attempt += 1;
     }

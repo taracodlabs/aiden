@@ -39,7 +39,7 @@ Get-Process | Out-String | Set-Clipboard
 
 ### Copy a file path to clipboard
 ```powershell
-Set-Clipboard -Value "C:\Users\shiva\Documents\report.pdf"
+Set-Clipboard -Value "C:\Users\<you>\Documents\report.pdf"
 ```
 
 ### Clear the clipboard

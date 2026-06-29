@@ -13,6 +13,8 @@ import {
   title,
   compress,
   usage,
+  undo,
+  retry,
   yolo,
   skin,
   skills,
@@ -82,9 +84,11 @@ describe('barrel exports', () => {
     // v4.9.0 Slice 1a added /theme (42 → 43).
     // v4.9.1 amendment added /memory + /hooks (43 → 45).
     // v4.9.3 Slice 1b added /greeter (45 → 46).
-    expect(allCommands.length).toBe(46);
+    // v4.11 Slice B added /undo (46 → 47).
+    // v4.11 Slice C added /retry (47 → 48).
+    expect(allCommands.length).toBe(48);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(46);
+    expect(names.size).toBe(48);
   });
 
   it('every command exposes name, description, category', () => {
@@ -324,6 +328,77 @@ describe('/compress', () => {
     expect(compressor.forceCompress).toHaveBeenCalled();
     expect(setHistory).toHaveBeenCalledWith(compressed);
     expect(output()).toMatch(/Compressed/);
+  });
+});
+
+describe('/undo', () => {
+  const baseSession = () => ({
+    history: [],
+    setHistory: () => {},
+    clearHistory: () => {},
+    getCurrentProvider: () => 'anthropic',
+    getCurrentModel: () => 'claude-opus-4-7',
+    setProvider: async () => {},
+  });
+
+  it('reverts and prints the in-memory caveat when a turn exists', async () => {
+    const undoLastTurn = vi.fn(() => true);
+    const { ctx, output } = makeCtx({ session: { ...baseSession(), undoLastTurn } });
+    await undo.handler(ctx as any);
+    expect(undoLastTurn).toHaveBeenCalled();
+    expect(output()).toMatch(/Reverted the last turn/);
+    expect(output()).toMatch(/undoes one turn only/);
+    expect(output()).toMatch(/Memory writes.*not reverted/);
+  });
+
+  it('prints a clean message and does not crash when there is nothing to undo', async () => {
+    const undoLastTurn = vi.fn(() => false);
+    const { ctx, output } = makeCtx({ session: { ...baseSession(), undoLastTurn } });
+    await undo.handler(ctx as any);
+    expect(undoLastTurn).toHaveBeenCalled();
+    expect(output()).toMatch(/Nothing to undo/);
+  });
+
+  it('warns when the session does not support undo', async () => {
+    const { ctx, output } = makeCtx({ session: baseSession() });
+    await undo.handler(ctx as any);
+    expect(output()).toMatch(/not available/i);
+  });
+});
+
+describe('/retry', () => {
+  const baseSession = () => ({
+    history: [],
+    setHistory: () => {},
+    clearHistory: () => {},
+    getCurrentProvider: () => 'anthropic',
+    getCurrentModel: () => 'claude-opus-4-7',
+    setProvider: async () => {},
+  });
+
+  it('returns a rerun signal with the recovered prompt when a turn exists', async () => {
+    const retryLastTurn = vi.fn(() => 'say banana');
+    const { ctx, output } = makeCtx({ session: { ...baseSession(), retryLastTurn } });
+    const result = await retry.handler(ctx as any);
+    expect(retryLastTurn).toHaveBeenCalled();
+    expect(result).toEqual({ rerun: 'say banana' });
+    expect(output()).toMatch(/Re-running your last prompt/);
+  });
+
+  it('prints a clean message and no rerun when there is nothing to retry', async () => {
+    const retryLastTurn = vi.fn(() => null);
+    const { ctx, output } = makeCtx({ session: { ...baseSession(), retryLastTurn } });
+    const result = await retry.handler(ctx as any);
+    expect(retryLastTurn).toHaveBeenCalled();
+    expect((result as any)?.rerun).toBeUndefined();
+    expect(output()).toMatch(/Nothing to retry/);
+  });
+
+  it('warns when the session does not support retry', async () => {
+    const { ctx, output } = makeCtx({ session: baseSession() });
+    const result = await retry.handler(ctx as any);
+    expect((result as any)?.rerun).toBeUndefined();
+    expect(output()).toMatch(/not available/i);
   });
 });
 

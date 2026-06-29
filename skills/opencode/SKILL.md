@@ -57,7 +57,7 @@ Set-Content -Path "$configDir\config.json" -Value $config
 ### 3. Run an interactive coding session
 
 ```powershell
-Set-Location "C:\Users\shiva\myproject"
+Set-Location "C:\Users\<you>\myproject"
 opencode
 # Opens terminal UI — type your task in the prompt
 ```

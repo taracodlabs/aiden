@@ -9,6 +9,8 @@ import {
   type ChatSessionOptions,
 } from '../../../cli/v4/chatSession';
 import { CommandRegistry, type SlashCommand } from '../../../cli/v4/commandRegistry';
+import { undo } from '../../../cli/v4/commands/undo';
+import { retry } from '../../../cli/v4/commands/retry';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { Message } from '../../../providers/v4/types';
@@ -340,6 +342,67 @@ describe('ChatSession.run', () => {
     );
     session.history = [{ role: 'user', content: 'old' }];
     await session.run();
+    expect(session.history).toEqual([]);
+  });
+
+  it('/undo reverts history and the next turn uses the reverted history (Slice B)', async () => {
+    const reg = new CommandRegistry();
+    reg.register(undo);
+    const { agent, calls } = mkAgent();
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        commandRegistry: reg,
+        // inputs run out after "say b" → force-close exits run()
+        promptApi: mkPromptApi({ inputs: ['say a', '/undo', 'say b'] }),
+      }),
+    );
+    await session.run();
+    // Turn 1 baseHistory is just the first user message.
+    expect(calls[0].map((m) => (m as { content: string }).content)).toEqual(['say a']);
+    // The turn AFTER /undo must NOT carry "say a" — proves the revert took
+    // effect AND the next turn builds on the reverted history.
+    expect(calls[1].map((m) => (m as { content: string }).content)).toEqual(['say b']);
+    // In-memory history reflects only the post-undo turn.
+    expect(session.history.map((m) => (m as { content: string }).content)).toEqual(['say b', 'ok']);
+  });
+
+  it('/retry reverts the last turn and re-runs the same prompt fresh (Slice C)', async () => {
+    const reg = new CommandRegistry();
+    reg.register(retry);
+    const { agent, calls } = mkAgent();
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        commandRegistry: reg,
+        // inputs run out after "/retry" → force-close exits run()
+        promptApi: mkPromptApi({ inputs: ['say a', '/retry'] }),
+      }),
+    );
+    await session.run();
+    // Two runConversation calls: the original turn + the /retry re-dispatch.
+    expect(calls).toHaveLength(2);
+    expect(calls[0].map((m) => (m as { content: string }).content)).toEqual(['say a']);
+    // The rerun ran on the REVERTED history (just the re-sent prompt), not
+    // appended after the prior turn — proves revert-then-rerun.
+    expect(calls[1].map((m) => (m as { content: string }).content)).toEqual(['say a']);
+    // Final history is a single fresh turn, not doubled up.
+    expect(session.history.map((m) => (m as { content: string }).content)).toEqual(['say a', 'ok']);
+  });
+
+  it('/retry with no prior turn is a clean no-op (no rerun, no crash)', async () => {
+    const reg = new CommandRegistry();
+    reg.register(retry);
+    const { agent, calls } = mkAgent();
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        commandRegistry: reg,
+        promptApi: mkPromptApi({ inputs: ['/retry'] }),
+      }),
+    );
+    await session.run();
+    expect(calls).toHaveLength(0);
     expect(session.history).toEqual([]);
   });
 

@@ -37,7 +37,7 @@ wsl bash -c "cd /home/user/project && npm install && npm run build"
 ### Pass Windows file to WSL command
 ```powershell
 # Convert Windows path to WSL path
-$winPath = "C:\Users\shiva\data.csv"
+$winPath = "C:\Users\<you>\data.csv"
 $wslPath = wsl wslpath -u $winPath
 wsl -- cat $wslPath | wsl -- grep "ERROR"
 ```
@@ -45,7 +45,7 @@ wsl -- cat $wslPath | wsl -- grep "ERROR"
 ### Access Windows drive from WSL
 ```powershell
 # Windows C: drive is mounted at /mnt/c inside WSL
-wsl -- ls /mnt/c/Users/shiva/Documents
+wsl -- ls /mnt/c/Users/<you>/Documents
 ```
 
 ### List installed WSL distributions
@@ -92,7 +92,7 @@ Write-Host "WSL IP: $wslIp"
 → `wsl --list --verbose` — shows name, state, and WSL version for each distro.
 
 **"Use awk to sum a column in a CSV"**
-→ `wsl -- awk -F',' '{sum += $3} END {print sum}' /mnt/c/Users/shiva/data.csv`
+→ `wsl -- awk -F',' '{sum += $3} END {print sum}' /mnt/c/Users/<you>/data.csv`
 
 ## Cautions
 

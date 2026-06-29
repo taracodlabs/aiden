@@ -68,8 +68,12 @@ describe('v4.2 Phase 2 — classifier integration', () => {
       [{ role: 'user', content: 'try' }] as Message[],
     );
     for (const entry of result.toolCallTrace) {
+      // v4.11 Slice 1 — the "zero classification surface" contract is about
+      // CLASSIFICATION, which stays gated under TCE=0. The per-tool verifier
+      // verdict is now recorded regardless of TCE (it feeds the honesty
+      // footer), so `verification` is populated but `classification` is not.
       expect(entry.classification).toBeUndefined();
-      expect(entry.verification).toBeUndefined();
+      expect(entry.verification).toBeDefined();
     }
   });
 

@@ -44,6 +44,10 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   compress: 'Session',
   save: 'Session',
   title: 'Session',
+  // v4.11 Slice B — revert the last turn from working context.
+  undo: 'Session',
+  // v4.11 Slice C — re-run the last prompt for a fresh response.
+  retry: 'Session',
 
   // ── Configuration ── runtime knobs
   model: 'Configuration',

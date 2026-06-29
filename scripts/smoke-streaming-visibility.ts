@@ -54,7 +54,7 @@ async function main(): Promise<void> {
   console.log(`[smoke] sandbox AIDEN_HOME = ${tmpRoot}`);
 
   const runtime = await buildAgentRuntime({ yolo: true }, { pathsOverride: sandbox });
-  const adapter = runtime.fallbackAdapter ?? runtime.providerAdapter;
+  const adapter = runtime.fallbackAdapter;
   if (!adapter) {
     console.error('[smoke] no provider adapter available — abort');
     process.exit(2);

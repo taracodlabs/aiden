@@ -32,7 +32,7 @@ gh repo create my-new-project --public --clone
 gh repo create my-new-project --private --description "Internal API service"
 
 # Create repo from local directory
-cd "C:\Users\shiva\Projects\myapp"
+cd "C:\Users\<you>\Projects\myapp"
 gh repo create my-new-project --source=. --private --push
 ```
 

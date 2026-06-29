@@ -39,7 +39,7 @@ $env:ANTHROPIC_API_KEY = "sk-ant-..."
 
 ```powershell
 # Navigate to the project
-Set-Location "C:\Users\shiva\myproject"
+Set-Location "C:\Users\<you>\myproject"
 
 # Run with a specific task
 claude "Refactor the authentication module to use JWT tokens instead of sessions"
@@ -89,7 +89,7 @@ claude $task
 ### 7. Run on a different directory
 
 ```powershell
-claude --directory "C:\Users\shiva\other-project" "Add error handling to all async functions"
+claude --directory "C:\Users\<you>\other-project" "Add error handling to all async functions"
 ```
 
 ## Examples

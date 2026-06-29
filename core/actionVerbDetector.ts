@@ -57,7 +57,7 @@ export function detectActionVerb(message: string): string {
  *   isActionIntent('Close all windows')         // capitalised
  *   isActionIntent('remember my color is purple')  // C5: memory verb
  *   isActionIntent('track my water intake')        // C5: memory verb
- *   isActionIntent('note that my name is shiva')   // C5: memory verb
+ *   isActionIntent('note that my name is Alex')    // C5: memory verb
  *   isActionIntent('store this fact')              // C5: memory verb
  *
  * Expect false:

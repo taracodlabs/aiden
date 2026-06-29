@@ -3,105 +3,77 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  *
  * Aiden — local-first agent.
- */
-/**
- * tools/v4/subagent/spawnSubAgentTool.ts — v4.6 Phase 1.
  *
- * LLM-callable wrapper for the `spawn_sub_agent` primitive. JSON
- * schema and description text are verbatim from
- * `docs/v4.6/phase-1-design.md` §4. The handler:
+ * tools/v4/subagent/spawnSubAgentTool.ts — v4.11 Slice 4 facade.
  *
- *   1. Reads the parent agent's current AbortSignal via the
- *      Flag 1 pattern (`parentAgent.getCurrentSignal()` captured
- *      reference, not a widened executor signature).
- *   2. Validates and clamps arguments.
- *   3. Calls `spawnSubAgent` from `core/v4/subagent/spawnSubAgent.ts`.
- *   4. Returns the result envelope as the tool result body.
+ * Thin LLM-callable wrapper for `spawn_sub_agent`. After Phase B
+ * Slice 4 this file owns only:
  *
- * Q9 — additive to the existing `subagent_fanout` tool. Both
- * coexist in Phase 1; Phase 2 will refactor `subagent_fanout` to
- * call this primitive N times.
+ *   1. JSON-schema declaration (unchanged from v4.6 — model-facing surface)
+ *   2. Operator pause gate (v4.6 Phase 3A)
+ *   3. Arg validation + coercion into a single SubagentTask
+ *   4. Delegation to SubagentCoordinator.spawnBatch
+ *   5. UI event emission (ui_task_update / ui_task_done) for chrome
+ *   6. Envelope re-formatting back into the legacy SubAgentResult
+ *      shape so the parent's LLM sees the same payload as v4.6
+ *
+ * Everything else — id minting, linked AbortController, child agent
+ * construction, registry, cost rollup, lifecycle trace — lives in
+ * the coordinator. The model surface is untouched.
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import type { ToolSchema } from '../../../providers/v4/types';
-import type { AidenAgent } from '../../../core/v4/aidenAgent';
 import type { Logger } from '../../../core/v4/logger/logger';
 import { noopLogger } from '../../../core/v4/logger/factory';
-import {
-  spawnSubAgent,
-  type SubAgentSpec,
-  type SpawnSubAgentDeps,
-} from '../../../core/v4/subagent/spawnSubAgent';
-// v4.6 Phase 3A — operator kill-switch. Checked at handler entry
-// BEFORE any work (no run row written, no child built, no provider
-// call). In-flight children continue uninterrupted; only NEW spawns
-// are blocked. Singleton initialised by REPL/daemon/MCP boot wiring.
+import type { TurnRuntimeContext } from '../../../core/v4/turnRuntimeContext';
+import type {
+  SubagentCoordinator,
+  SubagentTask,
+  SubagentResultEnvelope,
+} from '../../../core/v4/subagent/coordinator';
+// v4.6 Phase 3A — operator kill-switch.
 import { getSpawnPause } from '../../../core/v4/subagent/spawnPause';
 
 // ── Factory dependencies ───────────────────────────────────────────────────
 
 /**
- * Factory inputs the runtime supplies once at REPL bootstrap. The
- * parent agent reference is captured here so the handler can read the
- * current signal at dispatch time (Flag 1 pattern, locked in Dispatch
- * 2D / 2E spec).
+ * Slice 4 factory inputs. The runtime supplies once at REPL boot.
+ *
+ *   - `resolveTurnContext`: called at handler entry to get the live
+ *     per-turn TurnRuntimeContext (signal + cost accumulator + trace
+ *     emitter). The REPL passes `() => agent.getCurrentTurnContext()`
+ *     so the Flag 1 pattern flows through. MCP / other surfaces can
+ *     mint a fresh per-request context. When the resolver returns
+ *     `undefined`, the handler fails with a structured "no turn
+ *     context" envelope rather than silently widening behaviour.
+ *
+ *   - `coordinator`: the shared SubagentCoordinator instance — owns
+ *     id minting, registry, concurrency, cancellation, aggregation.
+ *
+ *   - `onUiEvent`: optional chrome-trail emitter. Fires
+ *     `ui_task_update` before the spawn and `ui_task_done` when the
+ *     envelope resolves. Same wire as v4.6.
  */
-export interface SpawnSubAgentFactoryOptions extends SpawnSubAgentDeps {
-  /**
-   * The parent agent whose `runConversation` invokes this tool.
-   * Captured at factory construction; the handler reads
-   * `parentAgent.getCurrentSignal()` to wire the child's cancellation
-   * chain to the parent's in-flight signal.
-   */
-  parentAgent: AidenAgent;
-  /**
-   * Optional parent run identifier — populated when the parent's turn
-   * has a `runs` row written (daemon-fired turns always; REPL turns
-   * may not). When set, the child's `spawned_from_run_id` points here.
-   */
-  resolveParentRunId?: () => number | undefined;
-  /**
-   * Optional parent session identifier. When set, the child's
-   * `spawned_from_session_id` is populated with this value.
-   */
-  resolveParentSessionId?: () => string | undefined;
-  /**
-   * v4.6 Phase 1 observability — optional logger for the spawn
-   * tool's own info-level traces (parsed spec at invocation,
-   * child-built confirmation, completion summary). Plumbed into
-   * `spawnSubAgent` so internal stages can also log. Defaults to
-   * `noopLogger()` — REPL wiring at `cli/v4/aidenCLI.ts` injects
-   * `bootLogger.child('subagent')` to land in the standard log
-   * sinks.
-   */
+export interface SpawnSubAgentFactoryOptions {
+  resolveTurnContext: () => TurnRuntimeContext | undefined;
+  coordinator: SubagentCoordinator;
+  /** Optional logger for handler-level info traces. Defaults noop. */
   logger?: Logger;
-  /**
-   * v4.8.0 Phase 2.5 — semantic ui_* event sink. When supplied, the
-   * handler fires `ui_task_update` (kind:'subagent', depth:1) before
-   * the child run starts and `ui_task_done` when it completes.
-   * Display layer paints these as gutter-indented trail rows so the
-   * user can see subagent activity alongside the parent's tool trail.
-   */
-  onUiEvent?: (name: string, args: Record<string, unknown>) => void;
+  // v4.11 regression patch — `onUiEvent` removed. UI emission is now
+  // owned by the coordinator (single source of truth); the boot
+  // wiring passes the display sink directly into
+  // `new SubagentCoordinator({ ..., onUiEvent })`.
 }
 
 // ── Pause helper (v4.6 Phase 3A) ──────────────────────────────────────────
 
-/**
- * Safe pause read for the handler entry guard. Catches the
- * "not initialized" error from `getSpawnPause()` and returns
- * `{paused: false, status: {paused: false}}` — wiring-order bugs
- * (handler firing before `initSpawnPause` ran) must NOT take down
- * the spawn surface. Production boot wiring always inits first,
- * so this only matters for tests that omit the init step.
- */
 function safeReadPause(): {
   paused: boolean;
   status: ReturnType<import('../../../core/v4/subagent/spawnPause').SpawnPauseState['status']>;
 } {
   try {
-    const state = getSpawnPause();
+    const state  = getSpawnPause();
     const status = state.status();
     return { paused: status.paused, status };
   } catch {
@@ -109,33 +81,26 @@ function safeReadPause(): {
   }
 }
 
-// ── Schema description (verbatim from design doc §4) ───────────────────────
+// ── Schema ────────────────────────────────────────────────────────────────
+//
+// v4.11 hi-budget fix — description compression. Pre-v4.11 SCHEMA_DESC
+// was 1.4KB of design-doc prose; per-tool measurement showed it as the
+// single largest tool in the catalog (~729 cl100k tokens). Trimmed
+// here to the operational facts the model needs at call time:
+//   - what it does (one sentence)
+//   - the hard bounds (1 child, no nesting, 200 iters cap)
+//   - when NOT to use it
+// Functional schema (param types, required, enum) is UNCHANGED — only
+// the prose narrative shrinks.
 
 const SCHEMA_DESC =
-  'Spawn a focused child agent to handle one delegated sub-task synchronously. ' +
-  'The child runs with no access to your conversation history, an intersected ' +
-  'toolset (cannot exceed your capabilities), and a fresh system prompt built ' +
-  'from the goal + optional context. Returns a structured result envelope with ' +
-  "the child's summary, metrics, and exit reason. Use this when a sub-task " +
-  'benefits from isolated context (e.g. exploring a separate codebase area, ' +
-  'running a focused investigation, drafting an artifact without polluting your ' +
-  'main turn). Do NOT use for long-running or scheduled work — use daemon ' +
-  'triggers for that. Spawning is bounded: max 1 child at a time in Phase 1, ' +
-  'no nested spawning, max 200 iterations per child. Each spawn pays full ' +
-  'agent-startup cost (system prompt build, tool catalog ship) and roughly ' +
-  'doubles token spend for that sub-task. Prefer inline work for anything you ' +
-  'can answer in 1-3 of your own iterations. Spawn when isolation, focus, or ' +
-  'a restricted toolset actually helps.';
+  'Spawn one focused child agent to handle a delegated sub-task synchronously. ' +
+  'Child runs isolated: no parent history, intersected toolset, fresh system prompt. ' +
+  'Returns a structured envelope with summary, metrics, exitReason. ' +
+  'Bounded: max 1 child at a time, no nested spawning, max 200 iterations. ' +
+  'Each spawn pays full agent-startup cost — prefer inline work for tasks ' +
+  'solvable in 1-3 of your own iterations.';
 
-// ── Schema constant (shared by real factory + boot-time stub) ─────────────
-
-/**
- * v4.6 Phase 1 — module-level schema constant so the boot-time stub
- * (`makeSpawnSubAgentStub`) advertises the SAME JSON-schema surface
- * the real factory ships. Both register under name `spawn_sub_agent`
- * with `contexts: ['repl']`, so the model sees a consistent surface
- * regardless of whether the stub or the real handler is active.
- */
 export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
   name:        'spawn_sub_agent',
   description: SCHEMA_DESC,
@@ -146,77 +111,47 @@ export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
       goal: {
         type: 'string',
         description:
-          'The single concrete task for the child. Phrase as an imperative ' +
-          'outcome — what should be done, not how. The child cannot ask ' +
-          'follow-up questions; if the goal is ambiguous, refine it before ' +
-          'spawning.',
+          'Concrete imperative outcome for the child. Child cannot ask ' +
+          'follow-ups — disambiguate before spawning.',
       },
       context: {
         type: 'string',
         description:
-          "Optional background the child needs but couldn't infer from the " +
-          "goal alone (file paths, prior findings, constraints). Plain text. " +
-          "The child does NOT see your conversation history; anything it needs " +
-          'must be here or discoverable via its toolset.',
+          'Optional background (paths, prior findings, constraints). Child ' +
+          "does NOT see your history; anything it needs goes here.",
       },
       toolsets: {
         type: 'array',
         description:
-          'OPTIONAL — when present, RESTRICTS the child to specific toolsets. ' +
-          'OMIT this field to let the child inherit your full toolset (recommended ' +
-          'for most cases — children inherit your capabilities minus the hard ' +
-          'blocklist). Each entry MUST be one of the enumerated valid names ' +
-          'below; invalid names get stripped, and if every requested name is ' +
-          'invalid the child falls back to inheriting your full toolset (with a ' +
-          'warning logged). The child can never exceed your capabilities — this ' +
-          'parameter only narrows them.',
+          'Optional. Restricts child to listed toolsets. Omit to inherit ' +
+          'your full toolset (minus the hard blocklist). Invalid names ' +
+          'are stripped; all-invalid falls back to your full set.',
         items: {
           type: 'string',
-          // v4.6 Phase 1 — enum reflects the actual toolset string
-          // values registered in tools/v4/. Kept in sync with the
-          // registry; new toolsets ship by being added to a tool's
-          // `toolset` field AND to this list.
           enum: [
-            'browser',
-            'execute',
-            'files',
-            'mcp',
-            'memory',
-            'process',
-            'sessions',
-            'skills',
-            'subagent',
-            'system',
-            'terminal',
-            'web',
+            'browser', 'execute', 'files', 'mcp', 'memory', 'process',
+            'sessions', 'skills', 'subagent', 'system', 'terminal', 'web',
           ],
         },
       },
       maxIterations: {
         type: 'integer',
         description:
-          'Maximum tool-call iterations the child may run. Clamped to [1, 200]. ' +
-          'Choose tight bounds for narrow tasks (5-15) and looser for ' +
-          'exploration (50-100). Default 50.',
+          'Tool-call iteration cap. Clamped to [1, 200]. Default 50.',
       },
       timeoutMs: {
         type: 'integer',
         description:
-          'Hard wall-clock timeout in milliseconds. Default 10 minutes. The ' +
-          "child is signalled to interrupt on timeout; if it doesn't yield " +
-          'cooperatively, the worker leaks but the parent stays responsive.',
+          'Hard wall-clock timeout (ms). Default 600000 (10 min); ' +
+          'env AIDEN_SUBAGENT_TIMEOUT_MS overrides default; this field ' +
+          'overrides both.',
       },
       provider: {
         type: 'string',
         description:
-          "OPTIONAL — override the child's provider. Pass a provider ID like " +
-          "'groq', 'chatgpt-plus', 'anthropic'. Omit to inherit the parent's " +
-          'provider (recommended for most callers). Mainly used by ' +
-          "`subagent_fanout`'s rotation for provider diversity. Validated " +
-          "against the parent's available pool at dispatch — an unknown name " +
-          "produces a failed envelope with `exitReason: 'provider_not_found'` " +
-          'and lists the valid names in the error message. Single-provider ' +
-          '(non-FallbackAdapter) parents reject this field with an error.',
+          "Optional. Override child's provider (e.g. 'groq', 'anthropic'). " +
+          "Omit to inherit. Unknown names fail with exitReason: " +
+          "'provider_not_found'. Rejected on single-provider parents.",
       },
     },
   },
@@ -224,17 +159,6 @@ export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
 
 // ── Boot-time stub (registered before runtime deps are resolved) ──────────
 
-/**
- * v4.6 Phase 1 — stub handler used until the REPL wiring at
- * `cli/v4/aidenCLI.ts` replaces it with the real factory. Returns
- * the SAME schema surface so `toolRegistry.getSchemas(undefined,
- * 'repl')` at agent construction sees `spawn_sub_agent` and the
- * LLM can address the tool by name. If called before the real
- * wiring lands, returns a clear "not wired" error envelope so the
- * model gets a structured error rather than a crash.
- *
- * Mirrors `makeSubagentFanoutStub` in `tools/v4/index.ts`.
- */
 export function makeSpawnSubAgentStub(): ToolHandler {
   return {
     schema:   SPAWN_SUB_AGENT_SCHEMA,
@@ -262,42 +186,23 @@ export function makeSpawnSubAgentStub(): ToolHandler {
 
 // ── Implementation ────────────────────────────────────────────────────────
 
+/**
+ * Slice 4 facade. All orchestration delegated to the coordinator;
+ * this handler just adapts the model-facing JSON in / JSON out.
+ */
 export function makeSpawnSubAgentTool(
   factory: SpawnSubAgentFactoryOptions,
 ): ToolHandler {
   return {
-    schema: SPAWN_SUB_AGENT_SCHEMA,
-    // The tool itself spends tokens. Disk / process side effects, if
-    // any, happen INSIDE the child agent whose toolset is intersected
-    // with the parent's and stripped of the v4.6 blocklist.
+    schema:   SPAWN_SUB_AGENT_SCHEMA,
     category: 'network',
     mutates:  false,
     toolset:  'subagent',
     riskTier: 'caution',
-    // v4.6 Phase 1 — REPL-only execution context per Q6.
-    // Daemon-fired agents must not initiate sub-agent spawns in
-    // Phase 1: the spawn factory captured the REPL agent reference
-    // at construction, so a daemon-fired turn invoking this tool
-    // would route its child's signal chain through the REPL agent's
-    // state rather than the daemon turn's. Tagging it `['repl']`
-    // here causes `toolRegistry.getSchemas(_, 'daemon')` (used by
-    // daemonAgentBuilder.ts:130) to exclude `spawn_sub_agent` from
-    // the daemon agent's tool catalog, so the model never sees it
-    // when running in daemon mode. Phase 3+ may add a daemon-mode
-    // spawn factory tied to the daemon agent's own reference.
     contexts: ['repl'],
 
     async execute(args, _ctx) {
-      // ── 0. Operator kill-switch (v4.6 Phase 3A) ─────────────────────────
-      // First thing — before arg validation, run-row insertion, or
-      // any child build. A paused state must short-circuit cleanly
-      // with NO side effects (no `runs` row, no log noise beyond
-      // the rejection). Locked decision: paused calls are operator-
-      // induced, NOT real failures; they don't pollute `aiden runs
-      // list`. Envelope intentionally drops the standard SubAgentResult
-      // shape because (a) no childRunId exists (no row was written)
-      // and (b) the error class is qualitatively different from a
-      // spawn that ran and failed.
+      // ── 0. Operator kill-switch (v4.6 Phase 3A — unchanged) ─────────────
       const pauseGate = safeReadPause();
       if (pauseGate.paused) {
         const s = pauseGate.status;
@@ -315,133 +220,129 @@ export function makeSpawnSubAgentTool(
         };
       }
 
-      // ── 1. Validate + coerce ─────────────────────────────────────────────
+      // ── 1. Validate goal ───────────────────────────────────────────────
       const goal = typeof args.goal === 'string' ? args.goal.trim() : '';
       if (!goal) {
-        return {
-          ok:             false,
-          status:         'failed' as const,
-          summary:        null,
-          error:          "spawn_sub_agent: 'goal' is required and must be a non-empty string",
-          exitReason:     'error' as const,
-          metrics:        { apiCalls: 0, durationMs: 0, tokensIn: 0, tokensOut: 0 },
-          childRunId:     '0',
-          childSessionId: '',
-        };
+        return legacyFailedEnvelope({
+          error: "spawn_sub_agent: 'goal' is required and must be a non-empty string",
+        });
       }
 
-      const spec: SubAgentSpec = {
+      // ── 2. Coerce into a single coordinator task ───────────────────────
+      const task: SubagentTask = {
         goal,
-        context:        typeof args.context === 'string'  ? args.context : undefined,
-        toolsets:       Array.isArray(args.toolsets)
+        context:       typeof args.context === 'string'      ? args.context : undefined,
+        toolsets:      Array.isArray(args.toolsets)
           ? (args.toolsets as unknown[]).filter((t): t is string => typeof t === 'string')
           : undefined,
-        maxIterations:  typeof args.maxIterations === 'number' ? args.maxIterations : undefined,
-        timeoutMs:      typeof args.timeoutMs === 'number'     ? args.timeoutMs     : undefined,
-        // v4.6 Phase 2P — per-spawn provider override (per design doc §12.2).
-        // Validation happens in childBuilder against the parent's FallbackAdapter
-        // provider pool; an unknown name produces a failed envelope.
-        provider:       typeof args.provider === 'string'      ? args.provider      : undefined,
+        maxIterations: typeof args.maxIterations === 'number' ? args.maxIterations : undefined,
+        timeoutMs:     typeof args.timeoutMs === 'number'     ? args.timeoutMs     : undefined,
+        provider:      typeof args.provider === 'string'      ? args.provider      : undefined,
       };
 
-      // v4.6 Phase 1 observability — log the parsed spec so the next
-      // smoke test can correlate "what the model asked for" with the
-      // child's actual behaviour. Goal is truncated to keep the log
-      // line readable. The parent's sessionId (read off the agent
-      // instance) is included so logs from one user turn cluster.
+      // ── 3. Resolve the live turn context (Flag 1 pattern) ──────────────
+      const turnContext = factory.resolveTurnContext();
+      if (!turnContext) {
+        // Back-compat: a caller wired the old factory shape (no per-turn
+        // context) or invoked spawn from a code path outside a turn loop.
+        // Fail loud rather than silently bypass cancellation / cost
+        // rollup — the legacy v4.6 behaviour is no longer the contract.
+        return legacyFailedEnvelope({
+          error:
+            'spawn_sub_agent: no active TurnRuntimeContext — ' +
+            'caller must construct one in runConversation options (v4.11 Slice 4).',
+        });
+      }
+
+      // ── 4. Logger ──────────────────────────────────────────────────────
+      // v4.11 regression patch — UI event emission MOVED into the
+      // SubagentCoordinator (single source of truth). The pre-Slice-4
+      // pair this facade used to emit (`subagent-${ts}-${rand}` task_id)
+      // collided with the gap that left fanout children unannounced.
+      // Now BOTH facades route their per-child UI events through the
+      // coordinator's emitUi*; the task_id is the coordinator's
+      // `subagentRunId` so display rows correlate to trace events.
       const logger = factory.logger ?? noopLogger();
-      const goalPreview = spec.goal.length > 200 ? spec.goal.slice(0, 200) + '…' : spec.goal;
-      logger.info('spawn_sub_agent invoked', {
-        parentSessionId: factory.parentAgent.getCurrentSignal !== undefined
-          ? (factory.parentAgent as unknown as { sessionId?: string }).sessionId ?? null
-          : null,
-        goalPreview,
-        goalLen:         spec.goal.length,
-        contextLen:      spec.context?.length ?? 0,
-        toolsets:        spec.toolsets ?? null,
-        maxIterations:   spec.maxIterations ?? null,
-        timeoutMs:       spec.timeoutMs ?? null,
-      });
 
-      // ── 2. Read the parent's current signal (Flag 1 pattern) ─────────────
-      const parentSignal = factory.parentAgent.getCurrentSignal();
-
-      // ── 3. Resolve optional parent run / session identifiers ─────────────
-      const parentRunId     = factory.resolveParentRunId?.();
-      const parentSessionId = factory.resolveParentSessionId?.();
-
-      // v4.8.0 Phase 2.5 — emit ui_task_update for the subagent start.
-      // Stable task_id correlates with the matching ui_task_done emit
-      // after the spawnSubAgent call returns. depth:1 hardcoded today
-      // — childBuilder caps recursion at 1 (see SUBAGENT_BLOCKED_TOOL_NAMES
-      // 'spawn_sub_agent'). TODO: thread real depth when nested spawns ship.
-      const subTaskId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      factory.onUiEvent?.('ui_task_update', {
-        task_id: subTaskId,
-        label:   goalPreview,
-        status:  'running',
-        kind:    'subagent',
-        depth:   1,
-      });
-
-      // ── 4. Invoke the primitive. NEVER throws — always envelope. ─────────
-      const result = await spawnSubAgent(
-        spec,
-        {
-          // ChildBuilderDeps fields:
-          toolRegistry:        factory.toolRegistry,
-          parentToolContext:   factory.parentToolContext,
-          parentProvider:      factory.parentProvider,
-          parentProviderId:    factory.parentProviderId,
-          parentModelId:       factory.parentModelId,
-          resolveVerifiedFlag: factory.resolveVerifiedFlag,
-          resolveToolset:      factory.resolveToolset,
-          resolveMutates:      factory.resolveMutates,
-          // Persistence:
-          runStore:            factory.runStore,
-          instanceId:          factory.instanceId,
-          // v4.6 Phase 1 observability:
-          logger,
-        },
-        {
-          signal:           parentSignal,
-          parentRunId,
-          parentSessionId,
-        },
+      // ── 5. Delegate to coordinator (it emits the UI pair internally) ──
+      const fanout = await factory.coordinator.spawnBatch(
+        turnContext,
+        [task],
+        'bestEffort',
       );
+      const envelope = fanout.results[0];
 
-      // v4.8.0 Phase 2.5 — emit ui_task_done with the same subTaskId
-      // so the display layer can finalize the in-flight row.
-      const doneStatus: 'success' | 'failure' | 'blocked' =
-        result.ok                       ? 'success' :
-        result.status === 'interrupted' ? 'blocked' :
-        result.status === 'timeout'     ? 'blocked' : 'failure';
-      factory.onUiEvent?.('ui_task_done', {
-        task_id: subTaskId,
-        status:  doneStatus,
-        summary: `${result.metrics.apiCalls} calls · ${result.exitReason}`,
+      // ── 6. Re-shape into the legacy SubAgentResult contract ───────────
+      // The parent's LLM has seen the v4.6 envelope shape since Phase 1;
+      // preserving it keeps the model-facing surface stable across the
+      // Slice 4 refactor. Future slice may upgrade to expose the new
+      // SubagentResultEnvelope directly.
+      if (!envelope) {
+        return legacyFailedEnvelope({
+          error: 'spawn_sub_agent: coordinator returned no results (internal bug)',
+        });
+      }
+      logger.info?.('spawn_sub_agent completed', {
+        subagentRunId:  envelope.subagentRunId,
+        conversationId: envelope.conversationId,
+        status:         envelope.status,
+        exitReason:     envelope.exitReason,
+        durationMs:     envelope.durationMs,
+        inputTokens:    envelope.usage.inputTokens,
+        outputTokens:   envelope.usage.outputTokens,
       });
-
-      // Completion log — pairs with "spawn_sub_agent invoked" so a
-      // grep on parentSessionId surfaces invoke → complete in order.
-      logger.info('spawn_sub_agent completed', {
-        childRunId:     result.childRunId,
-        childSessionId: result.childSessionId,
-        status:         result.status,
-        exitReason:     result.exitReason,
-        ok:             result.ok,
-        apiCalls:       result.metrics.apiCalls,
-        durationMs:     result.metrics.durationMs,
-        tokensIn:       result.metrics.tokensIn,
-        tokensOut:      result.metrics.tokensOut,
-        summaryLen:     result.summary?.length ?? 0,
-        errorPreview:   result.error?.slice(0, 200) ?? null,
-      });
-
-      // The envelope IS the tool result body. The agent loop's tool-
-      // result handling will JSON-stringify this and feed it back to
-      // the parent's LLM as the tool message content.
-      return result;
+      return legacyEnvelopeFrom(envelope);
     },
+  };
+}
+
+// ── Envelope mapping ─────────────────────────────────────────────────────
+
+/**
+ * Convert the coordinator's `SubagentResultEnvelope` into the legacy
+ * `SubAgentResult` shape returned by v4.6's `spawnSubAgent`. The
+ * parent's LLM has been reading this shape since v4.6 Phase 1; the
+ * Slice 4 refactor preserves the wire so models cached on the old
+ * format still parse correctly.
+ */
+function legacyEnvelopeFrom(env: SubagentResultEnvelope): Record<string, unknown> {
+  const ok = env.status === 'completed';
+  // Map coordinator status → legacy status. Legacy used 'interrupted'
+  // for cancel; coordinator normalises to 'cancelled'. We surface
+  // 'interrupted' here for back-compat.
+  const legacyStatus = env.status === 'cancelled' ? 'interrupted' : env.status;
+  return {
+    ok,
+    status:         legacyStatus,
+    summary:        env.summary || null,
+    error:          env.error    ?? null,
+    exitReason:     env.exitReason,
+    metrics: {
+      apiCalls:    0,                          // not tracked at envelope layer
+      durationMs:  env.durationMs,
+      tokensIn:    env.usage.inputTokens,
+      tokensOut:   env.usage.outputTokens,
+    },
+    // childRunId is now the subagentRunId from the coordinator. Old
+    // numeric runs.id values are still observable through the trace
+    // emitter (they land in run_events). The string form is a wire
+    // change tolerated as additive — the model only reads `summary` +
+    // `error` + `metrics` in practice.
+    childRunId:     env.subagentRunId,
+    childSessionId: env.conversationId,
+  };
+}
+
+/** Shorthand for pre-coordinator validation failures. */
+function legacyFailedEnvelope(opts: { error: string }): Record<string, unknown> {
+  return {
+    ok:             false,
+    status:         'failed',
+    summary:        null,
+    error:          opts.error,
+    exitReason:     'error',
+    metrics:        { apiCalls: 0, durationMs: 0, tokensIn: 0, tokensOut: 0 },
+    childRunId:     '0',
+    childSessionId: '',
   };
 }

@@ -36,7 +36,7 @@ Get-ChildItem "$env:USERPROFILE" -Recurse -Filter ".obsidian" -Directory -ErrorA
 
 ```powershell
 # Full-text search across all notes in vault
-$vault = "C:\Users\shiva\Documents\MyVault"
+$vault = "C:\Users\<you>\Documents\MyVault"
 Get-ChildItem $vault -Recurse -Filter "*.md" |
   Select-String -Pattern "your keyword" -SimpleMatch |
   Select-Object Path, LineNumber, Line |
@@ -48,7 +48,7 @@ Get-ChildItem $vault -Recurse -Filter "*.md" |
 Obsidian tags appear as `#tag` in note body or `tags: [tag]` in frontmatter.
 
 ```powershell
-$vault = "C:\Users\shiva\Documents\MyVault"
+$vault = "C:\Users\<you>\Documents\MyVault"
 $tag   = "project"
 Get-ChildItem $vault -Recurse -Filter "*.md" |
   Select-String -Pattern "#$tag\b|tags:.*\b$tag\b" -SimpleMatch:$false |
@@ -58,14 +58,14 @@ Get-ChildItem $vault -Recurse -Filter "*.md" |
 ### 4. Read a specific note
 
 ```powershell
-$note = "C:\Users\shiva\Documents\MyVault\Daily\2026-04-17.md"
+$note = "C:\Users\<you>\Documents\MyVault\Daily\2026-04-17.md"
 Get-Content $note -Raw
 ```
 
 ### 5. Create a new note
 
 ```powershell
-$vault   = "C:\Users\shiva\Documents\MyVault"
+$vault   = "C:\Users\<you>\Documents\MyVault"
 $folder  = "Projects"
 $title   = "New Project Idea"
 $date    = Get-Date -Format "yyyy-MM-dd"
@@ -89,7 +89,7 @@ Write-Host "Created: $path"
 ### 6. Find all backlinks to a note
 
 ```powershell
-$vault    = "C:\Users\shiva\Documents\MyVault"
+$vault    = "C:\Users\<you>\Documents\MyVault"
 $noteName = "Index"   # without .md
 Get-ChildItem $vault -Recurse -Filter "*.md" |
   Select-String -Pattern "\[\[$noteName(\|[^\]]*)?\]\]" |

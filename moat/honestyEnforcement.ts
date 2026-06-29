@@ -59,7 +59,11 @@ export interface HonestyFinding {
   reason?:
     | 'no_tool_call'
     | 'memory_verified_false'
-    | 'tool_errored';
+    | 'tool_errored'
+    // v4.11 Slice 1 — per-tool verifier failure surfaced for all tools.
+    | 'verifier_failed'
+    // v4.11 Slice 2 — structured success claim contradicted by tool evidence.
+    | 'claim_contradicted';
 }
 
 export interface HonestyResult {
@@ -91,7 +95,54 @@ export interface HonestyResult {
  */
 export type HonestyEvent =
   | { kind: 'mutation_errored'; tool: string; reason: string; path?: string }
-  | { kind: 'memory_unverified'; tool: string; reason: string };
+  | { kind: 'memory_unverified'; tool: string; reason: string }
+  // v4.11 Slice 1 — the per-tool verifier (verifier.ts) classified this
+  // result as a failure (shell non-zero exit, file-write unconfirmed,
+  // typed success:false, etc.). Surfaced for ALL tools, not just memory.
+  //
+  // NOTE: the verifier's `low_signal` code (ok:true but weak evidence —
+  // exit-0-empty-stdout, empty file read, short web result) is
+  // deliberately NOT surfaced in v1. It fires on benign silent successes
+  // (mkdir/cd/rm; reading an empty file) and would make the footer cry
+  // wolf. Only genuine failures (!ok) are flagged.
+  | { kind: 'tool_unverified'; tool: string; reason: string }
+  // v4.11 Slice 2 — a structured success claim emitted via a ui-event
+  // (ui_test_result{failed:0}, ui_task_done{status:'success'}) is
+  // contradicted by a shell_exec failure (verifier !ok) in the same turn.
+  // Structured-vs-structured; turn-scoped; no prose parsing.
+  | { kind: 'claim_contradicted'; tool: string; reason: string };
+
+/**
+ * v4.11 Slice 2 — a structured ui-event claim captured during the turn.
+ * `args` is the raw tool-call arguments object (shape per the ui_* tool
+ * schema in tools/v4/index.ts).
+ */
+export interface UiClaim {
+  name: string;
+  args: unknown;
+}
+
+/**
+ * v4.11 Slice 2 — true when a ui-event encodes a SUCCESS assertion:
+ * `ui_test_result` with `failed === 0`, or `ui_task_done` with
+ * `status === 'success'`. Purely structural — no natural-language parsing.
+ */
+function isSuccessClaim(c: UiClaim): boolean {
+  const a = (c.args ?? {}) as Record<string, unknown>;
+  if (c.name === 'ui_test_result') return a.failed === 0;
+  if (c.name === 'ui_task_done')   return a.status === 'success';
+  return false;
+}
+
+/** v4.11 Slice 2 — human-readable summary of a success claim for the footer. */
+function describeSuccessClaim(c: UiClaim): string {
+  const a = (c.args ?? {}) as Record<string, unknown>;
+  if (c.name === 'ui_test_result') {
+    return `ui_test_result reported ${a.passed ?? '?'} passed / 0 failed`;
+  }
+  if (c.name === 'ui_task_done') return 'ui_task_done reported success';
+  return 'reported success';
+}
 
 /**
  * Memory tools whose results carry the `verified` flag set by
@@ -218,6 +269,22 @@ function toFinding(event: HonestyEvent): HonestyFinding {
         confidence:   1,
         reason:       'memory_verified_false',
       };
+    case 'tool_unverified':
+      return {
+        claim:        event.tool,
+        expectedTool: event.tool,
+        found:        false,
+        confidence:   1,
+        reason:       'verifier_failed',
+      };
+    case 'claim_contradicted':
+      return {
+        claim:        event.tool,
+        expectedTool: event.tool,
+        found:        false,
+        confidence:   1,
+        reason:       'claim_contradicted',
+      };
   }
 }
 
@@ -247,7 +314,7 @@ export class HonestyEnforcement {
    * v4.7.0 Phase 2.3 — record deterministic unverified outcomes from
    * the per-turn tool trace. Pure function; no I/O, no side effects.
    */
-  recordOutcomes(trace: HonestyTraceEntry[]): HonestyEvent[] {
+  recordOutcomes(trace: HonestyTraceEntry[], uiClaims: UiClaim[] = []): HonestyEvent[] {
     const events: HonestyEvent[] = [];
     for (const t of trace) {
       if (t.error && t.handlerMutates === true) {
@@ -264,6 +331,41 @@ export class HonestyEnforcement {
           kind:   'memory_unverified',
           tool:   t.name,
           reason: 'verification failed',
+        });
+        continue;
+      }
+      // v4.11 Slice 1 — consume the per-tool verifier verdict (verifier.ts),
+      // surfacing genuine failures (!ok) for every tool — shell non-zero
+      // exit, file-write success:false, etc. Reached only when the two
+      // checks above didn't already flag this entry, so no double-counting.
+      // `low_signal` (ok:true, weak evidence) is intentionally not flagged
+      // in v1 — see the HonestyEvent comment.
+      const v = t.verification;
+      if (v && !v.ok) {
+        events.push({
+          kind:   'tool_unverified',
+          tool:   t.name,
+          reason: v.reason ?? v.code,
+        });
+      }
+    }
+    // v4.11 Slice 2 — structured claim-vs-evidence contradiction. When the
+    // model asserts success via a ui-event (ui_test_result{failed:0} /
+    // ui_task_done{status:'success'}) but a shell_exec FAILED this turn
+    // (verifier !ok), the claim contradicts the evidence. Scoped to
+    // shell_exec to keep false positives low (a read-only tool's
+    // low-signal result is not a failure). Turn-scoped — no per-command
+    // matching, no prose parsing.
+    const successClaim = uiClaims.find(isSuccessClaim);
+    if (successClaim) {
+      const failedShell = trace.find(
+        (t) => t.name === 'shell_exec' && !!t.verification && !t.verification.ok,
+      );
+      if (failedShell) {
+        events.push({
+          kind:   'claim_contradicted',
+          tool:   successClaim.name,
+          reason: `${describeSuccessClaim(successClaim)}, but shell_exec failed this turn (${failedShell.verification?.reason ?? 'non-zero exit'})`,
         });
       }
     }
@@ -282,6 +384,10 @@ export class HonestyEnforcement {
       if (e.kind === 'mutation_errored') {
         const where = e.path ? ` (path: ${e.path})` : '';
         lines.push(`- ${e.tool}${where}: errored — ${e.reason}`);
+      } else if (e.kind === 'tool_unverified') {
+        lines.push(`- ${e.tool}: unverified — ${e.reason}`);
+      } else if (e.kind === 'claim_contradicted') {
+        lines.push(`- ${e.tool}: contradicts evidence — ${e.reason}`);
       } else {
         lines.push(`- ${e.tool}: not verified`);
       }
@@ -304,6 +410,7 @@ export class HonestyEnforcement {
     response: string,
     _messages: Message[],
     trace: HonestyTraceEntry[],
+    uiClaims: UiClaim[] = [],
   ): Promise<HonestyResult> {
     if (this.mode === 'off') {
       return {
@@ -313,7 +420,7 @@ export class HonestyEnforcement {
         originalResponse: response,
       };
     }
-    const events = this.recordOutcomes(trace);
+    const events = this.recordOutcomes(trace, uiClaims);
     const findings = events.map(toFinding);
     const passed = findings.length === 0;
     let footer: string | undefined;

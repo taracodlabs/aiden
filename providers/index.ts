@@ -100,7 +100,7 @@ function defaultConfig(): DevOSConfig {
         {
           name:        'cerebras-free',
           provider:    'cerebras',
-          key:         'csk-w32jtjthv666erywhmxrkpx9kfnehn4e6cp38n3d3kmym943',
+          key:         'env:CEREBRAS_API_KEY',
           model:       'llama3.1-8b',
           enabled:     true,
           rateLimited: false,

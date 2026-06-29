@@ -49,6 +49,18 @@ export interface ChatSessionLike {
   getSessionId?(): string | undefined;
   /** Optional — total token usage across the whole session. */
   getTotalUsage?(): { inputTokens: number; outputTokens: number };
+  /**
+   * Optional — v4.11 Slice B. Restore the history captured before the
+   * most recent turn (in-memory only). Returns false when there is
+   * nothing to undo. The persisted session is not reverted.
+   */
+  undoLastTurn?(): boolean;
+  /**
+   * Optional — v4.11 Slice C. Revert the last turn (as /undo) AND return
+   * that turn's user-prompt text so the caller can re-dispatch it. Returns
+   * null when there is no prior turn or the prompt is unrecoverable.
+   */
+  retryLastTurn?(): string | null;
 }
 
 /**
@@ -118,6 +130,13 @@ export interface SlashCommandResult {
   exit?: boolean;
   /** Caller should drop conversation history. */
   clearHistory?: boolean;
+  /**
+   * v4.11 Slice C — re-dispatch this text as a fresh agent turn. Used by
+   * /retry: the command reverts the last turn and returns its prompt
+   * here; the REPL read loop runs it as a normal turn. Empty/undefined =
+   * no rerun.
+   */
+  rerun?: string;
 }
 
 export type SlashCommandHandler = (
@@ -251,7 +270,7 @@ export class CommandRegistry {
   async execute(
     input: string,
     ctx: Omit<SlashCommandContext, 'args' | 'rawArgs' | 'registry'>,
-  ): Promise<{ handled: boolean; exit?: boolean; clearHistory?: boolean }> {
+  ): Promise<{ handled: boolean; exit?: boolean; clearHistory?: boolean; rerun?: string }> {
     const parsed = this.parse(input);
     if (!parsed) return { handled: false };
 
@@ -274,7 +293,7 @@ export class CommandRegistry {
     const raw = (await cmd.handler(fullCtx)) as SlashCommandResult | void;
     const result: SlashCommandResult = raw ? raw : {};
     this.recordRecent(cmd.name);
-    return { handled: true, exit: result.exit, clearHistory: result.clearHistory };
+    return { handled: true, exit: result.exit, clearHistory: result.clearHistory, rerun: result.rerun };
   }
 
   /**

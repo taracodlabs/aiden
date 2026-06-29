@@ -101,6 +101,7 @@ import {
 // v4.6 Phase 1 — spawn_sub_agent stub registered alongside the
 // fanout stub so the schema is visible at agent construction.
 import { makeSpawnSubAgentStub } from './subagent/spawnSubAgentTool';
+import { makeClarifyTool } from './clarify/clarifyTool';
 
 /**
  * Register every read-only tool into `registry`. The
@@ -188,12 +189,35 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
  *  dependencies. Returns the SAME schema as the real tool so MCP and
  *  /tools see a consistent surface. */
 function makeSubagentFanoutStub() {
-  // v4.6 Phase 2R — `runChild` removed from `SubagentFanoutFactoryOptions`.
-  // The stub returns a "no providers configured" error envelope on every
-  // call via `resolveProviders: () => []`. Production wires real
-  // `spawnDeps` post-runtime build (`cli/v4/aidenCLI.ts` for REPL,
-  // `cli/v4/commands/mcp.ts` for MCP serve).
+  // v4.11 Slice 4 — the stub returns the "tool not wired" error on
+  // every call because `resolveProviders: () => []` makes the
+  // facade short-circuit before ever touching the coordinator. The
+  // coordinator + turn context resolvers are minimal placeholders
+  // — they never run since the providers check fires first.
+  // Production wiring (`cli/v4/aidenCLI.ts` for REPL,
+  // `cli/v4/commands/mcp.ts` for MCP serve) replaces this stub with
+  // a fully-wired registration after `buildAgentRuntime` resolves
+  // the real deps.
   return makeSubagentFanoutTool({
+    resolveTurnContext: () => undefined,
+    coordinator:        {
+      // Bare-minimum shape — only the methods the facade's hot path
+      // would touch. Since `resolveProviders` returns [] first, the
+      // facade short-circuits before any coordinator method runs.
+      // The cast is intentional: the stub IS unreachable scaffolding.
+      spawnBatch:         async () => ({
+        fanoutId:        'stub',
+        status:          'failed',
+        results:         [],
+        aggregateUsage:  { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUSD: 0 },
+        traceId:         'stub',
+        startedAt:       Date.now(),
+        endedAt:         Date.now(),
+        durationMs:      0,
+      }),
+      cancelChild:        () => false,
+      listActiveChildren: () => [],
+    } as unknown as import('../../core/v4/subagent/coordinator').SubagentCoordinator,
     resolveProviders:    () => [],
     resolveActiveModel:  () => ({ providerId: 'unset', modelId: 'unset' }),
     aggregatorAdapter:   {
@@ -283,10 +307,24 @@ export function registerAllTools(registry: ToolRegistry): void {
   // throws as a safety guard: if the uiOnly branch ever misfires
   // and an executor is reached, that's a wiring bug, not a render.
   // Renderer is a no-op stub in this phase; Phase 2.3 lands chrome.
+  // v4.11 toolset grouping — every ui_* helper is tagged `toolset: 'ui'`
+  // so profile-based tool selection (core/v4/toolProfiles.ts) can route
+  // them as a single group. Pre-Phase-B these were the only untagged
+  // tools in the catalog (~542 tokens / 7% of the budget) and the
+  // profile resolver would silently drop them under any non-`full`
+  // profile because `getSchemas(filterToolsets)` skips handlers with
+  // no `toolset` field. Tagging closes that audit gap.
   const ui = (name: string, description: string, properties: Record<string, unknown>, required: string[]): ToolHandler => ({
     schema:   { name, description, inputSchema: { type: 'object', properties, required } },
     execute:  async () => { throw new Error(`${name} is uiOnly — dispatch branch should bypass execute`); },
     category: 'read', mutates: false, uiOnly: true,
+    toolset:  'ui',
+    // v4.11 — explicit risk tier. These are uiOnly signal channels: never
+    // dispatched (execute throws by design), no system access, no side
+    // effects. They already INFER to 'safe' via mutates:false; this makes
+    // the labeling explicit so the riskTier coverage policy (every tool
+    // EXPLICITLY annotated) is satisfied honestly, not via inference.
+    riskTier: 'safe',
   });
   const str = { type: 'string' };
   const num = { type: 'number' };
@@ -318,6 +356,11 @@ export function registerAllTools(registry: ToolRegistry): void {
     { path: str, kind: { type: 'string', enum: ['file', 'skill', 'directory'] },
       preview: { type: 'string', description: 'Optional, ≤200 chars' } },
     ['path', 'kind']));
+  // v4.11 Slice 1 — clarify primitive (ask the user when blocked rather
+  // than guess). REPL-only (contexts: ['repl']); blocked for subagents
+  // (SUBAGENT_BLOCKED_TOOL_NAMES). Degrades to "unavailable, proceed"
+  // when no interactive clarify callback is wired (headless/daemon).
+  registry.register(makeClarifyTool());
   // v4.8.0 Phase 2.1 — env-gated uiOnly smoke stub. Never registers
   // in production. Set AIDEN_TEST_UI_STUB=1 to enable for the
   // dispatch-branch smoke harness. The execute() throws on purpose:
@@ -342,6 +385,7 @@ export function registerAllTools(registry: ToolRegistry): void {
       category: 'read',
       mutates:  false,
       uiOnly:   true,
+      toolset:  'ui',
     });
   }
 }

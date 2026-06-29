@@ -596,6 +596,33 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status
   ON tasks(status, created_at DESC);
 `;
 
+// v4.11 — artifact registry with provenance. Records files Aiden produces
+// (file_write/patch/move/copy + skill writes) with a traceable link back to
+// the originating turn (run_id), task (task_id → goal), tool, and action.
+// Captured automatically from the per-turn toolCallTrace in chatSession;
+// only verifier-ok writes are registered. Mirrors the `tasks` shape; the
+// reserved `tasks.artifact_ids` JSON array back-references rows here.
+const V15_SQL = `
+CREATE TABLE IF NOT EXISTS artifacts (
+  id              TEXT PRIMARY KEY,
+  path            TEXT NOT NULL,
+  kind            TEXT NOT NULL,
+  tool            TEXT NOT NULL,
+  action          TEXT NOT NULL,
+  run_id          INTEGER,
+  task_id         TEXT,
+  session_id      TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  bytes           INTEGER,
+  preview         TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_artifacts_session_created
+  ON artifacts(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_artifacts_task
+  ON artifacts(task_id, created_at DESC);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -611,6 +638,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 12, name: 'v4.9 slice 12b — hook auto-disable counter',    sql: V12_SQL },
   { version: 13, name: 'v4.10 slice 10.2b — run_events richer schema',  sql: V13_SQL },
   { version: 14, name: 'v4.10 slice 10.8 — durable Task-lite kernel',   sql: V14_SQL },
+  { version: 15, name: 'v4.11 — artifact registry with provenance',     sql: V15_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

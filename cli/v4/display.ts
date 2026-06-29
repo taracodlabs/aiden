@@ -1196,14 +1196,36 @@ export class Display {
       return cells.join('');
     };
 
+    // v4.11 — thinking-state dot-wave. A short row of muted `•` with one
+    // brand-orange `●` sliding L→R (position from `shimmerFrame`), so the
+    // bright dot shimmers across like a mind working. Used ONLY for the
+    // "thinking" verb; "calling provider" and all tool verbs keep the
+    // solid block-bar `buildShimmer` unchanged, so the two states read as
+    // distinct. Same `shimmerFrame` cadence — only the glyphs/feel differ.
+    const DOTWAVE_CELLS = 5;
+    const buildDotWave = (): string => {
+      const bright = shimmerFrame % DOTWAVE_CELLS;
+      const cells: string[] = [];
+      for (let c = 0; c < DOTWAVE_CELLS; c += 1) {
+        cells.push(c === bright
+          ? sk.applyColors(glyphs.status.dot, 'brand')
+          : sk.applyColors(glyphs.util.midDot, 'muted'));
+      }
+      return cells.join(' ');
+    };
+
     const buildLine = (): string => {
       const dots = '.'.repeat(dotFrame); // 0..3 dots
       const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
       const elapsedStr = elapsedSec >= 1
         ? ` ${sk.applyColors(`(${elapsedSec}s)`, 'muted')}`
         : '';
-      // Shimmer prefix (or none, when opts.waveBar === false).
-      const prefix = shimmerEnabled ? `${buildShimmer()} ` : '';
+      // Shimmer prefix (or none, when opts.waveBar === false). v4.11 —
+      // "thinking" uses the dot-wave; every other verb (calling provider,
+      // tool verbs) keeps the block-bar shimmer exactly as before.
+      const prefix = shimmerEnabled
+        ? `${verb === 'thinking' ? buildDotWave() : buildShimmer()} `
+        : '';
       // v4.8.1 Slice 2 hotfix #4 — 2-space leading indent so the
       // indicator line aligns at col 2, matching `▎ Aiden`, the
       // user-prompt `  ▲ `, the panel `  │ ` bar, and every other
@@ -1241,6 +1263,13 @@ export class Display {
 
     const renderTick = (): void => {
       if (stopped || paused || !isTty) return;
+      // v4.11 Slice 1 — explicit frame-mode silence.
+      // When the frame composer is mounted it owns the screen; the
+      // legacy indicator MUST stay quiet. This is the audited pause
+      // path the renderer foundation requires — grep for the global
+      // and you see every site that touches the silence.
+      type GFlag = typeof globalThis & { __aiden_legacy_indicator_paused?: boolean };
+      if ((globalThis as GFlag).__aiden_legacy_indicator_paused) return;
       dotFrame = (dotFrame + 1) % 4;
       // v4.8.0 Slice 11 — shimmer slides 1 cell per tick. Same 250ms
       // cadence as the dot pulse, so block + dots move in visible

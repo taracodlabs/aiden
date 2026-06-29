@@ -26,6 +26,7 @@ function makeTrace(entries: Partial<HonestyTraceEntry>[]): HonestyTraceEntry[] {
     verified:       e.verified,
     error:          e.error,
     handlerMutates: e.handlerMutates ?? false,
+    verification:   e.verification,
   }));
 }
 
@@ -281,5 +282,68 @@ describe('HonestyEnforcement — multi-event + edge cases', () => {
     expect(footer).toContain('file_write');
     expect(footer).toContain('x.txt');
     expect(footer).toContain('disk full');
+  });
+});
+
+describe('HonestyEnforcement — claim_contradicted (v4.11 Slice 2)', () => {
+  const failedShell = (): Partial<HonestyTraceEntry> => ({
+    name: 'shell_exec',
+    result: { success: false },
+    verification: { ok: false, confidence: 1, code: 'failed', reason: 'non-zero exit (1)' },
+  });
+
+  it('ui_test_result{failed:0} + shell_exec failed → contradiction', async () => {
+    const h = new HonestyEnforcement('enforce');
+    const res = await h.check('Tests pass.', [], makeTrace([failedShell()]), [
+      { name: 'ui_test_result', args: { framework: 'vitest', passed: 12, failed: 0 } },
+    ]);
+    expect(res.passed).toBe(false);
+    expect(res.findings.some((f) => f.reason === 'claim_contradicted')).toBe(true);
+    expect(res.footer).toMatch(/contradicts evidence/);
+    expect(res.footer).toMatch(/shell_exec failed/);
+  });
+
+  it('ui_task_done{status:"success"} + shell_exec failed → contradiction', async () => {
+    const h = new HonestyEnforcement('detect');
+    const res = await h.check('Done.', [], makeTrace([failedShell()]), [
+      { name: 'ui_task_done', args: { task_id: 't1', status: 'success' } },
+    ]);
+    expect(res.findings.some((f) => f.reason === 'claim_contradicted')).toBe(true);
+  });
+
+  it('ui_test_result{failed:0} + shell_exec OK → no contradiction', async () => {
+    const h = new HonestyEnforcement('detect');
+    const res = await h.check('Tests pass.', [], makeTrace([
+      { name: 'shell_exec', result: { success: true },
+        verification: { ok: true, confidence: 1, code: 'ok' } },
+    ]), [
+      { name: 'ui_test_result', args: { framework: 'vitest', passed: 12, failed: 0 } },
+    ]);
+    expect(res.findings.some((f) => f.reason === 'claim_contradicted')).toBe(false);
+  });
+
+  it('ui_test_result{failed:2} (not a success claim) + shell_exec failed → no contradiction', async () => {
+    const h = new HonestyEnforcement('detect');
+    const res = await h.check('2 failing.', [], makeTrace([failedShell()]), [
+      { name: 'ui_test_result', args: { framework: 'vitest', passed: 10, failed: 2 } },
+    ]);
+    expect(res.findings.some((f) => f.reason === 'claim_contradicted')).toBe(false);
+  });
+
+  it('FP guard: success claim + a NON-shell tool failure → no contradiction (scoped to shell_exec)', async () => {
+    const h = new HonestyEnforcement('detect');
+    const res = await h.check('Tests pass.', [], makeTrace([
+      { name: 'web_fetch', result: { success: false },
+        verification: { ok: false, confidence: 1, code: 'failed', reason: 'soft-block' } },
+    ]), [
+      { name: 'ui_test_result', args: { framework: 'vitest', passed: 12, failed: 0 } },
+    ]);
+    expect(res.findings.some((f) => f.reason === 'claim_contradicted')).toBe(false);
+  });
+
+  it('no ui claims → no contradiction (back-compat: uiClaims defaults to [])', async () => {
+    const h = new HonestyEnforcement('detect');
+    const res = await h.check('hi', [], makeTrace([failedShell()]));
+    expect(res.findings.some((f) => f.reason === 'claim_contradicted')).toBe(false);
   });
 });

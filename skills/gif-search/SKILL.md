@@ -76,7 +76,7 @@ $resp.results | Select-Object title, @{N="url";E={$_.media_formats.gif.url}}
 
 ```powershell
 $gifUrl   = "https://media.tenor.com/your-gif.gif"
-$outPath  = "C:\Users\shiva\Downloads\reaction.gif"
+$outPath  = "C:\Users\<you>\Downloads\reaction.gif"
 Invoke-WebRequest -Uri $gifUrl -OutFile $outPath
 Write-Host "Downloaded: $outPath"
 ```

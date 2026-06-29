@@ -15,6 +15,10 @@ import {
   isFreshInstall,
   printPostWizardTutorial,
 } from '../../../cli/v4/setupWizard';
+import {
+  shouldRunWizard,
+  type ProviderDetection,
+} from '../../../core/v4/firstRun/providerDetection';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import {
@@ -137,5 +141,82 @@ describe('printPostWizardTutorial', () => {
 
   it('68. version string flows through verbatim', () => {
     expect(captureTutorial('4.1.7-beta')).toContain('Aiden v4.1.7-beta is ready');
+  });
+});
+
+describe('shouldRunWizard — boot gate (v4.11 config-detection fix)', () => {
+  /** ProviderDetection factory; defaults to "nothing configured". */
+  function det(over: Partial<ProviderDetection> = {}): ProviderDetection {
+    return {
+      hasAnyProvider: false,
+      envVars: [],
+      oauthTokens: [],
+      ollamaReachable: false,
+      configProvider: null,
+      configModel: null,
+      configuredProviders: [],
+      configuredProviderHasCredentials: false,
+      ...over,
+    };
+  }
+
+  it('forceSetup always fires (the `aiden setup` subcommand)', () => {
+    expect(shouldRunWizard(det({ hasAnyProvider: true }), { forceSetup: true, configEmpty: false })).toBe(true);
+  });
+
+  it('truly fresh — no provider anywhere → fires', () => {
+    expect(shouldRunWizard(det(), { forceSetup: false, configEmpty: true })).toBe(true);
+  });
+
+  it('config names a provider with NO usable credentials → fires (broken)', () => {
+    const d = det({
+      hasAnyProvider: true,            // some unrelated env key exists
+      envVars: ['GROQ_API_KEY'],
+      configProvider: 'chatgpt-plus',  // but config points here…
+      configuredProviderHasCredentials: false, // …and its token is missing
+    });
+    expect(shouldRunWizard(d, { forceSetup: false, configEmpty: false })).toBe(true);
+  });
+
+  it('creds detected but config names no provider → fires (DEFAULT_CONFIG would mis-route)', () => {
+    const d = det({ hasAnyProvider: true, envVars: ['GROQ_API_KEY'], configProvider: null });
+    expect(shouldRunWizard(d, { forceSetup: false, configEmpty: true })).toBe(true);
+  });
+
+  it('inline providers.<id>.apiKey config (moat-boot fixture) → does NOT fire', () => {
+    const d = det({
+      hasAnyProvider: true,
+      configProvider: 'fake',
+      configuredProviders: ['fake'],
+      configuredProviderHasCredentials: true,
+    });
+    expect(shouldRunWizard(d, { forceSetup: false, configEmpty: false })).toBe(false);
+  });
+
+  // ── THE BUG ANCHOR ──────────────────────────────────────────────
+  it('BUG FIX: live OAuth config (chatgpt-plus token) with empty providers: section → does NOT fire', () => {
+    // Shiva's case: chatgpt-plus configured via OAuth (token in the auth
+    // store, NOT config.yaml providers:), so isFreshInstall reports the
+    // config "empty" (configEmpty=true) even though it's working.
+    const d = det({
+      hasAnyProvider: true,
+      oauthTokens: ['chatgpt-plus'],
+      configProvider: 'chatgpt-plus',
+      configuredProviderHasCredentials: true,
+    });
+    // Pre-fix this returned true (wizard auto-fired, offered overwrite).
+    expect(shouldRunWizard(d, { forceSetup: false, configEmpty: true })).toBe(false);
+  });
+
+  it('BUG FIX: live env config (groq via GROQ_API_KEY) with empty providers: section → does NOT fire', () => {
+    // Mirrors firstRunDetection test 63: model.provider=groq, no providers:
+    // section, GROQ_API_KEY in env → isFreshInstall=true but config is live.
+    const d = det({
+      hasAnyProvider: true,
+      envVars: ['GROQ_API_KEY'],
+      configProvider: 'groq',
+      configuredProviderHasCredentials: true,
+    });
+    expect(shouldRunWizard(d, { forceSetup: false, configEmpty: true })).toBe(false);
   });
 });

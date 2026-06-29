@@ -67,6 +67,55 @@ interface SearchResponse {
 
 const SEARXNG_URL    = process.env.SEARXNG_URL    || 'http://localhost:8888'
 const BRAVE_API_KEY  = process.env.BRAVE_SEARCH_API_KEY || ''
+
+// ── v4.11 perf: 5-min TTL backend-availability cache ──────────
+//
+// Pre-flight skip-on-unavailable for SearxNG + Brave. The fallback
+// chain in `reliableWebSearch` (SearxNG → Brave → DDG → Wikipedia)
+// wastes ~10s × N_searches when SearxNG isn't running and Brave has
+// no API key (the common case for a fresh install). This cache
+// avoids the dead-backend timeout on every call.
+//
+// TTL chosen at 5min: long enough to amortize the probe across many
+// searches in a research session, short enough that if the user
+// brings SearxNG up mid-session it'll be picked up on the next
+// expiry. Re-probes happen lazily inside `_isBackendAvailable`.
+const BACKEND_TTL_MS = 5 * 60 * 1000
+interface BackendHealth { available: boolean; checkedAt: number }
+const _backendHealth: { searxng: BackendHealth | null; brave: BackendHealth | null } = {
+  searxng: null,
+  brave:   null,
+}
+
+async function _isSearxNGAvailable(): Promise<boolean> {
+  const cached = _backendHealth.searxng
+  if (cached && Date.now() - cached.checkedAt < BACKEND_TTL_MS) {
+    return cached.available
+  }
+  // checkSearxNG already has a 3s timeout. Cache the result either way.
+  const available = await checkSearxNG()
+  _backendHealth.searxng = { available, checkedAt: Date.now() }
+  return available
+}
+
+function _isBraveAvailable(): boolean {
+  // Brave is config-driven (API key env var). No network probe needed —
+  // if the key isn't set the call returns null instantly. Still cached
+  // so the env-var read happens once per TTL window.
+  const cached = _backendHealth.brave
+  if (cached && Date.now() - cached.checkedAt < BACKEND_TTL_MS) {
+    return cached.available
+  }
+  const available = BRAVE_API_KEY.length > 0
+  _backendHealth.brave = { available, checkedAt: Date.now() }
+  return available
+}
+
+/** Test helper: reset backend-availability cache between tests. */
+export function _resetBackendHealthForTests(): void {
+  _backendHealth.searxng = null
+  _backendHealth.brave   = null
+}
 const SEARCH_TIMEOUT = 10000
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
@@ -318,18 +367,29 @@ export async function reliableWebSearch(query: string): Promise<{ success: boole
     if (weather) return { success: true, output: weather.output }
   }
 
-  // Method 1 — SearxNG
-  const searxResult = await searchViaSearxNG(query)
-  if (searxResult) {
-    debugLog(`[webSearch] ✓ SearxNG succeeded`)
-    return { success: true, output: searxResult.output.slice(0, 10000) }
+  // v4.11 perf — skip dead backends. SearxNG probe is async (3s
+  // timeout, cached 5min); Brave is a sync env-var read. Both writes
+  // populate the cache for subsequent calls in the same session.
+  // Method 1 — SearxNG (skip when probe says unavailable)
+  if (await _isSearxNGAvailable()) {
+    const searxResult = await searchViaSearxNG(query)
+    if (searxResult) {
+      debugLog(`[webSearch] ✓ SearxNG succeeded`)
+      return { success: true, output: searxResult.output.slice(0, 10000) }
+    }
+  } else {
+    debugLog(`[webSearch] SearxNG skipped — not available (cached)`)
   }
 
-  // Method 2 — Brave
-  const braveResult = await searchViaBrave(query)
-  if (braveResult) {
-    debugLog(`[webSearch] ✓ Brave succeeded`)
-    return { success: true, output: braveResult.output.slice(0, 10000) }
+  // Method 2 — Brave (skip when API key missing)
+  if (_isBraveAvailable()) {
+    const braveResult = await searchViaBrave(query)
+    if (braveResult) {
+      debugLog(`[webSearch] ✓ Brave succeeded`)
+      return { success: true, output: braveResult.output.slice(0, 10000) }
+    }
+  } else {
+    debugLog(`[webSearch] Brave skipped — no API key (cached)`)
   }
 
   // Method 3 — DDG

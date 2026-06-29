@@ -31,6 +31,10 @@ import * as os   from 'node:os';
 
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import { renderTable } from '../table';
+// v4.11 — quote-aware tokenizer extracted to a shared helper (also used
+// by /memory vault link). Re-exported below so existing importers
+// (cronCommand.test.ts) keep resolving `tokenize` from here.
+import { tokenize } from './_argTokens';
 import {
   createJob, createJobAsync, listJobs, getJob,
   pauseJob, resumeJob, deleteJob, triggerJob,
@@ -54,29 +58,10 @@ const TAIL_LINES   = 100;
 
 // ── Quote-aware arg tokenizer ──────────────────────────────────────────────
 //
-// Splits on whitespace but treats `"..."` (and `'...'`) as a single token
-// so schedules and commands keep their internal spaces.
-
-export function tokenize(raw: string): string[] {
-  const out: string[] = [];
-  const s = raw ?? '';
-  let cur  = '';
-  let inDQ = false;
-  let inSQ = false;
-
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    if (ch === '"' && !inSQ) { inDQ = !inDQ; continue; }
-    if (ch === "'" && !inDQ) { inSQ = !inSQ; continue; }
-    if (!inDQ && !inSQ && /\s/.test(ch)) {
-      if (cur.length > 0) { out.push(cur); cur = ''; }
-      continue;
-    }
-    cur += ch;
-  }
-  if (cur.length > 0) out.push(cur);
-  return out;
-}
+// v4.11 — moved to the shared `_argTokens` helper (also used by
+// `/memory vault link`). Re-exported so callers/tests importing
+// `tokenize` from this module are unaffected.
+export { tokenize };
 
 // ── Resolve id-prefix or exact name ────────────────────────────────────────
 

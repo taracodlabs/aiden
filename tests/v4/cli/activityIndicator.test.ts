@@ -109,7 +109,10 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
 
   it('TTY: initial paint contains shimmer block + verb (Slice 11 — █ replaces ⌛)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
-    const handle = d.activityIndicator('thinking');
+    // v4.11 — the █ shimmer block renders for non-thinking verbs;
+    // 'thinking' now uses the dot-wave (covered by its own test below).
+    // Use a network verb here to exercise the block.
+    const handle = d.activityIndicator('calling provider');
     const out = stripAnsi(chunks.join(''));
     // v4.8.0 Slice 11 — activity indicator's leading glyph cluster is
     // a 4-cell `█` segment sliding on a `─` track. Replaces the static
@@ -118,7 +121,7 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     // identity glyph.
     expect(out).toContain('█');
     expect(out).toContain('─');
-    expect(out).toContain('thinking');
+    expect(out).toContain('calling provider');
     // Slice 11 regression sentinels.
     expect(out).not.toContain('⌛');
     expect(out).not.toContain('▓'); // legacy wave-bar glyphs
@@ -296,9 +299,10 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
 
   it('shimmer default ON: initial paint emits 1 row with █/─ track (Slice 11)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
-    const handle = d.activityIndicator('thinking');
+    // v4.11 — block shimmer is for non-thinking verbs (see dot-wave test).
+    const handle = d.activityIndicator('calling provider');
     const initial = stripAnsi(chunks.join(''));
-    expect(initial).toContain('thinking');
+    expect(initial).toContain('calling provider');
     // v4.8.0 Slice 11 — shimmer uses `█` (U+2588 FULL BLOCK) on a `─`
     // (U+2500 BOX DRAWING LIGHT HORIZONTAL) track. Both CP437-safe.
     // At frame 0 the leading 4-cell block sits at positions 0..3.
@@ -314,7 +318,8 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
 
   it('shimmer: 4-cell █ block slides across 10 cells (Slice 11)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
-    const handle = d.activityIndicator('thinking');
+    // v4.11 — block shimmer is for non-thinking verbs (see dot-wave test).
+    const handle = d.activityIndicator('calling provider');
     chunks.length = 0;
     vi.advanceTimersByTime(500); // 2 ticks at 250ms
     const tick2 = stripAnsi(chunks.join(''));
@@ -325,7 +330,8 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
 
   it('shimmer: wraps at right edge (frame 8 → block straddles)', () => {
     const { d, chunks } = makeDisplay({ tty: true });
-    const handle = d.activityIndicator('thinking');
+    // v4.11 — block shimmer is for non-thinking verbs (see dot-wave test).
+    const handle = d.activityIndicator('calling provider');
     chunks.length = 0;
     vi.advanceTimersByTime(250 * 8); // shimmerFrame=8
     const tick8 = stripAnsi(chunks.join(''));
@@ -448,12 +454,27 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     out.columns = 80;
     const skin = new SkinEngine({ forceMono: false });
     const d = new Display({ stdout: out as unknown as NodeJS.WriteStream, skin });
-    const handle = d.activityIndicator('thinking');
+    // v4.11 — block shimmer is for non-thinking verbs (see dot-wave test).
+    const handle = d.activityIndicator('calling provider');
     const initial = chunks.join('');
     // Brand orange = #FF6B35 = rgb 255,107,53.
     expect(initial).toContain('\x1b[38;2;255;107;53m');
     expect(initial).toContain('█');
     expect(initial).not.toContain('⌛');
+    handle.stop();
+  });
+
+  it('v4.11: initial paint for "thinking" uses the dot-wave, not the █ block', () => {
+    // The thinking state renders a sliding brand-orange `●` across muted
+    // `•` dots (buildDotWave); the solid `█`/`─` shimmer block is reserved
+    // for "calling provider" and tool verbs. Locks the v4.11 differentiation.
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('thinking');
+    expect(out).toContain('●');   // bright sliding dot
+    expect(out).toContain('•');   // muted track dots
+    expect(out).not.toContain('█'); // NOT the block shimmer
     handle.stop();
   });
 });

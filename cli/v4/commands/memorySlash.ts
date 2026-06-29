@@ -14,6 +14,7 @@
  */
 import type { SlashCommand } from '../commandRegistry';
 import { runMemorySubcommand } from './memory';
+import { tokenize } from './_argTokens';
 
 /** Actions that need the full CLI surface (confirmation / destructive). */
 export const MEMORY_SHELL_ONLY = new Set(['remove', 'restore']);
@@ -46,13 +47,18 @@ export async function dispatchMemorySlash(opts: {
 
 export const memory: SlashCommand = {
   name: 'memory',
-  description: 'Manage memory (list / show / add / namespaces / pending / approve / review).',
+  description: 'Manage memory: list, show, add, namespaces, pending, approve, review, vault.',
   category: 'system',
   icon: '🧠',
   handler: async (ctx) => {
+    // v4.11 — tokenize rawArgs quote-aware so a quoted path with spaces
+    // (e.g. `/memory vault link "C:\…\Obsidian Vault\Aiden"`) survives as
+    // one token. The registry's default split is whitespace-only, which
+    // shredded such paths and left the quote chars attached.
+    const tokens = tokenize(ctx.rawArgs);
     await dispatchMemorySlash({
-      action: ctx.args[0] ?? 'list',
-      args:   ctx.args.slice(1),
+      action: tokens[0] ?? 'list',
+      args:   tokens.slice(1),
       write:  (s) => ctx.display.write(s),
       runMemory: runMemorySubcommand,
     });

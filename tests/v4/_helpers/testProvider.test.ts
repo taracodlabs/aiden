@@ -66,8 +66,9 @@ describe('testProvider helper', () => {
     expect(p).not.toBeNull();
     expect(p!.source).toBe('together');
     expect(p!.providerId).toBe('together');
-    // Phase 16f: Together default model is now Qwen3-235B (was Llama-3.3-Turbo).
-    expect(p!.modelId).toBe('Qwen/Qwen3-235B-A22B-Instruct-2507-tput');
+    // Together default model is openai/gpt-oss-120b (Tier-0 accessible;
+    // replaced Qwen3-235B-…-tput, which is gated behind a higher build tier).
+    expect(p!.modelId).toBe('openai/gpt-oss-120b');
   });
 
   it('returns null when no keys are set', async () => {

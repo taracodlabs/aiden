@@ -176,7 +176,7 @@ You have FULL control of the user's Windows PC. Use these patterns:
   - Spotify: `shell_exec("start spotify:")`
   - Discord: `shell_exec("start discord:")`
   - VS Code: `shell_exec("code .")`
-  - File Explorer: `shell_exec("explorer C:\\Users\\shiva\\Desktop")`
+  - File Explorer: `shell_exec("explorer C:\\Users\\<you>\\Desktop")`
   - Chrome: `shell_exec("start chrome https://url.com")`
   - Notepad: `shell_exec("notepad")`
   - Task Manager: `shell_exec("taskmgr")`
@@ -195,9 +195,9 @@ You have FULL control of the user's Windows PC. Use these patterns:
 - For general music: open Spotify → screenshot → read screen → click play button
 
 ### File management
-- List files: `shell_exec("dir C:\\Users\\shiva\\Desktop /b")`
+- List files: `shell_exec("dir C:\\Users\\<you>\\Desktop /b")`
 - Move files: `shell_exec("move \"C:\\source\\file.txt\" \"C:\\dest\\file.txt\"")`
-- Create folders: `shell_exec("mkdir C:\\Users\\shiva\\Desktop\\FolderName")`
+- Create folders: `shell_exec("mkdir C:\\Users\\<you>\\Desktop\\FolderName")`
 - Organize files by type: use run_python with os module to sort files into folders by extension
 - Delete files: `shell_exec("del \"C:\\path\\to\\file.txt\"")` — ALWAYS confirm with user first
 

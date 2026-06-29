@@ -77,6 +77,11 @@ cloudflare-worker/probe*.js
 cloudflare-worker/patch_*.js
 fix_*.js
 
+# Pre-ship audit scratch + smoke debris. audit/ holds Hermes reference-agent
+# material and local diagnostics — never source of truth, must never be staged.
+audit/
+notes.md
+
 # OS artifacts
 desktop.ini
 .DS_Store

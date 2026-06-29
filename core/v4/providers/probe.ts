@@ -270,10 +270,15 @@ export async function runProbe(o: ProbeOptions): Promise<ProbeResult> {
     }
   } else {
     // OpenAI-compatible: check membership in the /models body from step 1.
+    // Providers disagree on the envelope: OpenAI/Groq wrap the list in
+    // `{ data: [...] }`, while Together returns a bare top-level array.
+    // Accept either shape — assuming `.data` made the probe report
+    // "not in this key's catalog" for EVERY Together model.
     let found = false;
     try {
-      const body = JSON.parse(modelsBody) as { data?: Array<{ id: string }> };
-      found = !!body.data?.some((m) => m.id === o.modelId);
+      const body = JSON.parse(modelsBody) as { data?: Array<{ id: string }> } | Array<{ id: string }>;
+      const list = Array.isArray(body) ? body : body.data;
+      found = Array.isArray(list) && list.some((m) => m.id === o.modelId);
     } catch { /* malformed body — treat as unknown */ }
     if (found) {
       steps.push({ step: 'model', ok: true });

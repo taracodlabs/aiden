@@ -20,6 +20,8 @@ import { save } from './save';
 import { title } from './title';
 import { compress } from './compress';
 import { usage } from './usage';
+import { undo } from './undo';
+import { retry } from './retry';
 import { yolo } from './yolo';
 import { skin } from './skin';
 // v4.9.0 Slice 1a — unified theme system.
@@ -77,6 +79,8 @@ export {
   title,
   compress,
   usage,
+  undo,
+  retry,
   yolo,
   skin,
   theme,
@@ -137,6 +141,8 @@ export const allCommands: SlashCommand[] = [
   title,
   compress,
   usage,
+  undo,
+  retry,
   yolo,
   skin,
   theme,

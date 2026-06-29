@@ -1136,7 +1136,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
  * Box width policy:
  * - Auto-fit to the widest content row (icon + padded name + message,
  *   plus any hint continuation), so Windows paths like
- *   `C:\Users\shiva\AppData\Local\aiden\.bundled_manifest` don't get
+ *   `C:\Users\<you>\AppData\Local\aiden\.bundled_manifest` don't get
  *   truncated mid-word as they did at the previous fixed 70.
  * - Floor at HEALTH_BOX_MIN_WIDTH so empty-content cases still feel
  *   intentional rather than narrow.

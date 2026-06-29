@@ -25,9 +25,18 @@
  *   pending  →  active  →  completed
  *                       →  failed
  *                       →  cancelled
+ *                       →  interrupted
  *
  * `pending` is in the enum for v4.11 forward-compat (daemon may
  * legitimately queue tasks); REPL skips it and starts at `active`.
+ *
+ * `interrupted` (v4.11 Slice 0) is a terminal status applied by the
+ * boot-time orphan sweep: a REPL that crashes mid-turn never fires the
+ * completed/failed transition, leaving its row stuck at `active`
+ * forever. On the next REPL boot, `sweepOrphaned` retires those
+ * pre-boot `active` rows so `/tasks` doesn't accrue phantom in-flight
+ * tasks from dead sessions. Mirrors the `reclaimStuckRuns` precedent
+ * (core/v4/daemon/runs/reclaim.ts) which does the same for `runs`.
  *
  * Persistence policy: every write is best-effort. The caller wraps
  * in try/catch so a locked DB / schema drift never crashes the
@@ -37,7 +46,7 @@
 
 import type { Db } from './db/connection';
 
-export type TaskStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled';
+export type TaskStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
 
 export interface Task {
   id:           string;
@@ -139,10 +148,29 @@ export interface TaskStore {
    */
   appendTraceId(id: string, eventId: number): void;
   /**
+   * v4.11 — append an artifact id to the task's artifactIds array,
+   * closing the reserved field (migrations.ts: "back-reference into a
+   * future artifact registry"). Same atomic JSON-array-merge + de-dupe
+   * as appendTraceId; artifact rows live in the `artifacts` table
+   * (core/v4/daemon/artifactStore.ts).
+   */
+  appendArtifactId(id: string, artifactId: string): void;
+  /**
    * Listing surface for /tasks. Newest-first by created_at. Optional
    * session + status filters compose with AND.
    */
   listRecent(opts?: ListRecentTasksOptions): Task[];
+  /**
+   * v4.11 Slice 0 — boot-time orphan sweep. Retires every `active` task
+   * created strictly before `beforeMs` to `interrupted`, returning the
+   * number of rows swept. Called once at REPL boot with the boot
+   * timestamp: the current session's task rows are all created AFTER
+   * boot, so they're never touched — the cutoff is the session guard
+   * (the session id isn't even assigned yet at boot). Only `active`
+   * rows are eligible; terminal statuses (completed/failed/cancelled/
+   * interrupted) are left alone. Best-effort at the call site.
+   */
+  sweepOrphaned(beforeMs: number): number;
 }
 
 export interface CreateTaskStoreOptions {
@@ -223,6 +251,22 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
         `UPDATE tasks SET trace_ids = ?, updated_at = ? WHERE id = ?`,
       ).run(JSON.stringify(arr), Date.now(), id);
     },
+    appendArtifactId(id, artifactId) {
+      // Same atomic read-modify-write + de-dupe as appendTraceId, on the
+      // string-valued artifact_ids array.
+      const row = db.prepare('SELECT artifact_ids FROM tasks WHERE id = ?').get(id) as { artifact_ids: string } | undefined;
+      if (!row) return;
+      let arr: string[] = [];
+      try {
+        const parsed = JSON.parse(row.artifact_ids);
+        if (Array.isArray(parsed)) arr = parsed.filter((s): s is string => typeof s === 'string');
+      } catch { /* malformed — start fresh */ }
+      if (arr.includes(artifactId)) return;
+      arr.push(artifactId);
+      db.prepare(
+        `UPDATE tasks SET artifact_ids = ?, updated_at = ? WHERE id = ?`,
+      ).run(JSON.stringify(arr), Date.now(), id);
+    },
     listRecent(qOpts = {}) {
       const limit = Math.max(1, Math.min(qOpts.limit ?? 50, 5000));
       const where: string[]                 = [];
@@ -241,6 +285,18 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
         `SELECT * FROM tasks ${whereSql} ORDER BY created_at DESC LIMIT ?`,
       ).all(...params) as TaskRowSql[];
       return rows.map(rowToTask);
+    },
+    sweepOrphaned(beforeMs) {
+      // Single atomic UPDATE — only pre-boot `active` rows transition.
+      // `created_at < beforeMs` excludes anything this process creates
+      // (current-session tasks are all stamped after boot), so a live
+      // session is never disturbed. Returns the swept count for logging.
+      const info = db.prepare(
+        `UPDATE tasks
+            SET status = 'interrupted', updated_at = ?
+          WHERE status = 'active' AND created_at < ?`,
+      ).run(Date.now(), beforeMs);
+      return info.changes;
     },
   };
 }

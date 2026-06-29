@@ -184,14 +184,14 @@ describe('buildDefaultSlots', () => {
     expect(slots[5].keyPresent).toBe(false); // groq4 unset
   });
 
-  it('Together primary uses Qwen3-235B by default; fallback uses Llama-3.3-Turbo (Phase 16f)', () => {
+  it('Together primary uses gpt-oss-120b by default; fallback uses Llama-3.3-Turbo', () => {
     const slots = buildDefaultSlots({
       adapterFactory: () => okStub(),
       env: { TOGETHER_API_KEY: 'tk' },
     });
     const primary = slots.find((s) => s.id === 'together')!;
     const fallback = slots.find((s) => s.id === 'together-fallback')!;
-    expect(primary.modelId).toBe('Qwen/Qwen3-235B-A22B-Instruct-2507-tput');
+    expect(primary.modelId).toBe('openai/gpt-oss-120b');
     expect(fallback.modelId).toBe('meta-llama/Llama-3.3-70B-Instruct-Turbo');
     expect(primary.providerId).toBe('together');
     expect(fallback.providerId).toBe('together');

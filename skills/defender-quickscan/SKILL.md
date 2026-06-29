@@ -37,7 +37,7 @@ Start-MpScan -ScanType FullScan    # thorough scan of all files (30-60 min)
 
 ### Scan a specific file or folder
 ```powershell
-Start-MpScan -ScanType CustomScan -ScanPath "C:\Users\shiva\Downloads"
+Start-MpScan -ScanType CustomScan -ScanPath "C:\Users\<you>\Downloads"
 ```
 
 ### Update virus definitions

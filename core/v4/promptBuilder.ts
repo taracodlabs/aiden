@@ -38,6 +38,7 @@ import type { AidenPaths }      from './paths';
 import type { ConfigManager }   from './config';
 import type { MemorySnapshot }  from './memoryProvider';
 import type { ToolSchema }      from '../../providers/v4/types';
+import { isWeakModel }          from './modelCapability';
 // When SOUL.md is missing or whitespace-only the bundled default takes
 // over so a fresh install still has a working identity.
 import { DEFAULT_SOUL_MD } from '../../cli/v4/defaultSoul';
@@ -114,6 +115,15 @@ const NOTE_MEMORY_LIVE      = '[System note: Treat as live working memory, not p
 const SKILLS_LOAD_NOTE =
   'You MUST load it first via the `skill_view` tool before invoking ' +
   'the underlying capability. Skills carry the procedure the tools alone don\'t.';
+
+// v4.11 Skill Injection Narrowing — the index below carries only a
+// first-sentence teaser per skill (see `narrowSkillDesc`). This line
+// closes the routing gap that creates: when the teaser is too thin to
+// disambiguate, the model pulls the full descriptions on demand rather
+// than guessing. `skills_list` stays a full, un-narrowed copy.
+const SKILLS_MATCH_NUDGE =
+  'If no skill above clearly matches the task, call `skills_list` for the ' +
+  'full descriptions before deciding.';
 
 /**
  * Phase v4.1.2 alive-core: when the user has authored a real SOUL.md
@@ -261,6 +271,33 @@ export function shouldInjectExecutionDiscipline(_modelId: string | undefined): b
   return true;
 }
 
+/**
+ * v4.11 — predicate for the `## UI events` guidance slot.
+ *
+ * Default ON. Disabled for known-weak instruct models that imitate
+ * the `name {args}` pseudocode as XML-wrapped text instead of firing
+ * proper tool_calls — e.g. groq llama-3.3 emitting
+ * `<ui_toast{"kind":"info"}</ui_toast>` literally in the assistant
+ * reply for a bare "hi". The guidance teaches a conditional rule
+ * ("skip events on single-shot queries") that weak models don't
+ * follow reliably; removing the guidance removes the temptation.
+ *
+ * Bonus side-effect: ~250 prompt tokens saved per turn on weak
+ * models (the block is the third-largest static section).
+ *
+ * The sibling sanitizer `stripLeakedUiMarkup`
+ * (core/v4/uiLeakSanitizer.ts) is the safety net for the cases this
+ * gate misses — any future model that imitates the pattern is
+ * caught by the post-hoc scrub.
+ *
+ * v4.11 — the weak-model decision now lives in `isWeakModel`
+ * (core/v4/modelCapability.ts) so this guidance gate and the boot
+ * tool-catalog `ui` strip share ONE predicate and can never disagree.
+ */
+export function shouldInjectUiEventsGuidance(modelId: string | undefined): boolean {
+  return !isWeakModel(modelId);
+}
+
 // ── Internal helpers ──────────────────────────────────────────────────
 
 function detectPlatform(): 'windows' | 'linux' | 'macos' {
@@ -332,6 +369,40 @@ function formatUserSection(userMd: string): string {
   );
 }
 
+/**
+ * v4.11 Skill Injection Narrowing — hard per-entry cap for the
+ * system-prompt skill index. The cap actually fires (the pre-v4.11
+ * `.slice(0, 120)` never did: avg description is ~62 chars), so this is
+ * the lever that shrinks the ~1.5k-token block.
+ */
+export const SKILL_DESC_CAP = 60;
+
+/**
+ * Narrow a full skill description to a routing-sufficient teaser for the
+ * `<available_skills>` index.
+ *
+ * Routing depends on this text (it is the sole signal weak models —
+ * groq/llama — use to pick a skill), so we keep the discriminator: the
+ * first sentence. Everything after the first `.` or newline is dropped,
+ * then the result is hard-capped at `SKILL_DESC_CAP` chars with an
+ * ellipsis when the cap bites. The full description is never lost — it
+ * stays one `skills_list` / `skill_view` call away.
+ *
+ * Pure and idempotent: safe to call on already-narrowed text. Empty /
+ * non-string input yields `''`.
+ */
+export function narrowSkillDesc(desc: string): string {
+  if (typeof desc !== 'string') return '';
+  const trimmed = desc.trim();
+  if (trimmed.length === 0) return '';
+  // First sentence: stop at the first sentence-ending period or newline.
+  // Fall back to the whole trimmed string if the split yields nothing
+  // useful (e.g. a description that opens with punctuation).
+  const firstSentence = (trimmed.split(/[.\n]/, 1)[0] ?? '').trim() || trimmed;
+  if (firstSentence.length <= SKILL_DESC_CAP) return firstSentence;
+  return firstSentence.slice(0, SKILL_DESC_CAP).trimEnd() + '…';
+}
+
 function formatSkillsSection(
   skills: ReadonlyArray<{ name: string; description: string }>,
 ): string {
@@ -344,6 +415,8 @@ function formatSkillsSection(
     `<${TAG_AVAILABLE_SKILLS}>`,
     ...lines,
     `</${TAG_AVAILABLE_SKILLS}>`,
+    '',
+    SKILLS_MATCH_NUDGE,
   ].join('\n');
 }
 
@@ -498,14 +571,22 @@ export class PromptBuilder {
     }
 
     // ── 6.6. UI events nudge (v4.8.0 Phase 2.6) ───────────────────────
-    // Unconditional like execution discipline — every model that sees
-    // the ui_* tools benefits. Teaches structured-event emission for
-    // multi-step work instead of relying on text status formatting.
-    slots.push({
-      name:     'uiEvents',
-      content:  UI_EVENTS_GUIDANCE,
-      optional: true,
-    });
+    // Teaches structured-event emission for multi-step work instead of
+    // relying on text status formatting.
+    //
+    // v4.11 — gated by `shouldInjectUiEventsGuidance(modelId)`. Weak
+    // instruct models (llama-3.x, mistral, gemma, qwen2-7B/14B, phi)
+    // misimitate the `name {args}` pseudocode as XML-wrapped text
+    // (e.g. `<ui_toast{...}</ui_toast>`) instead of firing a proper
+    // tool_call. The sibling `stripLeakedUiMarkup` sanitizer is the
+    // safety net for any model that slips past this gate.
+    if (shouldInjectUiEventsGuidance(opts.modelId)) {
+      slots.push({
+        name:     'uiEvents',
+        content:  UI_EVENTS_GUIDANCE,
+        optional: true,
+      });
+    }
 
     // ── 7. Iteration budget ───────────────────────────────────────────
     if (opts.initialBudget) {

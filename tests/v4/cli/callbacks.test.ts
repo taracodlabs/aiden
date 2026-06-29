@@ -26,7 +26,7 @@ function makeDisplay() {
   };
 }
 
-function mockPrompts(answers: { kind: 'select' | 'confirm'; value: any }[]): PromptApi {
+function mockPrompts(answers: { kind: 'select' | 'confirm' | 'input'; value: any }[]): PromptApi {
   let i = 0;
   return {
     async select() {
@@ -39,6 +39,12 @@ function mockPrompts(answers: { kind: 'select' | 'confirm'; value: any }[]): Pro
       const a = answers[i];
       i += 1;
       if (a.kind !== 'confirm') throw new Error(`expected confirm, got ${a.kind}`);
+      return a.value;
+    },
+    async input() {
+      const a = answers[i];
+      i += 1;
+      if (a.kind !== 'input') throw new Error(`expected input, got ${a.kind}`);
       return a.value;
     },
   };
@@ -93,6 +99,9 @@ describe('CliCallbacks.promptApproval', () => {
       async confirm() {
         throw new Error('cancel');
       },
+      async input() {
+        throw new Error('cancel');
+      },
     };
     const cb = new CliCallbacks({ display, promptModule: throwing });
     const d = await cb.promptApproval({
@@ -102,7 +111,65 @@ describe('CliCallbacks.promptApproval', () => {
     });
     expect(d).toBe('deny');
   });
+});
 
+describe('CliCallbacks.promptClarify (v4.11 Slice 1)', () => {
+  it('free-text question returns the typed answer', async () => {
+    const { display } = makeDisplay();
+    const cb = new CliCallbacks({
+      display,
+      promptModule: mockPrompts([{ kind: 'input', value: 'the staging bucket' }]),
+    });
+    const answer = await cb.promptClarify('Which bucket?');
+    expect(answer).toBe('the staging bucket');
+  });
+
+  it('with options: a picked menu choice is returned directly', async () => {
+    const { display } = makeDisplay();
+    const cb = new CliCallbacks({
+      display,
+      promptModule: mockPrompts([{ kind: 'select', value: 'prod' }]),
+    });
+    const answer = await cb.promptClarify('Which env?', ['dev', 'prod']);
+    expect(answer).toBe('prod');
+  });
+
+  it('with options: "Other" routes to free-text input', async () => {
+    const { display } = makeDisplay();
+    const cb = new CliCallbacks({
+      display,
+      promptModule: mockPrompts([
+        { kind: 'select', value: '__clarify_other__' },
+        { kind: 'input',  value: 'a custom env' },
+      ]),
+    });
+    const answer = await cb.promptClarify('Which env?', ['dev', 'prod']);
+    expect(answer).toBe('a custom env');
+  });
+
+  it('blank answer → null (treated as no answer)', async () => {
+    const { display } = makeDisplay();
+    const cb = new CliCallbacks({
+      display,
+      promptModule: mockPrompts([{ kind: 'input', value: '   ' }]),
+    });
+    expect(await cb.promptClarify('Q?')).toBeNull();
+  });
+
+  it('returns null on Ctrl+C / cancel (reuses approval SIGINT path, never throws)', async () => {
+    const { display } = makeDisplay();
+    const throwing: PromptApi = {
+      async select() { throw new Error('cancel'); },
+      async confirm() { throw new Error('cancel'); },
+      async input() { throw new Error('cancel'); },
+    };
+    const cb = new CliCallbacks({ display, promptModule: throwing });
+    await expect(cb.promptClarify('Q?')).resolves.toBeNull();
+    await expect(cb.promptClarify('Q?', ['a', 'b'])).resolves.toBeNull();
+  });
+});
+
+describe('CliCallbacks.promptApproval — Session/Always qualifier (Slice 10.6c)', () => {
   // ── v4.10 Slice 10.6c — dynamic Session/Always qualifier ─────────
   //
   // Pre-10.6c the picker labels were bare "Session" / "Always", read

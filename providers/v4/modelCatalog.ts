@@ -564,21 +564,36 @@ export const MODEL_CATALOG: ModelEntry[] = [
   },
 
   // ─── together ────────────────────────────────────────────────────────────
-  // Phase 16f: Qwen3-235B is the new Together default — strong tool-calling,
-  // MoE 22B active params, throughput tier ~$0.20/M. Replaces Groq Llama-3.3
-  // as the primary in the runtime fallback chain.
+  // openai/gpt-oss-120b is the Together default — tool-calling capable and
+  // available at Build Tier 0. Replaces Qwen3-235B-…-tput, which is gated
+  // behind a higher Together build tier ("not in this key's catalog" on
+  // Tier-0 keys). This entry's `isDefault: true` is what marks it
+  // "recommended" in the /setup picker (fallbackFor → recommended = isDefault).
   {
-    id: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput',
-    displayName: 'Qwen3 235B Instruct (Together)',
+    id: 'openai/gpt-oss-120b',
+    displayName: 'GPT-OSS 120B (Together)',
     providerId: 'together',
     contextLength: 131_072,
     supportsToolCalling: true,
     supportsVision: false,
     supportsReasoning: false,
-    pricing: { inputPerM: 0.2, outputPerM: 0.2 },
+    pricing: { inputPerM: 0.15, outputPerM: 0.6 },
     isDefault: true,
     tier: 'flagship',
-    notes: 'MoE 22B active. Strong tool calling. Throughput tier.',
+    notes: 'Tool-calling capable. Available at Build Tier 0.',
+  },
+  {
+    id: 'openai/gpt-oss-20b',
+    displayName: 'GPT-OSS 20B (Together)',
+    providerId: 'together',
+    contextLength: 131_072,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: false,
+    pricing: { inputPerM: 0.05, outputPerM: 0.2 },
+    isDefault: false,
+    tier: 'small',
+    notes: 'Smaller/cheaper tool-calling option. Tier-0 accessible.',
   },
   {
     id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
@@ -628,9 +643,56 @@ export const MODEL_CATALOG: ModelEntry[] = [
   },
 
   // ─── deepseek ────────────────────────────────────────────────────────────
+  // v4.11 — DeepSeek V4 Pro / Flash. The provider + per-call defaults
+  // (mandatory thinking + reasoning_effort) are already wired in
+  // providers/v4/registry.ts + modelDefaults.ts; these catalog entries are
+  // what surface them in /model. IDs confirmed against DeepSeek's official
+  // docs (api.deepseek.com, OpenAI-compatible).
+  //
+  // contextLength mirrors the in-repo DeepSeek family value (chat/reasoner
+  // = 64_000); v4-specific context + maxOutputTokens are not cited in-repo,
+  // so maxOutputTokens is omitted rather than asserted. pricing is omitted
+  // (unknown — no DeepSeek-direct price is cited anywhere in-repo; per the
+  // header rule we leave `pricing` undefined rather than invent numbers).
+  // isDefault stays FALSE — selectable, not automatic; the default + the
+  // registry auto-pick wait on live tool-calling verification.
   {
+    id: 'deepseek-v4-pro',
+    displayName: 'DeepSeek V4 Pro',
+    providerId: 'deepseek',
+    contextLength: 64_000,           // family default; v4 context not cited in-repo
+    // maxOutputTokens omitted — not cited for v4.
+    // supportsToolCalling matches the provider registry flag, but is
+    // PROVIDER-DECLARED, not live-verified: we have not confirmed v4-pro
+    // returns tool_calls in its mandatory reasoning mode (key-blocked
+    // test). Confirm when a DeepSeek key is available before flipping any
+    // default/auto-pick to it.
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: true,         // mandatory thinking + reasoning_effort
+    // pricing omitted — unknown, not cited in-repo.
+    isDefault: false,
+    tier: 'flagship',
+  },
+  {
+    id: 'deepseek-v4-flash',
+    displayName: 'DeepSeek V4 Flash',
+    providerId: 'deepseek',
+    contextLength: 64_000,           // family default; v4 context not cited in-repo
+    // supportsToolCalling: provider-declared, not live-verified (see v4-pro).
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: true,
+    // pricing omitted — unknown, not cited in-repo.
+    isDefault: false,
+    tier: 'standard',
+  },
+  {
+    // Deprecating 2026-07-24 (per DeepSeek). Per modelDefaults.ts these
+    // are v4-flash aliases (chat = non-think, reasoner = think). Marker
+    // surfaced in the display name so /model users see they're going away.
     id: 'deepseek-chat',
-    displayName: 'DeepSeek Chat',
+    displayName: 'DeepSeek Chat (deprecating 2026-07-24)',
     providerId: 'deepseek',
     contextLength: 64_000,
     maxOutputTokens: 8_192,
@@ -643,7 +705,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
   },
   {
     id: 'deepseek-reasoner',
-    displayName: 'DeepSeek Reasoner (R1)',
+    displayName: 'DeepSeek Reasoner (R1) (deprecating 2026-07-24)',
     providerId: 'deepseek',
     contextLength: 64_000,
     maxOutputTokens: 8_192,
