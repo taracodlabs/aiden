@@ -225,13 +225,21 @@ describe('TaskStore.listRecent', () => {
   });
 
   it('respects limit (default 50, hard cap 5000)', () => {
-    for (let i = 0; i < 75; i++) {
-      store.create({ title: `t${i}`, goal: `t${i}`, sessionId: 's' });
-    }
+    // Batch the 75 inserts in a single transaction. The DB is file-backed
+    // (beforeEach), so individually each create() fsyncs to disk; on a
+    // Windows CI runner under full-suite parallel-worker disk contention
+    // (+ antivirus), 75 separate fsyncs blew past the 5s default timeout.
+    // One transaction = one commit/fsync. Assertions are unchanged — the
+    // same 75 rows exist; only the setup I/O is collapsed.
+    db.transaction(() => {
+      for (let i = 0; i < 75; i++) {
+        store.create({ title: `t${i}`, goal: `t${i}`, sessionId: 's' });
+      }
+    })();
     expect(store.listRecent().length).toBe(50);             // default
     expect(store.listRecent({ limit: 10 }).length).toBe(10);
     expect(store.listRecent({ limit: 99999 }).length).toBe(75); // cap clamps, only 75 exist
-  });
+  }, 30_000);
 });
 
 describe('TaskStore — defensive JSON parses', () => {

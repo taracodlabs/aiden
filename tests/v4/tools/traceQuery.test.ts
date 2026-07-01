@@ -95,7 +95,15 @@ describe('RunStore.listEventsForSession', () => {
 
   it('enforces limit cap (default 100, hard cap 5000)', async () => {
     const r = store.create({ sessionId: 'sess-L', instanceId: 'test-inst', status: 'running' });
-    for (let i = 0; i < 150; i++) store.emitEvent(r, 'tick', { i });
+    // Batch the 150 emits in a single transaction. The DB is file-backed
+    // (beforeEach), so each emitEvent() otherwise fsyncs individually; on a
+    // Windows CI runner under full-suite parallel-worker disk contention
+    // (+ antivirus), 150 separate fsyncs blew past the 5s default timeout.
+    // One transaction = one commit/fsync. Assertions are unchanged — the
+    // same 150 events exist; only the setup I/O is collapsed.
+    db.transaction(() => {
+      for (let i = 0; i < 150; i++) store.emitEvent(r, 'tick', { i });
+    })();
 
     const noLimit = store.listEventsForSession({ sessionId: 'sess-L' });
     expect(noLimit.length).toBe(100);    // default
@@ -105,7 +113,7 @@ describe('RunStore.listEventsForSession', () => {
 
     const huge = store.listEventsForSession({ sessionId: 'sess-L', limit: 99999 });
     expect(huge.length).toBeLessThanOrEqual(150);   // capped by what exists
-  });
+  }, 30_000);
 
   it('returns empty array when no events match', () => {
     const rows = store.listEventsForSession({ sessionId: 'never-existed' });

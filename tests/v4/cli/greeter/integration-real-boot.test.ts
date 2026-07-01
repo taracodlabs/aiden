@@ -53,6 +53,26 @@ import { Display } from '../../../../cli/v4/display';
 import { SkinEngine } from '../../../../cli/v4/skinEngine';
 import { readHistory, writeHistory } from '../../../../cli/v4/greeter/history';
 import type { AidenPaths, GreeterHistory } from '../../../../cli/v4/greeter/types';
+import { VERSION as AIDEN_VERSION } from '../../../../core/version';
+
+// The greeter's update banner fires only when the cached `latest` is
+// strictly NEWER than the running Aiden version (scanUpdate → isNewer).
+// A hardcoded literal (the old `4.9.99`) rots on every release: once the
+// package version passed it, `latest` was no longer newer and the banner
+// stopped rendering, failing this test on all platforms. Derive a version
+// guaranteed newer than whatever `core/version.ts` reports at run time —
+// the same source the product compares against — so the test tracks the
+// real comparison instead of a soon-stale constant.
+const NEWER_VERSION = `${Number(AIDEN_VERSION.split('.')[0] || '0') + 1}.0.0`;
+
+// YYYY-MM-DD in local time — must match selectOffer.isoDateLocal so we can
+// build the exact per-day offer id the greeter uses for decay lookups.
+function isoDateLocal(d: Date): string {
+  const y  = d.getFullYear();
+  const m  = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${dd}`;
+}
 
 let root: string;
 let paths: AidenPaths;
@@ -247,10 +267,29 @@ describe('renderStartupCard — greeter wiring', () => {
   });
 
   it('with seeded update cache: update-available appears in real chatSession output', async () => {
-    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    // update-available is Tier 4 (lowest); it only surfaces when no
+    // higher tier fires. The greeter reads the REAL local clock (no
+    // injection on the boot path), so a run in the evening (hour >= 18)
+    // would otherwise fire the Tier-3 time-of-day-evening offer and
+    // shadow update — flaky by wall-clock (incl. CI running in the
+    // evening in UTC). Suppress that Tier-3 offer via the product's own
+    // decay path: seed an `ignored` record for today's evening id
+    // (selectOffer.isDecayedRecently). lastCwd = cwd suppresses the other
+    // Tier-3 offer (cwd-changed); no distillation is seeded so Tier 2
+    // (continuity / welcome-back) stays silent. Update then wins
+    // deterministically.
+    const now = new Date();
+    await writeHistory(paths, mkHistory({
+      lastCwd: process.cwd(),
+      offers: [{
+        id:        `time-of-day-evening-${isoDateLocal(now)}`,
+        offeredAt: now.toISOString(),
+        response:  'ignored',
+      }],
+    }));
     await fs.writeFile(
       path.join(root, '.update_check.json'),
-      JSON.stringify({ latest: '4.9.99' }),
+      JSON.stringify({ latest: NEWER_VERSION }),
       'utf8',
     );
 
@@ -259,7 +298,8 @@ describe('renderStartupCard — greeter wiring', () => {
     await session.renderStartupCard();
 
     const text = chunks.join('');
-    expect(text).toMatch(/aiden-runtime .* → 4\.9\.99 available\./);
+    const escapedNewer = NEWER_VERSION.replace(/\./g, '\\.');
+    expect(text).toMatch(new RegExp(`aiden-runtime .* → ${escapedNewer} available\\.`));
     expect(text).toContain('/update install');
   });
 
