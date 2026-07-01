@@ -199,7 +199,20 @@ function buildDefaultDenyList(env: NodeJS.ProcessEnv = process.env): string[] {
     path.join(home, '.azure'),
     path.join(home, '.config', 'gcloud'),
     '/etc',
-    '/var',
+    // v4.12 CI-green — `/var` narrowed to its actually-sensitive subdirs.
+    // Denying ALL of `/var` swallowed the OS temp dir on macOS (os.tmpdir() =
+    // `/var/folders/…` → realpath `/private/var/folders`, under `/private/var`),
+    // which is ALLOW-listed by intent — so file_* tools were wrongly denied on
+    // macOS temp files. Every sensitive `/var` location stays denied; only the
+    // scratch temp dirs (`/var/folders`, `/var/tmp`) are freed.
+    '/var/log',       // system + app logs (may contain secrets)
+    '/var/spool',     // cron / at / print / mail spools
+    '/var/mail',      // user mailboxes
+    '/var/root',      // macOS root account home
+    '/var/db',        // macOS system dbs (sudo, dslocal user db, …)
+    '/var/audit',     // BSD/macOS audit trail
+    '/var/backups',   // Debian backups (shadow/passwd snapshots)
+    '/var/lib',       // Linux app state (docker, dpkg, mysql, … — creds/state)
     '/usr',
     '/boot',
     '/sys',

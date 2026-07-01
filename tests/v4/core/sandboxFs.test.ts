@@ -311,3 +311,37 @@ describe('isPathAllowed — decision shape', () => {
     expect(d.op).toBe('write');
   });
 });
+
+// ── v4.12 CI-green — /var narrowed so macOS OS temp isn't swallowed ──────────
+//
+// Regression for the macOS sandbox bug: the broad `/var` denylist entry
+// swallowed os.tmpdir() on macOS (`/var/folders/…` → realpath
+// `/private/var/folders`, under `/private/var`), so file_* tools were wrongly
+// denied on macOS temp files even though os.tmpdir() is ALLOW-listed. `/var` is
+// now narrowed to its sensitive subdirs. The macOS-specific half of this proof
+// runs on the macOS CI leg (there os.tmpdir() is under /var/folders).
+describe('/var narrowing — OS temp allowed, sensitive /var still denied', () => {
+  beforeEach(() => { _clearRealPathCacheForTests(); });
+  const cfg = () => readSandboxConfig({ AIDEN_SANDBOX: '1' });
+
+  it('OS temp dir is allowed for read AND write (macOS os.tmpdir() = /var/folders was denied)', () => {
+    const tmpFile = path.join(os.tmpdir(), `aiden-var-regress-${process.pid}.txt`);
+    expect(isPathAllowed(tmpFile, 'read',  process.cwd(), cfg()).allowed).toBe(true);
+    expect(isPathAllowed(tmpFile, 'write', process.cwd(), cfg()).allowed).toBe(true);
+  });
+
+  it('sensitive /var paths stay DENIED for read AND write', () => {
+    const sensitive = [
+      '/var/log/system.log', '/var/spool/cron/root', '/var/mail/u',
+      '/var/root/.ssh/id_rsa', '/var/db/sudo/ts/u', '/var/audit/current',
+      '/var/backups/shadow.bak', '/var/lib/docker/config.json',
+    ];
+    for (const p of sensitive) {
+      for (const op of ['read', 'write'] as const) {
+        const d = isPathAllowed(p, op, process.cwd(), cfg());
+        expect(d.allowed, `${p} (${op}) must stay denied`).toBe(false);
+        expect(d.violation?.code).toBe('fs.sensitive_path');
+      }
+    }
+  });
+});
