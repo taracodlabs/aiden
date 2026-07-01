@@ -460,6 +460,11 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         return;
       }
       await runDoctorCli({ liveness: cmdOpts.providers === true });
+      // Non-interactive subcommand: exit cleanly instead of hanging on a
+      // lingering handle. runDoctorCli already set process.exitCode honestly
+      // (0 when healthy, 1 on failure) so scripts/CI can detect a failing
+      // doctor. Mirrors the explicit exit trigger/cron/mcp/artifacts use.
+      process.exit();
     });
 
   program
@@ -471,6 +476,9 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         return;
       }
       await runSessionsSubcommand(action, arg, opts);
+      // Non-interactive subcommand: exit cleanly (was hanging on a lingering
+      // handle after printing). Read-only list/search → success exit 0.
+      process.exit(0);
     });
 
   program
@@ -482,6 +490,9 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         return;
       }
       await runSkillsSubcommand(action, arg, opts);
+      // Non-interactive subcommand: exit cleanly (was hanging on a lingering
+      // handle after printing). Read-only list/view → success exit 0.
+      process.exit(0);
     });
 
   // v4.5 Phase 2 — file watcher trigger management.
@@ -690,7 +701,10 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         writeOut: opts.writeOut,
         writeErr: (t: string) => process.stderr.write(t),
       });
-      if (code !== 0) process.exit(code);
+      // Non-interactive subcommand: always exit with the honest code (was only
+      // exiting on failure, so `voice doctor` SUCCESS hung on a lingering
+      // handle). All voice actions return a code and none are long-running.
+      process.exit(code);
     });
 
   program
