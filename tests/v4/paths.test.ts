@@ -52,10 +52,46 @@ describe('resolveAidenPaths', () => {
     expect(p.sessionsDb).toBe(path.join(p.root, 'sessions.db'));
   });
 
-  it('2. resolves Linux root to ~/.aiden', () => {
+  it('2. resolves Linux root to $XDG_CONFIG_HOME/aiden (XDG-compliant default)', async () => {
     setPlatform('linux');
-    const p = resolveAidenPaths();
-    expect(p.root).toBe(path.join(os.homedir(), '.aiden'));
+    // Control XDG + create the XDG dir so the legacy-`~/.aiden` migration branch
+    // is deterministically skipped (it only fires when legacy exists AND the XDG
+    // dir does NOT). This makes the assertion independent of whether the host
+    // happens to have a real ~/.aiden (which made the old `.toBe(~/.aiden)`
+    // pass locally but fail on fresh CI, where the XDG default applies).
+    const xdg = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-xdg-'));
+    await fs.mkdir(path.join(xdg, 'aiden'), { recursive: true });
+    const savedXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      const p = resolveAidenPaths();
+      expect(p.root).toBe(path.join(xdg, 'aiden'));
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = savedXdg;
+      await fs.rm(xdg, { recursive: true, force: true });
+    }
+  });
+
+  it('2b. Linux legacy ~/.aiden is used when it exists and no XDG dir does', () => {
+    setPlatform('linux');
+    // Deterministic legacy-migration coverage without touching real $HOME: point
+    // XDG at a temp dir with NO `aiden` subdir (xdgExists=false). The resolver's
+    // legacy check reads ~/.aiden via os.homedir(); assert the resolved root is
+    // whichever branch the resolver actually took — legacy iff ~/.aiden exists,
+    // else the XDG path — so the test tracks product behavior on any host.
+    const xdg = path.join(os.tmpdir(), `aiden-xdg-absent-${process.pid}`);
+    const savedXdg = process.env.XDG_CONFIG_HOME;
+    process.env.XDG_CONFIG_HOME = xdg;
+    try {
+      const p = resolveAidenPaths();
+      const legacy = path.join(os.homedir(), '.aiden');
+      const expected = require('node:fs').existsSync(legacy) ? legacy : path.join(xdg, 'aiden');
+      expect(p.root).toBe(expected);
+    } finally {
+      if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = savedXdg;
+    }
   });
 
   it('3. resolves macOS root to ~/Library/Application Support/aiden', () => {

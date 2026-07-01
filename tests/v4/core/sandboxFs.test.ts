@@ -24,6 +24,7 @@ import {
 } from '../../../core/v4/sandboxFs';
 import {
   readSandboxConfig,
+  resolveRealPath,
   _clearRealPathCacheForTests,
 } from '../../../core/v4/sandboxConfig';
 
@@ -64,21 +65,26 @@ describe('realpathWithFallback', () => {
   beforeEach(() => { _clearRealPathCacheForTests(); root = tmpDir('rpf'); });
   afterEach(() => { cleanup(root); });
 
+  // Reference the product's OWN canonicaliser (resolveRealPath, which uses
+  // fs.realpathSync.native) rather than raw fs.realpathSync. On Windows they
+  // diverge — .native normalises 8.3 short names + drive-letter casing that the
+  // CI runner's temp path exposes (e.g. RUNNER~1) — so comparing against raw
+  // realpathSync failed on the Windows CI leg while passing on dev machines.
   it('existing path: returns realpath directly', () => {
     const real = realpathWithFallback(root);
-    expect(real).toBe(fs.realpathSync(root));
+    expect(real).toBe(resolveRealPath(root));
   });
 
   it('non-existent leaf under existing parent: parent-realpath + basename', () => {
     const target = path.join(root, 'does-not-exist.txt');
     const real = realpathWithFallback(target);
-    expect(real).toBe(path.join(fs.realpathSync(root), 'does-not-exist.txt'));
+    expect(real).toBe(path.join(resolveRealPath(root), 'does-not-exist.txt'));
   });
 
   it('non-existent nested path: walks up to first existing ancestor', () => {
     const target = path.join(root, 'a', 'b', 'c', 'leaf.txt');
     const real = realpathWithFallback(target);
-    expect(real).toBe(path.join(fs.realpathSync(root), 'a', 'b', 'c', 'leaf.txt'));
+    expect(real).toBe(path.join(resolveRealPath(root), 'a', 'b', 'c', 'leaf.txt'));
   });
 });
 

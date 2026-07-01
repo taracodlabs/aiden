@@ -195,10 +195,11 @@ describe('CredentialResolver', () => {
   it('15. defaultAuthJsonPath resolves to platform-appropriate location', () => {
     const p = defaultAuthJsonPath();
     expect(p.endsWith('auth.json')).toBe(true);
-    if (process.platform === 'win32') {
-      expect(p.toLowerCase()).toMatch(/aiden[\\/]auth\.json$/);
-    } else {
-      expect(p).toContain('.aiden');
-    }
+    // Tracks the real per-platform resolver (resolveAidenPaths): macOS
+    // ~/Library/Application Support/aiden, Linux XDG ~/.config/aiden (or legacy
+    // ~/.aiden), Windows %LOCALAPPDATA%\aiden. The cross-platform invariant is
+    // the trailing `aiden/auth.json` — NOT a hardcoded `.aiden`, which only held
+    // on legacy Linux and wrongly failed on macOS + XDG Linux.
+    expect(p.replace(/\\/g, '/').toLowerCase()).toMatch(/(^|\/)aiden\/auth\.json$/);
   });
 });
