@@ -15,15 +15,14 @@
  * connections to external MCP servers and the tools they expose to the
  * model — the consumer side proven live in v4.12 Slice 0.
  *
- * Slice 1a (read-only — zero security surface, no subprocess spawning):
+ * Read-only surfaces:
  *   /mcp               — list connected servers: name · status · #tools
  *   /mcp status [name] — detail; with a name, that server's per-tool
  *                        list; without, all servers + a tool-count summary
  *
- * The mutating subcommands (`/mcp add | remove | import`) land in Slice
- * 1b/1c — they spawn subprocesses from config and need confirmation
- * gating (ctx.confirm), so they are deliberately NOT implemented here.
- * They print a "coming soon" pointer for now.
+ * Mutating subcommands (`/mcp add | remove | import | catalog | auth`) are
+ * implemented below — they spawn subprocesses from config and are gated on
+ * ctx.confirm.
  */
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import type { McpServer, McpServerConfig } from '../../../core/v4/mcpClient';
@@ -84,8 +83,8 @@ function serverLine(server: McpServer): string {
 function emptyState(ctx: SlashCommandContext): void {
   ctx.display.info('No MCP servers connected.');
   ctx.display.dim(
-    'Configure servers in config.yaml under `mcp.servers`, then restart. ' +
-      '(`/mcp add` is coming in a later slice.)',
+    'Add one with `/mcp add <name> <command> [args...]`, browse presets with ' +
+      '`/mcp catalog`, or declare servers in config.yaml under `mcp.servers`.',
   );
 }
 

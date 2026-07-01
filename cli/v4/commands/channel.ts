@@ -29,6 +29,8 @@ import path from 'node:path';
 
 import type { SlashCommand } from '../commandRegistry';
 import { TelegramAdapter } from '../../../core/channels/telegram';
+import { DiscordAdapter } from '../../../core/channels/discord';
+import type { ChannelAdapter } from '../../../core/channels/adapter';
 import { renderTable } from '../table';
 
 // ── Channel registry — drives /channel list -----------------------
@@ -103,6 +105,113 @@ async function deleteEnvKey(envFile: string, key: string): Promise<boolean> {
   await fs.writeFile(tmp, `${filtered.join('\n')}\n`, 'utf8');
   await fs.rename(tmp, envFile);
   return true;
+}
+
+// ── Generic single-token channel-add scaffold ---------------------
+//
+// The shared shape behind `/channel <x> add` for a channel whose only
+// credential is one bot token: prompt → validate via a channel-specific
+// probe → persist via the channel-agnostic upsertEnv → (re)register a fresh
+// adapter + restart it live. Telegram keeps its own bespoke handler below
+// (it has extra subcommands + active-model wiring, and it is the one proven
+// channel — not worth the regression risk of re-routing it). This scaffold
+// is the extraction Discord uses; Phase B multi-field channels can build on
+// it. Deliberately single-token only — no multi-field prompt-loop
+// abstraction until a channel actually needs one.
+
+interface TokenProbeResult {
+  ok:        boolean;
+  /** Bot identity for the success line (username / tag); optional. */
+  identity?: string;
+  /** Human-readable failure reason. MUST NOT contain the token. */
+  reason?:   string;
+}
+
+interface SingleTokenChannelSpec {
+  id:               string;   // manager/channel id, e.g. 'discord'
+  displayName:      string;   // 'Discord'
+  envVar:           string;   // 'DISCORD_BOT_TOKEN'
+  intakeHint:       string;   // printed before the prompt
+  promptLabel:      string;   // prompt caption
+  tokenFormat?:     RegExp;   // optional client-side sanity check
+  formatErrorHint?: string;
+  validatingLabel:  string;   // spinner caption
+  validate:         (token: string) => Promise<TokenProbeResult>;
+  makeAdapter:      () => ChannelAdapter;
+  successMessage:   (identity: string) => string;
+}
+
+export async function channelAddSingleToken(
+  ctx: import('../commandRegistry').SlashCommandContext,
+  spec: SingleTokenChannelSpec,
+): Promise<void> {
+  const { display, prompt } = ctx;
+  if (!prompt) {
+    display.printError('Cannot prompt for input in this context.');
+    return;
+  }
+  if (!ctx.paths) {
+    display.printError('Cannot resolve .env path — paths missing in context.');
+    return;
+  }
+
+  display.write(spec.intakeHint);
+  const raw = await prompt(spec.promptLabel);
+  const token = (raw ?? '').trim();
+  if (!token) {
+    display.dim('  Empty token — cancelled.');
+    return;
+  }
+  if (spec.tokenFormat && !spec.tokenFormat.test(token)) {
+    display.printError(
+      `That doesn't look like a ${spec.displayName} bot token.`,
+      spec.formatErrorHint ?? 'Double-check what you pasted.',
+    );
+    return;
+  }
+
+  const spinner = display.startSpinner(spec.validatingLabel);
+  let probe: TokenProbeResult;
+  try { probe = await spec.validate(token); }
+  finally { spinner.stop(); }
+
+  if (!probe.ok) {
+    display.printError(
+      `${spec.displayName} rejected the token: ${probe.reason ?? 'unknown error'}.`,
+      `Re-run /channel ${spec.id} add with a fresh token.`,
+    );
+    return;
+  }
+
+  // Persist to the env file Aiden resolves at boot. upsertEnv is
+  // channel-agnostic; the value is re-read by the fresh adapter below.
+  process.env[spec.envVar] = token;
+  await upsertEnv(ctx.paths.envFile, spec.envVar, token);
+
+  const manager = ctx.channelManager;
+  if (!manager) {
+    display.warn('Token saved, but no channel manager wired in this session — restart aiden to apply.');
+    return;
+  }
+  // Stop any existing adapter, then register a FRESH instance so its
+  // constructor picks up the token we just wrote — some adapters (Discord)
+  // read the token only in the constructor, not on start(). register()
+  // overwrites the map entry by name, so there is no double-registration.
+  const existing = manager.get(spec.id);
+  if (existing) { try { await existing.stop(); } catch { /* best-effort */ } }
+  const adapter = spec.makeAdapter();
+  manager.register(adapter);
+  const result = await manager.restart(spec.id);
+
+  if (result.status === 'started' && adapter.isHealthy()) {
+    display.success(spec.successMessage(probe.identity ?? 'bot'));
+    display.dim(`  Token saved to ${ctx.paths.envFile}`);
+  } else {
+    display.printError(
+      `Token saved but adapter did not come up: ${result.error ?? result.status}.`,
+      `Run /channel ${spec.id} status for diagnostics.`,
+    );
+  }
 }
 
 // ── Telegram getMe — token validation -----------------------------
@@ -720,6 +829,110 @@ async function telegramMedia(
   );
 }
 
+// ── Discord (Phase A — v4.12.1) -----------------------------------
+//
+// Second caller of the single-token scaffold. Discord needs only a bot
+// token; the optional guild/channel allowlists (DISCORD_ALLOWED_GUILDS /
+// _CHANNELS) are honoured by the adapter but not prompted here (Phase B).
+
+export async function validateDiscordToken(token: string): Promise<TokenProbeResult> {
+  // Verify before persisting — one API call spares the "saved but won't
+  // start" path. GET /users/@me with the Bot auth scheme; 10s hard cap so a
+  // network stall can't lock the REPL. The token travels only in the
+  // Authorization header — never logged, never echoed, never in an error.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 10_000);
+  try {
+    const res = await fetch('https://discord.com/api/v10/users/@me', {
+      headers: { Authorization: `Bot ${token}` },
+      signal:  ctrl.signal,
+    });
+    if (res.status === 401) {
+      return { ok: false, reason: 'invalid token (401 Unauthorized)' };
+    }
+    if (!res.ok) {
+      return { ok: false, reason: `HTTP ${res.status} ${res.statusText}` };
+    }
+    const json = (await res.json()) as { username?: string; discriminator?: string; id?: string };
+    const uname = json.username ?? 'bot';
+    // Modern Discord bots report discriminator '0'; only append a legacy
+    // #discriminator when it's a real tag.
+    const identity = json.discriminator && json.discriminator !== '0'
+      ? `${uname}#${json.discriminator}`
+      : uname;
+    return { ok: true, identity };
+  } catch (err: any) {
+    return {
+      ok: false,
+      reason: err?.name === 'AbortError' ? 'request timed out (10s)' : (err?.message ?? 'network error'),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function discordAdd(ctx: import('../commandRegistry').SlashCommandContext): Promise<void> {
+  await channelAddSingleToken(ctx, {
+    id:          'discord',
+    displayName: 'Discord',
+    envVar:      'DISCORD_BOT_TOKEN',
+    intakeHint:
+      '\n  Create an app at https://discord.com/developers/applications -> Bot ->\n' +
+      '  Reset Token, copy it. Enable the "Message Content Intent" on that page.\n',
+    promptLabel: '  Paste your Discord bot token: ',
+    // Lenient sanity check — Discord bot tokens are dot-separated and long.
+    // The API probe is authoritative; this only catches obvious paste slips.
+    tokenFormat:     /^[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_.-]{20,}$/,
+    formatErrorHint: 'A Discord bot token looks like `<id>.<part>.<part>` — copy it from the Bot page.',
+    validatingLabel: 'Validating token via Discord /users/@me…',
+    validate:        validateDiscordToken,
+    makeAdapter:     () => new DiscordAdapter(),
+    successMessage:  (identity) => `Discord connected as ${identity}. Ready to chat!`,
+  });
+}
+
+function discordStatus(ctx: import('../commandRegistry').SlashCommandContext): void {
+  const { display } = ctx;
+  const adapter  = ctx.channelManager?.get('discord');
+  const hasToken = (process.env.DISCORD_BOT_TOKEN ?? '').trim() !== '';
+  display.write('\n  Discord status:\n');
+  display.write(`    registered:  ${adapter ? 'yes' : display.muted('no')}\n`);
+  display.write(`    healthy:     ${adapter?.isHealthy() ? display.paint('yes', 'success') : display.paint('no', 'warn')}\n`);
+  display.write(`    token set:   ${hasToken ? 'yes' : display.paint('no', 'warn')}\n`);
+  if (!hasToken) {
+    display.write(`\n  ${display.muted('Set it up: /channel discord add')}\n`);
+  }
+  display.write('\n');
+}
+
+async function discordRemove(ctx: import('../commandRegistry').SlashCommandContext): Promise<void> {
+  const { display, confirm } = ctx;
+  if (!confirm) {
+    display.printError('Cannot confirm in this context.');
+    return;
+  }
+  if (!ctx.paths) {
+    display.printError('Cannot resolve .env path — paths missing.');
+    return;
+  }
+  const proceed = await confirm('Remove the Discord bot token? This disconnects the bot.');
+  if (!proceed) return;
+
+  const adapter = ctx.channelManager?.get('discord');
+  if (adapter && adapter.isHealthy()) {
+    try { await adapter.stop(); } catch { /* shutdown best-effort */ }
+  }
+  delete process.env.DISCORD_BOT_TOKEN;
+  const removed = await deleteEnvKey(ctx.paths.envFile, 'DISCORD_BOT_TOKEN');
+  if (removed) {
+    display.success('Discord disabled. DISCORD_BOT_TOKEN removed from .env.');
+  } else {
+    display.dim('Discord disabled. (No DISCORD_BOT_TOKEN entry was in .env.)');
+  }
+  display.dim('');
+  display.dim('Note: if you set the token via your shell, it may persist there.');
+}
+
 // ── Top-level command --------------------------------------------
 
 export const channel: SlashCommand = {
@@ -760,7 +973,23 @@ export const channel: SlashCommand = {
       }
     }
 
-    // Other channel ids — Phase 2 surface area. Honest stub.
+    if (sub === 'discord') {
+      const action = args[1]?.toLowerCase() ?? 'status';
+      switch (action) {
+        case 'add':      await discordAdd(ctx);    return;
+        case 'remove':
+        case 'rm':       await discordRemove(ctx); return;
+        case 'status':   discordStatus(ctx);       return;
+        default:
+          ctx.display.printError(
+            `Unknown discord action '${action}'.`,
+            'Try: /channel discord add | remove | status',
+          );
+          return;
+      }
+    }
+
+    // Other channel ids — Phase B/C surface area. Honest stub.
     if (CHANNEL_DESCRIPTORS.some((c) => c.id === sub)) {
       ctx.display.write(
         `\n  /channel ${sub} management is coming in a later phase.\n` +

@@ -163,6 +163,7 @@ import { OAuthProviderRegistry } from '../../core/v4/auth/providerAuth';
 // gate startup on a heuristic below to avoid 409 polling-conflict.
 import { ChannelManager } from '../../core/channels/manager';
 import { TelegramAdapter } from '../../core/channels/telegram';
+import { registerEnvChannels } from './channelBoot';
 import { gateway } from '../../core/gateway';
 import { createBootLogger } from '../../core/v4/logger';
 
@@ -3064,6 +3065,11 @@ export async function buildAgentRuntime(
       contextWindow: findModel(providerId, modelId)?.contextLength,
     }),
   }));
+  // Phase v4.12.1 — also register any env-driven channel whose credentials
+  // are present (e.g. Discord configured via `/channel discord add`) so it
+  // survives a restart. Credential-gated: unconfigured channels are skipped,
+  // so no disabled-adapter noise. Telegram is handled above (model wiring).
+  registerEnvChannels(channelManager);
 
   let serverIsHosting = false;
   try {
