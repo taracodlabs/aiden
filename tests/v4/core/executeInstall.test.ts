@@ -108,11 +108,14 @@ describe('executeInstall — happy path', () => {
     );
   });
 
-  it('routes via cmd.exe on win32, direct npm elsewhere, never with shell:true (v4.9.2)', async () => {
-    // v4.9.2 — the helper wraps Windows npm.cmd via `cmd.exe /d /s /c`
-    // (escaped args) so Node 20+ EINVAL on .cmd shims is avoided
-    // without resorting to shell:true (argument injection risk).
-    // On POSIX it's a direct `npm` spawn. Neither sets shell:true.
+  // v4.9.2 — the helper wraps Windows npm.cmd via `cmd.exe /d /s /c` (escaped
+  // args) so Node 20+ EINVAL on .cmd shims is avoided without shell:true. The
+  // cmd.exe wrap only fires when a real `npm.cmd` shim is resolvable on PATH,
+  // which exists only on a win32 HOST — even with platform:'win32', a posix
+  // runner has no npm.cmd and correctly resolves to a bare `npm`. So the
+  // cmd.exe assertion is win32-host-only; the posix branch is checked below on
+  // every host.
+  it.skipIf(process.platform !== 'win32')('routes via cmd.exe on win32, never with shell:true (win32 host only) (v4.9.2)', async () => {
     const winSpawn = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
     await executeInstall({
       spawnImpl: winSpawn as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
@@ -122,7 +125,9 @@ describe('executeInstall — happy path', () => {
     expect((winSpawn.mock.calls[0]?.[1] as string[])[0]).toBe('/d');
     expect(winSpawn.mock.calls[0]?.[2]?.shell).toBeFalsy();
     expect(winSpawn.mock.calls[0]?.[2]?.windowsVerbatimArguments).toBe(true);
+  });
 
+  it('routes direct npm on posix, never with shell:true (v4.9.2)', async () => {
     const linuxSpawn = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
     await executeInstall({
       spawnImpl: linuxSpawn as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
