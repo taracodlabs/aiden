@@ -673,6 +673,39 @@ ALTER TABLE runs  ADD COLUMN task_id      TEXT;
 ALTER TABLE tasks ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0;
 `;
 
+// v4.12.1 Pillar 1 — side-effect idempotency ledger. Durable, per-task
+// record of EXTERNAL-irreversible sends (channel deliveries, outbound
+// webhook/email) so a crash-then-resume never re-fires a send that already
+// left the machine. One row per logical send, keyed deterministically from
+// (task_id + step-ordinal + args_hash) — the same logical send always maps
+// to the same `key`, even though a channel DeliveryReceipt carries no
+// provider id. Lifecycle: an `attempting` row is written BEFORE the send;
+// promoted to `confirmed` with the receipt AFTER it returns. On resume:
+//   confirmed  → skip (idempotent replay) — the send already happened.
+//   attempting → crash mid-send; NEVER blind re-fire — verify a receipt if
+//                one exists, else surface to the user (needs-confirmation).
+// The (task_id, step) index backs the ambiguity guard: a confirmed row at
+// the same ordinal but a DIFFERENT args_hash (the re-driven model phrased
+// the send differently) is treated as needs-confirmation, not a fresh send.
+// Local file mutations do NOT land here — they are covered by verify +
+// the batch-staleness guard and are safe to re-drive.
+const V19_SQL = `
+CREATE TABLE IF NOT EXISTS side_effect_ledger (
+  key           TEXT    PRIMARY KEY,
+  task_id       TEXT,
+  step          INTEGER NOT NULL,
+  tool          TEXT    NOT NULL,
+  args_hash     TEXT    NOT NULL,
+  target        TEXT,
+  status        TEXT    NOT NULL,
+  receipt       TEXT,
+  attempted_at  INTEGER NOT NULL,
+  confirmed_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_side_effect_ledger_task
+  ON side_effect_ledger(task_id, step);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -692,6 +725,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 16, name: 'v4.13 gap 1 — task verification evidence',      sql: V16_SQL },
   { version: 17, name: 'v4.13 gap 3 — job-card columns',                sql: V17_SQL },
   { version: 18, name: 'v4.13 gap 4 — resume linkage + wake-loop cap',   sql: V18_SQL },
+  { version: 19, name: 'v4.12.1 — side-effect idempotency ledger',        sql: V19_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

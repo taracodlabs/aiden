@@ -31,6 +31,11 @@ import type { Express, Request, Response } from 'express'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
+import {
+  argsHashOf,
+  guardContentAddressedSend,
+  type SideEffectLedger,
+} from '../v4/sideEffectLedger'
 
 export class WebhookAdapter implements ChannelAdapter {
   readonly name = 'webhook'
@@ -53,6 +58,13 @@ export class WebhookAdapter implements ChannelAdapter {
   }
 
   attachLogger(logger: Logger): void { this.log = logger }
+
+  // v4.12.1 Pillar 1 — optional durable idempotency ledger. When set (by the
+  // daemon boot, which owns the sqlite db), the outbound async callback POST
+  // is guarded so an identical callback is never delivered twice across a
+  // crash/resume. Unset (the default) → callbacks fire directly, as before.
+  private idempotencyLedger: SideEffectLedger | null = null
+  setIdempotencyLedger(ledger: SideEffectLedger): void { this.idempotencyLedger = ledger }
 
   // ── Lifecycle ──────────────────────────────────────────────
 
@@ -174,11 +186,28 @@ export class WebhookAdapter implements ChannelAdapter {
         text:      message,
         timestamp: Date.now(),
       })
-      await fetch(callbackUrl, {
+      const body = JSON.stringify({ response, context })
+      const postOnce = () => fetch(callbackUrl, {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ response, context }),
+        body,
       })
+      // v4.12.1 — when a durable ledger is wired, dedup the callback POST by
+      // (destination URL + payload) so a resume never double-delivers it.
+      if (this.idempotencyLedger) {
+        const outcome = await guardContentAddressedSend(
+          this.idempotencyLedger,
+          { scope: `webhook:${callbackUrl}`, tool: 'webhook', contentHash: argsHashOf({ callbackUrl, response, context }), target: callbackUrl },
+          { send: postOnce },
+        )
+        if (outcome.kind === 'skipped') {
+          this.log.info(`callback skipped (idempotent replay): ${callbackUrl}`)
+        } else if (outcome.kind === 'needs_confirmation') {
+          this.log.warn(`callback not re-fired (interrupted, needs confirmation): ${callbackUrl}`)
+        }
+      } else {
+        await postOnce()
+      }
     } catch (e: any) {
       this.log.error(`Async callback failed:${e.message}`)
     }

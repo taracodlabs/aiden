@@ -59,6 +59,13 @@ export interface DeliveryReceipt {
   /** Number of platform messages emitted (e.g. chunk count). */
   chunks?: number
   error?:  string
+  /**
+   * v4.12.1 — true when the idempotency ledger SHORT-CIRCUITED this send: the
+   * same logical delivery already landed on a prior run, so nothing went out
+   * this time. `ok` is still true (the message is delivered — just not by this
+   * attempt). Absent on normal live sends.
+   */
+  replayed?: boolean
 }
 
 /**

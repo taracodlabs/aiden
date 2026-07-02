@@ -25,6 +25,11 @@ import {
   type DeliveryBinding,
   type DeliveryContext,
 } from './deliveryContext'
+import {
+  withIdempotentDelivery,
+  type IdempotentDeliveryIdent,
+} from './v4/idempotentDelivery'
+import type { SideEffectLedger } from './v4/sideEffectLedger'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -118,7 +123,17 @@ class Gateway {
   // DeliveryContext, thread it to the processor, and route the final reply
   // through the seam (`ctx.send('final', …)`). When omitted, behaviour is
   // exactly as before: the string is returned and the caller delivers it.
-  async routeMessage(message: IncomingMessage, delivery?: DeliveryBinding): Promise<string> {
+  // v4.12.1 Pillar 1 — an optional `idempotency` binding wraps the per-turn
+  // DeliveryContext with the durable side-effect ledger, so a resumed task
+  // never re-delivers a 'final' message that already went out. Absent (the
+  // interactive REPL default) → delivery is exactly as before: live sends,
+  // no ledger. Present (a durable/daemon task that can be re-driven) → the
+  // committed send is idempotent against (taskId, step, content).
+  async routeMessage(
+    message: IncomingMessage,
+    delivery?: DeliveryBinding,
+    idempotency?: { ledger: SideEffectLedger } & IdempotentDeliveryIdent,
+  ): Promise<string> {
     if (!this.messageProcessor) {
       throw new Error('No message processor registered')
     }
@@ -132,7 +147,7 @@ class Gateway {
     // message. Routing authority (platform/chatId/threadId) is frozen here and
     // never sourced from mutable/global state. Concurrent turns each get their
     // own ctx, so replies can never cross-route.
-    const ctx: DeliveryContext | undefined = delivery
+    let ctx: DeliveryContext | undefined = delivery
       ? createDeliveryContext(
           {
             platform:    message.channel,
@@ -143,6 +158,13 @@ class Gateway {
           delivery,
         )
       : undefined
+
+    // DC + v4.12.1 — wrap the seam with the idempotency ledger when this turn
+    // belongs to a resumable task. `ctx.send('final', …)` is now guarded.
+    if (ctx && idempotency) {
+      const { ledger, ...ident } = idempotency
+      ctx = withIdempotentDelivery(ctx, ledger, ident)
+    }
 
     this.log.debug(
       `${message.channel}:${message.channelId} → "${message.text.substring(0, 60)}"`,

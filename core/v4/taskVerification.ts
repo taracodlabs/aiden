@@ -299,7 +299,18 @@ export function computeTaskFinalization(
     /** Model-declared ui_task_done status ('success'/'failure'/…), when seen. */
     declaredStatus?: string | null;
   },
-  opts?: { approvalMode?: string; now?: number },
+  opts?: {
+    approvalMode?: string;
+    now?: number;
+    /**
+     * v4.12.1 — EXTERNAL sends the side-effect idempotency ledger skipped on
+     * a resume (already delivered on a prior run). They are not in the tool
+     * trace — delivery happens at the channel seam, not via a tool — so the
+     * daemon runner supplies them here to land on evidence.skipped[] and
+     * render the ↷ line on /tasks, reusing the batch-staleness skip shape.
+     */
+    externalSkips?: Array<{ tool: string; target: string; reason: string }>;
+  },
 ): {
   status:   'completed' | 'completed_unverified' | 'verification_failed' | 'failed';
   evidence: TaskEvidence;
@@ -345,9 +356,12 @@ export function computeTaskFinalization(
       reason: typeof r.reason === 'string' ? r.reason : 'skipped',
     });
   }
+  // v4.12.1 — external idempotent-replay skips merge into the SAME skipped[]
+  // channel as the batch-staleness skips (both are benign decision-records).
+  const allSkips = [...skipped, ...(opts?.externalSkips ?? [])];
   const declinedExtra = {
     ...(declined.length > 0 ? { declined } : {}),
-    ...(skipped.length > 0 ? { skipped } : {}),
+    ...(allSkips.length > 0 ? { skipped: allSkips } : {}),
   };
   if (turn.finishReason !== 'stop') {
     return {
