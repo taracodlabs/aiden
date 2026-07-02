@@ -21,7 +21,7 @@
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
-import { decideTaskVerdict, buildEvidenceEnvelope } from '../../core/v4/taskVerification';
+import { decideTaskVerdict, buildEvidenceEnvelope, buildJobCardUpdate } from '../../core/v4/taskVerification';
 // v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
 // sequence + system prompt + memory hashes when a turn shows loop
 // symptoms (10+ calls OR 5+ consecutive same-name). Default off via
@@ -2116,8 +2116,25 @@ export class ChatSession implements ChatSessionLike {
       // upgraded. Non-`stop` finishes route to 'failed' as before.
       if (replTaskStore && replTaskId !== null) {
         try {
+          // v4.13 Gap 3 — the job-card rides the same single finalize
+          // UPDATE: files touched, side effects, last failure state
+          // (all derived from the trace — the ledger owns the truth),
+          // plus the approval mode in force (Pillar-2 seam).
+          const jobCard = {
+            ...buildJobCardUpdate(result.toolCallTrace ?? []),
+            permissions: { approvalMode: this.opts.approvalEngine.getMode() },
+          };
           if (result.finishReason !== 'stop') {
-            replTaskStore.setStatus(replTaskId, 'failed');
+            // Non-clean finish — still persist the footprint: what the
+            // turn touched before it errored/was interrupted is exactly
+            // what a future resume needs to know.
+            const decision = decideTaskVerdict(result.toolCallTrace ?? []);
+            replTaskStore.finalizeVerification(
+              replTaskId,
+              'failed',
+              { ...buildEvidenceEnvelope(decision), verdict: 'failed' },
+              jobCard,
+            );
           } else {
             replTaskStore.setStatus(replTaskId, 'pending_verification');
             const declaredStatus =
@@ -2132,6 +2149,7 @@ export class ChatSession implements ChatSessionLike {
                 replTaskId,
                 'failed',
                 buildEvidenceEnvelope(decision, { reportedFailure: declaredStatus }),
+                jobCard,
               );
             } else {
               const decision = decideTaskVerdict(result.toolCallTrace ?? []);
@@ -2139,6 +2157,7 @@ export class ChatSession implements ChatSessionLike {
                 replTaskId,
                 decision.verdict,
                 buildEvidenceEnvelope(decision),
+                jobCard,
               );
               if (decision.verdict === 'verification_failed') {
                 const what = decision.failures

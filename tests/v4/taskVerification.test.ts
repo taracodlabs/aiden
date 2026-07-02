@@ -19,6 +19,7 @@ import {
   decideTaskVerdict,
   buildEvidenceEnvelope,
   extractEvidenceHandles,
+  buildJobCardUpdate,
 } from '../../core/v4/taskVerification';
 import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
 import { HonestyEnforcement } from '../../moat/honestyEnforcement';
@@ -134,6 +135,64 @@ describe('extractEvidenceHandles', () => {
     expect(hs).toEqual([
       { tool: 't', kind: 'note', value: 'exit 0, empty stdout', verified: false, code: 'low_signal' },
     ]);
+  });
+});
+
+// ── v4.13 Gap 3 — job-card material from the trace ──────────────────────
+
+describe('buildJobCardUpdate', () => {
+  it('two files + one non-file mutation → deduped filesTouched, sideEffects with verification flags', () => {
+    const card = buildJobCardUpdate([
+      entry({ name: 'file_write', result: { path: 'C:/a.txt', bytesWritten: 5 }, handlerMutates: true, verification: V_OK }),
+      entry({ name: 'file_write', result: { path: 'C:/b.txt', bytesWritten: 9 }, handlerMutates: true, verification: V_OK }),
+      // Same file touched again — must not duplicate.
+      entry({ name: 'file_patch', result: { path: 'C:/a.txt', bytesWritten: 2 }, handlerMutates: true, verification: V_OK }),
+      // Non-file mutation with weak evidence.
+      entry({ name: 'shell_exec', result: { exitCode: 0 }, handlerMutates: true, verification: V_LOW }),
+      // Read-only entries never land on the card.
+      entry({ name: 'file_read', result: { path: 'C:/ignored.txt' }, handlerMutates: false, verification: V_OK }),
+    ]);
+    expect(card.filesTouched).toEqual(['C:/a.txt', 'C:/b.txt']);
+    expect(card.sideEffects).toHaveLength(4);
+    expect(card.sideEffects[0]).toEqual({ tool: 'file_write', target: 'C:/a.txt', verified: true, evidence: 'bytes=5' });
+    const shell = card.sideEffects.find((e) => e.tool === 'shell_exec')!;
+    expect(shell.verified).toBe(false);
+    expect(shell.evidence).toBe('exit_code=0');
+    expect(card.failureState).toBeNull();
+  });
+
+  it('structured give-up → failureState carries class + the retry ledger (whatWasTried)', () => {
+    const retries = [
+      { attempt: 1, category: 'network', reason: 'ECONNREFUSED', backoffMs: 400 },
+      { attempt: 2, category: 'network', reason: 'ECONNREFUSED', backoffMs: 800 },
+    ];
+    const card = buildJobCardUpdate([
+      entry({
+        name: 'fetch_url', result: { success: false, error: 'connection refused' },
+        handlerMutates: false,
+        verification: V_FAIL,
+        classification: { category: 'network', confidence: 0.9, reason: 'network unreachable', recoverable: true },
+        retries,
+      } as never),
+    ], { now: 777 });
+    expect(card.failureState).toEqual({
+      class: 'network', reason: 'network unreachable', whatWasTried: retries, whenAt: 777,
+    });
+  });
+
+  it('the LAST structured failure wins', () => {
+    const card = buildJobCardUpdate([
+      entry({ name: 'a', result: {}, verification: V_FAIL, classification: { category: 'timeout', confidence: 1, recoverable: true } as never }),
+      entry({ name: 'b', result: {}, verification: V_FAIL, classification: { category: 'not_found', confidence: 1, recoverable: false } as never }),
+    ], { now: 1 });
+    expect(card.failureState!.class).toBe('not_found');
+  });
+
+  it('clean read-only trace → empty card, null failureState', () => {
+    const card = buildJobCardUpdate([
+      entry({ name: 'file_read', result: { path: 'x' }, handlerMutates: false, verification: V_OK }),
+    ]);
+    expect(card).toEqual({ filesTouched: [], sideEffects: [], failureState: null });
   });
 });
 

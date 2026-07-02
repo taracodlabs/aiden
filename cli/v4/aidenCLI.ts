@@ -2896,35 +2896,18 @@ export async function buildAgentRuntime(
       // orphans left by dead sessions, which the default session-scoped
       // view can't show). Default stays session-scoped — unchanged. A
       // status/limit arg may follow `all`, e.g. `/tasks all interrupted`.
-      // v4.13 Gap 1 — `/tasks <task_id>` detail view: status, goal, and
-      // the verification evidence envelope (verdict + per-claim handles +
-      // failures) written by the verify-before-done gate.
+      // v4.13 Gap 1 + Gap 3 — `/tasks <task_id>` detail view: the full
+      // job-card (constraints, permissions, files touched, side effects,
+      // failure state) + the verification evidence envelope. Rendering
+      // lives in commands/tasksDetail.ts so it's unit-testable.
       if ((ctx.args[0] ?? '').startsWith('task_')) {
         const t = replTaskStore.get(ctx.args[0]);
         if (!t) {
           ctx.display.dim(`(no task with id ${ctx.args[0]})`);
           return {};
         }
-        ctx.display.info(`Task ${t.id} [${t.status}]`);
-        ctx.display.write(`  title:   ${t.title}\n`);
-        if (t.goal !== t.title) ctx.display.write(`  goal:    ${t.goal}\n`);
-        ctx.display.write(`  created: ${new Date(t.createdAt).toISOString()}\n`);
-        ctx.display.write(`  updated: ${new Date(t.updatedAt).toISOString()}\n`);
-        if (t.artifactIds.length > 0) ctx.display.write(`  artifacts: ${t.artifactIds.join(', ')}\n`);
-        if (t.evidence) {
-          ctx.display.write(`  verification: ${t.evidence.verdict} (decided ${new Date(t.evidence.decidedAt).toISOString()})\n`);
-          if (t.evidence.reportedFailure) {
-            ctx.display.write(`    reported by model: ${t.evidence.reportedFailure}\n`);
-          }
-          for (const f of t.evidence.failures) {
-            ctx.display.write(`    ✗ ${f.tool}: ${f.reason}\n`);
-          }
-          for (const h of t.evidence.handles) {
-            ctx.display.write(`    ${h.verified ? '✓' : '·'} ${h.tool} ${h.kind}=${String(h.value)}${h.code && h.code !== 'ok' ? ` (${h.code})` : ''}\n`);
-          }
-        } else {
-          ctx.display.dim('  (no verification evidence recorded)');
-        }
+        const { renderTaskDetail } = await import('./commands/tasksDetail');
+        renderTaskDetail(t, (s) => ctx.display.write(s));
         return {};
       }
       const crossSession = (ctx.args[0] ?? '').toLowerCase() === 'all';

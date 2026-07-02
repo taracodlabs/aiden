@@ -251,11 +251,17 @@ describe('pending_verification crash state + v16 migration', () => {
            channel_id, session_id, parent_task_id, trace_ids, artifact_ids)
          VALUES ('task_old01', 'old', 'old goal', 'completed', 1, 1, 'repl', 's-old', NULL, '[]', '[]')`,
       ).run();
-      runMigrations(db2);   // applies v16 only
+      runMigrations(db2);   // applies v16 + v17
       const store2 = createTaskStore({ db: db2 as never });
       const t = store2.get('task_old01');
       expect(t!.status).toBe('completed');
       expect(t!.evidence).toBeNull();
+      // v17 job-card columns: null/empty-valid on pre-existing rows.
+      expect(t!.constraints).toBeNull();
+      expect(t!.filesTouched).toEqual([]);
+      expect(t!.sideEffects).toEqual([]);
+      expect(t!.failureState).toBeNull();
+      expect(t!.permissions).toBeNull();
       // And the new write path works on the migrated table.
       store2.finalizeVerification('task_old01', 'completed', {
         v: 1, verdict: 'completed', decidedAt: 2, handles: [], failures: [],
@@ -264,5 +270,123 @@ describe('pending_verification crash state + v16 migration', () => {
     } finally {
       db2.close();
     }
+  });
+});
+
+// ── v4.13 Gap 3 — the job-card ──────────────────────────────────────────
+
+describe('job-card columns (v17) — write + accumulate + atomicity', () => {
+  const ENV = { v: 1 as const, verdict: 'completed', decidedAt: 1, handles: [], failures: [] };
+
+  it('multi-turn accumulation: filesTouched merges deduped, sideEffects append deduped', () => {
+    const id = taskStore.create({ title: 't', goal: 't', sessionId: 's' });
+    taskStore.finalizeVerification(id, 'completed', ENV, {
+      filesTouched: ['C:/a.txt', 'C:/b.txt'],
+      sideEffects:  [{ tool: 'file_write', target: 'C:/a.txt', verified: true, evidence: 'bytes=5' }],
+    });
+    // Second turn on the same task: overlapping file + identical effect +
+    // one new of each.
+    taskStore.finalizeVerification(id, 'completed', ENV, {
+      filesTouched: ['C:/b.txt', 'C:/c.txt'],
+      sideEffects:  [
+        { tool: 'file_write', target: 'C:/a.txt', verified: true, evidence: 'bytes=5' },  // dup — dropped
+        { tool: 'shell_exec', target: 'build', verified: false, evidence: 'exit_code=0' },
+      ],
+    });
+    const t = taskStore.get(id)!;
+    expect(t.filesTouched).toEqual(['C:/a.txt', 'C:/b.txt', 'C:/c.txt']);
+    expect(t.sideEffects).toHaveLength(2);
+  });
+
+  it('ATOMICITY: one finalize call lands status + evidence + job-card together (single UPDATE by construction)', () => {
+    const id = taskStore.create({ title: 't', goal: 't', sessionId: 's' });
+    taskStore.finalizeVerification(id, 'verification_failed', { ...ENV, verdict: 'verification_failed' }, {
+      filesTouched: ['C:/x.txt'],
+      sideEffects:  [{ tool: 'file_write', target: 'C:/x.txt', verified: false }],
+      failureState: { class: 'not_found', whatWasTried: [], whenAt: 9 },
+      permissions:  { approvalMode: 'smart' },
+    });
+    const t = taskStore.get(id)!;
+    expect(t.status).toBe('verification_failed');
+    expect(t.evidence!.verdict).toBe('verification_failed');
+    expect(t.filesTouched).toEqual(['C:/x.txt']);
+    expect(t.failureState!.class).toBe('not_found');
+    expect(t.permissions).toEqual({ approvalMode: 'smart' });
+  });
+
+  it('provided-null clears a field; omitted keeps the existing value', () => {
+    const id = taskStore.create({ title: 't', goal: 't', sessionId: 's' });
+    taskStore.finalizeVerification(id, 'failed', ENV, {
+      failureState: { class: 'timeout', whatWasTried: [], whenAt: 1 },
+    });
+    // Omitted → kept.
+    taskStore.finalizeVerification(id, 'failed', ENV, {});
+    expect(taskStore.get(id)!.failureState!.class).toBe('timeout');
+    // Provided null → cleared.
+    taskStore.finalizeVerification(id, 'completed', ENV, { failureState: null });
+    expect(taskStore.get(id)!.failureState).toBeNull();
+  });
+});
+
+describe('gate integration — job-card lands from a real turn', () => {
+  it('mutating turn: row shows filesTouched + sideEffects + permissions (approval mode in force)', async () => {
+    const { task } = await runTurn({
+      toolCallTrace: [
+        {
+          name: 'file_write',
+          result: { success: true, path: 'C:/out/a.txt', bytesWritten: 11 },
+          handlerMutates: true,
+          verification: V_OK,
+        },
+        {
+          name: 'file_write',
+          result: { success: true, path: 'C:/out/b.txt', bytesWritten: 7 },
+          handlerMutates: true,
+          verification: V_OK,
+        },
+        {
+          name: 'shell_exec',
+          result: { exitCode: 0 },
+          handlerMutates: true,
+          verification: V_LOW,
+        },
+      ],
+    });
+    expect(task!.filesTouched).toEqual(['C:/out/a.txt', 'C:/out/b.txt']);
+    expect(task!.sideEffects).toHaveLength(3);
+    expect(task!.sideEffects.find((e) => e.tool === 'shell_exec')!.verified).toBe(false);
+    expect(task!.permissions).toEqual({ approvalMode: 'manual' });   // the mock engine's mode
+    expect(task!.constraints).toBeNull();                            // no producer today — honest null
+  });
+
+  it('non-stop finish still persists the footprint (what a resume needs)', async () => {
+    const { task } = await runTurn({
+      finishReason: 'error',
+      toolCallTrace: [{
+        name: 'file_write',
+        result: { success: true, path: 'C:/out/partial.txt', bytesWritten: 3 },
+        handlerMutates: true,
+        verification: V_OK,
+      }],
+    });
+    expect(task!.status).toBe('failed');
+    expect(task!.filesTouched).toEqual(['C:/out/partial.txt']);
+  });
+
+  it('give-up turn: failureState carries the class + retry ledger onto the row', async () => {
+    const retries = [{ attempt: 1, category: 'network', reason: 'refused', backoffMs: 400 }];
+    const { task } = await runTurn({
+      toolCallTrace: [{
+        name: 'fetch_url',
+        result: { success: false, error: 'connection refused' },
+        handlerMutates: false,
+        verification: { ok: false, confidence: 1, code: 'failed', reason: 'connection refused' },
+        classification: { category: 'network', confidence: 0.9, reason: 'network unreachable', recoverable: true },
+        retries,
+      } as never],
+    });
+    expect(task!.failureState).not.toBeNull();
+    expect(task!.failureState!.class).toBe('network');
+    expect(task!.failureState!.whatWasTried).toEqual(retries);
   });
 });

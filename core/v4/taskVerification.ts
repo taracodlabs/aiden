@@ -183,6 +183,84 @@ export function decideTaskVerdict(trace: HonestyTraceEntry[]): TaskVerdictDecisi
   return { verdict: 'completed_unverified', handles, failures };
 }
 
+// ── v4.13 Gap 3 — job-card material (durable record of what a task DID) ─
+//
+// The ledger owns the truth: everything below is derived from the turn's
+// trace (the same entries Gap 1 walks), never from prose, so a future
+// resume (Gap 4) can reconstruct the task's footprint after a crash.
+
+/** One non-file-specific mutating execution on the job card. */
+export interface SideEffectRecord {
+  tool:     string;
+  /** What was acted on — a path, an id, or the verifier's note. */
+  target:   string;
+  verified: boolean;
+  /** Compact evidence detail when available (bytes=…, exit_code=…). */
+  evidence?: string;
+}
+
+/** Last structured failure — Gap 2's give-up ledger + the failure class. */
+export interface TaskFailureState {
+  class:        string;
+  reason?:      string;
+  /** Gap 2's observable retry ledger — what the runtime already tried. */
+  whatWasTried: Array<{ attempt: number; category: string; reason?: string; backoffMs: number }>;
+  whenAt:       number;
+}
+
+export interface JobCardUpdate {
+  filesTouched: string[];
+  sideEffects:  SideEffectRecord[];
+  failureState: TaskFailureState | null;
+}
+
+/**
+ * Derive the turn's job-card material from the trace. Pure. Scoped to
+ * MUTATING entries (the task's footprint is its side effects); the last
+ * verifier-failed entry — read-only included — feeds failureState so an
+ * exhausted transient give-up on a fetch is recorded too.
+ */
+export function buildJobCardUpdate(
+  trace: HonestyTraceEntry[],
+  opts?: { now?: number },
+): JobCardUpdate {
+  const filesTouched: string[] = [];
+  const sideEffects:  SideEffectRecord[] = [];
+  for (const t of trace) {
+    if (t.handlerMutates !== true) continue;
+    const verified = t.verification?.ok === true && t.verification.code === 'ok';
+    const r = (t.result && typeof t.result === 'object') ? t.result as Record<string, unknown> : {};
+    const p = typeof r.path === 'string' && r.path.length > 0 ? r.path : null;
+    if (p && !filesTouched.includes(p)) filesTouched.push(p);
+    const detailBits: string[] = [];
+    if (typeof r.bytesWritten === 'number') detailBits.push(`bytes=${r.bytesWritten}`);
+    else if (typeof r.bytes === 'number')   detailBits.push(`bytes=${r.bytes}`);
+    if (typeof r.exitCode === 'number')     detailBits.push(`exit_code=${r.exitCode}`);
+    sideEffects.push({
+      tool:     t.name,
+      target:   p
+        ?? (typeof r.id === 'string' && r.id.length > 0 ? r.id : null)
+        ?? t.verification?.reason
+        ?? '(unspecified)',
+      verified,
+      ...(detailBits.length > 0 ? { evidence: detailBits.join(' ') } : {}),
+    });
+  }
+  let failureState: TaskFailureState | null = null;
+  for (const t of trace) {
+    if ((t.verification && t.verification.ok === false) || t.error) {
+      failureState = {
+        class:        t.classification?.category ?? 'unclassified',
+        reason:       t.classification?.reason ?? t.verification?.reason ?? t.error,
+        whatWasTried: t.retries ?? [],
+        whenAt:       opts?.now ?? Date.now(),
+      };
+      // Keep walking — the LAST structured failure wins (most recent).
+    }
+  }
+  return { filesTouched, sideEffects, failureState };
+}
+
 /** Build the persistable envelope for a decided verdict. */
 export function buildEvidenceEnvelope(
   decision: TaskVerdictDecision,

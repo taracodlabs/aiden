@@ -45,7 +45,11 @@
  */
 
 import type { Db } from './db/connection';
-import type { TaskEvidence } from '../taskVerification';
+import type {
+  TaskEvidence,
+  SideEffectRecord,
+  TaskFailureState,
+} from '../taskVerification';
 
 /**
  * v4.13 Gap 1 adds the verify-before-done states:
@@ -78,6 +82,17 @@ export interface Task {
   artifactIds:  string[];
   /** v4.13 Gap 1 — verification envelope (null pre-gate / non-stop finishes). */
   evidence:     TaskEvidence | null;
+  // ── v4.13 Gap 3 — the job-card ─────────────────────────────────────
+  /** User-stated limits at creation. No producer today — the seam. */
+  constraints:  Record<string, unknown> | null;
+  /** Deduped paths from mutating, verifier-evidenced executions. */
+  filesTouched: string[];
+  /** Mutating executions beyond files ({tool, target, verified, evidence?}). */
+  sideEffects:  SideEffectRecord[];
+  /** Last structured give-up / verification failure. */
+  failureState: TaskFailureState | null;
+  /** Approval mode in force when the task ran (Pillar-2 seam). */
+  permissions:  Record<string, unknown> | null;
 }
 
 /** Raw column shape from sqlite. JSON arrays come back as strings. */
@@ -94,6 +109,29 @@ interface TaskRowSql {
   trace_ids:       string;
   artifact_ids:    string;
   evidence:        string | null;
+  constraints:     string | null;
+  files_touched:   string;
+  side_effects:    string;
+  failure_state:   string | null;
+  permissions:     string | null;
+}
+
+/** Defensive JSON parse — null on corruption, never a crash. */
+function parseJsonOrNull<T>(raw: string | null | undefined): T | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed as T : null;
+  } catch { return null; }
+}
+
+/** Defensive JSON-array parse — empty array on corruption/absence. */
+function parseJsonArray<T>(raw: string | null | undefined): T[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch { return []; }
 }
 
 function rowToTask(r: TaskRowSql): Task {
@@ -129,6 +167,11 @@ function rowToTask(r: TaskRowSql): Task {
     traceIds,
     artifactIds,
     evidence,
+    constraints:  parseJsonOrNull<Record<string, unknown>>(r.constraints),
+    filesTouched: parseJsonArray<string>(r.files_touched).filter((s): s is string => typeof s === 'string'),
+    sideEffects:  parseJsonArray<SideEffectRecord>(r.side_effects),
+    failureState: parseJsonOrNull<TaskFailureState>(r.failure_state),
+    permissions:  parseJsonOrNull<Record<string, unknown>>(r.permissions),
   };
 }
 
@@ -187,8 +230,27 @@ export interface TaskStore {
    * gate. Writes status + the evidence envelope in ONE statement so a
    * crash can't leave a verdict without its justification (or vice
    * versa). Best-effort like setStatus.
+   *
+   * v4.13 Gap 3 — the same single UPDATE also carries the job-card:
+   * `filesTouched` MERGES (deduped) and `sideEffects` APPENDS (deduped
+   * by value) into the row's existing arrays so a multi-turn task
+   * accumulates its footprint; `failureState` / `permissions` /
+   * `constraints` overwrite only when provided. Single-write
+   * discipline: status, evidence, and job-card can never diverge —
+   * one statement, no scattered writers.
    */
-  finalizeVerification(id: string, status: TaskStatus, evidence: TaskEvidence): void;
+  finalizeVerification(
+    id: string,
+    status: TaskStatus,
+    evidence: TaskEvidence,
+    jobCard?: {
+      filesTouched?: string[];
+      sideEffects?:  SideEffectRecord[];
+      failureState?: TaskFailureState | null;
+      permissions?:  Record<string, unknown> | null;
+      constraints?:  Record<string, unknown> | null;
+    },
+  ): void;
   /**
    * Listing surface for /tasks. Newest-first by created_at. Optional
    * session + status filters compose with AND.
@@ -268,10 +330,51 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
         `UPDATE tasks SET goal = ?, updated_at = ? WHERE id = ?`,
       ).run(goal, Date.now(), id);
     },
-    finalizeVerification(id, status, evidence) {
+    finalizeVerification(id, status, evidence, jobCard) {
+      // Read-merge for the accumulating arrays (same discipline as
+      // appendTraceId), then ONE UPDATE carrying every field — status,
+      // evidence, and job-card land atomically or not at all.
+      const row = db.prepare(
+        'SELECT files_touched, side_effects, constraints, failure_state, permissions FROM tasks WHERE id = ?',
+      ).get(id) as {
+        files_touched: string; side_effects: string;
+        constraints: string | null; failure_state: string | null; permissions: string | null;
+      } | undefined;
+      if (!row) return;   // missing task — same silent no-op as setStatus
+
+      const files = parseJsonArray<string>(row.files_touched)
+        .filter((s): s is string => typeof s === 'string');
+      for (const f of jobCard?.filesTouched ?? []) {
+        if (!files.includes(f)) files.push(f);
+      }
+      const effects = parseJsonArray<SideEffectRecord>(row.side_effects);
+      const seen = new Set(effects.map((e) => JSON.stringify(e)));
+      for (const e of jobCard?.sideEffects ?? []) {
+        const key = JSON.stringify(e);
+        if (!seen.has(key)) { effects.push(e); seen.add(key); }
+      }
+      const pick = (provided: unknown | undefined, existing: string | null): string | null => {
+        if (provided === undefined) return existing;
+        return provided === null ? null : JSON.stringify(provided);
+      };
       db.prepare(
-        `UPDATE tasks SET status = ?, evidence = ?, updated_at = ? WHERE id = ?`,
-      ).run(status, JSON.stringify(evidence), Date.now(), id);
+        `UPDATE tasks SET
+           status = ?, evidence = ?,
+           files_touched = ?, side_effects = ?,
+           failure_state = ?, permissions = ?, constraints = ?,
+           updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        status,
+        JSON.stringify(evidence),
+        JSON.stringify(files),
+        JSON.stringify(effects),
+        pick(jobCard?.failureState, row.failure_state),
+        pick(jobCard?.permissions,  row.permissions),
+        pick(jobCard?.constraints,  row.constraints),
+        Date.now(),
+        id,
+      );
     },
     appendTraceId(id, eventId) {
       // Read-modify-write. SQLite's WAL serialises writers so the

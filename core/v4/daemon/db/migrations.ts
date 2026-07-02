@@ -636,6 +636,29 @@ const V16_SQL = `
 ALTER TABLE tasks ADD COLUMN evidence TEXT;
 `;
 
+// v4.13 Pillar 1 Gap 3 — complete the job-card. Additive columns making
+// the task row the durable, evidence-backed record of what a task is and
+// what it did — everything a future resume (Gap 4) needs, reconstructable
+// without trusting prose:
+//   constraints   (nullable JSON) — user-stated limits at creation. No
+//                 producer exists today (free-text constraints are not
+//                 captured anywhere); the column is the seam.
+//   files_touched (JSON array)    — deduped paths from mutating, verifier-
+//                 evidenced tool executions; append-per-turn.
+//   side_effects  (JSON array)    — mutating executions beyond files
+//                 ({tool, target, verified, evidence?}).
+//   failure_state (nullable JSON) — last structured give-up/verification
+//                 failure ({class, whatWasTried: retry ledger, whenAt}).
+//   permissions   (nullable JSON) — approval mode in force when the task
+//                 ran (the Pillar-2 seam: record now, enforce later).
+const V17_SQL = `
+ALTER TABLE tasks ADD COLUMN constraints   TEXT;
+ALTER TABLE tasks ADD COLUMN files_touched TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE tasks ADD COLUMN side_effects  TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE tasks ADD COLUMN failure_state TEXT;
+ALTER TABLE tasks ADD COLUMN permissions   TEXT;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -653,6 +676,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 14, name: 'v4.10 slice 10.8 — durable Task-lite kernel',   sql: V14_SQL },
   { version: 15, name: 'v4.11 — artifact registry with provenance',     sql: V15_SQL },
   { version: 16, name: 'v4.13 gap 1 — task verification evidence',      sql: V16_SQL },
+  { version: 17, name: 'v4.13 gap 3 — job-card columns',                sql: V17_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
