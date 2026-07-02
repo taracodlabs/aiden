@@ -78,6 +78,12 @@ async function waitForDisk(
   const stateFile = path.join(tmp, 'cron_jobs.json');
   const started = Date.now();
   for (;;) {
+    // Drain the atomic-write queue each iteration: the sync mutators
+    // persist in a background `withLock` IIFE, so once that write is
+    // queued this collapses the poll-vs-persist race deterministically
+    // (removes the under-contention flake) rather than relying on the
+    // 25ms poll happening to land after the rename.
+    try { await awaitPendingSaves(); } catch { /* best-effort drain */ }
     try {
       const jobs = JSON.parse(await fs.readFile(stateFile, 'utf8')).jobs;
       if (pred(jobs)) return jobs;
@@ -148,7 +154,7 @@ describe('lazy hydration — write safety (never clobber, never collide)', () =>
     expect(onDisk.map((j) => j.id).sort()).toEqual(['1', '2', '3']);
     expect(onDisk.find((j) => j.id === '1')?.description).toBe('first job');
     expect(onDisk.find((j) => j.id === '3')?.description).toBe('third job');
-  });
+  }, 30_000);
 
   it('cold pauseJob/resumeJob find the disk job (no false "not found") and persist', async () => {
     await seedDisk();
@@ -158,14 +164,14 @@ describe('lazy hydration — write safety (never clobber, never collide)', () =>
     expect(resumeJob('1')).toBe(true);
     onDisk = await waitForDisk((jobs) => jobs.some((j) => j.id === '1' && j.enabled === true));
     expect(onDisk.length).toBe(2);
-  });
+  }, 30_000);
 
   it('cold deleteJob removes exactly the target job from disk', async () => {
     await seedDisk();
     expect(deleteJob('1')).toBe(true);
     const onDisk = await waitForDisk((jobs) => jobs.length === 1);
     expect(onDisk[0].id).toBe('2');
-  });
+  }, 30_000);
 });
 
 describe('lazy hydration — idempotence + interplay with async paths', () => {
