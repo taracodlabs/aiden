@@ -333,7 +333,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('-c, --continue', 'Resume the most recent session')
     .option('-r, --resume <title>', 'Resume a session by id-prefix or partial title')
     .option('--yolo', 'Skip approval prompts (YOLO mode)')
-    .option('-q, --query <prompt>', 'Run ONE non-interactive turn on <prompt>, print the answer, and exit (headless; tools auto-denied unless --yolo)')
+    .option('-q, --query <prompt>', 'Run ONE non-interactive turn on <prompt>, print the answer, and exit (headless; read-only tools run, mutating tools auto-denied unless --yolo)')
     .option('--provider <id>', 'Override provider id')
     .option('--model <id>', 'Override model id')
     .option(
@@ -1563,7 +1563,23 @@ export async function buildAgentRuntime(
   const approvalEngine = new ApprovalEngine(
     config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'smart'),
   );
-  if (cliOpts.yolo) approvalEngine.setMode('off', { userInitiated: true });
+  if (cliOpts.yolo) {
+    approvalEngine.setMode('off', { userInitiated: true });
+  } else if (headless) {
+    // v4.12.1 — headless one-shot (`aiden -q`) forces MANUAL mode,
+    // overriding the user's config `agent.approval_mode`. This makes the
+    // safety switch deterministic and config-independent:
+    //   • read-category tools still auto-allow (checkApproval short-circuits
+    //     category==='read' before any mode/callback — harmless list/read).
+    //   • EVERY mutating (write/execute/network/browser) tool routes to
+    //     promptUser, which the headless override below answers 'deny'.
+    // Two bugs this closes: (1) a config `approval_mode: off` would have
+    // auto-allowed DESTRUCTIVE tools in `-q` non-yolo; (2) `smart` mode
+    // runs the auxiliary-LLM riskAssess, which could rate a mutating call
+    // 'safe' and auto-allow it (and is a network hop in a headless path).
+    // `--yolo` (mode 'off' above) remains the explicit opt-in to run tools.
+    approvalEngine.setMode('manual', { userInitiated: true });
+  }
   // ★ v4.12 SH.1 — freeze the mode once boot-time setup (config default +
   // --yolo) is done. From here, only user-initiated /yolo may flip it; a held
   // ApprovalEngine ref in tool/plugin code can NOT silently disable approvals.
@@ -1804,11 +1820,12 @@ export async function buildAgentRuntime(
 
   // v4.12.1 — headless one-shot approval: there is no TTY to confirm on, so
   // override the interactive prompt with a synchronous auto-DENY (mirrors the
-  // child-subagent auto-deny in core/v4/subagent/childBuilder.ts). Read-only
-  // tools still auto-allow under 'smart' mode; only gated (mutating/dangerous)
-  // calls are denied — surfaced by the caller as a non-zero exit. `--yolo`
-  // sets mode 'off' earlier (auto-allow all), so promptUser is never reached
-  // in that case. onUiEvent is silenced so no approval chrome leaks.
+  // child-subagent auto-deny in core/v4/subagent/childBuilder.ts). Combined
+  // with the forced 'manual' mode above, EVERY mutating tool routes here and
+  // is denied; read-category tools auto-allow before this callback (harmless).
+  // Denials surface to the caller as a non-zero exit. `--yolo` sets mode 'off'
+  // earlier (auto-allow all), so promptUser is never reached in that case.
+  // onUiEvent is silenced so no approval chrome leaks.
   if (headless) {
     approvalEngine['callbacks'] = {
       ...(approvalEngine['callbacks'] as object),
