@@ -29,13 +29,17 @@ const STUB_TOOLS: ToolSchema[] = [
   { name: 'file_write', description: 'write a file',     inputSchema: {} },
 ];
 
-// Stub executor — neutral success result. We don't care about the
-// result body; what matters is that the executor RAN (so dispatch
-// completes, verifier records, and the cooldown counter advances).
+// Stub executor — FAILING result. v4.13: the ladder's cooldown/surface
+// stages gate on LOOP-LIKE streaks (identical args, or consecutive
+// FAILURES); a varied-args streak that keeps succeeding is legitimate
+// bulk work and no longer trips them. These tests exercise rollback
+// mechanics under a stuck loop, and a real stuck loop is a FAILING one
+// — so the stub fails every call, driving the consecutive-failure
+// streak the stages count.
 const STUB_EXECUTOR = async (call: ToolCallRequest): Promise<ToolCallResult> => ({
   id:     call.id,
   name:   call.name,
-  result: { success: true },
+  result: { success: false, error: 'simulated stuck-loop failure (stub)' },
 });
 
 // resolveMutates closure for tests — declares specific tools as mutating.
@@ -70,10 +74,9 @@ describe('v4.2 Phase 4 — checkpoint / restore integration', () => {
 
   it('v4.2 Phase 6 — default ON (env unset): rollback fires on cooldown threshold', async () => {
     // Default-on sentinel for Phase 6 flip. With no env var set,
-    // TCE is active — a long same-name loop should trigger
-    // cooldown_with_rollback (consecName threshold = 8). Use the
-    // neutral STUB_EXECUTOR so verifier classifies every call as ok
-    // and the consecName counter is the only signal that fires.
+    // TCE is active — a long FAILING same-name loop should trigger
+    // cooldown_with_rollback (v4.13: loop-like threshold 8, driven by
+    // the consecutive-failure streak from the failing STUB_EXECUTOR).
     delete process.env.AIDEN_TCE;
     const provider = new LoopingMockProvider({
       mode: 'same-name-diff-args', loopTool: 'shell_exec', loopCount: 9,

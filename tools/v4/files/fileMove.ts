@@ -101,6 +101,24 @@ export const fileMoveTool: ToolHandler = {
     }
     const from = srcPolicy.resolvedPath;
     const to   = dstPolicy.resolvedPath;
+    // v4.13 — batch-staleness guard. An approved plan may reference a
+    // source an EARLIER operation already relocated/deleted (the plan
+    // goes stale as it executes). An absent source is a benign SKIP —
+    // a decision-record, not a failure, never a hallucination — and we
+    // never auto-redirect to a guessed location; the model can re-list
+    // if it cares.
+    try {
+      await fs.access(from);
+    } catch {
+      return {
+        success: true,
+        skipped: true,
+        reason:  'source_absent',
+        likely:  'already handled by an earlier operation',
+        from,
+        to,
+      };
+    }
     try {
       await fs.mkdir(path.dirname(to), { recursive: true });
       try {

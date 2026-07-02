@@ -95,6 +95,19 @@ export const filePatchTool: ToolHandler = {
     const replaceAll = args.replace_all === true;
     const resolved = policy.resolvedPath;
 
+    // v4.13 — batch-staleness guard. Patching a file an earlier batch
+    // operation already moved/deleted is a benign SKIP, not a failure.
+    try {
+      await fs.access(resolved);
+    } catch {
+      return {
+        success: true,
+        skipped: true,
+        reason:  'source_absent',
+        likely:  'already handled by an earlier operation',
+        path:    resolved,
+      };
+    }
     try {
       const original = await fs.readFile(resolved, 'utf-8');
       const occurrences = original.split(find).length - 1;

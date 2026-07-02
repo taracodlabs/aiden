@@ -84,6 +84,21 @@ export const fileDeleteTool: ToolHandler = {
       return { success: false, error: 'Refusing to delete filesystem root' };
     }
     const recursive = args.recursive === true;
+    // v4.13 — batch-staleness guard. An approved plan may reference a
+    // path an EARLIER operation already moved/deleted. An absent target
+    // for a delete is a benign SKIP (the end state — "gone" — already
+    // holds); a decision-record, not a failure.
+    try {
+      await fs.access(resolved);
+    } catch {
+      return {
+        success: true,
+        skipped: true,
+        reason:  'source_absent',
+        likely:  'already handled by an earlier operation',
+        path:    resolved,
+      };
+    }
     try {
       await fs.rm(resolved, { recursive, force: false });
       return { success: true, path: resolved };

@@ -103,34 +103,75 @@ describe('TurnState (v4.1.6 spike)', () => {
     expect(snap.consecSignature.count).toBe(1); // last call, fresh signature
   });
 
-  it('cooldown stage fires at name-streak 8 (different args, same tool)', () => {
+  // v4.13 — cooldown/surface gate on LOOP-LIKE counts (identical
+  // signature streak, or consecutive FAILURES). Varied-args streaks
+  // that keep succeeding are legitimate bulk work (the live-demo false
+  // positive: 11 legit file_move calls got the "stuck" banner).
+  const V_FAIL = { ok: false, confidence: 1, code: 'failed' as const, reason: 'nope' };
+  const V_OK   = { ok: true,  confidence: 1, code: 'ok' as const };
+
+  it('v4.13: 12 varied-args SUCCESSFUL calls → NO cooldown/surface (bulk work is legal)', () => {
     process.env.AIDEN_TCE = '1';
     const ts = new TurnState();
-    // 7 different-arg calls — none trigger hint (signature varies).
-    for (let i = 0; i < 7; i += 1) {
-      const d = ts.recordToolCall('skill_view', { name: `skill_${i}` });
+    for (let i = 0; i < 12; i += 1) {
+      const d = ts.recordToolCall('file_move', { from: `a${i}.txt`, to: `dir/a${i}.txt` }, V_OK);
       expect(d.kind).toBe('allow');
     }
-    // 8th call → cooldown (name-streak crossed 8 threshold).
-    const d8 = ts.recordToolCall('skill_view', { name: 'skill_7' });
-    expect(d8.kind).toBe('cooldown');
-    expect(d8.toolName).toBe('skill_view');
-    expect(d8.consecutive).toBe(8);
-    expect(d8.cooldownMessage).toMatch(/skill_view/);
-    expect(d8.cooldownMessage).toMatch(/disabled/);
-    // Tool is in cooldown list.
+    expect(ts.getCooledDownTools()).toEqual([]);
+    expect(ts.getDiagnosticSnapshot().stage).toBe('none');
+  });
+
+  it('v4.13: varied SUCCESSFUL streak hits the soft ceiling → ONE informational hint, never cooldown', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState({ variedNameHintThreshold: 6 });
+    for (let i = 0; i < 5; i += 1) {
+      expect(ts.recordToolCall('file_move', { from: `f${i}`, to: `g${i}` }, V_OK).kind).toBe('allow');
+    }
+    const d6 = ts.recordToolCall('file_move', { from: 'f5', to: 'g5' }, V_OK);
+    expect(d6.kind).toBe('hint');
+    expect(d6.hintMessage).toMatch(/intentional bulk work/);
+    // Beyond the ceiling: still never cooldown/surface for successes.
+    for (let i = 6; i < 15; i += 1) {
+      const d = ts.recordToolCall('file_move', { from: `f${i}`, to: `g${i}` }, V_OK);
+      expect(d.kind).toBe('allow');
+    }
+    expect(ts.getCooledDownTools()).toEqual([]);
+  });
+
+  it('v4.13: 8 IDENTICAL-args calls (even succeeding) → cooldown — that IS a loop', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    let last: ReturnType<TurnState['recordToolCall']> = { kind: 'allow', consecutive: 0 };
+    for (let i = 0; i < 8; i += 1) {
+      last = ts.recordToolCall('file_read', { path: 'same.txt' }, V_OK);
+    }
+    expect(last.kind).toBe('cooldown');
+    expect(last.consecutive).toBe(8);
+    expect(ts.getCooledDownTools()).toEqual(['file_read']);
+  });
+
+  it('cooldown fires at 8 consecutive varied-args FAILURES (fishing while failing)', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    let d: ReturnType<TurnState['recordToolCall']> = { kind: 'allow', consecutive: 0 };
+    for (let i = 0; i < 8; i += 1) {
+      d = ts.recordToolCall('skill_view', { name: `skill_${i}` }, V_FAIL);
+    }
+    expect(d.kind).toBe('cooldown');
+    expect(d.toolName).toBe('skill_view');
+    expect(d.consecutive).toBe(8);
+    expect(d.cooldownMessage).toMatch(/skill_view/);
+    expect(d.cooldownMessage).toMatch(/disabled/);
     expect(ts.getCooledDownTools()).toEqual(['skill_view']);
   });
 
-  it('surface stage fires at name-streak 11', () => {
+  it('surface fires at 11 consecutive varied-args FAILURES', () => {
     process.env.AIDEN_TCE = '1';
     const ts = new TurnState();
-    // 10 different-arg same-tool calls — should hit cooldown at 8.
     for (let i = 0; i < 10; i += 1) {
-      ts.recordToolCall('skill_view', { name: `s${i}` });
+      ts.recordToolCall('skill_view', { name: `s${i}` }, V_FAIL);
     }
-    // 11th → surface.
-    const d11 = ts.recordToolCall('skill_view', { name: 's10' });
+    const d11 = ts.recordToolCall('skill_view', { name: 's10' }, V_FAIL);
     expect(d11.kind).toBe('surface');
     expect(d11.toolName).toBe('skill_view');
     expect(d11.consecutive).toBe(11);
@@ -145,11 +186,11 @@ describe('TurnState (v4.1.6 spike)', () => {
     process.env.AIDEN_TCE = '1';
     const ts = new TurnState();
     for (let i = 0; i < 11; i += 1) {
-      ts.recordToolCall('skill_view', { name: `s${i}` });
+      ts.recordToolCall('skill_view', { name: `s${i}` }, V_FAIL);
     }
     // We're now in surfaced stage. Further calls return allow
     // (or at least don't re-emit surface decisions).
-    const d12 = ts.recordToolCall('skill_view', { name: 's11' });
+    const d12 = ts.recordToolCall('skill_view', { name: 's11' }, V_FAIL);
     expect(d12.kind).not.toBe('hint');
     expect(d12.kind).not.toBe('cooldown');
     // Stays surfaced.
@@ -193,9 +234,9 @@ describe('TurnState (v4.1.6 spike)', () => {
     ts.recordToolCall('web_search',   { q: 'foo' });
     ts.recordToolCall('execute_code', { code: '1+1' });
     for (let i = 0; i < 10; i += 1) {
-      ts.recordToolCall('skill_view', { name: `s${i}` });
+      ts.recordToolCall('skill_view', { name: `s${i}` }, V_FAIL);
     }
-    const surface = ts.recordToolCall('skill_view', { name: 's10' });
+    const surface = ts.recordToolCall('skill_view', { name: 's10' }, V_FAIL);
     expect(surface.kind).toBe('surface');
     // canStill should mention web_search + execute_code, NOT skill_view.
     const text = surface.surfaceCard!.canStill.join('\n');
@@ -208,7 +249,7 @@ describe('TurnState (v4.1.6 spike)', () => {
     process.env.AIDEN_TCE = '1';
     const ts = new TurnState({ cooldownIterations: 3 });
     for (let i = 0; i < 8; i += 1) {
-      ts.recordToolCall('skill_view', { name: `s${i}` });
+      ts.recordToolCall('skill_view', { name: `s${i}` }, V_FAIL);
     }
     expect(ts.getCooledDownTools()).toEqual(['skill_view']);
     // 3 iterations to expire.
@@ -256,12 +297,12 @@ describe('TurnState (v4.1.6 spike)', () => {
     process.env.AIDEN_TCE = '1';
     const ts = new TurnState();
     const sameArgs = { x: 1 };
-    // 5 identical → hint event.
+    // 5 identical → hint event (signature streak).
     for (let i = 0; i < 5; i += 1) ts.recordToolCall('t', sameArgs);
-    // Continue with diff args to 8 → cooldown event.
-    for (let i = 0; i < 3; i += 1) ts.recordToolCall('t', { x: i + 2 });
-    // Continue to 11 → surface event.
-    for (let i = 0; i < 3; i += 1) ts.recordToolCall('t', { x: i + 100 });
+    // v4.13 — varied args count toward cooldown/surface only when
+    // FAILING; 8 consecutive failures → cooldown, 11 → surface.
+    for (let i = 0; i < 8; i += 1) ts.recordToolCall('t', { x: i + 2 }, V_FAIL);
+    for (let i = 0; i < 3; i += 1) ts.recordToolCall('t', { x: i + 100 }, V_FAIL);
 
     const events = ts.getDiagnosticSnapshot().recoveryEvents;
     expect(events.map((e) => e.stage)).toEqual(['hinted', 'cooldown', 'surfaced']);

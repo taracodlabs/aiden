@@ -70,6 +70,12 @@ export function renderTaskDetail(t: Task, write: (s: string) => void): void {
         write(`      ⊘ ${d.tool} → ${d.target}${d.reason ? ` (${d.reason})` : ''}\n`);
       }
     }
+    if (t.evidence.skipped && t.evidence.skipped.length > 0) {
+      write(`    skipped (${t.evidence.skipped.length}):\n`);
+      for (const s of t.evidence.skipped) {
+        write(`      ↷ ${s.tool} → ${s.target}${s.reason ? ` (${s.reason})` : ''}\n`);
+      }
+    }
     for (const f of t.evidence.failures) {
       write(`    ✗ ${f.tool}: ${f.reason}\n`);
     }

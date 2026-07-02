@@ -258,12 +258,17 @@ describe('TurnState — Phase 4 cooldown emits cooldown_with_rollback when eligi
   beforeEach(() => { process.env.AIDEN_TCE = '1'; });
   afterEach(()  => { delete process.env.AIDEN_TCE; });
 
+  // v4.13 — cooldown gates on LOOP-LIKE streaks (identical args or
+  // consecutive failures); these varied-args loops now drive the
+  // failure streak, matching the real stuck-loop scenario.
+  const V_FAIL = { ok: false, confidence: 1, code: 'failed' as const, reason: 'stub failure' };
+
   it('emits cooldown_with_rollback when a restorable checkpoint exists', () => {
     const ts = new TurnState({ cooldownConsecThreshold: 2 });
     ts.captureCheckpoint([mkMsg('user', 'a')], 0);
     // No mutations recorded; checkpoint stays clean.
-    ts.recordToolCall('shell_exec', { c: 'one' });
-    const decision = ts.recordToolCall('shell_exec', { c: 'two' });
+    ts.recordToolCall('shell_exec', { c: 'one' }, V_FAIL);
+    const decision = ts.recordToolCall('shell_exec', { c: 'two' }, V_FAIL);
     expect(decision.kind).toBe('cooldown_with_rollback');
     expect(decision.rollback).toBeDefined();
     expect(decision.rollback!.checkpoint.iteration).toBe(0);
@@ -274,8 +279,8 @@ describe('TurnState — Phase 4 cooldown emits cooldown_with_rollback when eligi
     const ts = new TurnState({ cooldownConsecThreshold: 2 });
     ts.captureCheckpoint([mkMsg('user', 'a')], 0);
     ts.markMutationOnLiveCheckpoint('file_write');   // flag checkpoint
-    ts.recordToolCall('shell_exec', { c: 'one' });
-    const decision = ts.recordToolCall('shell_exec', { c: 'two' });
+    ts.recordToolCall('shell_exec', { c: 'one' }, V_FAIL);
+    const decision = ts.recordToolCall('shell_exec', { c: 'two' }, V_FAIL);
     expect(decision.kind).toBe('cooldown');
     expect(decision.rollback).toBeUndefined();
     expect(decision.cooldownMessage).toContain('shell_exec');
@@ -285,8 +290,8 @@ describe('TurnState — Phase 4 cooldown emits cooldown_with_rollback when eligi
     const ts = new TurnState({ cooldownConsecThreshold: 2, checkpointDepth: 0 });
     // Even if we "capture" a checkpoint, depth=0 → buffer stays empty.
     ts.captureCheckpoint([mkMsg('user', 'a')], 0);
-    ts.recordToolCall('shell_exec', { c: 'one' });
-    const decision = ts.recordToolCall('shell_exec', { c: 'two' });
+    ts.recordToolCall('shell_exec', { c: 'one' }, V_FAIL);
+    const decision = ts.recordToolCall('shell_exec', { c: 'two' }, V_FAIL);
     expect(decision.kind).toBe('cooldown');
     expect(decision.rollback).toBeUndefined();
   });

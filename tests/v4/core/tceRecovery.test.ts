@@ -51,6 +51,16 @@ const STUB_EXECUTOR = async (call: ToolCallRequest): Promise<ToolCallResult> => 
   result: { ok: true },
 });
 
+// v4.13 — cooldown/surface gate on LOOP-LIKE streaks (identical args or
+// consecutive FAILURES); varied-args streaks that keep succeeding are
+// legitimate bulk work. The name-streak tests below drive a FAILING
+// loop — the real stuck-loop shape those stages exist for.
+const FAILING_EXECUTOR = async (call: ToolCallRequest): Promise<ToolCallResult> => ({
+  id:     call.id,
+  name:   call.name,
+  result: { success: false, error: 'simulated stuck-loop failure (stub)' },
+});
+
 describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
   beforeEach(() => {
     delete process.env.AIDEN_TCE;
@@ -167,7 +177,7 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
       honorCooldown: true, // terminates as soon as cooldown filters skill_view
     });
     const agent = new AidenAgent({
-      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      provider, tools: STUB_TOOLS, toolExecutor: FAILING_EXECUTOR, maxTurns: 30,
     });
     const result = await agent.runConversation(
       [{ role: 'user', content: 'explore skills' }] as Message[],
@@ -199,7 +209,7 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
       honorCooldown: false, // keep looping even after cooldown
     });
     const agent = new AidenAgent({
-      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      provider, tools: STUB_TOOLS, toolExecutor: FAILING_EXECUTOR, maxTurns: 30,
     });
     const result = await agent.runConversation(
       [{ role: 'user', content: 'be stuck' }] as Message[],
@@ -225,7 +235,7 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
     // This preserves the test's original intent (assert surface card
     // contents) without coupling it to Phase 4 rollback semantics.
     const agent = new AidenAgent({
-      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      provider, tools: STUB_TOOLS, toolExecutor: FAILING_EXECUTOR, maxTurns: 30,
       resolveMutates: () => true,
     });
     const result = await agent.runConversation(
@@ -251,7 +261,7 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
       honorCooldown: true,
     });
     const agent = new AidenAgent({
-      provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      provider, tools: STUB_TOOLS, toolExecutor: FAILING_EXECUTOR, maxTurns: 30,
     });
     const result = await agent.runConversation(
       [{ role: 'user', content: 'sustained skill probe' }] as Message[],

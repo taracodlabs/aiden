@@ -85,6 +85,13 @@ export interface TaskEvidence {
    * Additive v:1 key per the extend-don't-reshape doctrine.
    */
   declined?: Array<{ tool: string; target: string; reason: string }>;
+  /**
+   * v4.13 — mutations SKIPPED by the batch-staleness guard (source
+   * already gone when the op executed, typically handled by an earlier
+   * operation in the same approved batch). A skip is a benign
+   * decision-record, not a failure. Additive v:1 key.
+   */
+  skipped?: Array<{ tool: string; target: string; reason: string }>;
 }
 
 export type TaskVerdict = 'completed' | 'completed_unverified' | 'verification_failed';
@@ -237,6 +244,10 @@ export function buildJobCardUpdate(
     if (t.handlerMutates !== true) continue;
     const verified = t.verification?.ok === true && t.verification.code === 'ok';
     const r = (t.result && typeof t.result === 'object') ? t.result as Record<string, unknown> : {};
+    // v4.13 — a SKIPPED mutation (batch-staleness guard: source already
+    // gone) touched nothing: no footprint. It lands on the evidence
+    // envelope as a decision-record instead (computeTaskFinalization).
+    if (r.skipped === true) continue;
     const p = typeof r.path === 'string' && r.path.length > 0 ? r.path : null;
     if (p && !filesTouched.includes(p)) filesTouched.push(p);
     // v4.13 Phase D — move/copy results carry from/to (not path); the
@@ -317,7 +328,27 @@ export function computeTaskFinalization(
       declined.push({ tool: d.tool, target, reason: typeof d.reason === 'string' ? d.reason : '' });
     }
   }
-  const declinedExtra = declined.length > 0 ? { declined } : {};
+  // v4.13 — skipped mutations (batch-staleness guard) are envelope
+  // decision-records, mirrored from the typed tool results.
+  const skipped: Array<{ tool: string; target: string; reason: string }> = [];
+  for (const t of trace) {
+    if (t.handlerMutates !== true) continue;
+    const r = (t.result && typeof t.result === 'object') ? t.result as Record<string, unknown> : {};
+    if (r.skipped !== true) continue;
+    const target =
+      typeof r.path === 'string' ? r.path :
+      typeof r.from === 'string' && typeof r.to === 'string' ? `${r.from} -> ${r.to}` :
+      '(unspecified)';
+    skipped.push({
+      tool:   t.name,
+      target,
+      reason: typeof r.reason === 'string' ? r.reason : 'skipped',
+    });
+  }
+  const declinedExtra = {
+    ...(declined.length > 0 ? { declined } : {}),
+    ...(skipped.length > 0 ? { skipped } : {}),
+  };
   if (turn.finishReason !== 'stop') {
     return {
       status:   'failed',
