@@ -21,6 +21,7 @@
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
+import { decideTaskVerdict, buildEvidenceEnvelope } from '../../core/v4/taskVerification';
 // v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
 // sequence + system prompt + memory hashes when a turn shows loop
 // symptoms (10+ calls OR 5+ consecutive same-name). Default off via
@@ -146,11 +147,23 @@ export interface OnUiEventDeps {
    *  back to runs on every call. */
   sessionId?:         string | null;
   stopIndicatorOnce:  () => void;
+  /**
+   * v4.13 Gap 1 — collector for the model's own ui_task_done declaration
+   * (its `status` payload). The verify-before-done gate reads the LAST
+   * declaration at turn end: a model-declared failure finalizes the task
+   * row as `failed` honestly instead of letting a clean finishReason
+   * upgrade it to completed. Optional — render + persistence unchanged
+   * when absent.
+   */
+  onTaskDone?:        (args: Record<string, unknown>) => void;
 }
 export function createOnUiEventHandler(
   deps: OnUiEventDeps,
 ): (name: string, args: Record<string, unknown>) => void {
   return (name, args) => {
+    if (name === 'ui_task_done' && deps.onTaskDone) {
+      try { deps.onTaskDone(args); } catch { /* collector must never break dispatch */ }
+    }
     deps.stopIndicatorOnce();
     deps.display.renderUiEvent(name, args);
     if (deps.runStore && deps.runId !== null) {
@@ -1666,6 +1679,10 @@ export class ChatSession implements ChatSessionLike {
     // original intent without parsing UI display rows. Best-effort —
     // any write failure logs once and the turn proceeds.
     let replTaskId: string | null = null;
+    // v4.13 Gap 1 — last ui_task_done payload the model emitted this
+    // turn (collected via the onUiEvent handler). Read by the verify-
+    // before-done gate: a declared failure finalizes honestly as failed.
+    let declaredTaskDone: Record<string, unknown> | null = null;
     const replTaskStore = this.opts.replTaskStore;
     if (replTaskStore && this.sessionId) {
       try {
@@ -2014,6 +2031,9 @@ export class ChatSession implements ChatSessionLike {
           // emit row gets session_id without the writer JOIN-ing to runs.
           sessionId:         this.sessionId ?? null,
           stopIndicatorOnce,
+          // v4.13 Gap 1 — capture the model's own done-declaration for
+          // the verify-before-done gate below (last one wins).
+          onTaskDone:        (args) => { declaredTaskDone = args; },
         })),
         onProgress: streamingEnabled
           ? wrapTurnId((outputTokens: number, maxTokens?: number) => {
@@ -2081,16 +2101,60 @@ export class ChatSession implements ChatSessionLike {
             err instanceof Error ? err.message : String(err));
         }
       }
-      // v4.10 Slice 10.8 — task-lite terminal transition (success
-      // path). `stop` is the canonical clean finish; everything else
-      // routes to 'failed' so /tasks listing distinguishes user-
-      // visible failures from clean turns. 'cancelled' stays
-      // reserved for explicit /adjust <id> cancel and is never set
-      // by the terminal hook.
+      // v4.13 Gap 1 — verify-before-done gate. The model narrates; the
+      // runtime keeps score: a clean `stop` no longer completes the task
+      // on prose. The row enters `pending_verification` (crash-honest:
+      // a death mid-decision leaves "not yet verified", never a lying
+      // `completed`), then the verdict policy decides over this turn's
+      // verifier evidence:
+      //   evidence-backed side effects   → completed (+ handles stored)
+      //   claimed side effect, no proof  → verification_failed (surfaced)
+      //   only weak/unverifiable claims  → completed_unverified (honest
+      //                                    downgrade, surfaced)
+      // A model-declared ui_task_done failure finalizes as `failed`
+      // regardless of finishReason — a declared failure is never
+      // upgraded. Non-`stop` finishes route to 'failed' as before.
       if (replTaskStore && replTaskId !== null) {
         try {
-          const taskStatus = result.finishReason === 'stop' ? 'completed' : 'failed';
-          replTaskStore.setStatus(replTaskId, taskStatus);
+          if (result.finishReason !== 'stop') {
+            replTaskStore.setStatus(replTaskId, 'failed');
+          } else {
+            replTaskStore.setStatus(replTaskId, 'pending_verification');
+            const declaredStatus =
+              declaredTaskDone && typeof (declaredTaskDone as Record<string, unknown>).status === 'string'
+                ? String((declaredTaskDone as Record<string, unknown>).status)
+                : null;
+            if (declaredStatus && declaredStatus !== 'success') {
+              // Honest self-reported failure — record it with the
+              // declaration as evidence; no verification gate needed.
+              const decision = decideTaskVerdict(result.toolCallTrace ?? []);
+              replTaskStore.finalizeVerification(
+                replTaskId,
+                'failed',
+                buildEvidenceEnvelope(decision, { reportedFailure: declaredStatus }),
+              );
+            } else {
+              const decision = decideTaskVerdict(result.toolCallTrace ?? []);
+              replTaskStore.finalizeVerification(
+                replTaskId,
+                decision.verdict,
+                buildEvidenceEnvelope(decision),
+              );
+              if (decision.verdict === 'verification_failed') {
+                const what = decision.failures
+                  .map((f) => `${f.tool} (${f.reason})`)
+                  .join(', ');
+                this.opts.display.warn(
+                  `Task verification failed — side effect claimed without evidence: ${what}. ` +
+                  `See /tasks ${replTaskId}.`,
+                );
+              } else if (decision.verdict === 'completed_unverified') {
+                this.opts.display.dim(
+                  `(task completed unverified — side effects lacked hard evidence; /tasks ${replTaskId})`,
+                );
+              }
+            }
+          }
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn('[tasks] failed to finalize REPL task row:',

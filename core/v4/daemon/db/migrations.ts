@@ -623,6 +623,19 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_task
   ON artifacts(task_id, created_at DESC);
 `;
 
+// v4.13 Pillar 1 Gap 1 — verify-before-done. `evidence` holds the
+// versioned JSON envelope written when the turn-end gate decides the
+// task's terminal status (core/v4/taskVerification.ts: verdict + per-claim
+// evidence handles + failures). Nullable: rows predating the gate, and
+// rows finalized on non-`stop` finishes, simply have no envelope. The
+// envelope is the seed of the full job-card — Gap 3 extends it (and adds
+// sibling columns) rather than reshaping. New status values
+// (pending_verification / completed_unverified / verification_failed)
+// need no schema change — `status` is unconstrained TEXT by design.
+const V16_SQL = `
+ALTER TABLE tasks ADD COLUMN evidence TEXT;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -639,6 +652,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 13, name: 'v4.10 slice 10.2b — run_events richer schema',  sql: V13_SQL },
   { version: 14, name: 'v4.10 slice 10.8 — durable Task-lite kernel',   sql: V14_SQL },
   { version: 15, name: 'v4.11 — artifact registry with provenance',     sql: V15_SQL },
+  { version: 16, name: 'v4.13 gap 1 — task verification evidence',      sql: V16_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

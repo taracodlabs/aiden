@@ -45,8 +45,24 @@
  */
 
 import type { Db } from './db/connection';
+import type { TaskEvidence } from '../taskVerification';
 
-export type TaskStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+/**
+ * v4.13 Gap 1 adds the verify-before-done states:
+ *
+ *   active → pending_verification → completed             (evidence-backed)
+ *                                 → completed_unverified  (honest downgrade)
+ *                                 → verification_failed   (claimed, no evidence)
+ *
+ * `pending_verification` is transitional — entered when the turn finishes
+ * with a clean `stop`, exited microseconds later by the verdict policy.
+ * Its value is crash-honesty: a process death mid-verification leaves the
+ * row saying "not yet verified" instead of a lying `completed`, and the
+ * boot orphan sweep retires it like a stranded `active`.
+ */
+export type TaskStatus =
+  | 'pending' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  | 'pending_verification' | 'completed_unverified' | 'verification_failed';
 
 export interface Task {
   id:           string;
@@ -60,6 +76,8 @@ export interface Task {
   parentTaskId: string | null;
   traceIds:     number[];
   artifactIds:  string[];
+  /** v4.13 Gap 1 — verification envelope (null pre-gate / non-stop finishes). */
+  evidence:     TaskEvidence | null;
 }
 
 /** Raw column shape from sqlite. JSON arrays come back as strings. */
@@ -75,6 +93,7 @@ interface TaskRowSql {
   parent_task_id:  string | null;
   trace_ids:       string;
   artifact_ids:    string;
+  evidence:        string | null;
 }
 
 function rowToTask(r: TaskRowSql): Task {
@@ -90,6 +109,13 @@ function rowToTask(r: TaskRowSql): Task {
     const parsed = JSON.parse(r.artifact_ids);
     if (Array.isArray(parsed)) artifactIds = parsed.filter((s): s is string => typeof s === 'string');
   } catch { /* same */ }
+  let evidence: TaskEvidence | null = null;
+  try {
+    if (r.evidence) {
+      const parsed = JSON.parse(r.evidence);
+      if (parsed && typeof parsed === 'object') evidence = parsed as TaskEvidence;
+    }
+  } catch { /* malformed envelope — surface as null, never crash a listing */ }
   return {
     id:           r.id,
     title:        r.title,
@@ -102,6 +128,7 @@ function rowToTask(r: TaskRowSql): Task {
     parentTaskId: r.parent_task_id,
     traceIds,
     artifactIds,
+    evidence,
   };
 }
 
@@ -155,6 +182,13 @@ export interface TaskStore {
    * (core/v4/daemon/artifactStore.ts).
    */
   appendArtifactId(id: string, artifactId: string): void;
+  /**
+   * v4.13 Gap 1 — terminal transition decided by the verify-before-done
+   * gate. Writes status + the evidence envelope in ONE statement so a
+   * crash can't leave a verdict without its justification (or vice
+   * versa). Best-effort like setStatus.
+   */
+  finalizeVerification(id: string, status: TaskStatus, evidence: TaskEvidence): void;
   /**
    * Listing surface for /tasks. Newest-first by created_at. Optional
    * session + status filters compose with AND.
@@ -234,6 +268,11 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
         `UPDATE tasks SET goal = ?, updated_at = ? WHERE id = ?`,
       ).run(goal, Date.now(), id);
     },
+    finalizeVerification(id, status, evidence) {
+      db.prepare(
+        `UPDATE tasks SET status = ?, evidence = ?, updated_at = ? WHERE id = ?`,
+      ).run(status, JSON.stringify(evidence), Date.now(), id);
+    },
     appendTraceId(id, eventId) {
       // Read-modify-write. SQLite's WAL serialises writers so the
       // race window is small but theoretically present; we de-dupe
@@ -287,14 +326,17 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
       return rows.map(rowToTask);
     },
     sweepOrphaned(beforeMs) {
-      // Single atomic UPDATE — only pre-boot `active` rows transition.
+      // Single atomic UPDATE — only pre-boot in-flight rows transition.
       // `created_at < beforeMs` excludes anything this process creates
       // (current-session tasks are all stamped after boot), so a live
       // session is never disturbed. Returns the swept count for logging.
+      // v4.13 Gap 1 — `pending_verification` is in-flight too: a crash
+      // between the gate's two writes must retire the row honestly
+      // rather than leaving it pending forever.
       const info = db.prepare(
         `UPDATE tasks
             SET status = 'interrupted', updated_at = ?
-          WHERE status = 'active' AND created_at < ?`,
+          WHERE status IN ('active', 'pending_verification') AND created_at < ?`,
       ).run(Date.now(), beforeMs);
       return info.changes;
     },

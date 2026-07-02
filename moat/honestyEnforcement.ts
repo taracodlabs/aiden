@@ -62,6 +62,8 @@ export interface HonestyFinding {
     | 'tool_errored'
     // v4.11 Slice 1 — per-tool verifier failure surfaced for all tools.
     | 'verifier_failed'
+    // v4.13 Gap 1 — mutating tool succeeded but with weak evidence.
+    | 'verifier_low_signal'
     // v4.11 Slice 2 — structured success claim contradicted by tool evidence.
     | 'claim_contradicted';
 }
@@ -100,12 +102,15 @@ export type HonestyEvent =
   // result as a failure (shell non-zero exit, file-write unconfirmed,
   // typed success:false, etc.). Surfaced for ALL tools, not just memory.
   //
-  // NOTE: the verifier's `low_signal` code (ok:true but weak evidence —
-  // exit-0-empty-stdout, empty file read, short web result) is
-  // deliberately NOT surfaced in v1. It fires on benign silent successes
-  // (mkdir/cd/rm; reading an empty file) and would make the footer cry
-  // wolf. Only genuine failures (!ok) are flagged.
   | { kind: 'tool_unverified'; tool: string; reason: string }
+  // v4.13 Gap 1 — the verifier said ok:true but with weak evidence
+  // (`low_signal` / `no_progress`). v1 suppressed these entirely because
+  // they fire on benign read-only successes (reading an empty file, short
+  // web result) and would cry wolf. The Gap-1 narrowing: surface them for
+  // MUTATING tools only (handlerMutates === true) — a side-effecting tool
+  // whose evidence is weak is exactly the honesty gap worth telling the
+  // user about; benign reads stay quiet.
+  | { kind: 'tool_low_signal'; tool: string; reason: string }
   // v4.11 Slice 2 — a structured success claim emitted via a ui-event
   // (ui_test_result{failed:0}, ui_task_done{status:'success'}) is
   // contradicted by a shell_exec failure (verifier !ok) in the same turn.
@@ -277,6 +282,16 @@ function toFinding(event: HonestyEvent): HonestyFinding {
         confidence:   1,
         reason:       'verifier_failed',
       };
+    case 'tool_low_signal':
+      return {
+        claim:        event.tool,
+        expectedTool: event.tool,
+        found:        false,
+        // Weak evidence, not proven failure — lower confidence than the
+        // hard !ok kinds so downstream consumers can distinguish.
+        confidence:   0.5,
+        reason:       'verifier_low_signal',
+      };
     case 'claim_contradicted':
       return {
         claim:        event.tool,
@@ -338,12 +353,24 @@ export class HonestyEnforcement {
       // surfacing genuine failures (!ok) for every tool — shell non-zero
       // exit, file-write success:false, etc. Reached only when the two
       // checks above didn't already flag this entry, so no double-counting.
-      // `low_signal` (ok:true, weak evidence) is intentionally not flagged
-      // in v1 — see the HonestyEvent comment.
       const v = t.verification;
       if (v && !v.ok) {
         events.push({
           kind:   'tool_unverified',
+          tool:   t.name,
+          reason: v.reason ?? v.code,
+        });
+        continue;
+      }
+      // v4.13 Gap 1 — weak-evidence successes on MUTATING tools surface
+      // too (see the HonestyEvent comment for the read-only narrowing).
+      if (
+        v && v.ok &&
+        (v.code === 'low_signal' || v.code === 'no_progress') &&
+        t.handlerMutates === true
+      ) {
+        events.push({
+          kind:   'tool_low_signal',
           tool:   t.name,
           reason: v.reason ?? v.code,
         });
@@ -386,6 +413,8 @@ export class HonestyEnforcement {
         lines.push(`- ${e.tool}${where}: errored — ${e.reason}`);
       } else if (e.kind === 'tool_unverified') {
         lines.push(`- ${e.tool}: unverified — ${e.reason}`);
+      } else if (e.kind === 'tool_low_signal') {
+        lines.push(`- ${e.tool}: weak evidence — ${e.reason}`);
       } else if (e.kind === 'claim_contradicted') {
         lines.push(`- ${e.tool}: contradicts evidence — ${e.reason}`);
       } else {
