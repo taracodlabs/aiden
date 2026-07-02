@@ -17,6 +17,7 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
@@ -45,6 +46,16 @@ export const fileListTool: ToolHandler = {
           description:
             'Directory path. Absolute or relative to cwd. Defaults to cwd when omitted.',
         },
+        stat: {
+          type: 'boolean',
+          description:
+            'When true, include size (bytes) and mtimeMs per entry. Useful for grouping and duplicate pre-filtering by size.',
+        },
+        hash: {
+          type: 'boolean',
+          description:
+            'When true, include sha256 per FILE entry (implies stat). Content identity for duplicate detection. Files over 50 MB are skipped (hash omitted, hashSkipped: true).',
+        },
       },
     },
   },
@@ -66,10 +77,37 @@ export const fileListTool: ToolHandler = {
     const resolved = policy.resolvedPath;
     try {
       const entries = await fs.readdir(resolved, { withFileTypes: true });
-      const items = entries.map((e) => ({
-        name: e.name,
-        type: e.isDirectory() ? 'dir' : e.isFile() ? 'file' : 'other',
-      }));
+      // v4.13 Phase D — optional stat + content hash. `hash` implies
+      // `stat`; sha256 is size-guarded (files over the cap get
+      // hashSkipped: true instead of stalling the turn on a huge blob).
+      // Read-only additions: the tool stays a primitive — grouping,
+      // duplicate grouping, and screenshot heuristics are the model's job.
+      const wantHash = args.hash === true;
+      const wantStat = wantHash || args.stat === true;
+      const HASH_MAX_BYTES = 50 * 1024 * 1024;
+      const items: Array<Record<string, unknown>> = [];
+      for (const e of entries) {
+        const item: Record<string, unknown> = {
+          name: e.name,
+          type: e.isDirectory() ? 'dir' : e.isFile() ? 'file' : 'other',
+        };
+        if (wantStat && item.type === 'file') {
+          try {
+            const st = await fs.stat(path.join(resolved, e.name));
+            item.size = st.size;
+            item.mtimeMs = st.mtimeMs;
+            if (wantHash) {
+              if (st.size > HASH_MAX_BYTES) {
+                item.hashSkipped = true;
+              } else {
+                const buf = await fs.readFile(path.join(resolved, e.name));
+                item.sha256 = crypto.createHash('sha256').update(buf).digest('hex');
+              }
+            }
+          } catch { /* per-entry stat/hash failure — entry stays listed */ }
+        }
+        items.push(item);
+      }
       return {
         success: true,
         path: resolved,

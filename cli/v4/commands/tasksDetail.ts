@@ -64,6 +64,12 @@ export function renderTaskDetail(t: Task, write: (s: string) => void): void {
     if (t.evidence.reportedFailure) {
       write(`    reported by model: ${t.evidence.reportedFailure}\n`);
     }
+    if (t.evidence.declined && t.evidence.declined.length > 0) {
+      write(`    declined by user (${t.evidence.declined.length}):\n`);
+      for (const d of t.evidence.declined) {
+        write(`      ⊘ ${d.tool} → ${d.target}${d.reason ? ` (${d.reason})` : ''}\n`);
+      }
+    }
     for (const f of t.evidence.failures) {
       write(`    ✗ ${f.tool}: ${f.reason}\n`);
     }

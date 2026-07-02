@@ -36,6 +36,8 @@ import { fileWriteTool } from './files/fileWrite';
 import { filePatchTool } from './files/filePatch';
 import { fileDeleteTool } from './files/fileDelete';
 import { fileMoveTool } from './files/fileMove';
+import { readPdfTool } from './files/readPdf';
+import { planApprovalTool } from './approval/planApproval';
 import { fileCopyTool } from './files/fileCopy';
 
 import { browserScreenshotTool } from './browser/browserScreenshot';
@@ -257,6 +259,9 @@ export function registerWriteTools(registry: ToolRegistry): void {
   register(fileWriteTool);
   register(filePatchTool);
   register(fileDeleteTool);
+  // v4.13 Phase D — Downloads-demo primitives.
+  register(readPdfTool);
+  register(planApprovalTool);
   register(fileMoveTool);
   register(fileCopyTool);
 
@@ -417,6 +422,8 @@ export { fileListTool } from './files/fileList';
 export { fileWriteTool } from './files/fileWrite';
 export { filePatchTool } from './files/filePatch';
 export { fileDeleteTool } from './files/fileDelete';
+export { readPdfTool } from './files/readPdf';
+export { planApprovalTool } from './approval/planApproval';
 export { fileMoveTool } from './files/fileMove';
 export { fileCopyTool } from './files/fileCopy';
 export { browserScreenshotTool } from './browser/browserScreenshot';

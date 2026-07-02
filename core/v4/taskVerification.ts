@@ -78,6 +78,13 @@ export interface TaskEvidence {
   failures: TaskVerificationFailure[];
   /** Set when the model itself reported failure via ui_task_done. */
   reportedFailure?: string;
+  /**
+   * v4.13 Phase D — batch operations the USER DECLINED via
+   * plan_approval. A declined op is a decision, not a failure; it is
+   * recorded so the audit trail shows what was proposed and refused.
+   * Additive v:1 key per the extend-don't-reshape doctrine.
+   */
+  declined?: Array<{ tool: string; target: string; reason: string }>;
 }
 
 export type TaskVerdict = 'completed' | 'completed_unverified' | 'verification_failed';
@@ -232,13 +239,20 @@ export function buildJobCardUpdate(
     const r = (t.result && typeof t.result === 'object') ? t.result as Record<string, unknown> : {};
     const p = typeof r.path === 'string' && r.path.length > 0 ? r.path : null;
     if (p && !filesTouched.includes(p)) filesTouched.push(p);
+    // v4.13 Phase D — move/copy results carry from/to (not path); the
+    // DESTINATION is the touched file.
+    const dest = typeof r.to === 'string' && r.to.length > 0 ? r.to : null;
+    if (dest && !filesTouched.includes(dest)) filesTouched.push(dest);
     const detailBits: string[] = [];
     if (typeof r.bytesWritten === 'number') detailBits.push(`bytes=${r.bytesWritten}`);
     else if (typeof r.bytes === 'number')   detailBits.push(`bytes=${r.bytes}`);
     if (typeof r.exitCode === 'number')     detailBits.push(`exit_code=${r.exitCode}`);
+    const moveTarget =
+      typeof r.from === 'string' && dest ? `${r.from} -> ${dest}` : dest;
     sideEffects.push({
       tool:     t.name,
       target:   p
+        ?? moveTarget
         ?? (typeof r.id === 'string' && r.id.length > 0 ? r.id : null)
         ?? t.verification?.reason
         ?? '(unspecified)',
@@ -286,23 +300,41 @@ export function computeTaskFinalization(
     ...(opts?.approvalMode ? { permissions: { approvalMode: opts.approvalMode } } : {}),
   };
   const decision = decideTaskVerdict(trace);
+  // v4.13 Phase D — user-declined batch ops (plan_approval results) land
+  // on the evidence envelope: decisions, not failures.
+  const declined: Array<{ tool: string; target: string; reason: string }> = [];
+  for (const t of trace) {
+    if (t.name !== 'plan_approval') continue;
+    const r = (t.result && typeof t.result === 'object') ? t.result as Record<string, unknown> : {};
+    if (!Array.isArray(r.declined)) continue;
+    for (const d of r.declined as Array<{ tool?: unknown; args?: unknown; reason?: unknown }>) {
+      if (!d || typeof d.tool !== 'string') continue;
+      const a = (d.args && typeof d.args === 'object') ? d.args as Record<string, unknown> : {};
+      const target =
+        typeof a.path === 'string' ? a.path :
+        typeof a.from === 'string' && typeof a.to === 'string' ? `${a.from} -> ${a.to}` :
+        JSON.stringify(a).slice(0, 120);
+      declined.push({ tool: d.tool, target, reason: typeof d.reason === 'string' ? d.reason : '' });
+    }
+  }
+  const declinedExtra = declined.length > 0 ? { declined } : {};
   if (turn.finishReason !== 'stop') {
     return {
       status:   'failed',
-      evidence: { ...buildEvidenceEnvelope(decision, { now: opts?.now }), verdict: 'failed' },
+      evidence: { ...buildEvidenceEnvelope(decision, { now: opts?.now }), verdict: 'failed', ...declinedExtra },
       jobCard,
     };
   }
   if (turn.declaredStatus && turn.declaredStatus !== 'success') {
     return {
       status:   'failed',
-      evidence: buildEvidenceEnvelope(decision, { reportedFailure: turn.declaredStatus, now: opts?.now }),
+      evidence: { ...buildEvidenceEnvelope(decision, { reportedFailure: turn.declaredStatus, now: opts?.now }), ...declinedExtra },
       jobCard,
     };
   }
   return {
     status:   decision.verdict,
-    evidence: buildEvidenceEnvelope(decision, { now: opts?.now }),
+    evidence: { ...buildEvidenceEnvelope(decision, { now: opts?.now }), ...declinedExtra },
     jobCard,
   };
 }
