@@ -21,7 +21,7 @@
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
-import { decideTaskVerdict, buildEvidenceEnvelope, buildJobCardUpdate } from '../../core/v4/taskVerification';
+import { computeTaskFinalization } from '../../core/v4/taskVerification';
 // v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
 // sequence + system prompt + memory hashes when a turn shows loop
 // symptoms (10+ calls OR 5+ consecutive same-name). Default off via
@@ -2116,62 +2116,40 @@ export class ChatSession implements ChatSessionLike {
       // upgraded. Non-`stop` finishes route to 'failed' as before.
       if (replTaskStore && replTaskId !== null) {
         try {
-          // v4.13 Gap 3 — the job-card rides the same single finalize
-          // UPDATE: files touched, side effects, last failure state
-          // (all derived from the trace — the ledger owns the truth),
-          // plus the approval mode in force (Pillar-2 seam).
-          const jobCard = {
-            ...buildJobCardUpdate(result.toolCallTrace ?? []),
-            permissions: { approvalMode: this.opts.approvalEngine.getMode() },
-          };
-          if (result.finishReason !== 'stop') {
-            // Non-clean finish — still persist the footprint: what the
-            // turn touched before it errored/was interrupted is exactly
-            // what a future resume needs to know.
-            const decision = decideTaskVerdict(result.toolCallTrace ?? []);
-            replTaskStore.finalizeVerification(
-              replTaskId,
-              'failed',
-              { ...buildEvidenceEnvelope(decision), verdict: 'failed' },
-              jobCard,
-            );
-          } else {
+          // v4.13 Gap 4 — the REPL and the daemon runner share ONE
+          // finalization policy (computeTaskFinalization): status +
+          // evidence envelope + job-card, all landing in a single
+          // finalize UPDATE. The REPL keeps its user-facing surfaces.
+          const declaredStatus =
+            declaredTaskDone && typeof (declaredTaskDone as Record<string, unknown>).status === 'string'
+              ? String((declaredTaskDone as Record<string, unknown>).status)
+              : null;
+          const fin = computeTaskFinalization(
+            {
+              finishReason:   result.finishReason,
+              toolCallTrace:  result.toolCallTrace,
+              declaredStatus,
+            },
+            { approvalMode: this.opts.approvalEngine.getMode() },
+          );
+          if (result.finishReason === 'stop') {
+            // Crash-honesty intermediate state (see Gap 1).
             replTaskStore.setStatus(replTaskId, 'pending_verification');
-            const declaredStatus =
-              declaredTaskDone && typeof (declaredTaskDone as Record<string, unknown>).status === 'string'
-                ? String((declaredTaskDone as Record<string, unknown>).status)
-                : null;
-            if (declaredStatus && declaredStatus !== 'success') {
-              // Honest self-reported failure — record it with the
-              // declaration as evidence; no verification gate needed.
-              const decision = decideTaskVerdict(result.toolCallTrace ?? []);
-              replTaskStore.finalizeVerification(
-                replTaskId,
-                'failed',
-                buildEvidenceEnvelope(decision, { reportedFailure: declaredStatus }),
-                jobCard,
+          }
+          replTaskStore.finalizeVerification(replTaskId, fin.status, fin.evidence, fin.jobCard);
+          if (result.finishReason === 'stop' && !(declaredStatus && declaredStatus !== 'success')) {
+            if (fin.status === 'verification_failed') {
+              const what = fin.evidence.failures
+                .map((f) => `${f.tool} (${f.reason})`)
+                .join(', ');
+              this.opts.display.warn(
+                `Task verification failed — side effect claimed without evidence: ${what}. ` +
+                `See /tasks ${replTaskId}.`,
               );
-            } else {
-              const decision = decideTaskVerdict(result.toolCallTrace ?? []);
-              replTaskStore.finalizeVerification(
-                replTaskId,
-                decision.verdict,
-                buildEvidenceEnvelope(decision),
-                jobCard,
+            } else if (fin.status === 'completed_unverified') {
+              this.opts.display.dim(
+                `(task completed unverified — side effects lacked hard evidence; /tasks ${replTaskId})`,
               );
-              if (decision.verdict === 'verification_failed') {
-                const what = decision.failures
-                  .map((f) => `${f.tool} (${f.reason})`)
-                  .join(', ');
-                this.opts.display.warn(
-                  `Task verification failed — side effect claimed without evidence: ${what}. ` +
-                  `See /tasks ${replTaskId}.`,
-                );
-              } else if (decision.verdict === 'completed_unverified') {
-                this.opts.display.dim(
-                  `(task completed unverified — side effects lacked hard evidence; /tasks ${replTaskId})`,
-                );
-              }
             }
           }
         } catch (err) {

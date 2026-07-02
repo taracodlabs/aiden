@@ -77,12 +77,57 @@ export async function runRunsSubcommand(
     case 'list':      return cmdList(runStore, argv as unknown as RunsListArgs, out);
     case 'show':      return cmdShow(runStore, args[0], out, err);
     case 'interrupt': return cmdInterrupt(args[0], aidenRoot, out, err);
+    case 'resume':    return cmdResume(db, runStore, args[0], out, err);
     case 'stats':     return cmdStats(db, out);
     default:
       err(`Unknown runs action: ${action}\n`);
-      err('Actions: list, show <runId>, interrupt <runId>, stats\n');
+      err('Actions: list, show <runId>, interrupt <runId>, resume <runId>, stats\n');
       return 2;
   }
+}
+
+// ── resume (v4.13 Gap 4) ───────────────────────────────────────────────────
+//
+// Manual re-drive of a single resume_pending run: builds the ResumePlan
+// (revalidation-first), and either enqueues the fresh-conversation resume
+// event, parks the task on a user question, or abandons honestly. The
+// enqueued event is executed by the RUNNING daemon's dispatcher — this
+// command only queues; if no daemon is up, the event waits for one.
+function cmdResume(
+  db:       ReturnType<typeof openDaemonDb>,
+  runStore: ReturnType<typeof createRunStore>,
+  ref:      string | undefined,
+  out:      (s: string) => void,
+  err:      (s: string) => void,
+): number {
+  if (!ref) { err('runs resume: runId required\n'); return 2; }
+  const runId = Number.parseInt(ref, 10);
+  if (!Number.isFinite(runId)) { err(`runs resume: invalid runId "${ref}"\n`); return 2; }
+  const run = runStore.get(runId);
+  if (!run) { err(`runs resume: no run ${runId}\n`); return 1; }
+  if (!run.resumePending) {
+    err(`runs resume: run ${runId} is not resume-pending (status=${run.status}${run.resumeReason ? `, reason=${run.resumeReason}` : ''})\n`);
+    return 1;
+  }
+  // Lazy imports keep the runs CLI light for list/show.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { createTaskStore } = require('../../../core/v4/daemon/taskStore') as typeof import('../../../core/v4/daemon/taskStore');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { createTriggerBus } = require('../../../core/v4/daemon/triggerBus') as typeof import('../../../core/v4/daemon/triggerBus');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { sweepResumePending } = require('../../../core/v4/daemon/resumeSweep') as typeof import('../../../core/v4/daemon/resumeSweep');
+  const result = sweepResumePending({
+    runStore,
+    taskStore:  createTaskStore({ db }),
+    triggerBus: createTriggerBus({ db }),
+    runId,
+    log: (_lvl, msg) => out(`${msg}\n`),
+  });
+  if (result.resumed > 0)   { out(`runs resume: run ${runId} re-drive enqueued (the daemon dispatcher will pick it up)\n`); return 0; }
+  if (result.askedUser > 0) { out(`runs resume: run ${runId} needs a user decision — see /tasks detail\n`); return 0; }
+  if (result.abandoned > 0) { out(`runs resume: run ${runId} abandoned — see /tasks detail\n`); return 0; }
+  err(`runs resume: run ${runId} could not be resumed (no job-card, or already claimed)\n`);
+  return 1;
 }
 
 // ── list ──────────────────────────────────────────────────────────────────

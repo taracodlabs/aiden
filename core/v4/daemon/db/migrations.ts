@@ -659,6 +659,20 @@ ALTER TABLE tasks ADD COLUMN failure_state TEXT;
 ALTER TABLE tasks ADD COLUMN permissions   TEXT;
 `;
 
+// v4.13 Pillar 1 Gap 4 — durable resume that re-drives.
+//   runs.task_id       — links a daemon run to its durable task row (the
+//                        job-card), so the resume sweep can revalidate the
+//                        world from evidence instead of prose. NULL for
+//                        rows predating the link (those are honestly
+//                        unresumable — no card, no revalidation).
+//   tasks.resume_count — per-TASK resume attempts spent; the wake-loop
+//                        cap (default 2) reads this. Turn-level budgets
+//                        (Gap 2) reset per attempt; this one never does.
+const V18_SQL = `
+ALTER TABLE runs  ADD COLUMN task_id      TEXT;
+ALTER TABLE tasks ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -677,6 +691,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 15, name: 'v4.11 — artifact registry with provenance',     sql: V15_SQL },
   { version: 16, name: 'v4.13 gap 1 — task verification evidence',      sql: V16_SQL },
   { version: 17, name: 'v4.13 gap 3 — job-card columns',                sql: V17_SQL },
+  { version: 18, name: 'v4.13 gap 4 — resume linkage + wake-loop cap',   sql: V18_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

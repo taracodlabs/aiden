@@ -76,6 +76,8 @@ export interface RunRow {
   completedAt:     number | null;
   resumePending:   boolean;
   resumeReason:    string | null;
+  /** v4.13 Gap 4 — durable job-card linkage (null pre-v18). */
+  taskId:          string | null;
 }
 
 // ── Daemon instance ─────────────────────────────────────────────────────────

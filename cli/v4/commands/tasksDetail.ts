@@ -24,6 +24,9 @@ export function renderTaskDetail(t: Task, write: (s: string) => void): void {
   write(`  created: ${new Date(t.createdAt).toISOString()}\n`);
   write(`  updated: ${new Date(t.updatedAt).toISOString()}\n`);
 
+  if (t.resumeCount > 0) {
+    write(`  resume attempts: ${t.resumeCount}\n`);
+  }
   if (t.constraints && Object.keys(t.constraints).length > 0) {
     write(`  constraints: ${JSON.stringify(t.constraints)}\n`);
   }

@@ -690,7 +690,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   // v4.5 Phase 6 — `aiden runs` surface (daemon run history).
   program
     .command('runs <action> [args...]')
-    .description('Daemon runs. Actions: list, show <id>, interrupt <id>, stats.')
+    .description('Daemon runs. Actions: list, show <id>, interrupt <id>, resume <id>, stats.')
     .option('--limit <n>',    'list: max rows (default 50)', (v: string) => Number.parseInt(v, 10))
     .option('--source <src>', 'list: filter by trigger source (file/webhook/email/schedule/manual)')
     .option('--status <s>',   'list: filter by status (queued/running/completed/failed/cancelled/interrupted)')
@@ -2916,6 +2916,8 @@ export async function buildAgentRuntime(
         'pending', 'active', 'completed', 'failed', 'cancelled', 'interrupted',
         // v4.13 Gap 1 — verify-before-done states.
         'pending_verification', 'completed_unverified', 'verification_failed',
+        // v4.13 Gap 4 — resume verdict terminals.
+        'blocked_needs_user', 'abandoned',
       ]);
       let filterStatus: string | undefined;
       let limit = 20;

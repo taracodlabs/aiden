@@ -71,6 +71,8 @@ import type {
   DaemonAgentRunner,
 } from './agentRunner';
 import { buildInitialHistory } from './agentRunner';
+import { computeTaskFinalization } from '../../taskVerification';
+import type { TaskStore } from '../taskStore';
 import {
   resolveDaemonModel,
 } from './resolveModel';
@@ -128,6 +130,14 @@ export type AgentBuilder = (input: {
 export interface CreateRealAgentRunnerOptions {
   db:                Db;
   runStore:          RunStore;
+  /**
+   * v4.13 Gap 4 — when provided, every daemon run gets a durable task
+   * row (the job-card): created at claim (or reused on resume), then
+   * finalized through the same verify-before-done gate the REPL uses
+   * (computeTaskFinalization). Optional so rails-only tests and
+   * placeholder environments keep working unchanged.
+   */
+  taskStore?:        TaskStore;
   resourceRegistry?: ResourceRegistry;
   log?:              (level: 'info' | 'warn' | 'error', msg: string) => void;
   /** Builds AidenAgent per turn (caller-injected). */
@@ -216,12 +226,35 @@ export function createRealAgentRunner(
         maxTokensPerFire: triggerSpec?.maxTokensPerFire ?? null,
       });
 
-      // ── 5: run row + dispatcher:invoked event ─────────────────────────
+      // ── 5: task row (job-card) + run row + dispatcher:invoked event ───
+      //
+      // v4.13 Gap 4 — daemon runs now carry the same durable job-card the
+      // REPL writes: created fresh per run, or REUSED when this is a
+      // resume (the card accumulates evidence across attempts). Best-
+      // effort — a card failure never blocks dispatch.
+      let taskId: string | null = null;
+      if (opts.taskStore) {
+        try {
+          if (input.resume?.taskId && opts.taskStore.get(input.resume.taskId)) {
+            taskId = input.resume.taskId;
+            opts.taskStore.setStatus(taskId, 'active');   // card wakes with the run
+          } else {
+            taskId = opts.taskStore.create({
+              title:     input.initialMessage,
+              goal:      input.initialMessage,
+              sessionId: input.sessionId,
+              channelId: 'daemon',
+              status:    'active',
+            });
+          }
+        } catch { taskId = null; }
+      }
       const runId = opts.runStore.create({
         sessionId:      input.sessionId,
         instanceId:     input.instanceId,
         triggerEventId: input.triggerEventId,
         status:         'running',
+        ...(taskId ? { taskId } : {}),
       });
       opts.runStore.emitEventRich({
         runId,
@@ -310,6 +343,9 @@ export function createRealAgentRunner(
       // ── 8: invoke runConversation ─────────────────────────────────────
       let result: AidenAgentResult | null = null;
       let invocationError: string | null = null;
+      // v4.13 Gap 4 — the model's own done-declaration (ui_task_done
+      // status) feeds the verify-before-done gate below, same as the REPL.
+      let declaredTaskStatus: string | null = null;
       try {
         result = await agent.runConversation(history, {
           // The agent honours its own abort signal via per-tool aborts;
@@ -329,6 +365,9 @@ export function createRealAgentRunner(
           // try/catch matches the chatSession + aidenCLI sites — a
           // locked DB or schema drift must not crash dispatch.
           onUiEvent: (name: string, args: Record<string, unknown>) => {
+            if (name === 'ui_task_done' && typeof args.status === 'string') {
+              declaredTaskStatus = args.status;   // last one wins
+            }
             // v4.10 Slice 10.2b — rich emission via the shared
             // categoriser so daemon-fired UI events line up with
             // REPL-fired ones in trace_query results.
@@ -397,6 +436,27 @@ export function createRealAgentRunner(
         finishReason === 'error'             ? 'failed'    :
         finishReason === 'tool_loop'         ? 'failed'    : 'completed';
       opts.runStore.setStatus(runId, runStatus, { finishReason });
+
+      // v4.13 Gap 4 — finalize the job-card through the SAME verify-
+      // before-done gate the REPL uses (computeTaskFinalization): a
+      // daemon task can no more complete on prose than a REPL one.
+      // pending_verification lands first (crash honesty), then the
+      // verdict + evidence + card in one UPDATE. Best-effort.
+      if (opts.taskStore && taskId) {
+        try {
+          const fin = computeTaskFinalization(
+            {
+              // 'delivered' is a successful non-agent finish; treat as clean.
+              finishReason:   finishReason === 'delivered' ? 'stop' : finishReason,
+              toolCallTrace:  result?.toolCallTrace,
+              declaredStatus: declaredTaskStatus,
+            },
+            { approvalMode: approvalPolicy, now: now() },
+          );
+          opts.taskStore.setStatus(taskId, 'pending_verification');
+          opts.taskStore.finalizeVerification(taskId, fin.status, fin.evidence, fin.jobCard);
+        } catch { /* card write must never break dispatch */ }
+      }
 
       return {
         runId,

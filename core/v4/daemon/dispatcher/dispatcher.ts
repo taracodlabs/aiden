@@ -223,6 +223,13 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
     event: ClaimedEvent,
     template: string | null,
   ): { message: string; missing: string[] } {
+    // v4.13 Gap 4 — a resume event carries its FULL prompt verbatim
+    // (revalidation preamble + original goal, built by the resume
+    // sweep). Never templated, never payload-dumped.
+    const resumePrompt = (event.payload as { resume?: { prompt?: unknown } } | null)?.resume?.prompt;
+    if (typeof resumePrompt === 'string' && resumePrompt.length > 0) {
+      return { message: resumePrompt, missing: [] };
+    }
     if (template && template.length > 0) {
       const vars = flattenPayloadToVars(event.payload);
       // Inject a couple of dispatcher-known fields so templates can
@@ -309,6 +316,22 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
 
       // Build the input + branch on deliverOnly.
       const deliverOnly = spec?.deliver_only === 1;
+      // v4.13 Gap 4 — resume passthrough: the sweep's trigger event
+      // carries {taskId, ofRunId, attempt} so the runner reuses the
+      // existing job-card instead of minting a new one.
+      const resumeRaw = (event.payload as {
+        resume?: { taskId?: unknown; ofRunId?: unknown; attempt?: unknown };
+      } | null)?.resume;
+      const resume =
+        resumeRaw
+        && typeof resumeRaw.taskId === 'string'
+        && typeof resumeRaw.ofRunId === 'number'
+          ? {
+              taskId:  resumeRaw.taskId,
+              ofRunId: resumeRaw.ofRunId,
+              attempt: typeof resumeRaw.attempt === 'number' ? resumeRaw.attempt : 1,
+            }
+          : undefined;
       const input: DaemonAgentInput = {
         sessionId,
         instanceId:     opts.instanceId,
@@ -316,6 +339,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         triggerContext: context,
         initialMessage: message,
         deliverOnly,
+        ...(resume ? { resume } : {}),
       };
 
       let result: DaemonAgentResult;

@@ -48,6 +48,8 @@ import type { TriggerBus } from './triggerBus';
 import { createIdempotencyStore } from './idempotencyStore';
 import type { IdempotencyStore } from './idempotencyStore';
 import { createRunStore } from './runStore';
+import { createTaskStore } from './taskStore';
+import { sweepResumePending } from './resumeSweep';
 import type { RunStore } from './runStore';
 // v4.10 Slice 10.2b — shared event taxonomy.
 import { categorizeEvent } from './eventCategories';
@@ -938,6 +940,8 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
             db, runStore, resourceRegistry,
             log, agentBuilder: opts.agentBuilder!,
             persistedDefault: opts.persistedDefaultModel,
+            // v4.13 Gap 4 — daemon runs carry the durable job-card.
+            taskStore: createTaskStore({ db }),
           })
         : () => makeRunner(async (input) => {
           // Phase 5a placeholder runner — used when no AgentBuilder
@@ -991,6 +995,24 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       });
       dispatcher.start();
       log('info', `[dispatcher] active workerCount=1 runner=${opts.agentBuilder ? 'real' : 'placeholder'}`);
+      // v4.13 Gap 4 — resume sweep: act on the resume_pending marks
+      // crash recovery left. Gated on a REAL runner — re-driving into
+      // the placeholder would fake-complete resumed tasks. Best-effort.
+      if (opts.agentBuilder) {
+        try {
+          const sweep = sweepResumePending({
+            runStore,
+            taskStore: createTaskStore({ db }),
+            triggerBus,
+            log,
+          });
+          if (sweep.scanned > 0) {
+            log('info', `[resume] sweep: scanned=${sweep.scanned} resumed=${sweep.resumed} needs_user=${sweep.askedUser} abandoned=${sweep.abandoned} skipped=${sweep.skipped}`);
+          }
+        } catch (e) {
+          log('warn', `[resume] sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
     } catch (e) {
       log('error', `[dispatcher] start failed: ${e instanceof Error ? e.message : String(e)}`);
       dispatcher = null;
@@ -1105,15 +1127,35 @@ export function installDaemonAgentBuilder(
     else                        fallbackLogger.info(msg);
   });
   try {
+    const dbHandle = openDaemonDb(handle.dbPath!);
+    const taskStore = createTaskStore({ db: dbHandle });
     const realRunner = createRealAgentRunner({
-      db:               openDaemonDb(handle.dbPath!),
+      db:               dbHandle,
       runStore:         handle.runStore,
       resourceRegistry: handle.resourceRegistry ?? undefined,
       log:              logFn,
       agentBuilder,
       persistedDefault: persistedDefaultModel,
+      // v4.13 Gap 4 — daemon runs carry the durable job-card.
+      taskStore,
     });
     handle.dispatcher.installRunner(realRunner);
+    // v4.13 Gap 4 — with a real runner installed, act on any pending
+    // resume marks (the foundation booted with the placeholder, which
+    // must never re-drive). Best-effort.
+    try {
+      const sweep = sweepResumePending({
+        runStore:   handle.runStore,
+        taskStore,
+        triggerBus: handle.triggerBus,
+        log:        logFn,
+      });
+      if (sweep.scanned > 0) {
+        logFn('info', `[resume] sweep: scanned=${sweep.scanned} resumed=${sweep.resumed} needs_user=${sweep.askedUser} abandoned=${sweep.abandoned} skipped=${sweep.skipped}`);
+      }
+    } catch (e) {
+      logFn('warn', `[resume] sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
     return true;
   } catch (e) {
     logFn('error', `[daemon] installDaemonAgentBuilder failed: ${e instanceof Error ? e.message : String(e)}`);

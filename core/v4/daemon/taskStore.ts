@@ -66,7 +66,11 @@ import type {
  */
 export type TaskStatus =
   | 'pending' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
-  | 'pending_verification' | 'completed_unverified' | 'verification_failed';
+  | 'pending_verification' | 'completed_unverified' | 'verification_failed'
+  // v4.13 Gap 4 — resume verdict terminals: the sweep parked the task on a
+  // specific user question (blocked_needs_user) or gave up honestly after
+  // the wake-loop cap / an unrecoverable world (abandoned).
+  | 'blocked_needs_user' | 'abandoned';
 
 export interface Task {
   id:           string;
@@ -93,6 +97,8 @@ export interface Task {
   failureState: TaskFailureState | null;
   /** Approval mode in force when the task ran (Pillar-2 seam). */
   permissions:  Record<string, unknown> | null;
+  /** v4.13 Gap 4 — resume attempts spent (per-task wake-loop cap). */
+  resumeCount:  number;
 }
 
 /** Raw column shape from sqlite. JSON arrays come back as strings. */
@@ -114,6 +120,7 @@ interface TaskRowSql {
   side_effects:    string;
   failure_state:   string | null;
   permissions:     string | null;
+  resume_count:    number;
 }
 
 /** Defensive JSON parse — null on corruption, never a crash. */
@@ -172,6 +179,7 @@ function rowToTask(r: TaskRowSql): Task {
     sideEffects:  parseJsonArray<SideEffectRecord>(r.side_effects),
     failureState: parseJsonOrNull<TaskFailureState>(r.failure_state),
     permissions:  parseJsonOrNull<Record<string, unknown>>(r.permissions),
+    resumeCount:  typeof r.resume_count === 'number' ? r.resume_count : 0,
   };
 }
 
@@ -251,6 +259,12 @@ export interface TaskStore {
       constraints?:  Record<string, unknown> | null;
     },
   ): void;
+  /**
+   * v4.13 Gap 4 — spend one resume attempt (atomic increment). Returns
+   * the NEW count so the sweep can compare against the wake-loop cap
+   * without a second read.
+   */
+  incrementResumeCount(id: string): number;
   /**
    * Listing surface for /tasks. Newest-first by created_at. Optional
    * session + status filters compose with AND.
@@ -408,6 +422,13 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
       db.prepare(
         `UPDATE tasks SET artifact_ids = ?, updated_at = ? WHERE id = ?`,
       ).run(JSON.stringify(arr), Date.now(), id);
+    },
+    incrementResumeCount(id) {
+      db.prepare(
+        `UPDATE tasks SET resume_count = resume_count + 1, updated_at = ? WHERE id = ?`,
+      ).run(Date.now(), id);
+      const row = db.prepare('SELECT resume_count FROM tasks WHERE id = ?').get(id) as { resume_count: number } | undefined;
+      return row?.resume_count ?? 0;
     },
     listRecent(qOpts = {}) {
       const limit = Math.max(1, Math.min(qOpts.limit ?? 50, 5000));

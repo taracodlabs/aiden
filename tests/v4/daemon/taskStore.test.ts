@@ -276,6 +276,8 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
       'parent_task_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'permissions',
+      // v4.13 Gap 4 (v18 migration) — wake-loop cap.
+      'resume_count',
       'session_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'side_effects',

@@ -33,6 +33,8 @@ function rowToTs(r: RunRowSql): RunRow {
     completedAt:     r.completed_at,
     resumePending:   r.resume_pending === 1,
     resumeReason:    r.resume_reason,
+    // v4.13 Gap 4 — job-card linkage (NULL on rows predating v18).
+    taskId:          (r as { task_id?: string | null }).task_id ?? null,
   };
 }
 
@@ -51,12 +53,22 @@ export interface RunStore {
      */
     spawnedFromRunId?:     number;
     spawnedFromSessionId?: string;
+    /** v4.13 Gap 4 — link to the durable task row (the job-card). */
+    taskId?:               string;
   }): number;
   setStatus(runId: number, status: RunStatus, opts?: {
     finishReason?: string;
     completedAt?:  number;
   }): void;
   markResumePending(runId: number, reason: string): void;
+  /** v4.13 Gap 4 — runs awaiting the resume sweep. */
+  listResumePending(): RunRow[];
+  /**
+   * v4.13 Gap 4 — resume lease: atomically clears resume_pending and
+   * stamps the reason. Returns true for exactly ONE caller per run
+   * (single-statement compare-and-clear) — double sweeps are no-ops.
+   */
+  claimResumePending(runId: number, reason: string): boolean;
   /**
    * Legacy emit — preserved for callers that don't yet pass rich tags.
    * Delegates to emitEventRich with category='legacy' so legacy and
@@ -348,18 +360,17 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
   };
 
   return {
-    create({ sessionId, instanceId, triggerEventId, status, startedAt, spawnedFromRunId, spawnedFromSessionId }) {
+    create({ sessionId, instanceId, triggerEventId, status, startedAt, spawnedFromRunId, spawnedFromSessionId, taskId }) {
       const now = startedAt ?? Date.now();
-      // v4.6 Phase 1 — explicit 8-column INSERT including the two
-      // sub-agent lineage columns. Top-level runs pass NULL for both;
-      // sub-agent runs pass the parent run_id + session_id. Single
-      // insert path keeps the code simple at the cost of two extra
-      // bound NULLs on the common (top-level) case.
+      // v4.6 Phase 1 — explicit INSERT including the two sub-agent
+      // lineage columns (NULL for top-level runs).
+      // v4.13 Gap 4 — task_id links the run to its durable job-card so
+      // the resume sweep revalidates from evidence, not prose.
       const r = db.prepare(
         `INSERT INTO runs
            (trigger_event_id, session_id, instance_id, status, started_at,
-            resume_pending, spawned_from_run_id, spawned_from_session_id)
-         VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+            resume_pending, spawned_from_run_id, spawned_from_session_id, task_id)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?)`,
       ).run(
         triggerEventId ?? null,
         sessionId,
@@ -368,6 +379,7 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
         now,
         spawnedFromRunId ?? null,
         spawnedFromSessionId ?? null,
+        taskId ?? null,
       );
       return Number(r.lastInsertRowid);
     },
@@ -388,6 +400,20 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
       db.prepare(
         `UPDATE runs SET resume_pending = 1, resume_reason = ? WHERE id = ?`,
       ).run(reason, runId);
+    },
+    listResumePending() {
+      const rows = db.prepare(
+        `SELECT * FROM runs WHERE resume_pending = 1 ORDER BY started_at ASC`,
+      ).all() as RunRowSql[];
+      return rows.map(rowToTs);
+    },
+    claimResumePending(runId, reason) {
+      // Single-statement compare-and-clear: exactly one caller wins.
+      const info = db.prepare(
+        `UPDATE runs SET resume_pending = 0, resume_reason = ?
+          WHERE id = ? AND resume_pending = 1`,
+      ).run(reason, runId);
+      return info.changes === 1;
     },
     emitEvent(runId, kind, payload) {
       // Legacy path — preserve the pre-Slice-10.2b call shape by

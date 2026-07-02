@@ -73,6 +73,17 @@ export interface DaemonAgentInput {
    * (per Q-P5-4(a) stub). Future phases wire channel adapters.
    */
   deliverOnly:      boolean;
+  /**
+   * v4.13 Gap 4 — set when this invocation RESUMES a dead run. The
+   * runner reuses the existing task row (the job-card accumulates
+   * across attempts) instead of creating a fresh one. Parsed by the
+   * dispatcher from the resume trigger event's payload.
+   */
+  resume?: {
+    taskId:  string;
+    ofRunId: number;
+    attempt: number;
+  };
 }
 
 /** What the runner returns to the dispatcher. */

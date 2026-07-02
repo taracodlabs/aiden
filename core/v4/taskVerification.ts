@@ -261,6 +261,52 @@ export function buildJobCardUpdate(
   return { filesTouched, sideEffects, failureState };
 }
 
+/**
+ * v4.13 Gap 4 — the complete turn-end finalization, computed purely so
+ * the REPL gate (chatSession) and the daemon runner share ONE policy:
+ * given the turn's outcome, what status/evidence/job-card should land on
+ * the task row. Callers do their own store write + surfaces.
+ */
+export function computeTaskFinalization(
+  turn: {
+    finishReason:   string;
+    toolCallTrace?: HonestyTraceEntry[];
+    /** Model-declared ui_task_done status ('success'/'failure'/…), when seen. */
+    declaredStatus?: string | null;
+  },
+  opts?: { approvalMode?: string; now?: number },
+): {
+  status:   'completed' | 'completed_unverified' | 'verification_failed' | 'failed';
+  evidence: TaskEvidence;
+  jobCard:  JobCardUpdate & { permissions?: Record<string, unknown> };
+} {
+  const trace = turn.toolCallTrace ?? [];
+  const jobCard = {
+    ...buildJobCardUpdate(trace, { now: opts?.now }),
+    ...(opts?.approvalMode ? { permissions: { approvalMode: opts.approvalMode } } : {}),
+  };
+  const decision = decideTaskVerdict(trace);
+  if (turn.finishReason !== 'stop') {
+    return {
+      status:   'failed',
+      evidence: { ...buildEvidenceEnvelope(decision, { now: opts?.now }), verdict: 'failed' },
+      jobCard,
+    };
+  }
+  if (turn.declaredStatus && turn.declaredStatus !== 'success') {
+    return {
+      status:   'failed',
+      evidence: buildEvidenceEnvelope(decision, { reportedFailure: turn.declaredStatus, now: opts?.now }),
+      jobCard,
+    };
+  }
+  return {
+    status:   decision.verdict,
+    evidence: buildEvidenceEnvelope(decision, { now: opts?.now }),
+    jobCard,
+  };
+}
+
 /** Build the persistable envelope for a decided verdict. */
 export function buildEvidenceEnvelope(
   decision: TaskVerdictDecision,
