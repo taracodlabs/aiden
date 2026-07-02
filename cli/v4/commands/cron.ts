@@ -38,6 +38,7 @@ import { tokenize } from './_argTokens';
 import {
   createJob, createJobAsync, listJobs, getJob,
   pauseJob, resumeJob, deleteJob, triggerJob,
+  pauseJobAsync, resumeJobAsync, deleteJobAsync,
   awaitPendingSaves,
   getDiagnostics,
   AIDEN_CRON_BUILD,
@@ -419,7 +420,12 @@ export async function runCronSubcommand(
 }
 
 async function cmdCliAdd(a: CronAddArgs, out: (s: string) => void, err: (s: string) => void): Promise<number> {
-  const name = a.name ?? a.label;
+  // v4.12.1 — tolerate a raw Commander Command being passed as argv:
+  // `.name` on a Command is a METHOD, which previously short-circuited
+  // `a.name ?? a.label` to a function and made `aiden cron add` fail
+  // "label is required" no matter what. Only string values count.
+  const name = (typeof a.name === 'string' ? a.name : undefined)
+    ?? (typeof a.label === 'string' ? a.label : undefined);
   if (!name || !NAME_RE.test(name)) {
     err('cron add: --label is required (alphanumeric, dash, underscore only)\n');
     return 2;
@@ -488,33 +494,40 @@ function cmdCliShow(ref: string | undefined, out: (s: string) => void, err: (s: 
   return 0;
 }
 
+// v4.12.1 — the CLI mutation handlers await the *Async cronManager
+// variants: the sync ones persist in a background IIFE, which a one-shot
+// CLI process kills at process.exit — `cron remove` printed success while
+// the job survived on disk. The awaited variants persist under the file
+// lock BEFORE resolving, so the write can never be lost to an exit.
 async function cmdCliRemove(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): Promise<number> {
   if (!ref) { err('cron remove: id or name required\n'); return 2; }
   const job = resolveJob(ref);
   if (!job) { err(`cron remove: not found: ${ref}\n`); return 1; }
-  if (!deleteJob(job.id)) { err('cron remove: delete failed\n'); return 1; }
+  if (!(await deleteJobAsync(job.id))) { err('cron remove: delete failed\n'); return 1; }
   deleteScheduledWorkflow(job.id);
   await awaitPendingSaves();
   out(`cron removed: ${job.id} (${job.description})\n`);
   return 0;
 }
 
-function cmdCliEnable(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): number {
+async function cmdCliEnable(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): Promise<number> {
   if (!ref) { err('cron enable: id or name required\n'); return 2; }
   const job = resolveJob(ref);
   if (!job) { err(`cron enable: not found: ${ref}\n`); return 1; }
-  if (!resumeJob(job.id)) { err('cron enable: enable failed\n'); return 1; }
+  if (!(await resumeJobAsync(job.id))) { err('cron enable: enable failed\n'); return 1; }
   setWorkflowEnabled(job.id, 1);
+  await awaitPendingSaves();
   out(`cron enabled: ${job.id}\n`);
   return 0;
 }
 
-function cmdCliDisable(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): number {
+async function cmdCliDisable(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): Promise<number> {
   if (!ref) { err('cron disable: id or name required\n'); return 2; }
   const job = resolveJob(ref);
   if (!job) { err(`cron disable: not found: ${ref}\n`); return 1; }
-  if (!pauseJob(job.id)) { err('cron disable: disable failed\n'); return 1; }
+  if (!(await pauseJobAsync(job.id))) { err('cron disable: disable failed\n'); return 1; }
   setWorkflowEnabled(job.id, 0);
+  await awaitPendingSaves();
   out(`cron disabled: ${job.id}\n`);
   return 0;
 }

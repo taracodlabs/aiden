@@ -673,7 +673,15 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('--deliver-only',            'daemon skips the agent loop on fire')
     .action(async (action: string, posArgs: string[] | undefined, cmdObj: Record<string, unknown>) => {
       const { runCronSubcommand } = await import('./commands/cron');
-      const code = await runCronSubcommand(action, posArgs ?? [], cmdObj, {
+      // v4.12.1 — pass the PLAIN option values, not the Command object.
+      // Commander stores options as properties on the command, but the
+      // command also carries its own members: `.name` is a METHOD, so
+      // `argv.name ?? argv.label` in cmdCliAdd short-circuited to the
+      // function and `aiden cron add` always failed "label is required".
+      const argv = typeof (cmdObj as { opts?: () => Record<string, unknown> }).opts === 'function'
+        ? (cmdObj as unknown as { opts: () => Record<string, unknown> }).opts()
+        : cmdObj;
+      const code = await runCronSubcommand(action, posArgs ?? [], argv, {
         writeOut: opts.writeOut,
       });
       process.exit(code);
