@@ -275,6 +275,8 @@ export interface MainOptions {
   runSkillsHook?: (action: string, arg?: string) => Promise<void>;
   runConfigHook?: (action?: string, key?: string, value?: string) => Promise<void>;
   runMcpHook?: (action: string) => Promise<void>;
+  /** Override for test injection — headless one-shot (`aiden -q`). Returns exit code. */
+  runQueryHook?: (opts: any) => Promise<number>;
   /** Path override for tests. */
   pathsOverride?: AidenPaths;
   /** Stub stdout writer (defaults to process.stdout.write). */
@@ -331,6 +333,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('-c, --continue', 'Resume the most recent session')
     .option('-r, --resume <title>', 'Resume a session by id-prefix or partial title')
     .option('--yolo', 'Skip approval prompts (YOLO mode)')
+    .option('-q, --query <prompt>', 'Run ONE non-interactive turn on <prompt>, print the answer, and exit (headless; tools auto-denied unless --yolo)')
     .option('--provider <id>', 'Override provider id')
     .option('--model <id>', 'Override model id')
     .option(
@@ -359,6 +362,17 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         process.stderr.write(`error: unknown command "${leftover[0]}"\n`);
         process.stderr.write(`Run 'aiden --help' for available commands.\n`);
         process.exit(2);
+      }
+
+      // v4.12.1 — headless one-shot. `aiden -q "<prompt>"` runs a single turn
+      // and exits; it must NOT boot the daemon foundation, the REPL, or any
+      // long-lived machinery. Handle it BEFORE the daemon bootstrap below.
+      const qOpts = program.opts() as { query?: string };
+      if (qOpts.query != null) {
+        if (opts.runQueryHook) {
+          process.exit(await opts.runQueryHook(program.opts()));
+        }
+        process.exit(await runQuery(qOpts.query, program.opts(), opts));
       }
 
       // v4.5 Phase 1 — daemon foundation bootstrap. Lazy-imported so
@@ -413,6 +427,25 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .action(() => {
       process.stdout.write(`${AIDEN_UI_BUILD}\n`);
       process.exit(0);
+    });
+
+  // v4.12.1 — `aiden chat -q "<prompt>"` alias for the headless one-shot.
+  // Same behaviour as the top-level `aiden -q`; provided for discoverability.
+  program
+    .command('chat')
+    .description('Run one non-interactive turn and exit (headless one-shot)')
+    .option('-q, --query <prompt>', 'The prompt to run')
+    .option('--yolo', 'Auto-approve tool calls (default: auto-deny)')
+    .action(async (cmdOpts: { query?: string; yolo?: boolean }) => {
+      const merged = { ...program.opts(), ...cmdOpts };
+      if (merged.query == null) {
+        process.stderr.write('usage: aiden chat -q "<prompt>"\n');
+        process.exit(2);
+      }
+      if (opts.runQueryHook) {
+        process.exit(await opts.runQueryHook(merged));
+      }
+      process.exit(await runQuery(merged.query, merged, opts));
     });
 
   program
@@ -890,12 +923,33 @@ async function resolveFirstWorkingProvider(
   return null;
 }
 
+/**
+ * v4.12.1 — thrown by `buildAgentRuntime({ headless })` when the install has
+ * no usable provider (the point where the interactive boot would launch the
+ * setup wizard). Headless callers (`aiden -q`) catch this and print a clean
+ * "run `aiden setup`" message + exit non-zero instead of hanging on a wizard
+ * prompt or booting a NullAdapter explore session.
+ */
+export class NoProviderConfiguredError extends Error {
+  constructor(message = 'No provider configured') {
+    super(message);
+    this.name = 'NoProviderConfiguredError';
+  }
+}
+
 export async function buildAgentRuntime(
   cliOpts: any,
   opts: MainOptions,
 ): Promise<AgentRuntime> {
   const paths = opts.pathsOverride ?? resolveAidenPaths();
   await ensureAidenDirsExist(paths);
+
+  // v4.12.1 — headless one-shot (`aiden -q`). When set, this build assembles
+  // ONLY what a single agent turn needs and starts nothing long-lived: no
+  // channel manager / polling, display routed to stderr so stdout stays a
+  // clean pipeable answer, and approvals default to auto-DENY (no TUI to
+  // prompt). See runQuery / executeOneShotTurn below.
+  const headless = !!cliOpts?.headless;
 
   // ── v4.6 Phase 1 — always-on runStore for spawn_sub_agent ──────────────
   //
@@ -1102,6 +1156,13 @@ export async function buildAgentRuntime(
   let exploreMode = false;
 
   if (wizardNeeded) {
+    // v4.12.1 — headless one-shot must never prompt (no TTY) nor silently
+    // boot a NullAdapter explore session that would return a junk answer.
+    // Bail with a typed error the caller maps to a clean "run `aiden setup`"
+    // message + non-zero exit.
+    if (headless) {
+      throw new NoProviderConfiguredError();
+    }
     // v4.5 Phase 7c — TTY guard. The wizard uses inquirer prompts
     // which block on stdin. When stdin is NOT a TTY (systemd unit
     // start, launchd run, piped invocation, CI), there's no user
@@ -1257,7 +1318,13 @@ export async function buildAgentRuntime(
   }
 
   const skin = new SkinEngine();
-  const display = new Display({ skin });
+  // Headless one-shot: route ALL display output to stderr so stdout carries
+  // only the agent's answer (pipeable). Nothing streams to `display` during a
+  // headless turn (runConversation is called bare), but any boot-time notice
+  // must not pollute stdout.
+  const display = headless
+    ? new Display({ skin, stdout: process.stderr, stderr: process.stderr })
+    : new Display({ skin });
   const warnSink = (msg: string) => display.warn(msg);
 
   // Resolver + adapter.
@@ -1726,6 +1793,21 @@ export async function buildAgentRuntime(
       fs.renameSync(tmp, paths.approvalsJson);
     },
   } as any;
+
+  // v4.12.1 — headless one-shot approval: there is no TTY to confirm on, so
+  // override the interactive prompt with a synchronous auto-DENY (mirrors the
+  // child-subagent auto-deny in core/v4/subagent/childBuilder.ts). Read-only
+  // tools still auto-allow under 'smart' mode; only gated (mutating/dangerous)
+  // calls are denied — surfaced by the caller as a non-zero exit. `--yolo`
+  // sets mode 'off' earlier (auto-allow all), so promptUser is never reached
+  // in that case. onUiEvent is silenced so no approval chrome leaks.
+  if (headless) {
+    approvalEngine['callbacks'] = {
+      ...(approvalEngine['callbacks'] as object),
+      promptUser: async () => 'deny',
+      onUiEvent:  () => {},
+    } as any;
+  }
 
   // MCP setup (best-effort — connection failures are non-fatal).
   const mcpResult = await setupMcpFromConfig(config, toolRegistry, { paths }).catch(
@@ -3058,44 +3140,51 @@ export async function buildAgentRuntime(
   // this scope so the photo-vision module can decide native vs
   // text routing (and pdf-extract can compute the truncation
   // budget) using the SAME model the chat path already uses.
-  channelManager.register(new TelegramAdapter({
-    activeModelInfo: () => ({
-      providerId,
-      modelId,
-      contextWindow: findModel(providerId, modelId)?.contextLength,
-    }),
-  }));
-  // Phase v4.12.1 — also register any env-driven channel whose credentials
-  // are present (e.g. Discord configured via `/channel discord add`) so it
-  // survives a restart. Credential-gated: unconfigured channels are skipped,
-  // so no disabled-adapter noise. Telegram is handled above (model wiring).
-  registerEnvChannels(channelManager);
+  // v4.12.1 — headless one-shot registers NO channels and starts NO polling:
+  // a single turn must not open a Telegram/Discord long-poll (a lingering
+  // handle that would hang the process). The empty channelManager is still
+  // returned so the runtime shape + teardown (stopAll) stay uniform.
+  if (!headless) {
+    // Phase v4.1-4.1 — wire active-model lookup into the Telegram adapter.
+    channelManager.register(new TelegramAdapter({
+      activeModelInfo: () => ({
+        providerId,
+        modelId,
+        contextWindow: findModel(providerId, modelId)?.contextLength,
+      }),
+    }));
+    // Phase v4.12.1 — also register any env-driven channel whose credentials
+    // are present (e.g. Discord configured via `/channel discord add`) so it
+    // survives a restart. Credential-gated: unconfigured channels are skipped,
+    // so no disabled-adapter noise. Telegram is handled above (model wiring).
+    registerEnvChannels(channelManager);
 
-  let serverIsHosting = false;
-  try {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 250);
-    const probe = await fetch('http://127.0.0.1:4200/health', {
-      signal: ctrl.signal,
-    }).catch(() => null);
-    clearTimeout(timer);
-    if (probe && (probe.status >= 200 && probe.status < 500)) {
-      serverIsHosting = true;
+    let serverIsHosting = false;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 250);
+      const probe = await fetch('http://127.0.0.1:4200/health', {
+        signal: ctrl.signal,
+      }).catch(() => null);
+      clearTimeout(timer);
+      if (probe && (probe.status >= 200 && probe.status < 500)) {
+        serverIsHosting = true;
+      }
+    } catch {
+      /* no server — fall through to CLI-host */
     }
-  } catch {
-    /* no server — fall through to CLI-host */
-  }
 
-  if (serverIsHosting) {
-    display.dim(
-      '[channels] aiden serve is running locally — channel adapters hosted there, /channel commands stay read-only.',
-    );
-  } else {
-    // start() resolves quickly when no token is set (logs "Disabled" and
-    // returns). Errors don't crash boot.
-    channelManager.startAll().catch((e: Error) =>
-      display.dim(`[channels] startAll error: ${e.message}`),
-    );
+    if (serverIsHosting) {
+      display.dim(
+        '[channels] aiden serve is running locally — channel adapters hosted there, /channel commands stay read-only.',
+      );
+    } else {
+      // start() resolves quickly when no token is set (logs "Disabled" and
+      // returns). Errors don't crash boot.
+      channelManager.startAll().catch((e: Error) =>
+        display.dim(`[channels] startAll error: ${e.message}`),
+      );
+    }
   }
 
   return {
@@ -3275,6 +3364,117 @@ export interface AgentRuntime {
     sessionId:     string | null;
     chatSessionId: string | null;
   };
+}
+
+// ── v4.12.1 — headless one-shot (`aiden -q`) ─────────────────────────────
+//
+// A single non-interactive agent turn: print the answer to stdout (clean,
+// pipeable — no banner/footer/box-drawing) and exit with an honest code.
+// Reuses the SAME Display-free seam the channel adapters use —
+// agent.runConversation([userTurn]) — without booting the REPL/TUI, the
+// greeter, the paste interceptor, watchers, or channel polling.
+
+/** Loose structural shape of the one turn we need — lets tests pass a mock. */
+interface OneShotAgent {
+  runConversation(history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<{
+    finalContent?:  string;
+    finishReason?:  string;
+    toolCallTrace?: Array<{ error?: string }>;
+  }>;
+}
+
+export interface OneShotDeps {
+  agent:     OneShotAgent;
+  prompt:    string;
+  /** Defaults to process.stdout.write — the ONLY thing that touches stdout. */
+  writeOut?: (s: string) => void;
+  /** Defaults to process.stderr.write — diagnostics stay off stdout. */
+  writeErr?: (s: string) => void;
+  /** Best-effort resource cleanup, always awaited (finally). */
+  teardown?: () => Promise<void>;
+}
+
+/**
+ * Run one turn, print the answer to stdout, and return an HONEST exit code
+ * (0 = clean success; non-zero = agent error, incomplete turn, or a tool
+ * denied by the approval policy). Never calls process.exit — the caller owns
+ * that so this stays unit-testable. Always runs `teardown` (finally) so the
+ * caller can process.exit() without leaking handles.
+ */
+export async function executeOneShotTurn(deps: OneShotDeps): Promise<number> {
+  const out = deps.writeOut ?? ((s: string) => { process.stdout.write(s); });
+  const err = deps.writeErr ?? ((s: string) => { process.stderr.write(s); });
+  let code = 0;
+  try {
+    const result = await deps.agent.runConversation([{ role: 'user', content: deps.prompt }]);
+    const answer = result.finalContent ?? '';
+    // stdout carries ONLY the answer (newline-terminated for pipe hygiene).
+    out(answer.endsWith('\n') ? answer : `${answer}\n`);
+
+    // Surface tools denied by the auto-deny policy so the output isn't
+    // silently incomplete. Matches the executor's denial marker
+    // (core/v4/toolRegistry.ts: 'Tool execution denied by approval engine').
+    const denied = (result.toolCallTrace ?? []).filter(
+      (e) => typeof e?.error === 'string' && /denied by (the )?approval/i.test(e.error),
+    );
+    if (denied.length > 0) {
+      err(
+        `[aiden -q] ${denied.length} tool call(s) were denied by the approval policy. ` +
+        `Re-run with --yolo to allow tool use.\n`,
+      );
+      code = 1;
+    }
+    if (result.finishReason && result.finishReason !== 'stop') {
+      err(`[aiden -q] turn did not complete cleanly (finishReason: ${result.finishReason}).\n`);
+      if (code === 0) code = 1;
+    }
+  } catch (e: any) {
+    err(`[aiden -q] agent error: ${e?.message ?? String(e)}\n`);
+    code = 1;
+  } finally {
+    if (deps.teardown) {
+      try { await deps.teardown(); } catch { /* teardown is best-effort */ }
+    }
+  }
+  return code;
+}
+
+/**
+ * Build a headless runtime, run one turn, tear down, and return the exit
+ * code. `_build` is an injection seam for tests (defaults to the real
+ * buildAgentRuntime). Does NOT call process.exit — the caller does.
+ */
+export async function runQuery(
+  prompt: string,
+  cliOpts: any,
+  opts: MainOptions,
+  _build: typeof buildAgentRuntime = buildAgentRuntime,
+): Promise<number> {
+  let runtime: AgentRuntime;
+  try {
+    runtime = await _build({ ...cliOpts, headless: true }, opts);
+  } catch (e: any) {
+    if (e instanceof NoProviderConfiguredError) {
+      process.stderr.write(
+        'aiden -q: no provider configured. Run `aiden setup` from a terminal first.\n',
+      );
+      return 1;
+    }
+    process.stderr.write(`aiden -q: failed to start: ${e?.message ?? String(e)}\n`);
+    return 1;
+  }
+  return executeOneShotTurn({
+    agent:  runtime.agent as unknown as OneShotAgent,
+    prompt,
+    teardown: async () => {
+      // Same discipline as runInteractiveChat's shutdown, plus process.exit
+      // in the caller guarantees no lingering-handle hang (memory #29).
+      try { if (runtime.mcpClient) await runtime.mcpClient.closeAll(); } catch { /* best-effort */ }
+      try { await runtime.pluginLoader?.teardown(); } catch { /* best-effort */ }
+      try { await runtime.channelManager?.stopAll(); } catch { /* best-effort */ }
+      try { runtime.store?.close?.(); } catch { /* best-effort */ }
+    },
+  });
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
