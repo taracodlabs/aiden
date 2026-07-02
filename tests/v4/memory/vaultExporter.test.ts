@@ -72,6 +72,39 @@ describe('resolveVaultPath', () => {
   it('trims whitespace', () => {
     expect(resolveVaultPath('  /env/p  ', undefined)).toBe(path.resolve('/env/p'));
   });
+
+  // ── v4.12.1 — quote healing + poisoned-value guard ───────────────────
+  //
+  // Class bug: a value with literal surrounding quotes (setx / hand-edited
+  // config) doesn't start with a root, so the old `path.resolve` glued it
+  // onto the cwd. Now healed via resolveUserPath.
+
+  it('heals a double-quoted absolute env value (the setx footgun)', () => {
+    const q = '"C:\\Users\\shiva\\Documents\\Obsidian\\aiden-memory"';
+    const expected = path.resolve('C:\\Users\\shiva\\Documents\\Obsidian\\aiden-memory');
+    expect(resolveVaultPath(q, undefined)).toBe(expected);
+  });
+
+  it('heals a single-quoted config value', () => {
+    expect(resolveVaultPath(undefined, "'/vault/dir'")).toBe(path.resolve('/vault/dir'));
+  });
+
+  it('REGRESSION: a config poisoned by the pre-v4.11 link bug (glued path, quote mid-string) → warn + null, never a garbage dir', () => {
+    // The EXACT malformed shape reported from the field: repo cwd glued to
+    // a quoted absolute Windows path. It IS absolute (starts C:\), so no
+    // resolver can un-glue it — the guard must disable the vault loudly
+    // instead of exporting into `...DevOS\"C:\...`.
+    const poisoned = 'C:\\Users\\shiva\\DevOS\\"C:\\Users\\shiva\\Documents\\Obsidian\\aiden-memory\\memory';
+    const warns: string[] = [];
+    expect(resolveVaultPath(undefined, poisoned, (m) => warns.push(m))).toBeNull();
+    expect(warns.length).toBe(1);
+    expect(warns[0]).toMatch(/malformed/i);
+    expect(warns[0]).toMatch(/vault link/);
+  });
+
+  it('poisoned guard is silent when no onWarn is supplied (no throw)', () => {
+    expect(resolveVaultPath('a\\"b', undefined)).toBeNull();
+  });
 });
 
 // ── exportNamespace: split + frontmatter + filename ─────────────────────

@@ -106,15 +106,56 @@ export interface ResolveAidenPathsOptions {
   rootOverride?: string;
 }
 
+/**
+ * v4.12.1 — central resolver for USER-SUPPLIED paths (env vars, config
+ * values, slash-command args). Fixes a path-handling class bug: a value
+ * carrying literal surrounding quotes (e.g. `"C:\Users\me\Obsidian"` baked
+ * in by `setx`, a hand-edited config, or a quoted slash arg) does not start
+ * with a root, so `path.resolve` classified it RELATIVE and glued it onto
+ * the base — producing `C:\...\DevOS\"C:\Users\...`. Same class: `~/vault`
+ * resolved to a literal `<cwd>/~/vault` directory on every OS.
+ *
+ * Pipeline: trim → strip leading/trailing quote chars → expand `~` /
+ * `~/…` / `~\…` via os.homedir() → empty → null → resolve (absolute value
+ * wins as-is and is normalized; relative resolves against `baseDir`,
+ * default cwd). Separators normalize per-OS via path.resolve.
+ *
+ * Trade-off (documented, accepted): a POSIX name genuinely ENDING in a
+ * quote char would be stripped — vanishingly rare vs. the paste-artifact
+ * frequency. Mid-string quotes (O'Brien) are untouched.
+ *
+ * Every site consuming a user-controlled path routes through this helper;
+ * do not hand-roll `path.join(base, userValue)` for config/env paths.
+ */
+export function resolveUserPath(
+  raw: string | undefined | null,
+  baseDir?: string,
+): string | null {
+  if (raw == null) return null;
+  let s = raw.trim();
+  s = s.replace(/^["']+/, '').replace(/["']+$/, '').trim();
+  if (s.length === 0) return null;
+  if (s === '~') {
+    s = os.homedir();
+  } else if (s.startsWith('~/') || s.startsWith('~\\')) {
+    s = path.join(os.homedir(), s.slice(2));
+  }
+  // path.resolve ignores baseDir when `s` is fully absolute, completes
+  // drive-relative forms (`/x` on Windows), and normalizes separators.
+  return path.resolve(baseDir ?? process.cwd(), s);
+}
+
 /** Compute the Aiden user-data root without computing the rest of the layout. */
 export function resolveAidenRoot(opts: ResolveAidenPathsOptions = {}): string {
   if (opts.rootOverride && opts.rootOverride.length > 0) {
     return path.resolve(opts.rootOverride);
   }
 
-  const fromEnv = process.env.AIDEN_HOME;
-  if (fromEnv && fromEnv.trim().length > 0) {
-    return path.resolve(fromEnv.trim());
+  // v4.12.1 — routed through resolveUserPath so a quoted / ~-prefixed
+  // AIDEN_HOME cannot glue the entire data root onto the cwd.
+  const fromEnv = resolveUserPath(process.env.AIDEN_HOME);
+  if (fromEnv) {
+    return fromEnv;
   }
 
   const home = os.homedir();
@@ -137,11 +178,12 @@ export function resolveAidenRoot(opts: ResolveAidenPathsOptions = {}): string {
       // the XDG path doesn't, prefer the legacy dir
       // so a power user mid-migration is not surprised. AIDEN_HOME
       // env override above wins regardless.
-      const xdg = process.env.XDG_CONFIG_HOME;
-      const xdgRoot =
-        xdg && xdg.trim().length > 0
-          ? path.join(xdg.trim(), 'aiden')
-          : path.join(home, '.config', 'aiden');
+      // v4.12.1 — XDG_CONFIG_HOME routed through resolveUserPath (quote
+      // strip + ~ expansion) like every other user-supplied path.
+      const xdg = resolveUserPath(process.env.XDG_CONFIG_HOME);
+      const xdgRoot = xdg
+        ? path.join(xdg, 'aiden')
+        : path.join(home, '.config', 'aiden');
       const legacyRoot = path.join(home, '.aiden');
       // Synchronous existence check — this runs at boot, before any
       // async I/O is set up. fs.existsSync is acceptable here.

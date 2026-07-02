@@ -751,23 +751,6 @@ async function cmdReview(
  * exporter itself lives in `core/v4/memory/vaultExporter.ts` and is
  * the same code path the boot listener fires.
  */
-/**
- * v4.11 — defensive strip of one layer of matching surrounding quotes.
- * The `_argTokens` tokenizer already removes quotes it parses, but a path
- * pasted with mismatched/partial quoting (or reached via a non-tokenized
- * path) may still arrive wrapped. Only strips when both ends match.
- */
-function stripSurroundingQuotes(s: string): string {
-  if (s.length >= 2) {
-    const first = s[0];
-    const last = s[s.length - 1];
-    if ((first === '"' || first === "'") && first === last) {
-      return s.slice(1, -1);
-    }
-  }
-  return s;
-}
-
 async function cmdVault(
   positional:  string[],
   paths:       import('../../../core/v4/paths').AidenPaths,
@@ -788,7 +771,7 @@ async function cmdVault(
       await cm.load();
       cfgVal = cm.getValue<string>('agent.vault_path');
     } catch { /* missing config = no-op */ }
-    const resolved = resolveVaultPath(envVal, cfgVal);
+    const resolved = resolveVaultPath(envVal, cfgVal, (m) => err(`${m}\n`));
     if (json) {
       out(JSON.stringify({
         env:      envVal ?? null,
@@ -805,17 +788,18 @@ async function cmdVault(
   }
 
   if (sub === 'link') {
-    // v4.11 — positional[1] arrives quote-aware-tokenized (internal
-    // spaces preserved, surrounding quotes stripped by `_argTokens`).
-    // Strip any residual quotes defensively, and treat an absolute path
-    // as absolute so we never prepend cwd — the bug that produced
-    // `…\DevOS\"C:\Users\…\Obsidian`.
-    const target = stripSurroundingQuotes((positional[1] ?? '').trim());
-    if (!target) {
+    // v4.12.1 — routed through the central resolveUserPath (quote-strip,
+    // ~ expansion, absolute-wins), replacing the v4.11 local spot-patch.
+    // positional[1] arrives quote-aware-tokenized (internal spaces
+    // preserved by `_argTokens`), but a mismatched/partial quoting or a
+    // non-tokenized entry path may still arrive wrapped — the resolver
+    // heals it so we never persist a cwd-glued path again.
+    const { resolveUserPath } = await import('../../../core/v4/paths');
+    const abs = resolveUserPath(positional[1] ?? '');
+    if (!abs) {
       err('Usage: /memory vault link <absolute-path>\n');
       return 1;
     }
-    const abs = path.isAbsolute(target) ? path.normalize(target) : path.resolve(target);
     try {
       const { ConfigManager } = await import('../../../core/v4/config');
       const cm = new ConfigManager(paths);
@@ -840,7 +824,7 @@ async function cmdVault(
       await cm.load();
       cfgVal = cm.getValue<string>('agent.vault_path');
     } catch { /* noop */ }
-    const resolved = resolveVaultPath(envVal, cfgVal);
+    const resolved = resolveVaultPath(envVal, cfgVal, (m) => err(`${m}\n`));
     if (!resolved) {
       err('no vault path configured — run `/memory vault link <path>` first or set AIDEN_VAULT_PATH\n');
       return 1;

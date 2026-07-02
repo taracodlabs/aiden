@@ -62,6 +62,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 
 import type { AidenPaths } from '../paths';
+import { resolveUserPath } from '../paths';
 import { ENTRY_SEPARATOR } from '../memoryManager';
 
 // ── Public types ──────────────────────────────────────────────────────
@@ -102,16 +103,34 @@ const AUTO_FILENAME_RE = /^[a-z0-9][a-z0-9-]*-[0-9a-f]{4}\.md$/;
  * Boot-time resolver. Env var wins over config; empty string treated
  * as unset. Returns `null` when no vault is configured (= feature
  * off → exporter is a no-op).
+ *
+ * v4.12.1 — routed through `resolveUserPath` (quote-strip, ~ expansion,
+ * absolute-wins) so a quoted value from `setx` / a hand-edited config can
+ * no longer be glued onto the cwd (`C:\...\DevOS\"C:\Users\...`).
+ *
+ * Poisoned-value guard: a config persisted by the PRE-v4.11 `/memory
+ * vault link` bug holds an already-glued absolute path with a quote char
+ * embedded MID-string — no resolver can un-glue that. Rather than export
+ * into a garbage directory, surface it via `onWarn` and treat the vault
+ * as unconfigured. (`"` is illegal in Windows paths and never intentional
+ * in a configured vault path; a mid-string apostrophe — O'Brien — is
+ * legitimate on POSIX, so only `"` triggers the guard.)
  */
 export function resolveVaultPath(
   envValue:    string | undefined,
   configValue: string | undefined,
+  onWarn?:     (msg: string) => void,
 ): string | null {
-  const env = (envValue ?? '').trim();
-  if (env.length > 0) return path.resolve(env);
-  const cfg = (configValue ?? '').trim();
-  if (cfg.length > 0) return path.resolve(cfg);
-  return null;
+  const resolved = resolveUserPath(envValue) ?? resolveUserPath(configValue);
+  if (resolved === null) return null;
+  if (resolved.includes('"')) {
+    onWarn?.(
+      'vault_path is malformed (contains a quote character) — vault export disabled. ' +
+      'Re-run /memory vault link <path> (or fix AIDEN_VAULT_PATH).',
+    );
+    return null;
+  }
+  return resolved;
 }
 
 // ── Public API ────────────────────────────────────────────────────────

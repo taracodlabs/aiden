@@ -31,6 +31,7 @@ import { promisify } from 'util'
 import axios         from 'axios'
 
 import { noopLogger, type Logger } from '../v4/logger'
+import { resolveUserPath } from '../v4/paths'
 
 const execAsync = promisify(exec)
 
@@ -183,7 +184,9 @@ async function transcribeOpenAI(audioPath: string, opts: SttOptions): Promise<St
 // ── Provider 3 — Local Whisper.cpp ────────────────────────────────────────────
 
 async function transcribeLocal(audioPath: string, opts: SttOptions): Promise<SttResult> {
-  const modelPath  = process.env.WHISPER_MODEL_PATH
+  // v4.12.1 — user-supplied path routed through resolveUserPath
+  // (quote-strip, ~ expansion); null behaves like the old undefined.
+  const modelPath  = resolveUserPath(process.env.WHISPER_MODEL_PATH)
   const t0         = Date.now()
   const timeout    = opts.timeoutMs ?? 60_000
 

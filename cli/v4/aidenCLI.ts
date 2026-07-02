@@ -2348,6 +2348,13 @@ export async function buildAgentRuntime(
     const vaultPath = resolveVaultPath(
       process.env.AIDEN_VAULT_PATH,
       config.getValue<string>('agent.vault_path'),
+      // v4.12.1 poisoned-value guard — loud on the boot surface (user sees
+      // it) AND in the log file, then the exporter stays off for the
+      // session instead of writing into a garbage directory.
+      (msg) => {
+        display.warn(msg);
+        bootLogger.child('vault').warn(msg);
+      },
     );
     if (vaultPath !== null) {
       const vaultDeps = {

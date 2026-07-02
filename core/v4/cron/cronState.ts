@@ -45,6 +45,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { writeJsonAtomic } from './atomicWrite';
+import { resolveUserPath } from '../paths';
 import {
   CRON_SCHEMA_VERSION,
   type CronFireRecord,
@@ -108,16 +109,22 @@ export interface CronPaths {
 
 export function defaultCronPaths(homeOverride?: string): CronPaths {
   // Honor AIDEN_HOME (used by tests + multi-profile workflows). When
-  // set, paths root IS AIDEN_HOME directly (no `.aiden` suffix —
-  // mirrors `core/v4/paths.ts::resolveAidenRoot`). Otherwise default
-  // to ~/.aiden.
+  // set, paths root IS AIDEN_HOME directly (no `.aiden` suffix).
+  //
+  // v4.12.1 — the AIDEN_HOME read is routed through resolveUserPath so a
+  // quoted / ~-prefixed value can't glue onto the cwd (same class fix as
+  // resolveAidenRoot). The `~/.aiden` FALLBACK below is intentionally
+  // preserved byte-identical: it has DRIFTED from resolveAidenRoot's
+  // platform defaults (%LOCALAPPDATA%\aiden on Windows), and unifying it
+  // would silently relocate existing installs' cron_jobs.json — that
+  // relocation + migration is a separate, explicit decision, not part of
+  // the path-handling fix.
   let root: string;
   if (homeOverride && homeOverride.length > 0) {
     root = homeOverride;
-  } else if (process.env.AIDEN_HOME && process.env.AIDEN_HOME.trim().length > 0) {
-    root = process.env.AIDEN_HOME.trim();
   } else {
-    root = path.join(os.homedir(), '.aiden');
+    const envRoot = resolveUserPath(process.env.AIDEN_HOME);
+    root = envRoot ?? path.join(os.homedir(), '.aiden');
   }
   const stateFile = path.join(root, 'cron_jobs.json');
   return {

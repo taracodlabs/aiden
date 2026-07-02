@@ -28,6 +28,7 @@ import path from 'path'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
+import { resolveUserPath } from '../v4/paths'
 
 export class WhatsAppAdapter implements ChannelAdapter {
   readonly name = 'whatsapp'
@@ -42,7 +43,10 @@ export class WhatsAppAdapter implements ChannelAdapter {
   private businessApiKey:  string
 
   constructor() {
-    this.sessionPath    = process.env.WHATSAPP_SESSION_PATH ?? path.join(process.cwd(), 'workspace', '.whatsapp_session')
+    // v4.12.1 — user-supplied path routed through resolveUserPath
+    // (quote-strip, ~ expansion, absolute-wins) like every config/env path.
+    this.sessionPath    = resolveUserPath(process.env.WHATSAPP_SESSION_PATH)
+      ?? path.join(process.cwd(), 'workspace', '.whatsapp_session')
     const raw           = process.env.WHATSAPP_ALLOWED_NUMBERS ?? ''
     this.allowedNumbers = raw ? new Set(raw.split(',').map(s => s.trim()).filter(Boolean)) : new Set()
     this.businessApiKey = process.env.WHATSAPP_BUSINESS_API_KEY ?? ''

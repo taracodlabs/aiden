@@ -7,6 +7,7 @@ import {
   resolveAidenPaths,
   resolveAidenRoot,
   ensureAidenDirsExist,
+  resolveUserPath,
 } from '../../core/v4/paths';
 
 const ORIGINAL_PLATFORM = process.platform;
@@ -181,5 +182,70 @@ describe('resolveAidenPaths', () => {
     } finally {
       await fs.rm(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+// ── v4.12.1 — resolveUserPath (central user-path resolver) ─────────────
+//
+// The path-handling class fix: quote-strip + ~ expansion + absolute-wins.
+// Both sides of each exact assert go through path.resolve so the tests
+// hold on every OS (a `C:\...` literal is absolute on win32, relative on
+// POSIX — path.resolve on both sides keeps the comparison honest).
+
+describe('resolveUserPath', () => {
+  it('quoted absolute value is healed — quotes stripped, never glued onto a base (the reported bug class)', () => {
+    const inner = 'C:\\Users\\shiva\\Documents\\Obsidian\\aiden-memory';
+    expect(resolveUserPath(`"${inner}"`)).toBe(path.resolve(inner));
+    // With an explicit base: the absolute value still wins — no join.
+    expect(resolveUserPath(`"${inner}"`, path.resolve('/some/base'))).toBe(path.resolve(inner));
+  });
+
+  it('quoted relative value resolves against the base after quote-strip', () => {
+    const base = path.resolve('/base/dir');
+    expect(resolveUserPath('"subdir"', base)).toBe(path.resolve(base, 'subdir'));
+    expect(resolveUserPath("'sub dir'", base)).toBe(path.resolve(base, 'sub dir'));
+  });
+
+  it('~ expands to the home directory', () => {
+    expect(resolveUserPath('~')).toBe(path.resolve(os.homedir()));
+  });
+
+  it('~/sub and ~\\sub expand under the home directory', () => {
+    expect(resolveUserPath('~/vault')).toBe(path.resolve(path.join(os.homedir(), 'vault')));
+    expect(resolveUserPath('~\\vault')).toBe(path.resolve(path.join(os.homedir(), 'vault')));
+  });
+
+  it('quoted ~ path expands too (strip happens before expansion)', () => {
+    expect(resolveUserPath('"~/vault"')).toBe(path.resolve(path.join(os.homedir(), 'vault')));
+  });
+
+  it('unbalanced leading quote is stripped', () => {
+    const inner = 'C:\\Users\\x\\vault';
+    expect(resolveUserPath(`"${inner}`)).toBe(path.resolve(inner));
+  });
+
+  it('empty / whitespace / quotes-only / null / undefined → null', () => {
+    expect(resolveUserPath('')).toBeNull();
+    expect(resolveUserPath('   ')).toBeNull();
+    expect(resolveUserPath('""')).toBeNull();
+    expect(resolveUserPath("''")).toBeNull();
+    expect(resolveUserPath(null)).toBeNull();
+    expect(resolveUserPath(undefined)).toBeNull();
+  });
+
+  it('plain absolute path passes through normalized', () => {
+    const abs = path.resolve('/plain/abs/dir');
+    expect(resolveUserPath(abs)).toBe(abs);
+  });
+
+  it('plain relative path resolves against the base (default cwd)', () => {
+    const base = path.resolve('/the/base');
+    expect(resolveUserPath('rel/child', base)).toBe(path.resolve(base, 'rel/child'));
+    expect(resolveUserPath('rel/child')).toBe(path.resolve(process.cwd(), 'rel/child'));
+  });
+
+  it('mid-string quote chars are untouched (only leading/trailing strip)', () => {
+    const base = path.resolve('/b');
+    expect(resolveUserPath("obrien's-files", base)).toBe(path.resolve(base, "obrien's-files"));
   });
 });
