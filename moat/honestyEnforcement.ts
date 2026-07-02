@@ -236,6 +236,19 @@ export interface HonestyTraceEntry {
     };
     matchedPattern?: string;
   };
+  /**
+   * v4.13 Gap 2 — observable runtime-retry ledger. One note per policy
+   * re-attempt the dispatch loop performed for this call (transient
+   * classes only, bounded budgets). Declared structurally to avoid
+   * pulling core/v4/retryPolicy into the moat layer; shape stays in
+   * lockstep with `RetryAttemptNote` in core/v4/retryPolicy.ts.
+   */
+  retries?: Array<{
+    attempt:   number;
+    category:  string;
+    reason?:   string;
+    backoffMs: number;
+  }>;
 }
 
 /**

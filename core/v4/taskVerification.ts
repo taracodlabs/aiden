@@ -128,6 +128,18 @@ export function extractEvidenceHandles(entry: HonestyTraceEntry): EvidenceHandle
       code,
     });
   }
+  // v4.13 Gap 2 — what-was-tried: runtime retry attempts feed the
+  // evidence envelope so a structured give-up shows its work.
+  if (entry.retries && entry.retries.length > 0) {
+    const cats = [...new Set(entry.retries.map((r) => r.category))].join(', ');
+    out.push({
+      tool:     entry.name,
+      kind:     'note',
+      value:    `runtime retried ${entry.retries.length}x (${cats})`,
+      verified,
+      code,
+    });
+  }
   return out;
 }
 

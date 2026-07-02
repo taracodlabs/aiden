@@ -70,7 +70,10 @@ async function seedDisk(): Promise<void> {
  *  in a background IIFE — no await surface). */
 async function waitForDisk(
   pred: (jobs: Array<{ id: string; description: string; enabled: boolean }>) => boolean,
-  timeoutMs = 5_000,
+  // Generous: the sync mutators persist via a background withLock IIFE,
+  // and under full-suite parallel-worker contention the lock acquisition
+  // alone can take seconds. 15s sits inside the CI-mode 20s testTimeout.
+  timeoutMs = 15_000,
 ): Promise<Array<{ id: string; description: string; enabled: boolean }>> {
   const stateFile = path.join(tmp, 'cron_jobs.json');
   const started = Date.now();

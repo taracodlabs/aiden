@@ -289,6 +289,21 @@ export class TurnState {
    */
   private checkpoints:                Checkpoint[] = [];
 
+  // ── v4.13 Gap 2 — per-turn retry-policy attempt state ──────────────
+  //
+  // Owned here (not in the policy module) so the repeat ladder above
+  // and the retry policy share ONE per-turn state object and can't
+  // fight: policy retries are recorded into the ladder's signature
+  // counters by the agent loop, and the policy consults these budgets.
+  /** Runtime retries spent per failure class this turn. */
+  private policyRetriesByClass:       Map<string, number> = new Map();
+  /** Runtime retries spent across all classes this turn. */
+  private policyRetriesTotal          = 0;
+  /** One-shot repair flags (`<tool>:<category>`) — protocol repair-once. */
+  private repairAttempted:            Set<string> = new Set();
+  /** One-shot clarify directive issued this turn. */
+  private clarifyAdvisedFlag          = false;
+
   constructor(opts: TurnStateOptions = {}) {
     // v4.2 Phase 6 — TCE is ON by default. Strict `'0'` opt-out
     // semantic: env var must be literally the string `'0'` to
@@ -325,6 +340,38 @@ export class TurnState {
 
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  // ── v4.13 Gap 2 — retry-policy attempt-state surface ────────────────
+
+  /** Record one spent runtime retry for a failure class. */
+  recordPolicyRetry(category: string): void {
+    this.policyRetriesByClass.set(
+      category,
+      (this.policyRetriesByClass.get(category) ?? 0) + 1,
+    );
+    this.policyRetriesTotal += 1;
+  }
+
+  markRepairAttempted(key: string): void { this.repairAttempted.add(key); }
+  markClarifyAdvised(): void { this.clarifyAdvisedFlag = true; }
+
+  /**
+   * Read-only view the retry policy consults (RetryAttemptView shape,
+   * declared structurally in retryPolicy.ts to avoid an import cycle).
+   */
+  retryView(): {
+    attemptsForClass(category: string): number;
+    totalRetries(): number;
+    hasRepairAttempted(key: string): boolean;
+    clarifyAdvised(): boolean;
+  } {
+    return {
+      attemptsForClass: (category) => this.policyRetriesByClass.get(category) ?? 0,
+      totalRetries:     () => this.policyRetriesTotal,
+      hasRepairAttempted: (key) => this.repairAttempted.has(key),
+      clarifyAdvised:   () => this.clarifyAdvisedFlag,
+    };
   }
 
   /**

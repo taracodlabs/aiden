@@ -73,6 +73,13 @@ import type { PromptCaching } from './promptCaching';
 // AIDEN_TCE=0 to disable. Zero
 // behavioral change when unset. See core/v4/turnState.ts.
 import { TurnState, type RecoveryDecision } from './turnState';
+import {
+  decideRecoveryAction,
+  resolveRetryPolicyConfig,
+  buildRetryAnnotation,
+  type RetryAttemptNote,
+  type RecoveryActionDecision,
+} from './retryPolicy';
 // v4.9.4 Slice 1 — tool-call/result protocol invariant + synthetic
 // blocked-result helpers used at the surface + abort fill sites.
 import {
@@ -1181,6 +1188,9 @@ export class AidenAgent {
     // v4.9.4 Slice 1 — honor optional test-seam factory. Production
     // paths never pass turnStateFactory → falls through to real ctor.
     const turnState = this.turnStateFactory?.() ?? new TurnState();
+    // v4.13 Gap 2 — retry-policy budgets resolved once per turn
+    // (env-tunable, conservative defaults; AIDEN_RETRY_OFF=1 disables).
+    const retryPolicyCfg = resolveRetryPolicyConfig();
     // v4.2 Phase 1 — per-tool verifier registry. Constructed
     // unconditionally (cheap, no side effects) but only used to
     // classify tool outcomes when TCE is enabled; verification args
@@ -1595,7 +1605,6 @@ export class AidenAgent {
           turnState.markMutationOnLiveCheckpoint(call.name);
         }
         let result: ToolCallResult;
-        const _toolStartedAt = _perfDiag ? Date.now() : 0;
         // v4.11 perf — use the pre-computed result from the parallel
         // batch above when available; falls through to live execution
         // for mutating calls + solo read-only batches. The error
@@ -1603,56 +1612,65 @@ export class AidenAgent {
         // produce, so the verifier / classifier paths below are
         // indifferent to the source.
         const _preComputed = preComputedResults.get(call.id);
-        if (_preComputed) {
-          result = _preComputed;
-        } else {
-          try {
-            result = await this.toolExecutor(call);
-          } catch (err) {
-            result = {
-              id:     call.id,
-              name:   call.name,
-              result: null,
-              error:  err instanceof Error ? err.message : String(err),
-            };
-          }
-        }
-        if (_perfDiag) {
-          const toolMs = Date.now() - _toolStartedAt;
-          const ok = result.error == null;
-          const src = _preComputed ? 'parallel' : 'live';
-          process.stderr.write(
-            `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok}]\n`,
-          );
-        }
-        toolCallCount += 1;
-        // v4.2 Phase 1 — verifier classification. Runs only when TCE
-        // is enabled; the registry resolves a per-tool verifier or
-        // falls back to the heuristic default. Synchronous + pure;
-        // no network, no side effects.
+        // v4.2 Phase 1 — verifier classification. The registry resolves
+        // a per-tool verifier or falls back to the heuristic default.
+        // Synchronous + pure; no network, no side effects.
         let verification: VerificationResult | undefined;
         let classification: ClassificationResult | null = null;
-        // v4.11 Slice 1 (verifier→honesty bridge) — compute the per-tool
-        // verification ALWAYS. It is pure / synchronous / side-effect-free
-        // (verifier.ts), so the post-loop honesty footer can reflect real
-        // outcomes (shell exit code, file-write confirmation, low-signal
-        // web) independent of whether TCE/recovery is active. Everything
-        // inside the `turnState.isEnabled()` gate below — the failure
-        // classifier and recovery-store writes — stays gated, so
-        // error-recovery behaviour is byte-for-byte unchanged.
-        try {
-          verification = verifierRegistry.resolve(call.name)(
-            call.name, call.arguments, result,
-          );
-        } catch {
-          // Defensive — a buggy verifier never breaks the agent loop.
-          verification = undefined;
-        }
-        if (turnState.isEnabled()) {
-          // v4.2 Phase 2 — classify WHY when the verifier said !ok.
-          // classify(...) returns null for ok results, so happy-path
-          // calls incur zero classifier work.
-          if (verification && !verification.ok) {
+        // ── v4.13 Gap 2 — failure-class retry policy at the dispatch
+        // choke point. Execute → verify → classify, then ask the policy
+        // (core/v4/retryPolicy.ts) what to do. Only transient classes on
+        // non-mutating tools runtime-retry (bounded backoff, per-class +
+        // per-turn budgets); every retry is OBSERVABLE — recorded on the
+        // trace entry and annotated on the model-visible tool message.
+        // The TurnState repeat ladder stays the outer circuit breaker:
+        // each superseded failed attempt is recorded into its counters
+        // BEFORE re-attempting, and any non-allow ladder decision stops
+        // the retry loop immediately (the two never fight).
+        const retryNotes: RetryAttemptNote[] = [];
+        const pendingRetryHints: string[] = [];
+        let finalPolicyDecision: RecoveryActionDecision | null = null;
+        let preRecordedRecovery: RecoveryDecision | null = null;
+        let attemptNo = 0;
+        for (;;) {
+          attemptNo += 1;
+          const _toolStartedAt = _perfDiag ? Date.now() : 0;
+          if (attemptNo === 1 && _preComputed) {
+            result = _preComputed;
+          } else {
+            try {
+              result = await this.toolExecutor(call);
+            } catch (err) {
+              result = {
+                id:     call.id,
+                name:   call.name,
+                result: null,
+                error:  err instanceof Error ? err.message : String(err),
+              };
+            }
+          }
+          if (_perfDiag) {
+            const toolMs = Date.now() - _toolStartedAt;
+            const ok = result.error == null;
+            const src = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
+            process.stderr.write(
+              `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok} attempt=${attemptNo}]\n`,
+            );
+          }
+          // v4.11 Slice 1 (verifier→honesty bridge) — compute the
+          // per-tool verification ALWAYS (pure/synchronous) so the
+          // post-loop honesty footer reflects real outcomes independent
+          // of whether TCE/recovery is active.
+          try {
+            verification = verifierRegistry.resolve(call.name)(
+              call.name, call.arguments, result,
+            );
+          } catch {
+            // Defensive — a buggy verifier never breaks the agent loop.
+            verification = undefined;
+          }
+          classification = null;
+          if (turnState.isEnabled() && verification && !verification.ok) {
             try {
               classification = failureClassifier.classify(
                 verification, call.name, call.arguments, result,
@@ -1661,6 +1679,53 @@ export class AidenAgent {
               // Defensive — a buggy classifier never breaks the loop.
               classification = null;
             }
+          }
+          // Verifier-ok / unclassified / TCE-off → this attempt is final.
+          if (!classification) break;
+          const decision = decideRecoveryAction(
+            classification.category,
+            call.name,
+            turnState.retryView(),
+            retryPolicyCfg,
+            { toolMutates: this.resolveMutates?.(call.name) ?? false },
+          );
+          finalPolicyDecision = decision;
+          // One-shot flags: repair-once is marked on FIRST sight of the
+          // class (the decision above already consulted the pre-mark
+          // state); clarify-once marks when the directive is issued.
+          if (classification.category === 'invalid_input') {
+            turnState.markRepairAttempted(`${call.name}:invalid_input`);
+          }
+          if (decision.action === 'clarify') turnState.markClarifyAdvised();
+          if (decision.action !== 'retry' && decision.action !== 'retry_with_backoff') break;
+          if (this._currentSignal?.aborted) break;
+          // Breaker feed — the superseded failed attempt counts toward
+          // the ladder's signature counters before we re-attempt.
+          const rec = turnState.recordToolCall(
+            call.name, call.arguments, verification, classification,
+          );
+          if (rec.kind === 'hint') {
+            if (rec.hintMessage) pendingRetryHints.push(rec.hintMessage);
+          } else if (rec.kind !== 'allow') {
+            // Ladder says stop (cooldown/rollback/surface) — the breaker
+            // wins over the policy. This failed attempt is final and has
+            // ALREADY been recorded; reuse the decision below.
+            preRecordedRecovery = rec;
+            break;
+          }
+          turnState.recordPolicyRetry(classification.category);
+          retryNotes.push({
+            attempt:   attemptNo,
+            category:  classification.category,
+            reason:    classification.reason,
+            backoffMs: decision.backoffMs ?? 0,
+          });
+          await sleepWithSignal(decision.backoffMs ?? 0, this._currentSignal);
+          if (this._currentSignal?.aborted) break;
+        }
+        toolCallCount += 1;
+        if (turnState.isEnabled()) {
+          if (verification && !verification.ok && classification) {
             // v4.6 Phase 3b — write-through to the durable failure
             // ledger. Best-effort: a null/missing store (test agents
             // without a daemon DB wired) silently no-ops. The
@@ -1748,6 +1813,10 @@ export class AidenAgent {
           // Undefined for verifier-ok calls (classifier skips them) and
           // when TCE is off.
           classification: classification ?? undefined,
+          // v4.13 Gap 2 — observable retry ledger: one note per runtime
+          // re-attempt (class, reason, backoff). Undefined when the call
+          // went through on the first attempt.
+          retries: retryNotes.length > 0 ? retryNotes : undefined,
         });
         fullTrace.push({ name: call.name, args: call.arguments });
         // URL ledger ingest — extracts ids from result body for next turn.
@@ -1759,13 +1828,28 @@ export class AidenAgent {
           trackers.skill.recordSkillView(skillView.skillName, skillView.requiredTools);
         }
         this.onToolCall?.(call, 'after', result);
+        // v4.13 Gap 2 — the model SEES what the runtime did: retry
+        // attempts, the failure class, and the chosen recovery action
+        // are appended to the tool message (observable, never silent).
+        const _finalOk = !(verification && !verification.ok);
+        const _retryAnnotation = buildRetryAnnotation(
+          retryNotes,
+          _finalOk ? null : finalPolicyDecision,
+          _finalOk,
+        );
+        const _baseContent = result.error
+          ? `[error] ${result.error}`
+          : stringifyToolResult(result.result);
         turnToolMessages.push({
           role:        'tool',
           toolCallId:  call.id,
-          content:     result.error
-            ? `[error] ${result.error}`
-            : stringifyToolResult(result.result),
+          content:     _retryAnnotation ? `${_baseContent}\n${_retryAnnotation}` : _baseContent,
         });
+        // Ladder hints raised DURING retry attempts still reach the
+        // model as system messages (same pattern as the post-call hint).
+        for (const h of pendingRetryHints) {
+          turnToolMessages.push({ role: 'system', content: h });
+        }
         // v4.1.6 spike (TCE) — after the tool result lands in the
         // message history, consult the recovery controller. Returns
         // `allow` immediately when TCE disabled (zero overhead).
@@ -1774,7 +1858,10 @@ export class AidenAgent {
         // tool calls before the slower signature/name counters fire.
         // v4.2 Phase 2 — also pass the classification so TurnState
         // records the WHY for Phase 3's RecoveryReport.
-        const recovery = turnState.recordToolCall(
+        // v4.13 Gap 2 — when the ladder interrupted the retry loop, the
+        // final (failed) attempt was already recorded there; reuse that
+        // decision instead of double-counting the same attempt.
+        const recovery = preRecordedRecovery ?? turnState.recordToolCall(
           call.name, call.arguments, verification, classification,
         );
         if (recovery.kind === 'hint' && recovery.hintMessage) {
@@ -2096,6 +2183,24 @@ export class AidenAgent {
  * "approximately N items in the persistent memory file" rather than
  * a precise inventory.
  */
+/**
+ * v4.13 Gap 2 — abort-aware backoff sleep for the retry loop. Resolves
+ * early (never rejects) when the turn's AbortSignal fires so a user
+ * cancel is never held hostage by a backoff timer.
+ */
+function sleepWithSignal(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
 function countMemoryFacts(snapshot: unknown): number {
   if (!snapshot || typeof snapshot !== 'object') return 0;
   const s = snapshot as { memoryMd?: string; userMd?: string };
