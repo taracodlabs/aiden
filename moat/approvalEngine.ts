@@ -151,6 +151,12 @@ export interface ApprovalCallbacks {
   /** Logging hook — fired AFTER every decision (allow or deny). */
   onDecision?: (req: ApprovalRequest, decision: ApprovalDecision) => void;
   /**
+   * v4.14 Pillar 5 Slice C — fired AFTER the autonomy level is (re)set and
+   * applied. The host wires this to emit the `autonomy_changed` pillar event.
+   * Observer-only; the engine ignores any return.
+   */
+  onAutonomyChanged?: (level: string, by: 'boot' | 'user') => void;
+  /**
    * v4.9.0 Slice 12b — fired BEFORE the engine decides. Observer-only;
    * the engine ignores the return value. Wiring path: `aiden hooks`
    * subsystem fires `approval.requested` so registered hooks can
@@ -338,6 +344,15 @@ export class ApprovalEngine {
   }
 
   /**
+   * v4.14 Pillar 5 Slice C — late-bind the autonomy-changed observer. The host
+   * (chatSession) wires this to emit the `autonomy_changed` pillar event once
+   * the run-scoped event sink is available. Idempotent overwrite.
+   */
+  setAutonomyChangedHandler(fn: (level: string, by: 'boot' | 'user') => void): void {
+    this.callbacks = { ...this.callbacks, onAutonomyChanged: fn };
+  }
+
+  /**
    * ★ SH.1 — after `freeze()`, only a user-initiated call (`{ userInitiated:
    * true }`, from `/yolo` or `--yolo`) may change the mode. Any other
    * post-freeze call is a silent no-op — in-process code can NOT flip approvals.
@@ -366,6 +381,9 @@ export class ApprovalEngine {
       if (current && levelRank(policy.level) > levelRank(current.level)) return false;
     }
     this.autonomyPolicy = policy;
+    // v4.14 — observability hook; a telemetry failure must never break the set.
+    try { this.callbacks.onAutonomyChanged?.(policy.level, opts?.userInitiated ? 'user' : 'boot'); }
+    catch { /* callback fault must never break the autonomy set */ }
     return true;
   }
 

@@ -46,6 +46,9 @@ evals/results/*
 # (accumulates across nightly live runs, per-environment); the committed
 # expected pass-rates live in evals/baseline-live.json instead.
 evals/reliability.json
+# v4.14 Slice C — the nightly live-run report (regenerated each run; the nightly
+# uploads it as a CI artifact, never commits it).
+evals/live-report.json
 
 # ── Claude Code session state ─────────────────────────────────────────────────
 .claude/worktrees/

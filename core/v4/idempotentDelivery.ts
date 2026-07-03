@@ -28,6 +28,7 @@
 
 import type { DeliveryContext, DeliveryKind, DeliveryPayload, DeliveryReceipt } from '../deliveryContext';
 import { argsHashOf, guardExternalSend, type SideEffectLedger } from './sideEffectLedger';
+import { emitNeedsConfirmation, type PillarEventSink } from './pillarEvents';
 
 /** Kinds that COMMIT an irreversible external send — these are ledger-gated. */
 const COMMITTED_KINDS: ReadonlySet<DeliveryKind> = new Set<DeliveryKind>(['final', 'media']);
@@ -53,6 +54,12 @@ export interface IdempotentDeliveryIdent {
   onNeedsConfirmation?: (note: DeliverySideEffectNote) => void;
   /** Optional: verify an interrupted send's recorded receipt actually landed. */
   verify?: (receipt: unknown) => Promise<boolean>;
+  /**
+   * v4.14 Pillar 5 Slice C — when present, a needs-confirmation surface also
+   * emits the `needs_confirmation` pillar event (live + durable run_events).
+   * Optional so channels that don't run under a durable run just omit it.
+   */
+  pillarSink?: PillarEventSink;
 }
 
 /**
@@ -104,6 +111,16 @@ export function withIdempotentDelivery(
     }
     // needs_confirmation — do NOT send; surface for the user.
     ident.onNeedsConfirmation?.({ tool: 'channel_send', target, reason: outcome.reason ?? 'needs confirmation', key: outcome.key });
+    // v4.14 — observability: also emit the pillar event when a sink is wired.
+    // emitPillarEvent never throws, but wrap defensively — telemetry must never
+    // break a delivery decision.
+    if (ident.pillarSink) {
+      try {
+        emitNeedsConfirmation(ident.pillarSink, {
+          tool: 'channel_send', target, reason: outcome.reason ?? 'needs confirmation',
+        });
+      } catch { /* telemetry failure must never break delivery */ }
+    }
     return { ok: false, kind, error: outcome.reason ?? 'external send needs confirmation' };
   };
 

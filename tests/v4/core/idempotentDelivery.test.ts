@@ -176,4 +176,41 @@ describe('withIdempotentDelivery — never re-fires on ambiguous state', () => {
     expect(r.ok).toBe(false);
     expect(blocked[0]).toMatch(/prior run/);
   });
+
+  // v4.14 Pillar 5 Slice C — needs_confirmation also emits the pillar event
+  // (durable run_events) when a sink is wired.
+  it('emits needs_confirmation onto run_events when a pillarSink is provided', async () => {
+    const l1 = openLedger();
+    await withIdempotentDelivery(makeCtx({ sends: [] }), l1, { taskId: 'task_1' }).send('final', 'version A');
+    db.close();
+
+    const l2 = openLedger();
+    const events: Array<{ name: string; payload: Record<string, unknown> }> = [];
+    const ctx = withIdempotentDelivery(makeCtx({ sends: [] }), l2, {
+      taskId: 'task_1',
+      pillarSink: {
+        runStore: { emitEventRich: (o) => { events.push({ name: String(o.name), payload: o.payload as Record<string, unknown> }); return 1; } },
+        runId: 42,
+      },
+    });
+    const r = await ctx.send('final', 'version B DIFFERENT');   // same ordinal, drift → needs_confirmation
+    expect(r.ok).toBe(false);
+    const nc = events.find((e) => e.name === 'needs_confirmation');
+    expect(nc).toBeTruthy();
+    expect(nc!.payload.tool).toBe('channel_send');
+  });
+
+  it('a throwing pillarSink is swallowed — the delivery decision still returns', async () => {
+    const l1 = openLedger();
+    await withIdempotentDelivery(makeCtx({ sends: [] }), l1, { taskId: 'task_1' }).send('final', 'version A');
+    db.close();
+
+    const l2 = openLedger();
+    const ctx = withIdempotentDelivery(makeCtx({ sends: [] }), l2, {
+      taskId: 'task_1',
+      pillarSink: { runStore: { emitEventRich: () => { throw new Error('DB down'); } }, runId: 1 },
+    });
+    const r = await ctx.send('final', 'version B DIFFERENT');
+    expect(r.ok).toBe(false);   // telemetry failure did not break the decision
+  });
 });

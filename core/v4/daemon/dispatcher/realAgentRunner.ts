@@ -72,6 +72,7 @@ import type {
 } from './agentRunner';
 import { buildInitialHistory } from './agentRunner';
 import { computeTaskFinalization } from '../../taskVerification';
+import { emitArtifactVerified, emitCostUpdated, type PillarEventSink } from '../../pillarEvents';
 import type { TaskStore } from '../taskStore';
 import {
   resolveDaemonModel,
@@ -455,7 +456,31 @@ export function createRealAgentRunner(
           );
           opts.taskStore.setStatus(taskId, 'pending_verification');
           opts.taskStore.finalizeVerification(taskId, fin.status, fin.evidence, fin.jobCard);
+          // v4.14 Pillar 5 Slice C — artifact_verified onto the run's stream.
+          try {
+            emitArtifactVerified(
+              { runStore: opts.runStore as unknown as PillarEventSink['runStore'], runId },
+              {
+                verdict:  fin.status,
+                verified: fin.status === 'completed' || fin.status === 'completed_unverified',
+                handles:  fin.evidence.handles?.length ?? 0,
+                taskId:   taskId ?? undefined,
+              },
+            );
+          } catch { /* telemetry must never break dispatch */ }
         } catch { /* card write must never break dispatch */ }
+      }
+
+      // v4.14 Pillar 5 Slice C — cost_updated: the run's token spend. The daemon
+      // watcher tracks a single total (no in/out split), so report it as total.
+      const spentTokens = perTurnWatcher.used();
+      if (spentTokens > 0) {
+        try {
+          emitCostUpdated(
+            { runStore: opts.runStore as unknown as PillarEventSink['runStore'], runId },
+            { inputTokens: 0, outputTokens: 0, totalTokens: spentTokens },
+          );
+        } catch { /* telemetry must never break dispatch */ }
       }
 
       return {

@@ -1,0 +1,118 @@
+name: Self-Score Nightly
+
+# v4.14 Pillar 5 Slice C — ADVISORY real-model self-scoring.
+# Deliberately NOT on push / pull_request: the per-PR blocker is the free,
+# deterministic mock gate (tests/v4/eval/selfScoreGate.test.ts in the normal CI
+# run). This nightly is nondeterministic + costs tokens, so it runs on a
+# schedule (and on demand) only, and merely OPENS AN ISSUE on a real regression.
+on:
+  schedule:
+    # 02:00 UTC nightly.
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      repeats:
+        description: 'Runs per scenario (pass-rate sample size)'
+        required: false
+        default: '3'
+      model:
+        description: 'Cheap model id'
+        required: false
+        default: 'llama-3.3-70b-versatile'
+      subset:
+        description: 'Comma-separated scenario ids (blank = evals/baseline-live.json subset)'
+        required: false
+        default: ''
+
+# Only open issues; read the repo. No write to contents.
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: self-score-nightly
+  cancel-in-progress: false
+
+jobs:
+  live:
+    name: Live self-score (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Map the secret to env and decide whether we can run. The secret is
+      # NEVER echoed; absent secret ⇒ clean skip, never a hard failure.
+      - name: Check for model API key
+        id: check
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+        run: |
+          if [ -n "$GROQ_API_KEY" ]; then
+            echo "has_key=true" >> "$GITHUB_OUTPUT"
+            echo "GROQ_API_KEY present — running live self-score."
+          else
+            echo "has_key=false" >> "$GITHUB_OUTPUT"
+            echo "GROQ_API_KEY not set — skipping live self-score (advisory path, no failure)."
+          fi
+
+      # Advisory run: never fails the job on a regression — it writes a report
+      # the next step turns into an issue. continue-on-error guards infra flakes.
+      - name: Run live self-score
+        if: steps.check.outputs.has_key == 'true'
+        continue-on-error: true
+        env:
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          AIDEN_EVAL_PROVIDER: groq
+        run: |
+          MODEL="${{ github.event.inputs.model || 'llama-3.3-70b-versatile' }}"
+          REPEATS="${{ github.event.inputs.repeats || '3' }}"
+          SUBSET="${{ github.event.inputs.subset || '' }}"
+          ARGS="--live --provider groq --model $MODEL --repeats $REPEATS --report evals/live-report.json"
+          if [ -n "$SUBSET" ]; then ARGS="$ARGS --subset $SUBSET"; fi
+          echo "eval args: $ARGS"
+          npx ts-node evals/cli.ts $ARGS
+
+      - name: Open issue on regression
+        if: steps.check.outputs.has_key == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let report;
+            try {
+              report = JSON.parse(fs.readFileSync('evals/live-report.json', 'utf8'));
+            } catch (e) {
+              core.info('no report file produced (eval skipped or infra-only run) — nothing to open.');
+              return;
+            }
+            if (!report.regressions || report.regressions <= 0) {
+              core.info(`no regressions (${report.scenarios?.length ?? 0} scenarios scored).`);
+              return;
+            }
+            const res = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: report.issueTitle,
+              body: report.issueBody,
+              labels: ['self-score', 'regression'],
+            });
+            core.info(`opened regression issue #${res.data.number}`);
+
+      - name: Upload live report
+        if: steps.check.outputs.has_key == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-report
+          path: evals/live-report.json
+          if-no-files-found: ignore

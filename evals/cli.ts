@@ -40,8 +40,9 @@ import { runMockSuite } from './mockRun';
 import { scoreSuite, evaluateGate, type SuiteScorecard } from './score';
 import {
   runScenarioRepeats, aggregateReliability, compareToBaseline, mergeReliability,
-  isQuarantineCandidate, type LiveComparison,
+  isQuarantineCandidate, type LiveComparison, type ScenarioReliability,
 } from './live';
+import { buildLiveReport } from './liveReport';
 import { loadLiveBaseline, loadReliability, saveReliability } from './liveStore';
 import { SUITES } from './index';
 import type { ProviderAdapter } from '../providers/v4/types';
@@ -77,6 +78,7 @@ interface ParsedFlags {
   repeats:          number;
   subset?:          string[];
   failOnRegression: boolean;
+  report?:          string;
 }
 
 function parseFlags(argv: string[]): ParsedFlags {
@@ -108,6 +110,7 @@ function parseFlags(argv: string[]): ParsedFlags {
       case '--repeats':           out.repeats = Math.max(1, Number(next) || 3); i++; break;
       case '--subset':            out.subset = next.split(',').map((s) => s.trim()).filter(Boolean); i++; break;
       case '--fail-on-regression': out.failOnRegression = true; break;
+      case '--report':            out.report = next; i++; break;
       case '--help':
       case '-h':                  out.help = true; break;
       default:
@@ -343,6 +346,7 @@ async function runLiveMode(flags: ParsedFlags): Promise<number> {
 
   const allScenarios = Object.values(SUITES).flat();
   const records = await loadReliability();
+  const reportRows: Array<{ rel: ScenarioReliability; cmp: LiveComparison | null }> = [];
   let regressions = 0;
 
   for (const id of subset) {
@@ -362,6 +366,7 @@ async function runLiveMode(flags: ParsedFlags): Promise<number> {
     const cmp = entry
       ? compareToBaseline(rel, entry, { band: baseline?.band })
       : null;
+    reportRows.push({ rel, cmp });
     if (cmp?.classification === 'regression') regressions += 1;
 
     const rate = rel.passRate === null ? 'n/a' : `${rel.passed}/${rel.taskRuns} (${(rel.passRate * 100).toFixed(0)}%)`;
@@ -381,6 +386,20 @@ async function runLiveMode(flags: ParsedFlags): Promise<number> {
   if (flags.write) {
     try { await saveReliability(records); process.stdout.write(`\n${DIM}reliability updated: evals/reliability.json${RESET}\n`); }
     catch (err) { process.stderr.write(`${YELLOW}warn:${RESET} could not save reliability: ${(err as Error).message}\n`); }
+  }
+
+  // Machine-readable report for the nightly workflow (issue-on-regression).
+  if (flags.report) {
+    const report = buildLiveReport({
+      model: resolved.model, provider: resolved.provider, repeats: flags.repeats,
+      generatedAt: new Date().toISOString(), results: reportRows,
+    });
+    try {
+      await fs.writeFile(flags.report, JSON.stringify(report, null, 2) + '\n', 'utf8');
+      process.stdout.write(`${DIM}report: ${flags.report}${RESET}\n`);
+    } catch (err) {
+      process.stderr.write(`${YELLOW}warn:${RESET} could not write report: ${(err as Error).message}\n`);
+    }
   }
 
   // Advisory by default — a regression is reported but does NOT fail the run

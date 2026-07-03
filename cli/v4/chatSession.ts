@@ -22,6 +22,9 @@
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
+import {
+  emitArtifactVerified, emitCostUpdated, emitAutonomyChanged, type PillarEventSink,
+} from '../../core/v4/pillarEvents';
 // v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
 // sequence + system prompt + memory hashes when a turn shows loop
 // symptoms (10+ calls OR 5+ consecutive same-name). Default off via
@@ -655,6 +658,23 @@ export class ChatSession implements ChatSessionLike {
     // still applies after the engine is frozen at boot.
     if (opts.yoloMode) opts.approvalEngine.setMode('off', { userInitiated: true });
     if (opts.resumeHistory) this.history = [...opts.resumeHistory];
+    // v4.14 Pillar 5 Slice C — emit autonomy_changed when the dial is set. The
+    // dial changes at the prompt (no active run), so runId is null here: the
+    // live subscriber sees it and durable persistence is skipped.
+    try {
+      opts.approvalEngine.setAutonomyChangedHandler?.((level, by) => {
+        try { emitAutonomyChanged(this.pillarSink(null), { level, by }); } catch { /* safe */ }
+      });
+    } catch { /* engine may be a stub in some test contexts */ }
+  }
+
+  /**
+   * v4.14 Pillar 5 Slice C — a run-scoped pillar-event sink from the REPL run
+   * store. `runId` is null at the prompt (durable persistence then skipped;
+   * the live subscriber still fires). emitPillarEvent is itself never-throw.
+   */
+  private pillarSink(runId: number | null): PillarEventSink {
+    return { runStore: this.opts.replRunStore as unknown as PillarEventSink['runStore'], runId };
   }
 
   // ── ChatSessionLike API ────────────────────────────────────────────
@@ -2179,6 +2199,16 @@ export class ChatSession implements ChatSessionLike {
         this.totalUsage.inputTokens  += turnContext.costAccumulator.inputTokens;
         this.totalUsage.outputTokens += turnContext.costAccumulator.outputTokens;
       }
+      // v4.14 Pillar 5 Slice C — cost_updated: the running token total (parent
+      // + children) after the turn. One emit per turn (inherently ≤1/sec), so
+      // no throttle needed here. emitPillarEvent never throws; wrapped anyway.
+      try {
+        emitCostUpdated(this.pillarSink(replRunId), {
+          inputTokens:  this.totalUsage.inputTokens,
+          outputTokens: this.totalUsage.outputTokens,
+          totalTokens:  this.totalUsage.inputTokens + this.totalUsage.outputTokens,
+        });
+      } catch { /* telemetry must never break the turn */ }
 
       // v4.6 Phase 2Q-B — finalize the REPL parent-run row on success.
       // `finishReason` from the agent loop maps directly into our DB
@@ -2234,6 +2264,16 @@ export class ChatSession implements ChatSessionLike {
             },
             { approvalMode: this.opts.approvalEngine.getMode() },
           );
+          // v4.14 Pillar 5 Slice C — artifact_verified: the Pillar-3 verdict +
+          // evidence-handle count, onto the live + durable event stream.
+          try {
+            emitArtifactVerified(this.pillarSink(replRunId), {
+              verdict:  fin.status,
+              verified: fin.status === 'completed' || fin.status === 'completed_unverified',
+              handles:  fin.evidence.handles?.length ?? 0,
+              taskId:   replTaskId != null ? String(replTaskId) : undefined,
+            });
+          } catch { /* telemetry must never break finalization */ }
           if (result.finishReason === 'stop') {
             // Crash-honesty intermediate state (see Gap 1).
             replTaskStore.setStatus(replTaskId, 'pending_verification');
