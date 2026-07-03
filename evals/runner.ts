@@ -26,13 +26,37 @@
  */
 
 import { AidenAgent, type ToolExecutor } from '../core/v4/aidenAgent';
+import { computeTaskFinalization } from '../core/v4/taskVerification';
+import type { HonestyTraceEntry } from '../moat/honestyEnforcement';
 import type {
   Message,
   ProviderAdapter,
+  ProviderCallOutput,
   ToolCallRequest,
   ToolCallResult,
   ToolSchema,
 } from '../providers/v4/types';
+
+// ── v4.14 Slice A — verification-axis inputs ─────────────────────────────
+//
+// Which of the default eval tools MUTATE state. computeTaskFinalization
+// decides its verdict over mutating entries only, so a read-only scenario is
+// `completed` on its own terms while a mutating one must PROVE its effect to
+// clear `completed_unverified`. Reuses the same names the honesty layer keys
+// off — not a new registry.
+export const MUTATING_EVAL_TOOLS = new Set<string>([
+  'file_write', 'file_delete', 'file_move', 'memory_add', 'shell_exec',
+]);
+
+/**
+ * Stamp the handler `mutates` flag onto the trace at dispatch time. This is
+ * load-bearing: computeTaskFinalization scopes its verdict to mutating entries,
+ * so without it every scenario is trivially `completed` and the verified axis
+ * carries no signal. The per-tool result verifier (pure/synchronous, always-on
+ * in the agent loop) then decides `completed` vs `verification_failed` from the
+ * scripted tool result — deterministic, no I/O.
+ */
+export const resolveEvalMutates = (toolName: string): boolean => MUTATING_EVAL_TOOLS.has(toolName);
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -64,6 +88,20 @@ export interface EvalScenario {
   executeTool?: ToolExecutor;
   /** Per-scenario timeout in ms. Default 60_000. */
   timeoutMs?:   number;
+  /**
+   * v4.14 Slice A — deterministic mock script. When present, the mock-mode
+   * runner drives the scenario with a MockProviderAdapter over these scripted
+   * provider outputs instead of a real LLM — bit-for-bit repeatable, zero
+   * token cost, gateable per-PR. One entry per provider call (each tool-use
+   * turn, then the final `stop` turn).
+   */
+  script?:      ProviderCallOutput[];
+  /**
+   * v4.14 Slice A — this scenario asserts a SAFETY / honesty boundary. The
+   * gate blocks immediately (binary, no averaging) if such a scenario's
+   * declared expectations fail. Honesty-suite scenarios default to `true`.
+   */
+  safety?:      boolean;
 }
 
 export type EvalExpectation =
@@ -82,6 +120,19 @@ export interface EvalResult {
   toolCalls:     Array<{ name: string; args: unknown }>;
   finalResponse: string;
   failures:      string[];
+  // ── v4.14 Slice A scoring axes (HARD checks — no AI judge) ─────────────
+  /** Pillar-3 verdict from computeTaskFinalization over the tool trace. */
+  verdict:       'completed' | 'completed_unverified' | 'verification_failed' | 'failed';
+  /** Tokens summed across the run (cost axis). */
+  usage:         { inputTokens: number; outputTokens: number; totalTokens: number };
+  /** Model turns consumed (steps axis). */
+  turnCount:     number;
+  /** Tool calls executed (steps axis). */
+  toolCallCount: number;
+  /** clarify + plan_approval calls — human-in-the-loop asks (interventions axis). */
+  interventions: number;
+  /** Echoed from the scenario — drives the gate's safety layer. */
+  safety:        boolean;
 }
 
 export interface RunEvalOptions {
@@ -263,6 +314,10 @@ export async function runEval(
     tools,
     toolExecutor: wrapped,
     maxTurns:    20,
+    // v4.14 Slice A — feed the verification axis. `resolveMutates` stamps
+    // `handlerMutates` so computeTaskFinalization scopes its verdict to
+    // side-effecting calls (the always-on pure verifier decides ok/failed).
+    resolveMutates: resolveEvalMutates,
   });
 
   // System prompt is required by the Codex Responses API (the adapter
@@ -276,7 +331,13 @@ export async function runEval(
   // Bound the whole scenario with the timeout. We race against
   // runConversation so a stuck provider doesn't hang the suite.
   const timeoutMs = scenario.timeoutMs ?? opts.timeoutMs ?? 60_000;
+  const safety = scenario.safety ?? false;
   let finalResponse = '';
+  let trace: HonestyTraceEntry[] = [];
+  let usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  let turnCount = 0;
+  let toolCallCount = 0;
+  let finishReason = 'error';
   try {
     const result = await Promise.race([
       agent.runConversation(history),
@@ -285,9 +346,19 @@ export async function runEval(
       }),
     ]);
     finalResponse = typeof result?.finalContent === 'string' ? result.finalContent : '';
+    trace         = result.toolCallTrace ?? [];
+    turnCount     = result.turnCount;
+    toolCallCount = result.toolCallCount;
+    finishReason  = result.finishReason;
+    usage = {
+      inputTokens:  result.totalUsage.inputTokens,
+      outputTokens: result.totalUsage.outputTokens,
+      totalTokens:  result.totalUsage.inputTokens + result.totalUsage.outputTokens,
+    };
   } catch (err) {
     // Don't propagate to the caller — turn it into a structured failure
-    // so the suite can keep running other scenarios.
+    // so the suite can keep running other scenarios. Axes take their
+    // zero/failed defaults so the scorecard stays well-formed.
     return {
       scenarioId:    scenario.id,
       description:   scenario.description,
@@ -295,11 +366,22 @@ export async function runEval(
       durationMs:    Date.now() - start,
       toolCalls:     traced,
       finalResponse: '',
-      failures:      [
-        `infrastructure error: ${(err as Error).message}`,
-      ],
+      failures:      [`infrastructure error: ${(err as Error).message}`],
+      verdict:       'failed',
+      usage:         { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+      turnCount:     0,
+      toolCallCount: 0,
+      interventions: 0,
+      safety,
     };
   }
+
+  // The verdict is the agent's own trace verdict: computeTaskFinalization over
+  // the (always-verified) trace. Deterministic — the per-tool verifier is
+  // pure, so a scripted result maps to a fixed verdict.
+  const verdict = computeTaskFinalization({ finishReason, toolCallTrace: trace }).status;
+  // Human-in-the-loop asks: the two tools that pause for a person.
+  const interventions = trace.filter((e) => e.name === 'clarify' || e.name === 'plan_approval').length;
 
   const failures = evaluateExpectations(scenario.expectations, traced, finalResponse);
   return {
@@ -310,6 +392,12 @@ export async function runEval(
     toolCalls:     traced,
     finalResponse,
     failures,
+    verdict,
+    usage,
+    turnCount,
+    toolCallCount,
+    interventions,
+    safety,
   };
 }
 

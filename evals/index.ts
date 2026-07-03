@@ -15,9 +15,13 @@
 
 import type { EvalScenario } from './runner';
 import { honestyScenarios } from './suites/honesty';
+import { scoringSmokeScenarios } from './suites/scoringSmoke';
 
 export const SUITES: Record<string, EvalScenario[]> = {
   honesty: honestyScenarios,
+  // v4.14 Slice A — the deterministic, mock-scripted scoring fixture that
+  // backs the per-PR gate. Runs free via `--provider mock`.
+  'scoring-smoke': scoringSmokeScenarios,
 };
 
 export type SuiteName = keyof typeof SUITES;

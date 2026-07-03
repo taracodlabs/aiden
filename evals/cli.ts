@@ -36,10 +36,15 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { runEval, type EvalScenario, type EvalResult } from './runner';
+import { runMockSuite } from './mockRun';
+import { scoreSuite, evaluateGate, type SuiteScorecard } from './score';
 import { SUITES } from './index';
 import type { ProviderAdapter } from '../providers/v4/types';
 import { resolveAidenPaths } from '../core/v4/paths';
 import { VERSION } from '../core/version';
+
+/** Committed deterministic baseline for the mock scoring gate. */
+const BASELINE_PATH = path.join(__dirname, 'baseline.json');
 
 // ── ANSI helpers (tiny, no chalk dep) ──────────────────────────────────
 const GREEN  = '\x1b[32m';
@@ -52,14 +57,16 @@ const YELLOW = '\x1b[33m';
 // ── Flag parsing ───────────────────────────────────────────────────────
 
 interface ParsedFlags {
-  suite:      string;
-  scenario?:  string;
-  provider?:  string;
-  model?:     string;
-  timeoutMs?: number;
-  strict:     boolean;
-  write:      boolean;
-  help:       boolean;
+  suite:          string;
+  scenario?:      string;
+  provider?:      string;
+  model?:         string;
+  timeoutMs?:     number;
+  strict:         boolean;
+  write:          boolean;
+  help:           boolean;
+  gate:           boolean;
+  updateBaseline: boolean;
 }
 
 function parseFlags(argv: string[]): ParsedFlags {
@@ -68,20 +75,24 @@ function parseFlags(argv: string[]): ParsedFlags {
     strict: false,
     write: true,
     help: false,
+    gate: false,
+    updateBaseline: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const next = argv[i + 1];
     switch (arg) {
-      case '--suite':      out.suite = next; i++; break;
-      case '--scenario':   out.scenario = next; i++; break;
-      case '--provider':   out.provider = next; i++; break;
-      case '--model':      out.model = next; i++; break;
-      case '--timeout':    out.timeoutMs = Number(next); i++; break;
-      case '--strict':     out.strict = true; break;
-      case '--no-write':   out.write = false; break;
+      case '--suite':           out.suite = next; i++; break;
+      case '--scenario':        out.scenario = next; i++; break;
+      case '--provider':        out.provider = next; i++; break;
+      case '--model':           out.model = next; i++; break;
+      case '--timeout':         out.timeoutMs = Number(next); i++; break;
+      case '--strict':          out.strict = true; break;
+      case '--no-write':        out.write = false; break;
+      case '--gate':            out.gate = true; break;
+      case '--update-baseline': out.updateBaseline = true; break;
       case '--help':
-      case '-h':           out.help = true; break;
+      case '-h':                out.help = true; break;
       default:
         if (arg.startsWith('--')) {
           // Unknown flag — surface but don't crash; future-proofs CI scripts.
@@ -113,6 +124,10 @@ function printUsage(): void {
     '  --timeout <ms>          per-scenario timeout override (default 60000)',
     '  --strict                exit 1 if any scenario fails (default: always exit 0)',
     '  --no-write              do not persist results to evals/results/',
+    '',
+    `  ${BOLD}--provider mock${RESET}         deterministic, free, no network (scripted scenarios)`,
+    '  --gate                  (mock) score vs evals/baseline.json; exit 1 on capability regression',
+    '  --update-baseline       (mock) regenerate evals/baseline.json from this run',
     '',
     `Available suites: ${Object.keys(SUITES).join(', ')}`,
     '',
@@ -200,6 +215,80 @@ async function persistResults(payload: unknown): Promise<string> {
   return outPath;
 }
 
+// ── Scorecard rendering (mock mode) ──────────────────────────────────────
+
+function fmtVerdict(v: EvalResult['verdict']): string {
+  const c = v === 'completed' ? GREEN
+    : v === 'completed_unverified' ? YELLOW
+    : RED;
+  return `${c}${v}${RESET}`;
+}
+
+function fmtScored(r: EvalResult): string {
+  const icon = r.passed ? `${GREEN}✓${RESET}` : `${RED}✗${RESET}`;
+  const tag  = r.safety ? `${DIM}[safety]${RESET} ` : '';
+  const idCol = (tag + r.scenarioId).padEnd(58);
+  return `  ${icon} ${idCol} ${fmtVerdict(r.verdict)}` +
+    `${DIM}  ·  ${r.usage.totalTokens}tok · ${r.toolCallCount + r.turnCount} steps · ${r.interventions} interv${RESET}`;
+}
+
+// ── Mock-provider gate (deterministic, free) ─────────────────────────────
+
+async function loadBaseline(): Promise<SuiteScorecard | null> {
+  try {
+    return JSON.parse(await fs.readFile(BASELINE_PATH, 'utf8')) as SuiteScorecard;
+  } catch {
+    return null;
+  }
+}
+
+async function runMockMode(
+  scenarios: EvalScenario[],
+  suiteLabel: string,
+  flags: ParsedFlags,
+): Promise<number> {
+  process.stdout.write(`\n${BOLD}aiden eval${RESET}  ·  ${suiteLabel}  ${DIM}(mock — deterministic)  ·  aiden v${VERSION}${RESET}\n\n`);
+  const results = await runMockSuite(scenarios);
+  for (const r of results) {
+    process.stdout.write(fmtScored(r) + '\n');
+    if (!r.passed) process.stdout.write(fmtFailures(r));
+  }
+  const scorecard = scoreSuite(results, { suite: suiteLabel, provider: 'mock' });
+  const t = scorecard.totals;
+  process.stdout.write(
+    `\n${DIM}verdicts:${RESET} ${t.completed} completed · ${t.completedUnverified} unverified · ` +
+    `${t.verificationFailed} verify-failed · ${t.failed} failed` +
+    `${DIM}  ·  ${t.totalTokens} tok · ${t.totalSteps} steps · ${t.totalInterventions} interv${RESET}\n`,
+  );
+
+  // Regenerate the committed baseline.
+  if (flags.updateBaseline) {
+    await fs.writeFile(BASELINE_PATH, JSON.stringify(scorecard, null, 2) + '\n', 'utf8');
+    process.stdout.write(`${GREEN}✓${RESET} baseline written: ${BASELINE_PATH}\n`);
+    return 0;
+  }
+
+  // Gate against the committed baseline.
+  if (flags.gate) {
+    const baseline = await loadBaseline();
+    if (!baseline) {
+      process.stderr.write(`${RED}✗${RESET} no baseline at ${BASELINE_PATH} — run with --update-baseline first.\n`);
+      return 1;
+    }
+    const gate = evaluateGate(scorecard, baseline);
+    for (const w of gate.warnings) process.stdout.write(`  ${YELLOW}!${RESET} ${w}\n`);
+    if (gate.ok) {
+      process.stdout.write(`\n${GREEN}${BOLD}GATE PASS${RESET}${DIM}  ·  no capability regression vs baseline${RESET}\n`);
+      return 0;
+    }
+    process.stdout.write(`\n${RED}${BOLD}GATE FAIL${RESET}\n`);
+    for (const b of gate.blocks) process.stdout.write(`  ${RED}✗${RESET} ${b}\n`);
+    return 1;
+  }
+
+  return flags.strict && t.passed < t.total ? 1 : 0;
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
@@ -229,6 +318,11 @@ async function main(argv: string[]): Promise<number> {
     }
     scenarios = s;
     suiteLabel = flags.suite;
+  }
+
+  // v4.14 Slice A — mock mode: deterministic, free, gate-capable. No provider.
+  if (flags.provider === 'mock') {
+    return runMockMode(scenarios, suiteLabel, flags);
   }
 
   // Resolve the provider.
