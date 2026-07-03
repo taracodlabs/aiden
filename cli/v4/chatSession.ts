@@ -1604,7 +1604,7 @@ export class ChatSession implements ChatSessionLike {
             try { this.opts.display.dim(`  ✓ queued (${act.count} pending) — runs after this turn`); } catch { /* defensive */ }
           } else if (act.action === 'steered') {
             // Slice 2b — buffered; lands after the current tool, next iteration.
-            try { this.opts.display.dim(`  ◆ steering: ${act.text} — applies from the next step`); } catch { /* defensive */ }
+            try { this.opts.display.dim(`  ◆ redirecting: ${act.text} — applies from the next step`); } catch { /* defensive */ }
           } else if (act.action === 'interrupt') {
             requestTurnCancel(this.currentAbortController);
           }

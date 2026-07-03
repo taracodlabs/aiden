@@ -22,7 +22,7 @@
  * lost. `mode`/`queueCount` are optional for back-compat with Slice-1 callers.
  */
 export function renderFooter(
-  opts: { busy: boolean; activeSubagents: number; mode?: 'queue' | 'interrupt' | 'steer'; queueCount?: number },
+  opts: { busy: boolean; activeSubagents: number; mode?: 'queue' | 'interrupt' | 'redirect'; queueCount?: number },
   width = 80,
 ): string {
   if (!opts.busy) return '';
@@ -30,7 +30,7 @@ export function renderFooter(
   // What Enter does right now (mode-dependent), then esc always cancels.
   if (opts.mode === 'queue')      hints.push('enter = queue next');
   else if (opts.mode === 'interrupt') hints.push('enter = cancel turn');
-  else if (opts.mode === 'steer') hints.push('enter = steer');
+  else if (opts.mode === 'redirect') hints.push('enter = redirect');
   hints.push('esc = cancel turn');
   if (opts.activeSubagents > 0) {
     hints.push(`ctrl+k = cancel 1 of ${opts.activeSubagents} subagent${opts.activeSubagents === 1 ? '' : 's'}`);

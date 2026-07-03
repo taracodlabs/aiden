@@ -33,9 +33,9 @@ describe('renderFooter', () => {
     expect(i).toContain('enter = cancel turn');
     expect(i).not.toContain('queued');            // no queue count when 0
 
-    // Slice 2b — steer mode.
-    const s = renderFooter({ busy: true, activeSubagents: 0, mode: 'steer' });
-    expect(s).toContain('enter = steer');
+    // Slice 2b — redirect mode.
+    const s = renderFooter({ busy: true, activeSubagents: 0, mode: 'redirect' });
+    expect(s).toContain('enter = redirect');
     expect(s).toContain('esc = cancel turn');
   });
 });

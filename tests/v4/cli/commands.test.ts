@@ -93,7 +93,7 @@ describe('barrel exports', () => {
     // registered in aidenCLI, like /tasks — not in the barrel, not counted.)
     // v4.12.1 Pillar 2 added /autonomy (52 → 53).
     // v4.12.1 Pillar 4 Slice 2a added /busy + /queue (53 → 55).
-    // v4.12.1 Pillar 4 Slice 2b added /steer (55 → 56).
+    // v4.12.1 Pillar 4 Slice 2b added /redirect (55 → 56).
     expect(allCommands.length).toBe(56);
     const names = new Set(allCommands.map((c) => c.name));
     expect(names.size).toBe(56);

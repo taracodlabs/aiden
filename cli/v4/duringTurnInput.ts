@@ -13,18 +13,21 @@
  * keypress sources feed this one controller.
  *
  * Modes: 'queue' (Enter-while-busy queues the message for after the turn — the
- * safe default), 'interrupt' (Enter cancels the turn), and 'steer' (v4.12.1
+ * safe default), 'interrupt' (Enter cancels the turn), and 'redirect' (v4.12.1
  * Slice 2b — Enter injects a mid-turn nudge as tool-stream context at the safe
- * loop boundary). `esc` is a distinct always-live interrupt key handled by the
- * keypress source, NOT a mode.
+ * loop boundary; user-facing command is `/redirect`). `esc` is a distinct
+ * always-live interrupt key handled by the keypress source, NOT a mode.
+ *
+ * Internal identifiers (pendingSteer / drainSteer / clearSteer / the 'steered'
+ * action) keep the original verb — only the user-facing surface says redirect.
  */
 
-export type BusyEnterMode = 'queue' | 'interrupt' | 'steer';
+export type BusyEnterMode = 'queue' | 'interrupt' | 'redirect';
 
-export const BUSY_ENTER_MODES: readonly BusyEnterMode[] = ['queue', 'interrupt', 'steer'];
+export const BUSY_ENTER_MODES: readonly BusyEnterMode[] = ['queue', 'interrupt', 'redirect'];
 
 export function isBusyEnterMode(s: unknown): s is BusyEnterMode {
-  return s === 'queue' || s === 'interrupt' || s === 'steer';
+  return s === 'queue' || s === 'interrupt' || s === 'redirect';
 }
 
 /** What the keypress source should DO with an Enter pressed during a turn. */
@@ -110,7 +113,7 @@ export class DuringTurnInput {
   onBusyEnter(text: string): BusyEnterAction {
     if (text.trim().length === 0) return { action: 'ignored' };
     if (this.mode === 'interrupt') return { action: 'interrupt' };
-    if (this.mode === 'steer') {
+    if (this.mode === 'redirect') {
       this.setPendingSteer(text);
       return { action: 'steered', text: text.trim() };
     }

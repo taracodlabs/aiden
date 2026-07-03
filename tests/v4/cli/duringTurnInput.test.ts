@@ -63,15 +63,15 @@ describe('DuringTurnInput — mode + onBusyEnter', () => {
   it('isBusyEnterMode guards input', () => {
     expect(isBusyEnterMode('queue')).toBe(true);
     expect(isBusyEnterMode('interrupt')).toBe(true);
-    expect(isBusyEnterMode('steer')).toBe(true);    // Slice 2b
+    expect(isBusyEnterMode('redirect')).toBe(true); // Slice 2b
     expect(isBusyEnterMode('x')).toBe(false);
   });
 });
 
-describe('DuringTurnInput — steer (Slice 2b)', () => {
-  it('steer mode: Enter buffers a nudge (does not queue, does not interrupt)', () => {
+describe('DuringTurnInput — redirect (Slice 2b)', () => {
+  it('redirect mode: Enter buffers a nudge (does not queue, does not interrupt)', () => {
     const c = new DuringTurnInput();
-    c.setMode('steer');
+    c.setMode('redirect');
     expect(c.onBusyEnter('use pnpm not npm')).toEqual({ action: 'steered', text: 'use pnpm not npm' });
     expect(c.count()).toBe(0);                       // not queued
     expect(c.hasPendingSteer()).toBe(true);
@@ -79,7 +79,7 @@ describe('DuringTurnInput — steer (Slice 2b)', () => {
 
   it('multiple nudges accumulate (newline-joined); drainSteer takes + clears', () => {
     const c = new DuringTurnInput();
-    c.setMode('steer');
+    c.setMode('redirect');
     c.onBusyEnter('use pnpm');
     c.onBusyEnter('skip the tests');
     expect(c.drainSteer()).toBe('use pnpm\nskip the tests');
@@ -95,7 +95,7 @@ describe('DuringTurnInput — steer (Slice 2b)', () => {
     expect(c.clearSteer()).toBe(false);              // nothing to clear now
   });
 
-  it('QUEUE and STEER are independent — they do not interfere', () => {
+  it('QUEUE and REDIRECT are independent — they do not interfere', () => {
     const c = new DuringTurnInput();
     c.enqueue('run after turn');                      // queued
     c.setPendingSteer('adjust mid-turn');             // steer
