@@ -96,6 +96,7 @@ import {
   enableBracketedPaste,
   disableBracketedPaste,
   stripPasteMarkers,
+  stripAllPasteMarkers,
   isCompletePaste,
   hasPasteMarkers,
 } from './bracketedPaste';
@@ -2980,6 +2981,9 @@ export class ChatSession implements ChatSessionLike {
       raw = stripped;
     }
 
+    // v4.12.1 — belt-and-braces: remove ANY residual bracketed-paste marker
+    // (embedded / partial), so no path ever surfaces a literal [200~/[201~.
+    raw = stripAllPasteMarkers(raw);
     raw = raw.replace(/\r/g, '');
 
     // Multi-line via leading """.

@@ -19,6 +19,51 @@ function cbs() {
   return { onLine: vi.fn(), onEscape: vi.fn(), onCtrlC: vi.fn() };
 }
 const key = (name: string, extra: Record<string, unknown> = {}) => ({ name, ...extra });
+const PASTE_BEGIN = '\x1b[200~';
+const PASTE_END = '\x1b[201~';
+
+describe('makeKeypressHandler — bracketed paste is stripped, not leaked', () => {
+  it('paste-marker keypresses are skipped (no literal [200~ / [201~ in the line)', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    h(PASTE_BEGIN, { sequence: PASTE_BEGIN });        // begin marker as a keypress seq
+    for (const ch of 'pasted') h(ch, key(ch));
+    h(PASTE_END, { sequence: PASTE_END });            // end marker
+    h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenCalledWith('pasted');
+  });
+
+  it('a multi-char paste BURST is accepted, embedded markers stripped', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    // readline can deliver the whole paste as one str incl. the markers.
+    h(`${PASTE_BEGIN}npm run build${PASTE_END}`, { sequence: `${PASTE_BEGIN}npm run build${PASTE_END}` });
+    h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenCalledWith('npm run build');
+  });
+
+  it('a newline INSIDE a paste is literal text, not a submit', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    h(PASTE_BEGIN, { sequence: PASTE_BEGIN });
+    for (const ch of 'line1') h(ch, key(ch));
+    h('\r', key('return'));                            // Enter during paste → literal \n
+    for (const ch of 'line2') h(ch, key(ch));
+    expect(cb.onLine).not.toHaveBeenCalled();          // did NOT submit mid-paste
+    h(PASTE_END, { sequence: PASTE_END });
+    h(undefined, key('return'));                       // real Enter submits
+    expect(cb.onLine).toHaveBeenCalledWith('line1\nline2');
+  });
+
+  it('a CSI sequence (arrow) is NOT mistaken for a cancel; only a BARE esc cancels', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    h(undefined, { name: 'escape', sequence: '\x1b[A' });  // arrow-up (CSI) — not cancel
+    expect(cb.onEscape).not.toHaveBeenCalled();
+    h(undefined, { name: 'escape', sequence: '\x1b' });    // bare ESC — cancel
+    expect(cb.onEscape).toHaveBeenCalledOnce();
+  });
+});
 
 describe('makeKeypressHandler — line buffer + key routing', () => {
   it('accumulates printable chars, Enter flushes the line', () => {

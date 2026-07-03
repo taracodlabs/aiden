@@ -66,6 +66,21 @@ export function stripPasteMarkers(raw: string): string {
 }
 
 /**
+ * Regex form: remove EVERY bracketed-paste marker (`\x1b[200~` / `\x1b[201~`)
+ * anywhere in the string — not just at the boundaries. This is the robust
+ * strip for STREAMED / char-by-char input (the during-turn raw-mode listener),
+ * where markers can arrive as a lone keypress sequence or embedded in a paste
+ * burst. `stripPasteMarkers` above stays the boundary-aware form used by the
+ * whole-line prompt path. One shared module — both paths strip here.
+ */
+// eslint-disable-next-line no-control-regex
+const PASTE_MARKER_RE = /\x1b\[20[01]~/g;
+export function stripAllPasteMarkers(raw: string): string {
+  if (typeof raw !== 'string' || raw.length === 0) return raw;
+  return raw.replace(PASTE_MARKER_RE, '');
+}
+
+/**
  * Detect bracketed paste markers anywhere inside `raw` (not just at the
  * boundaries). Useful for diagnosing partial / interleaved sequences.
  */

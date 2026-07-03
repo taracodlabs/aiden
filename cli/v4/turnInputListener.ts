@@ -24,6 +24,8 @@
  * input, CI) so it can never corrupt a non-interactive terminal.
  */
 
+import { PASTE_BEGIN, PASTE_END, stripAllPasteMarkers } from './bracketedPaste';
+
 export interface TurnKey {
   name?:     string;
   ctrl?:     boolean;
@@ -49,23 +51,44 @@ const NAV_KEYS = new Set([
 /**
  * Build the keypress handler over a private line buffer. Pure — no I/O; drive
  * it with synthetic `(str, key)` in tests exactly as `readline` emits.
+ *
+ * v4.12.1 — bracketed-paste safe. When paste mode is on, the terminal wraps a
+ * paste in `\x1b[200~`…`\x1b[201~`. Those markers must never leak into the
+ * buffer (the literal `[200~` bug) nor be mis-read as a bare ESC (which would
+ * cancel the turn). We: (1) skip paste-marker keypresses + set a `pasting`
+ * flag; (2) only treat `escape` as cancel for a BARE ESC (`\x1b`), not a CSI
+ * like `\x1b[200~` or an arrow; (3) accept multi-char paste bursts, stripping
+ * any embedded markers + control chars; (4) while pasting, a newline is
+ * literal text, not a submit.
  */
 export function makeKeypressHandler(cb: TurnInputCallbacks): (str: string | undefined, key: TurnKey) => void {
   let buffer = '';
+  let pasting = false;
   return (str, key) => {
     const k = key ?? {};
-    if (k.ctrl && k.name === 'c') { buffer = ''; cb.onCtrlC(); return; }
-    if (k.name === 'escape')       { buffer = ''; cb.onEscape(); return; }
+    const seq = k.sequence ?? '';
+    // ── bracketed-paste markers — never keys; toggle the paste state ────────
+    if (seq === PASTE_BEGIN || k.name === 'paste-start') { pasting = true;  return; }
+    if (seq === PASTE_END   || k.name === 'paste-end')   { pasting = false; return; }
+
+    if (k.ctrl && k.name === 'c') { buffer = ''; pasting = false; cb.onCtrlC(); return; }
+    // Only a BARE ESC cancels — a CSI sequence (paste marker, arrow) does not.
+    if (k.name === 'escape' && (seq === '\x1b' || seq === '')) { buffer = ''; pasting = false; cb.onEscape(); return; }
     if (k.name === 'return' || k.name === 'enter') {
-      const line = buffer; buffer = ''; cb.onLine(line); return;
+      if (pasting) { buffer += '\n'; return; }        // newline inside a paste is literal
+      const line = stripAllPasteMarkers(buffer); buffer = ''; cb.onLine(line); return;
     }
     if (k.name === 'backspace')    { buffer = buffer.slice(0, -1); return; }
-    // Ignore every other control / navigation / modified key.
-    if (k.ctrl || k.meta) return;
+    // Ignore control / navigation / modified keys (but NOT a paste burst,
+    // which has no key.name and a multi-char str).
+    if ((k.ctrl || k.meta) && !(typeof str === 'string' && str.length > 1)) return;
     if (k.name && NAV_KEYS.has(k.name)) return;
-    // Accept a single printable character.
-    if (typeof str === 'string' && str.length === 1 && str >= ' ' && str !== '\x7f') {
-      buffer += str;
+    // Printable content — a single char OR a paste burst. Strip any embedded
+    // paste markers, drop control chars, keep the rest (incl. spaces/newlines).
+    if (typeof str === 'string' && str.length > 0) {
+      // eslint-disable-next-line no-control-regex
+      const clean = stripAllPasteMarkers(str).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+      if (clean.length > 0) buffer += clean;
     }
   };
 }

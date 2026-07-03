@@ -6,10 +6,27 @@ import {
   PASTE_DISABLE,
   isCompletePaste,
   stripPasteMarkers,
+  stripAllPasteMarkers,
   hasPasteMarkers,
   enableBracketedPaste,
   disableBracketedPaste,
 } from '../../../cli/v4/bracketedPaste';
+
+describe('stripAllPasteMarkers — remove markers ANYWHERE (streamed input)', () => {
+  it('strips boundary markers', () => {
+    expect(stripAllPasteMarkers(`${PASTE_BEGIN}hello${PASTE_END}`)).toBe('hello');
+  });
+  it('strips EMBEDDED / partial markers (mid-string, only begin, only end)', () => {
+    expect(stripAllPasteMarkers(`a${PASTE_BEGIN}b${PASTE_END}c`)).toBe('abc');
+    expect(stripAllPasteMarkers(`${PASTE_BEGIN}only begin`)).toBe('only begin');
+    expect(stripAllPasteMarkers(`only end${PASTE_END}`)).toBe('only end');
+    expect(stripAllPasteMarkers(`${PASTE_BEGIN}${PASTE_END}`)).toBe('');
+  });
+  it('leaves clean text untouched (idempotent)', () => {
+    expect(stripAllPasteMarkers('plain text, no markers')).toBe('plain text, no markers');
+    expect(stripAllPasteMarkers('')).toBe('');
+  });
+});
 
 describe('bracketedPaste', () => {
   it('isCompletePaste matches a full payload', () => {
