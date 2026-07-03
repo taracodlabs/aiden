@@ -1,0 +1,128 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
+ * v4.12.1 Pillar 4 Slice 2a — the during-turn keypress source: the pure key
+ * handler + the attach/detach lifecycle (raw-mode set + CLEAN restore).
+ */
+import { describe, it, expect, vi } from 'vitest';
+import {
+  makeKeypressHandler,
+  attachTurnInputListener,
+  type RawStdinLike,
+} from '../../../cli/v4/turnInputListener';
+
+function cbs() {
+  return { onLine: vi.fn(), onEscape: vi.fn(), onCtrlC: vi.fn() };
+}
+const key = (name: string, extra: Record<string, unknown> = {}) => ({ name, ...extra });
+
+describe('makeKeypressHandler — line buffer + key routing', () => {
+  it('accumulates printable chars, Enter flushes the line', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    for (const ch of 'hi there') h(ch, key(ch === ' ' ? 'space' : ch));
+    h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenCalledWith('hi there');
+    // buffer resets after Enter.
+    h('x', key('x')); h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenLastCalledWith('x');
+  });
+
+  it('esc fires onEscape and DISCARDS the buffer', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    h('a', key('a')); h('b', key('b'));
+    h(undefined, key('escape'));
+    expect(cb.onEscape).toHaveBeenCalledOnce();
+    h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenCalledWith('');   // buffer was cleared by esc
+  });
+
+  it('Ctrl+C routes to onCtrlC (raw mode suppresses the kernel signal)', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    h('c', key('c', { ctrl: true }));
+    expect(cb.onCtrlC).toHaveBeenCalledOnce();
+    expect(cb.onLine).not.toHaveBeenCalled();
+  });
+
+  it('backspace edits the buffer; nav / modified keys are ignored', () => {
+    const cb = cbs();
+    const h = makeKeypressHandler(cb);
+    for (const ch of 'abc') h(ch, key(ch));
+    h(undefined, key('backspace'));               // -> 'ab'
+    h(undefined, key('up'));                       // ignored
+    h(undefined, key('left'));                     // ignored
+    h('z', key('z', { meta: true }));              // modified — ignored
+    h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenCalledWith('ab');
+  });
+});
+
+// ── attach/detach lifecycle with a fake stdin ────────────────────────────────
+
+function fakeStdin(over: Partial<RawStdinLike> = {}): RawStdinLike & { rawState: boolean; listeners: number } {
+  const state = { rawState: false, listeners: 0 };
+  const stdin: any = {
+    isTTY: true,
+    get isRaw() { return state.rawState; },
+    setRawMode: vi.fn((m: boolean) => { state.rawState = m; }),
+    on: vi.fn(() => { state.listeners += 1; }),
+    removeListener: vi.fn(() => { state.listeners -= 1; }),
+    ...over,
+  };
+  Object.defineProperty(stdin, 'rawState', { get: () => state.rawState });
+  Object.defineProperty(stdin, 'listeners', { get: () => state.listeners });
+  return stdin;
+}
+
+describe('attachTurnInputListener — lifecycle', () => {
+  it('non-TTY stdin → no-op (never touches raw mode)', () => {
+    const stdin = fakeStdin({ isTTY: false });
+    const detach = attachTurnInputListener({ cb: cbs(), stdin, emitKeypressEvents: vi.fn(), onProcessExit: vi.fn(), offProcessExit: vi.fn() });
+    expect(stdin.setRawMode).not.toHaveBeenCalled();
+    expect(() => detach()).not.toThrow();
+  });
+
+  it('TTY: sets raw mode + attaches, detach restores prior mode + removes listener', () => {
+    const stdin = fakeStdin();                     // starts non-raw
+    const emit = vi.fn();
+    const detach = attachTurnInputListener({ cb: cbs(), stdin, emitKeypressEvents: emit, onProcessExit: vi.fn(), offProcessExit: vi.fn() });
+    expect(emit).toHaveBeenCalledWith(stdin);
+    expect(stdin.setRawMode).toHaveBeenCalledWith(true);
+    expect(stdin.rawState).toBe(true);
+    expect(stdin.listeners).toBe(1);
+    detach();
+    expect(stdin.rawState).toBe(false);            // restored to prior (non-raw)
+    expect(stdin.listeners).toBe(0);
+  });
+
+  it('detach is idempotent; a process-exit hook is registered + removed', () => {
+    const stdin = fakeStdin();
+    let exitFn: (() => void) | null = null;
+    const onExit = vi.fn((fn: () => void) => { exitFn = fn; });
+    const offExit = vi.fn();
+    const detach = attachTurnInputListener({ cb: cbs(), stdin, emitKeypressEvents: vi.fn(), onProcessExit: onExit, offProcessExit: offExit });
+    expect(onExit).toHaveBeenCalledOnce();
+    // the exit hook restores raw mode (crash safety).
+    stdin.setRawMode!(true);
+    exitFn!();
+    expect(stdin.rawState).toBe(false);
+    detach();
+    detach();                                      // idempotent
+    expect(offExit).toHaveBeenCalledOnce();
+    expect(stdin.removeListener).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves a stdin that was ALREADY in raw mode', () => {
+    const stdin = fakeStdin();
+    stdin.setRawMode!(true);                        // already raw before attach
+    const detach = attachTurnInputListener({ cb: cbs(), stdin, emitKeypressEvents: vi.fn(), onProcessExit: vi.fn(), offProcessExit: vi.fn() });
+    detach();
+    expect(stdin.rawState).toBe(true);             // left as it found it (raw)
+  });
+});

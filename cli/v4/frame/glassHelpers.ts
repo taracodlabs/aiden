@@ -15,12 +15,27 @@
 
 // ── Action footer (interrupt hints) ──────────────────────────────────────────
 
-/** Render the footer of available actions. Only shown while a turn runs. */
-export function renderFooter(opts: { busy: boolean; activeSubagents: number }, width = 80): string {
+/**
+ * Render the footer of available actions. Only shown while a turn runs.
+ * v4.12.1 Slice 2a — surfaces the busy-Enter MODE and the type-next QUEUE
+ * count so the user always knows what Enter does and that queued input wasn't
+ * lost. `mode`/`queueCount` are optional for back-compat with Slice-1 callers.
+ */
+export function renderFooter(
+  opts: { busy: boolean; activeSubagents: number; mode?: 'queue' | 'interrupt'; queueCount?: number },
+  width = 80,
+): string {
   if (!opts.busy) return '';
-  const hints: string[] = ['esc = cancel turn'];
+  const hints: string[] = [];
+  // What Enter does right now (mode-dependent), then esc always cancels.
+  if (opts.mode === 'queue')      hints.push('enter = queue next');
+  else if (opts.mode === 'interrupt') hints.push('enter = cancel turn');
+  hints.push('esc = cancel turn');
   if (opts.activeSubagents > 0) {
     hints.push(`ctrl+k = cancel 1 of ${opts.activeSubagents} subagent${opts.activeSubagents === 1 ? '' : 's'}`);
+  }
+  if (opts.queueCount && opts.queueCount > 0) {
+    hints.push(`${opts.queueCount} queued`);
   }
   const line = hints.join('  ·  ');
   return line.length > width ? line.slice(0, Math.max(0, width - 1)) + '…' : line;

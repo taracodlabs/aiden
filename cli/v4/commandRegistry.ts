@@ -61,6 +61,15 @@ export interface ChatSessionLike {
    * null when there is no prior turn or the prompt is unrecoverable.
    */
   retryLastTurn?(): string | null;
+  // ── v4.12.1 Pillar 4 Slice 2a — type-next-while-busy surface ──────────────
+  /** Set what Enter does during a running turn: 'queue' | 'interrupt'. */
+  setBusyMode?(mode: 'queue' | 'interrupt'): void;
+  getBusyMode?(): 'queue' | 'interrupt';
+  /** The pending type-next queue (copy). */
+  listQueue?(): string[];
+  /** Empty the queue; returns how many were dropped. */
+  clearQueue?(): number;
+  queueCount?(): number;
 }
 
 /**

@@ -108,6 +108,10 @@ import { installResizeGuard } from './resizeGuard';
 // v4.10 Slice 10.2b — shared event taxonomy. UI tool name → (category, kind).
 import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { captureArtifactFromTrace } from '../../core/v4/daemon/artifactStore';
+// v4.12.1 Pillar 4 Slice 2a — type-next-while-busy.
+import { DuringTurnInput, type BusyEnterMode } from './duringTurnInput';
+import { attachTurnInputListener } from './turnInputListener';
+import { requestTurnCancel } from './frame/interruptControls';
 
 /**
  * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
@@ -619,6 +623,20 @@ export class ChatSession implements ChatSessionLike {
   private nextTurnId      = 0;
 
   /**
+   * v4.12.1 Pillar 4 Slice 2a — the during-turn input controller: owns the
+   * type-next queue + the busy-Enter mode. Fed by the raw-mode keypress
+   * listener attached for the duration of each turn.
+   */
+  private readonly duringTurnInput = new DuringTurnInput();
+
+  // ── Slice 2a public surface for /busy + /queue commands ──────────────────
+  setBusyMode(mode: BusyEnterMode): void { this.duringTurnInput.setMode(mode); }
+  getBusyMode(): BusyEnterMode { return this.duringTurnInput.getMode(); }
+  listQueue(): string[] { return this.duringTurnInput.peek(); }
+  clearQueue(): number { return this.duringTurnInput.clear(); }
+  queueCount(): number { return this.duringTurnInput.count(); }
+
+  /**
    * v4.11 Slice B — bounded per-turn history snapshot stack for /undo.
    * A copy of `history` is pushed at the start of each turn (capped at
    * UNDO_MAX_SNAPSHOTS, oldest dropped). In-memory only.
@@ -767,6 +785,9 @@ export class ChatSession implements ChatSessionLike {
       // (SIGTERM still routes here directly — no two-press semantics
       // for SIGTERM, which has no human-typing context to disambiguate).
       const gracefulShutdown = async (sig: SessionExitPath): Promise<void> => {
+        // v4.12.1 Slice 2a — a force-exit discards any type-next queue; the
+        // user is bailing out, so don't run queued messages after they leave.
+        try { this.duringTurnInput.clear(); } catch { /* best-effort */ }
         this.opts.display.write('\n');
         this.opts.display.dim(`Got ${sig.toUpperCase()} — saving session before exit…`);
         // v4.10 Slice 10.7 — stop channel adapters BEFORE the
@@ -959,6 +980,15 @@ export class ChatSession implements ChatSessionLike {
         // with a rule + blank, so suppress on the very first iteration.
         if (iter > 1) this.opts.display.printTurnSeparator();
         let input: string;
+        // v4.12.1 Slice 2a — idle boundary: run a message the user queued
+        // WHILE the previous turn was busy before blocking on fresh input.
+        // Echo it so a queued message never fires invisibly.
+        const queuedNext = this.duringTurnInput.dequeue();
+        if (queuedNext !== null) {
+          try { this.opts.display.dim(`▸ running queued: ${queuedNext}`); } catch { /* defensive */ }
+          input = queuedNext;
+          // Fall through to the slash/agent dispatch below with this input.
+        } else
         try {
           input = await this.readUserInput(promptApi);
         } catch (err) {
@@ -1556,6 +1586,27 @@ export class ChatSession implements ChatSessionLike {
     const turnAbort = new AbortController();
     this.currentAbortController = turnAbort;
     this.activeTurnId           = turnId;
+
+    // v4.12.1 Pillar 4 Slice 2a — attach the during-turn keypress listener for
+    // the life of this turn. Enter → queue (or cancel, per mode); esc → cancel
+    // this turn but KEEP the queue; Ctrl+C → the existing two-press SIGINT
+    // logic (raw mode suppresses the kernel signal, so we re-emit it). No-op on
+    // a non-TTY. Detached in the finally below (all paths) so raw mode is
+    // always restored.
+    const detachTurnInput = attachTurnInputListener({
+      cb: {
+        onLine: (text) => {
+          const act = this.duringTurnInput.onBusyEnter(text);
+          if (act.action === 'queued') {
+            try { this.opts.display.dim(`  ✓ queued (${act.count} pending) — runs after this turn`); } catch { /* defensive */ }
+          } else if (act.action === 'interrupt') {
+            requestTurnCancel(this.currentAbortController);
+          }
+        },
+        onEscape: () => { requestTurnCancel(this.currentAbortController); },   // cancel turn, keep queue
+        onCtrlC:  () => { try { (process as NodeJS.Process).emit('SIGINT'); } catch { /* defensive */ } },
+      },
+    });
     // Helper: wrap a callback so it only fires for the live turn.
     // R1 guard — late events from a cancelled turn early-return.
     // `wrapTurnId` accepts (callback, undefined) and returns
@@ -2497,6 +2548,9 @@ export class ChatSession implements ChatSessionLike {
         this.currentAbortController = null;
       }
       this.lastInterruptAt = 0;
+      // v4.12.1 Slice 2a — detach the during-turn listener + restore raw mode
+      // on EVERY exit path (success / error / abort / throw).
+      try { detachTurnInput(); } catch { /* defensive — never break turn teardown */ }
 
       // v4.11 Slice 1 — explicit streaming-handoff boundary, exit
       // side. Mirrors the pauseFrame at the top of runAgentTurn so

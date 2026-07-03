@@ -22,6 +22,17 @@ describe('renderFooter', () => {
     expect(f).toContain('esc = cancel turn');
     expect(f).toContain('ctrl+k = cancel 1 of 3 subagents');
   });
+
+  it('v4.12.1 Slice 2a — shows the busy-Enter mode + queue count', () => {
+    const q = renderFooter({ busy: true, activeSubagents: 0, mode: 'queue', queueCount: 2 });
+    expect(q).toContain('enter = queue next');
+    expect(q).toContain('esc = cancel turn');
+    expect(q).toContain('2 queued');
+
+    const i = renderFooter({ busy: true, activeSubagents: 0, mode: 'interrupt', queueCount: 0 });
+    expect(i).toContain('enter = cancel turn');
+    expect(i).not.toContain('queued');            // no queue count when 0
+  });
 });
 
 describe('formatNBehind', () => {
