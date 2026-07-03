@@ -22,7 +22,7 @@ export interface ComposerState {
   prompt: string;
 }
 
-/** Status lane — the pinned heartbeat row. */
+/** Status lane — the pinned heartbeat row + v4.12.1 glass status-bar fields. */
 export interface StatusState {
   /**
    * idle = no status row rendered. busy = "thinking… Ns" rendered.
@@ -36,6 +36,17 @@ export interface StatusState {
   sinceMs:  number | null;
   /** Most recent elapsed reading in seconds (driven by the heartbeat). */
   elapsedS: number;
+  // ── v4.12.1 Pillar 4 — pinned status-bar inputs (rendered via
+  //    statusBar.renderStatusBar; all default-safe so Slice-1 callers that
+  //    don't set them still get a valid bar). ─────────────────────────────
+  model:           string;
+  contextTokens:   number;
+  contextMax:      number | null;
+  activeSubagents: number;
+  cwd:             string;
+  pendingApproval: boolean;
+  /** Update segment ('v4.13 ↑') or null when up to date / unknown. */
+  nBehind:         string | null;
 }
 
 export interface FrameState {
@@ -46,7 +57,21 @@ export interface FrameState {
 export function makeInitialState(prompt: string): FrameState {
   return {
     composer: { value: '', cursor: 0, prompt },
-    status:   { phase: 'idle', verb: 'thinking', sinceMs: null, elapsedS: 0 },
+    status:   {
+      phase: 'idle', verb: 'thinking', sinceMs: null, elapsedS: 0,
+      model: '', contextTokens: 0, contextMax: null,
+      activeSubagents: 0, cwd: '', pendingApproval: false, nBehind: null,
+    },
+  };
+}
+
+/** Build the pure status-bar model from the status lane. */
+export function barModelFromStatus(s: StatusState): import('./statusBar').StatusBarModel {
+  return {
+    busy: s.phase === 'busy', verb: s.verb, elapsedS: s.elapsedS,
+    model: s.model, contextTokens: s.contextTokens, contextMax: s.contextMax,
+    activeSubagents: s.activeSubagents, cwd: s.cwd,
+    pendingApproval: s.pendingApproval, nBehind: s.nBehind,
   };
 }
 
@@ -63,7 +88,10 @@ export type FrameAction =
   | { type: 'composer/setCursor'; cursor: number }
   | { type: 'status/markBusy'; verb?: string; sinceMs: number }
   | { type: 'status/tick';     elapsedS: number }
-  | { type: 'status/reset' };
+  | { type: 'status/reset' }
+  // v4.12.1 Pillar 4 — patch any subset of the glass status-bar fields.
+  | { type: 'status/setBar'; patch: Partial<Pick<StatusState,
+      'model' | 'contextTokens' | 'contextMax' | 'activeSubagents' | 'cwd' | 'pendingApproval' | 'nBehind' | 'verb'>> };
 
 export function reducer(prev: FrameState, action: FrameAction): FrameState {
   switch (action.type) {
@@ -85,6 +113,7 @@ export function reducer(prev: FrameState, action: FrameAction): FrameState {
       return {
         ...prev,
         status: {
+          ...prev.status,           // preserve model / cwd / nBehind across turns
           phase:    'busy',
           verb:     action.verb ?? prev.status.verb,
           sinceMs:  action.sinceMs,
@@ -97,7 +126,19 @@ export function reducer(prev: FrameState, action: FrameAction): FrameState {
       return { ...prev, status: { ...prev.status, elapsedS: action.elapsedS } };
     }
     case 'status/reset': {
-      return { ...prev, status: { phase: 'idle', verb: prev.status.verb, sinceMs: null, elapsedS: 0 } };
+      // Reset the heartbeat + subagent count; PERSIST session-level bar fields
+      // (model / cwd / nBehind) across turns so the bar stays populated idle.
+      return {
+        ...prev,
+        status: {
+          ...prev.status,
+          phase: 'idle', sinceMs: null, elapsedS: 0,
+          activeSubagents: 0, pendingApproval: false,
+        },
+      };
+    }
+    case 'status/setBar': {
+      return { ...prev, status: { ...prev.status, ...action.patch } };
     }
     default: {
       return prev;

@@ -84,6 +84,15 @@ export function categorizeEvent(name: string): EventTags {
 
     // ── Trigger-event delivery ─────────────────────────────────────
     case 'delivered':            return { category: 'dispatcher', kind: 'dispatcher.delivered' };
+
+    // ── v4.12.1 Pillar 4 Slice 1 — the Pillar 1/2/3 surfaces as events,
+    //    so the glass dashboard renders ONE stream (no DB round-trip; these
+    //    fire through the same live onUiEvent / emitEventRich seam). ────────
+    case 'artifact_verified':    return { category: 'artifact',   kind: 'artifact.verified' };        // Pillar 3 verdict
+    case 'needs_confirmation':   return { category: 'approval',   kind: 'approval.needs_confirmation' }; // Pillar 1 ledger
+    case 'autonomy_changed':     return { category: 'status',     kind: 'status.autonomy' };           // Pillar 2 dial
+    case 'subagent_escalation':  return { category: 'subagent',   kind: 'subagent.escalation' };       // Pillar 2/3 escalate-to-parent
+    case 'cost_updated':         return { category: 'status',     kind: 'status.cost' };               // throttled cost tick
   }
 
   // Subagent child events from childBuilder.ts — both names share a

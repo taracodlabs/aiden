@@ -28,8 +28,9 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const React = require('react') as typeof import('react');
 
-import { type StatusState } from './state';
+import { type StatusState, barModelFromStatus } from './state';
 import { type InkComponents } from './composer';
+import { renderStatusBar } from './statusBar';
 
 /** Build the status component bound to the supplied Ink primitives. */
 export function makeStatus(ink: InkComponents): React.ComponentType<{
@@ -40,6 +41,12 @@ export function makeStatus(ink: InkComponents): React.ComponentType<{
   function Status(props: { status: StatusState }): React.ReactElement | null {
     const { status } = props;
     if (status.phase !== 'busy') return null;
+    // v4.12.1 Pillar 4 — the pinned glass status bar. Rendered as ONE
+    // width-budgeted line via the pure renderStatusBar (the frame renderer
+    // owns the paint; no ad-hoc ANSI). Falls back gracefully when the
+    // bar fields are unset (Slice-1 callers) — model/ctx just show empty/0.
+    const width = (process.stdout && process.stdout.columns) ? process.stdout.columns : 80;
+    const bar = renderStatusBar(barModelFromStatus(status), Math.max(20, width - 2));
     return React.createElement(
       Box,
       // marginTop: 1 inserts a blank row between the composer's
@@ -55,7 +62,7 @@ export function makeStatus(ink: InkComponents): React.ComponentType<{
       React.createElement(
         Text,
         { dimColor: true },
-        `${status.verb}… ${status.elapsedS}s`,
+        bar,
       ),
     );
   }

@@ -52,11 +52,17 @@ describe('frame source-contract guard', () => {
     const files = readdirSync(FRAME_DIR).filter((f) => f.endsWith('.ts') || f.endsWith('.tsx'));
     expect(files.sort()).toEqual([
       'composer.ts',
+      // v4.12.1 Pillar 4 Slice 1 — pure glass-dashboard models (no stdout/ANSI;
+      // the frame renderer paints them; the driver-only contract still holds).
+      'glassHelpers.ts',
       'index.ts',
+      'interruptControls.ts',
       'runtime.ts',
       'state.ts',
       'status.ts',
+      'statusBar.ts',
       'terminalDriver.ts',
+      'toolRowModel.ts',
     ]);
   });
 

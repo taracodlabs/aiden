@@ -35,6 +35,7 @@ import type { ChildBuilderDeps } from './childBuilder';
 // verdict system.
 import type { TaskEvidence } from '../taskVerification';
 import { deriveSubagentEvidence, type ProofHandle } from './evidenceRecheck';
+import { emitPillarEvent } from '../pillarEvents';
 // v4.9.0 Slice 7 — fork ExecutionContext into the child agent.
 import { currentContext, runWithContext, childSpan } from '../identity';
 import type { RunStore } from '../daemon/runStore';
@@ -250,7 +251,17 @@ export async function spawnSubAgent(
         childRunId,
         logger,
         // Pillar 2 — record every escalation, then forward to any caller sink.
-        onEscalate: (e) => { escalations.push({ tool: e.tool, reason: e.reason }); deps.onEscalate?.(e); },
+        // Pillar 4 — also emit it as a live `subagent_escalation` event so the
+        // glass dashboard sees the escalate-to-parent moment on the one stream.
+        onEscalate: (e) => {
+          escalations.push({ tool: e.tool, reason: e.reason });
+          emitPillarEvent(
+            { runStore: deps.runStore as unknown as { emitEventRich(o: Record<string, unknown>): number }, runId: Number(childRunId) },
+            'subagent_escalation',
+            { tool: e.tool, reason: e.reason ?? null, childRunId: String(childRunId) },
+          );
+          deps.onEscalate?.(e);
+        },
       },
       {
         sessionId:         childSessionId,

@@ -34,6 +34,35 @@ function toolResult(toolCallId: string, content = 'ok'): Message {
 const SYSTEM: Message = { role: 'system', content: 'you are aiden' };
 const USER:   Message = { role: 'user',   content: 'do a thing' };
 
+// ── v4.12.1 Pillar 4 Slice 1 — interrupt leaves a VALID transcript ──────
+//
+// Mirrors the aidenAgent abort path: on a mid-batch cancel, the call being
+// dispatched gets an 'interrupted' result and every remaining call gets a
+// 'skipped' result — so an interrupted turn never leaves a tool_call without
+// a matching tool_result (which would provider-error the NEXT turn).
+describe('interrupt mid-batch → every tool_call still gets a result', () => {
+  it('a 3-call batch cancelled at index 1 leaves zero orphans', () => {
+    const calls: ToolCallRequest[] = [
+      { id: 'c0', name: 'file_read',  arguments: {} },
+      { id: 'c1', name: 'file_write', arguments: {} },
+      { id: 'c2', name: 'shell_exec', arguments: {} },
+    ];
+    // c0 already ran; the user aborts as c1 is about to dispatch.
+    const buf: Message[] = [toolResult('c0')];
+    buf.push(synthesizeBlockedToolResult(calls[1], 'cancelled', { variant: 'interrupted' }));
+    fillRemainingAsBlocked(buf, calls, 2, 'cancelled', 'skipped');
+
+    const history: Message[] = [
+      USER,
+      asst('a', calls.map((c) => ({ id: c.id, name: c.name }))),
+      ...buf,
+    ];
+    // Every tool_call id has a matching tool_result → no OrphanToolCallError.
+    expect(() => assertNoUnansweredToolCalls(history)).not.toThrow();
+    expect(buf.map((m) => m.toolCallId).sort()).toEqual(['c0', 'c1', 'c2']);
+  });
+});
+
 // ── assertNoUnansweredToolCalls ───────────────────────────────────────
 
 describe('assertNoUnansweredToolCalls — clean cases (no throw)', () => {
