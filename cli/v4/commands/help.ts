@@ -77,6 +77,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   skills: 'System',
   quit: 'System',
   yolo: 'System',
+  // v4.12.1 Pillar 2 — the autonomy dial (Observer | Assistant | Partner).
+  autonomy: 'System',
   usage: 'System',
   cron: 'System',
   setup: 'System',

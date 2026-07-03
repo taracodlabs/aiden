@@ -437,7 +437,11 @@ export class ToolRegistry {
           toolName: call.name,
           category: handler.category,
           args,
-          riskTier,
+          // v4.12.1 Pillar 2 — pass the EFFECTIVE tier (handler-declared floor
+          // OR classifier escalation) so the autonomy gate + smart mode see a
+          // tool's real risk (e.g. file_delete → 'dangerous' always asks),
+          // not just classifier-flagged shell/browser tiers.
+          riskTier: effectiveTier,
           reason,
           preview,
           // v4.10 Slice 10.6 — pass through fine-grained effects when

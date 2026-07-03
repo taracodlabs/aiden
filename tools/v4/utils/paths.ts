@@ -30,6 +30,10 @@ const DENY_PATTERNS: RegExp[] = [
   /\.key$/i,
   /id_rsa\b/i,
   /id_ed25519\b/i,
+  // v4.12.1 Pillar 2 — Aiden's own autonomy policy file. The agent must not
+  // be able to rewrite its own approval policy to bypass the gate. (The
+  // ApprovalEngine hard-block also covers this + the shell back-door.)
+  /[\\/]aiden[\\/](?:[^\\/]*[\\/])?config\.ya?ml$/i,
 ];
 
 export function isProtectedPath(p: string): boolean {

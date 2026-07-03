@@ -123,6 +123,12 @@ export interface SubAgentResult {
   reasoningOnly: boolean;
   /** The concrete proof handles that survived the parent-side re-check. */
   handles: ProofHandle[];
+  /**
+   * v4.12.1 Pillar 2 — mutating ops the child ESCALATED to the parent
+   * (destructive / external / out-of-scope) instead of running them. Empty
+   * for a child that only did in-scope work. The parent decides on these.
+   */
+  escalations: Array<{ tool: string; reason?: string }>;
 }
 
 /** Dependencies the spawn primitive needs to do its job. */
@@ -227,6 +233,9 @@ export async function spawnSubAgent(
 
   // ── 3. Build child agent ────────────────────────────────────────────────
   const logger = deps.logger ?? noopLogger();
+  // v4.12.1 Pillar 2 — collect escalations the child raised to the parent
+  // (destructive / external / out-of-scope ops it refused to run itself).
+  const escalations: Array<{ tool: string; reason?: string }> = [];
   let agentBundle: ReturnType<typeof buildChildAgent>;
   try {
     agentBundle = buildChildAgent(
@@ -240,6 +249,8 @@ export async function spawnSubAgent(
         runStore:    deps.runStore,
         childRunId,
         logger,
+        // Pillar 2 — record every escalation, then forward to any caller sink.
+        onEscalate: (e) => { escalations.push({ tool: e.tool, reason: e.reason }); deps.onEscalate?.(e); },
       },
       {
         sessionId:         childSessionId,
@@ -274,6 +285,7 @@ export async function spawnSubAgent(
         verified:       false,
         reasoningOnly:  false,
         handles:        [],
+        escalations:    [],
       };
     }
     deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'error' });
@@ -479,6 +491,7 @@ export async function spawnSubAgent(
     verified,
     reasoningOnly,
     handles,
+    escalations,
   };
 }
 
@@ -523,5 +536,6 @@ function failureEnvelope(opts: {
     verified:       false,
     reasoningOnly:  false,
     handles:        [],
+    escalations:    [],
   };
 }

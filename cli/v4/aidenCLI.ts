@@ -59,7 +59,8 @@ import {
 } from '../../core/v4/paths';
 import { ensureSoulMdSeeded } from '../../core/v4/soulSeed';
 import { setVisionProvider } from '../../core/v4/visionClient';
-import { ConfigManager } from '../../core/v4/config';
+import { ConfigManager, resolveConfiguredAutonomyLevel } from '../../core/v4/config';
+import { resolveAutonomyPolicy, type AutonomyLevel } from '../../moat/autonomy';
 import { SessionStore } from '../../core/v4/sessionStore';
 import { SessionManager } from '../../core/v4/sessionManager';
 import { ToolRegistry } from '../../core/v4/toolRegistry';
@@ -1579,6 +1580,18 @@ export async function buildAgentRuntime(
     // 'safe' and auto-allow it (and is a network hop in a headless path).
     // `--yolo` (mode 'off' above) remains the explicit opt-in to run tools.
     approvalEngine.setMode('manual', { userInitiated: true });
+  }
+  // ★ v4.12.1 Pillar 2 — install the autonomy policy for the INTERACTIVE
+  // session (the dial). Skipped for --yolo (mode 'off' short-circuits the
+  // policy anyway) and for headless -q (its manual+deny floor is preserved
+  // exactly). The workspace root is the cwd — Partner auto-allows writes
+  // under it; everything else asks. Set BEFORE freeze so it's the boot
+  // default; `/autonomy` changes it post-freeze via userInitiated.
+  if (!cliOpts.yolo && !headless) {
+    const level = resolveConfiguredAutonomyLevel(config);
+    approvalEngine.setAutonomyPolicy(
+      resolveAutonomyPolicy(level, { workspaceRoots: [process.cwd()] }),
+    );
   }
   // ★ v4.12 SH.1 — freeze the mode once boot-time setup (config default +
   // --yolo) is done. From here, only user-initiated /yolo may flip it; a held

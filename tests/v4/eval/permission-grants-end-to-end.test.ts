@@ -128,7 +128,9 @@ describe('permission-grants-end-to-end — onDecision audit symmetry (Slice 10.6
   it('off mode short-circuits + still fires onDecision with `allow`', async () => {
     const onDecision = vi.fn();
     const engine = new ApprovalEngine('off', { onDecision });
-    const ok = await engine.checkApproval(writeReq({ args: { command: 'rm -rf /' } }));
+    // v4.12.1 — a NON-catastrophic command; off auto-allows it. (The hard-block
+    // floor denies `rm -rf /` even at off — covered in approvalEngine.test.ts.)
+    const ok = await engine.checkApproval(writeReq({ args: { command: 'ls -la' } }));
     expect(ok).toBe(true);
     expect(onDecision).toHaveBeenCalledWith(expect.any(Object), 'allow');
   });

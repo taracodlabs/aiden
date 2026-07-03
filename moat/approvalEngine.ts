@@ -29,7 +29,22 @@
  * heartbeat/HTTP approval surface yet; that lands in Phase 14-15 TUI).
  *
  * Status: PHASE 9.
+ *
+ * v4.12.1 Pillar 2 — the autonomy dial layers ON TOP of these modes: when a
+ * resolved `AutonomyPolicy` is installed, the mutating-path decision routes
+ * through `decideAutonomy` (the generalised tier-gate) instead of the raw
+ * mode logic. A universal `matchesHardBlock` floor runs BEFORE the mode/yolo
+ * short-circuit — catastrophic ops are denied even at --yolo.
  */
+
+// Type-only back-edge (ApprovalRequest/RiskTier) is erased at runtime, so
+// this value import creates no runtime cycle.
+import {
+  matchesHardBlock,
+  decideAutonomy,
+  levelRank,
+  type AutonomyPolicy,
+} from './autonomy';
 
 export type ApprovalMode = 'manual' | 'smart' | 'off';
 export type ApprovalDecision =
@@ -276,6 +291,18 @@ export class ApprovalEngine {
    * compromised code path) from silently disabling approvals.
    */
   private frozen = false;
+  /**
+   * v4.12.1 Pillar 2 — the installed autonomy policy. When set, the
+   * mutating-path decision routes through `decideAutonomy`. Opt-in: when
+   * undefined, the legacy mode logic (smart/manual/off) is unchanged.
+   */
+  private autonomyPolicy?: AutonomyPolicy;
+  /**
+   * v4.12.1 Pillar 2 — true for a subagent's engine. A child cannot prompt,
+   * so an `ask` outcome ESCALATES to the parent (via promptUser, which the
+   * child wires to record+deny) rather than a silent deny.
+   */
+  private subagent = false;
 
   constructor(
     private mode: ApprovalMode = 'manual',
@@ -323,6 +350,36 @@ export class ApprovalEngine {
 
   getMode(): ApprovalMode {
     return this.mode;
+  }
+
+  /**
+   * v4.12.1 Pillar 2 — install the resolved autonomy policy. Mirrors SH.1's
+   * frozen-approval discipline: after `freeze()`, a change is honoured only
+   * when `userInitiated` (the `/autonomy` command), OR when it TIGHTENS the
+   * level (lower rank) — in-process / prompt-injected code can never RAISE
+   * autonomy. Returns whether the policy was applied.
+   */
+  setAutonomyPolicy(policy: AutonomyPolicy, opts?: { userInitiated?: boolean }): boolean {
+    if (this.frozen && !opts?.userInitiated) {
+      const current = this.autonomyPolicy;
+      // Non-user callers may only tighten (never raise the level).
+      if (current && levelRank(policy.level) > levelRank(current.level)) return false;
+    }
+    this.autonomyPolicy = policy;
+    return true;
+  }
+
+  getAutonomyPolicy(): AutonomyPolicy | undefined {
+    return this.autonomyPolicy;
+  }
+
+  /** Mark this engine as a subagent's — `ask` becomes escalate-to-parent. */
+  markSubagent(): void {
+    this.subagent = true;
+  }
+
+  isSubagentEngine(): boolean {
+    return this.subagent;
   }
 
   allowForSession(toolName: string, signature: string): void {
@@ -446,12 +503,25 @@ export class ApprovalEngine {
     // Read-category short-circuits below; we still fire so observers
     // see ALL approval requests (not just the ones that prompt).
     this.callbacks.onRequested?.(req);
+
+    // ★ v4.12.1 Pillar 2 — HARD-BLOCK FLOOR. Catastrophic, no-recovery ops
+    // (wipe root/home, mkfs, dd-to-device, fork bomb, shutdown, kill-all,
+    // sudo-password-pipe) AND any attempt to rewrite Aiden's own autonomy
+    // policy file are denied at EVERY level — before the read/off/allowlist
+    // short-circuits, so NOT even --yolo or a recorded allowlist entry can
+    // bypass them.
+    const hb = matchesHardBlock(req);
+    if (hb.blocked) {
+      this.callbacks.onDecision?.({ ...req, reason: hb.reason }, 'deny');
+      return false;
+    }
+
     if (req.category === 'read') {
       this.callbacks.onDecision?.(req, 'allow');
       return true;
     }
 
-    // YOLO mode: auto-allow but log.
+    // YOLO mode: auto-allow but log. (Hard-block already caught catastrophes.)
     if (this.mode === 'off') {
       this.callbacks.onDecision?.(req, 'allow');
       return true;
@@ -479,16 +549,35 @@ export class ApprovalEngine {
       return true;
     }
 
-    // Phase 16f: in smart mode, consult the built-in policy before any
-    // prompt or LLM call. Built-in safe tools / safe domains short-circuit
-    // here; this is the bulk of the UX win — most calls in a normal
-    // session match one of these patterns and never prompt.
-    if (this.mode === 'smart' && this.matchesBuiltinSafePolicy(req)) {
+    // Phase 16f / v4.12.1: built-in safe policy short-circuit — reads,
+    // memory, known-safe fetches auto-allow (applies under smart mode AND
+    // when an autonomy policy is installed; both treat these as safe).
+    if ((this.mode === 'smart' || this.autonomyPolicy) && this.matchesBuiltinSafePolicy(req)) {
       this.callbacks.onDecision?.(req, 'allow');
       return true;
     }
 
-    if (this.mode === 'smart') {
+    // ★ v4.12.1 Pillar 2 — autonomy dial. When a policy is installed it is
+    // the authority for the mutating decision (the generalised tier-gate).
+    // allow → run; deny → block; ask → fall through to the shared prompt path
+    // below (which for a subagent's engine is wired to escalate to the parent).
+    if (this.autonomyPolicy) {
+      const decision = decideAutonomy(this.autonomyPolicy, req);
+      if (decision === 'allow') {
+        this.callbacks.onDecision?.(req, 'allow');
+        return true;
+      }
+      if (decision === 'deny') {
+        this.callbacks.onDecision?.(req, 'deny');
+        return false;
+      }
+      // 'ask' → normalise the tier and fall through to the shared prompt path.
+      req = { ...req, riskTier: req.riskTier ?? 'caution' };
+    }
+
+    // Legacy smart-mode tier logic — skipped entirely when a dial policy is
+    // installed (the policy is the authority above).
+    if (!this.autonomyPolicy && this.mode === 'smart') {
       // Smart mode: trust the pre-flagged tier, otherwise ask the LLM.
       // Phase 16f: when neither a pre-flagged tier nor a riskAssess callback
       // is available, the call did NOT match BUILTIN_SAFE_TOOLS or the

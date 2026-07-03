@@ -31,6 +31,7 @@
 
 import type { ApprovalCallbacks } from '../../../moat/approvalEngine';
 import { ApprovalEngine } from '../../../moat/approvalEngine';
+import { resolveAutonomyPolicy, type AutonomyLevel } from '../../../moat/autonomy';
 import { HonestyEnforcement } from '../../../moat/honestyEnforcement';
 import { AidenAgent } from '../aidenAgent';
 import type { AidenAgentOptions, ToolExecutor } from '../aidenAgent';
@@ -56,11 +57,16 @@ import type { Logger } from '../logger/logger';
  *   - `send_message`    — no cross-platform side effects from a child
  */
 export const SUBAGENT_BLOCKED_TOOL_NAMES: ReadonlySet<string> = new Set([
-  'spawn_sub_agent',
-  'clarify',
-  'memory',
-  'execute_code',
-  'send_message',
+  // v4.12.1 Pillar 2 — least-privilege default. A child inherits the parent's
+  // level MINUS these tool CLASSES (the reference agent's explicit rule):
+  'spawn_sub_agent',   // delegation
+  'clarify',           // user-contact
+  'send_message',      // user-contact / external side-effect
+  'memory',            // memory-write
+  'memory_add', 'memory_replace', 'memory_remove',
+  'execute_code',      // arbitrary background code
+  'process_spawn',     // background / long-running
+  'cronjob',           // background / scheduled
 ]);
 
 // ── Public types ────────────────────────────────────────────────────────────
@@ -139,6 +145,23 @@ export interface ChildBuilderDeps {
    * (the `full` profile), via getSchemas' excludeToolsets param.
    */
   parentExcludeToolsets?: readonly string[];
+  /**
+   * v4.12.1 Pillar 2 — the parent's autonomy level. The child inherits it
+   * (minus least-privilege removals) instead of the old hardcoded deny-all.
+   * At Assistant+ the child auto-allows write-under-workspace (produces a
+   * Pillar-3 evidence handle) and escalates destructive/out-of-scope to the
+   * parent. Observer children stay read-only. Defaults to 'Assistant' (the
+   * safe floor) when omitted.
+   */
+  parentAutonomyLevel?: AutonomyLevel;
+  /**
+   * v4.12.1 Pillar 2 — escalation sink. Fired when the child's policy says a
+   * mutating op needs the PARENT's confirmation (destructive / external /
+   * out-of-scope). The op does NOT run; the parent records the escalation and
+   * decides. Reuses the Pillar-1 needs_confirmation posture: never a silent
+   * deny.
+   */
+  onEscalate?: (e: { tool: string; reason?: string; args: Record<string, unknown> }) => void;
 }
 
 /** One spawn's parameters, validated by the tool wrapper. */
@@ -204,14 +227,32 @@ export function buildChildAgent(
   deps: ChildBuilderDeps,
   input: ChildBuildInput,
 ): ChildBuildOutput {
-  // ── 1. ApprovalEngine: fresh, auto-deny callbacks ────────────────────────
-  // 'smart' mode: safe auto-allows, dangerous auto-denies, caution
-  // calls promptUser which we wire to a synchronous deny — children
-  // cannot interact with a TUI.
-  const autoDenyCallbacks: ApprovalCallbacks = {
-    promptUser: async () => 'deny',
+  // ── 1. ApprovalEngine: inherit the parent's autonomy level ───────────────
+  // v4.12.1 Pillar 2 — replaces the old hardcoded deny-all. The child gets an
+  // AutonomyPolicy resolved from the parent's level with `isSubagent: true`:
+  //   • Observer parent  → child denies all mutation (read-only).
+  //   • Assistant/Partner → child AUTO-ALLOWS write-under-workspace (so it can
+  //     produce a Pillar-3 evidence handle) and ESCALATES destructive /
+  //     external / out-of-scope to the parent instead of silently denying.
+  // A child can't prompt, so an `ask` outcome routes to promptUser, which we
+  // wire to record the escalation (onEscalate) and deny THIS run — the parent
+  // then decides. Only SCOPED task grants apply; children never load the
+  // permanent allowlist.
+  const childLevel: AutonomyLevel = deps.parentAutonomyLevel ?? 'Assistant';
+  const cwd = deps.parentToolContext.cwd;
+  const childPolicy = resolveAutonomyPolicy(childLevel, {
+    workspaceRoots: cwd ? [cwd] : [],
+    isSubagent: true,
+  });
+  const escalateCallbacks: ApprovalCallbacks = {
+    promptUser: async (req) => {
+      deps.onEscalate?.({ tool: req.toolName, reason: req.reason, args: req.args });
+      return 'deny';   // escalated to the parent — not run this turn (never silent)
+    },
   };
-  const childApprovalEngine = new ApprovalEngine('smart', autoDenyCallbacks);
+  const childApprovalEngine = new ApprovalEngine('smart', escalateCallbacks);
+  childApprovalEngine.setAutonomyPolicy(childPolicy);
+  childApprovalEngine.markSubagent();
 
   // ── 2. ToolContext: parent's services + child approval engine + session ──
   const childToolContext: ToolContext = {

@@ -130,14 +130,24 @@ describe('ApprovalEngine — smart mode', () => {
 });
 
 describe('ApprovalEngine — off / mode switching', () => {
-  it('11. off mode auto-allows everything; logs decisions', async () => {
+  it('11. off mode auto-allows ordinary tools; logs decisions', async () => {
     const onDecision = vi.fn();
     const engine = new ApprovalEngine('off', { onDecision });
     const ok = await engine.checkApproval(
-      writeReq({ args: { command: 'rm -rf /' } }),
+      writeReq({ args: { command: 'echo hello' } }),
     );
     expect(ok).toBe(true);
     expect(onDecision).toHaveBeenCalledWith(expect.any(Object), 'allow');
+  });
+
+  it('11b. v4.12.1 — the hard-block floor is non-bypassable EVEN at off/--yolo', async () => {
+    const onDecision = vi.fn();
+    const engine = new ApprovalEngine('off', { onDecision });
+    // Catastrophic, no-recovery: denied despite YOLO.
+    expect(await engine.checkApproval(writeReq({ args: { command: 'rm -rf /' } }))).toBe(false);
+    expect(await engine.checkApproval(writeReq({ args: { command: 'mkfs.ext4 /dev/sda' } }))).toBe(false);
+    expect(await engine.checkApproval(writeReq({ args: { command: 'shutdown -h now' } }))).toBe(false);
+    expect(onDecision).toHaveBeenLastCalledWith(expect.any(Object), 'deny');
   });
 
   it('12. setMode mid-session changes behavior', async () => {

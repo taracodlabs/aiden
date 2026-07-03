@@ -91,9 +91,10 @@ describe('barrel exports', () => {
     // v4.12 BE.1 added /budget (50 → 51).
     // v4.12 /commands slice added /home (51 → 52). (/activity is inline-
     // registered in aidenCLI, like /tasks — not in the barrel, not counted.)
-    expect(allCommands.length).toBe(52);
+    // v4.12.1 Pillar 2 added /autonomy (52 → 53).
+    expect(allCommands.length).toBe(53);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(52);
+    expect(names.size).toBe(53);
   });
 
   it('every command exposes name, description, category', () => {

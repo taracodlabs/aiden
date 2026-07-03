@@ -34,6 +34,7 @@ import yaml from 'js-yaml';
 
 import type { AidenPaths } from './paths';
 import type { ConfigProvider } from '../../providers/v4/runtimeResolver';
+import { type AutonomyLevel, isAutonomyLevel, levelFromApprovalMode } from '../../moat/autonomy';
 
 export type ApprovalMode = 'manual' | 'smart' | 'off';
 
@@ -46,6 +47,13 @@ export interface AidenConfig {
   agent: {
     max_turns: number;
     approval_mode: ApprovalMode;
+    /**
+     * v4.12.1 Pillar 2 — the autonomy dial: 'Observer' | 'Assistant' |
+     * 'Partner'. When unset, derived from `approval_mode` for back-compat
+     * (default 'Assistant'). `--yolo` remains a SEPARATE dev bypass, not a
+     * dial level. See `resolveConfiguredAutonomyLevel`.
+     */
+    autonomy?: AutonomyLevel;
     personalities?: Record<string, string>;
     /**
      * v4.11 toolset grouping — selects which built-in tool profile the
@@ -195,6 +203,21 @@ function setDotted(obj: Record<string, unknown>, key: string, value: unknown): v
     cur = cur[p] as Record<string, unknown>;
   }
   cur[parts[parts.length - 1]] = value;
+}
+
+/**
+ * v4.12.1 Pillar 2 — resolve the configured autonomy level. Explicit
+ * `agent.autonomy` wins; otherwise derive from `approval_mode` (back-compat,
+ * → 'Assistant'). Invalid values fall back to the derived default rather than
+ * throwing — a typo must never silently RAISE autonomy.
+ */
+export function resolveConfiguredAutonomyLevel(config: {
+  getValue<T = unknown>(key: string, fallback?: T): T;
+}): AutonomyLevel {
+  const raw = config.getValue<string | undefined>('agent.autonomy', undefined);
+  if (isAutonomyLevel(raw)) return raw;
+  const mode = config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'smart');
+  return levelFromApprovalMode(mode);
 }
 
 export class ConfigManager implements ConfigProvider {

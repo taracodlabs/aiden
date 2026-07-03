@@ -23,6 +23,7 @@ import { usage } from './usage';
 import { undo } from './undo';
 import { retry } from './retry';
 import { yolo } from './yolo';
+import { autonomy } from './autonomy';
 import { skin } from './skin';
 // v4.9.0 Slice 1a — unified theme system.
 import { theme } from './theme';
@@ -88,6 +89,7 @@ export {
   undo,
   retry,
   yolo,
+  autonomy,
   skin,
   theme,
   skills,
@@ -154,6 +156,7 @@ export const allCommands: SlashCommand[] = [
   undo,
   retry,
   yolo,
+  autonomy,
   skin,
   theme,
   skills,
