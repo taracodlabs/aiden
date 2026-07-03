@@ -29,13 +29,6 @@ const React = require('react') as typeof import('react');
 
 import { type FrameState } from './state';
 import { makeStatus } from './status';
-import { stripAllPasteMarkers } from '../bracketedPaste';
-
-// Control bytes that must never land in the visible composer value. Matches
-// the during-turn listener's scrub (keeps tab/newline; drops ESC/CSI leftovers
-// and other C0/C1 controls that would corrupt the single owned prompt row).
-// eslint-disable-next-line no-control-regex
-const CTRL_STRIP = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
 export interface ComposerCallbacks {
   onChange: (value: string, cursor: number) => void;
@@ -110,18 +103,8 @@ export function makeComposer(ink: InkComponents): React.ComponentType<{
       // Printable input (Ink delivers it as a possibly-multi-char
       // string for fast typing / paste).
       if (input && !key.ctrl) {
-        // v4.12.1 — class fix for the main-prompt paste leak. When bracketed
-        // paste is enabled, a paste burst reaches Ink's useInput with the raw
-        // \x1b[200~ / \x1b[201~ markers embedded in `input` (Ink doesn't
-        // understand them, and the stdin interceptor doesn't reliably tap
-        // Ink's read path). Strip the markers + control bytes here so they
-        // never enter `value` — which is both rendered live AND echoed to
-        // scrollback on submit. This is the miss that surfaced `[200~…` on the
-        // frame renderer's main prompt.
-        const clean = stripAllPasteMarkers(input).replace(CTRL_STRIP, '');
-        if (clean.length === 0) return;
-        const next = value.slice(0, cursor) + clean + value.slice(cursor);
-        callbacks.onChange(next, cursor + clean.length);
+        const next = value.slice(0, cursor) + input + value.slice(cursor);
+        callbacks.onChange(next, cursor + input.length);
       }
     }, { isActive: true });
 

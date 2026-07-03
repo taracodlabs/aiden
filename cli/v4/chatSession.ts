@@ -95,6 +95,7 @@ import path from 'node:path';
 import {
   enableBracketedPaste,
   disableBracketedPaste,
+  decidePasteBootAction,
   stripPasteMarkers,
   stripAllPasteMarkers,
   isCompletePaste,
@@ -924,11 +925,41 @@ export class ChatSession implements ChatSessionLike {
     // Phase 16: enable bracketed paste for the duration of the REPL when
     // a real TTY is attached. Disabled in `finally` below so the user's
     // shell doesn't inherit the mode after we exit.
+    //
+    // v4.12.1 — ROOT FIX for the frame-renderer paste-marker leak. Bracketed
+    // paste exists ONLY to feed the stdin interceptor (`[paste #N]` labels +
+    // anti-auto-submit) on the legacy/inquirer path — the interceptor taps
+    // `stdin.emit('data')`. The frame renderer reads stdin via Ink's
+    // `stdin.read()` on the `'readable'` event, which BYPASSES that tap, so it
+    // can neither use bracketed paste nor be cleaned by the interceptor — and
+    // Ink strips the leading ESC, delivering a bare `[200~` that no ESC-keyed
+    // strip can catch. Ink already hands a paste to useInput atomically, so the
+    // frame path never needed bracketed paste. Therefore: enable it ONLY in
+    // legacy mode; in frame mode actively DISABLE it (`\x1b[?2004l`) at boot so
+    // the terminal never wraps a paste → Ink gets plain text → nothing to strip.
     const stdout = process.stdout;
-    const pasteEnabled =
-      stdout?.isTTY && !this.opts.promptApi
-        ? enableBracketedPaste(stdout)
-        : false;
+    // Frame module is best-effort (matches the pauseFrame/resumeFrame requires
+    // below): if it can't load, fall back to legacy behaviour (bracketed paste
+    // enabled). Never throw out of REPL boot over a renderer probe.
+    let frameModeOn = false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      frameModeOn = (require('./frame') as typeof import('./frame')).isFrameModeRequested();
+    } catch { /* frame module unavailable → treat as legacy */ }
+    const pasteBootAction = decidePasteBootAction({
+      isTty:        !!stdout?.isTTY,
+      hasPromptApi: !!this.opts.promptApi,
+      frameMode:    frameModeOn,
+    });
+    // legacy TTY → enable (feeds the interceptor); frame TTY → actively disable
+    // so the terminal never wraps a paste (markers never generated → Ink gets
+    // plain text → nothing to strip); non-TTY / promptApi → leave it alone.
+    let pasteEnabled = false;
+    if (pasteBootAction === 'enable') {
+      pasteEnabled = enableBracketedPaste(stdout);
+    } else if (pasteBootAction === 'disable') {
+      disableBracketedPaste(stdout);
+    }
     // Tier-3.1a: install stdin pre-tap so bracketed paste payloads are
     // captured and replaced with `[paste #N: …]` labels BEFORE inquirer
     // sees them. Without this, modern @inquirer/prompts treats internal

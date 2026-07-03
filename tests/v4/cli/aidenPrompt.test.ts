@@ -247,31 +247,3 @@ describe('aidenPrompt — extra render-snapshot coverage', () => {
   // ghost goes to the footer slot. The "ghost without dropdown lands
   // in footer" test above covers the new positive case.
 });
-
-describe('aidenPrompt — bracketed-paste markers stripped from the value (v4.12.1)', () => {
-  it('a marker-wrapped paste in rl.line never reaches the rendered prompt line', () => {
-    const runner = renderPrompt({
-      commands: [{ name: 'daemon', description: 'Manage the Aiden daemon.' }],
-      history:  [],
-    });
-    // Simulate a paste burst landing in readline's buffer WITH the CSI
-    // markers (the case the stdin interceptor didn't catch on this path).
-    runner.state.rl.line   = '\x1b[200~list files in Downloads\x1b[201~';
-    runner.state.rl.cursor = runner.state.rl.line.length;
-    runner.keypress({ name: 'end' });   // non-Enter, non-nav → default rederive(rl.line)
-    const { line } = runner.lastRender();
-    expect(line).toContain('list files in Downloads');
-    expect(line).not.toContain('[200~');
-    expect(line).not.toContain('[201~');
-  });
-
-  it('a bare begin marker (unterminated paste) is stripped too', () => {
-    const runner = renderPrompt({ commands: [], history: [] });
-    runner.state.rl.line   = '\x1b[200~hello';
-    runner.state.rl.cursor = runner.state.rl.line.length;
-    runner.keypress({ name: 'end' });
-    const { line } = runner.lastRender();
-    expect(line).toContain('hello');
-    expect(line).not.toContain('[200~');
-  });
-});

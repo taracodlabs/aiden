@@ -293,4 +293,41 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('frame mode — PTY gate tests (v4.11 Slic
     }
   }, 60_000);
 
+  // ── v4.12.1 ROOT FIX — bracketed paste is DISABLED in frame mode ─────────
+
+  it('T6: frame boot emits the bracketed-paste DISABLE (2004l) and never the ENABLE (2004h)', async () => {
+    term = await spawnFrameAiden();
+    const raw = term.raw();
+    // The root fix: in frame mode the REPL actively LEAVES bracketed-paste
+    // mode at boot so the terminal never wraps a paste. The ENABLE sequence
+    // (\x1b[?2004h) — which is what made the terminal emit the leaking
+    // \x1b[200~ markers — must be absent from the entire boot stream.
+    expect(raw).toContain('\x1b[?2004l');     // DISABLE was emitted
+    expect(raw).not.toContain('\x1b[?2004h'); // ENABLE never emitted
+    term.ctrl('c');
+    try { await term.waitForExit({ timeoutMs: 10_000 }); }
+    catch { term.kill(); await new Promise((r) => setTimeout(r, 500)); }
+  }, 60_000);
+
+  it('T7: a multi-line paste into the main prompt renders clean — zero [200~ / [201~', async () => {
+    term = await spawnFrameAiden();
+    const baseline = term.plain().length;
+    // With bracketed-paste mode OFF, a real terminal delivers a paste as
+    // plain text (no CSI wrap). We simulate that faithfully: send the pasted
+    // text verbatim, exactly as the terminal would with the mode disabled.
+    term.type('list files in Downloads\nand summarize them');
+    await new Promise((r) => setTimeout(r, 500));
+    const rawTail   = term.raw().slice(term.raw().length - 600);
+    const plainTail = term.plain().slice(baseline);
+    // The screenshotted failure: a literal [200~ in the composer / echo.
+    expect(rawTail).not.toContain('[200~');
+    expect(rawTail).not.toContain('[201~');
+    expect(plainTail).not.toContain('[200~');
+    // And the pasted text is present (first line, at minimum).
+    expect(plainTail).toContain('list files in Downloads');
+    term.ctrl('c');
+    try { await term.waitForExit({ timeoutMs: 10_000 }); }
+    catch { term.kill(); await new Promise((r) => setTimeout(r, 500)); }
+  }, 60_000);
+
 });

@@ -10,6 +10,7 @@ import {
   hasPasteMarkers,
   enableBracketedPaste,
   disableBracketedPaste,
+  decidePasteBootAction,
 } from '../../../cli/v4/bracketedPaste';
 
 describe('stripAllPasteMarkers — remove markers ANYWHERE (streamed input)', () => {
@@ -103,5 +104,32 @@ describe('bracketedPaste', () => {
       }),
     } as unknown as NodeJS.WriteStream;
     expect(enableBracketedPaste(stream)).toBe(false);
+  });
+});
+
+describe('decidePasteBootAction — ROOT FIX gate (v4.12.1)', () => {
+  it('legacy interactive TTY → enable (the interceptor needs the paste signal)', () => {
+    expect(decidePasteBootAction({ isTty: true, hasPromptApi: false, frameMode: false })).toBe('enable');
+  });
+
+  it('frame-mode interactive TTY → disable (never wrap a paste; markers never generated)', () => {
+    expect(decidePasteBootAction({ isTty: true, hasPromptApi: false, frameMode: true })).toBe('disable');
+  });
+
+  it('non-TTY → none (nothing to enable/disable)', () => {
+    expect(decidePasteBootAction({ isTty: false, hasPromptApi: false, frameMode: false })).toBe('none');
+    expect(decidePasteBootAction({ isTty: false, hasPromptApi: false, frameMode: true })).toBe('none');
+  });
+
+  it('caller-supplied promptApi → none (its own input plumbing owns paste)', () => {
+    expect(decidePasteBootAction({ isTty: true, hasPromptApi: true, frameMode: false })).toBe('none');
+    expect(decidePasteBootAction({ isTty: true, hasPromptApi: true, frameMode: true })).toBe('none');
+  });
+
+  it('the two escape sequences are distinct (enable ≠ disable)', () => {
+    // Sanity: the fix hinges on emitting DISABLE (2004l), not ENABLE (2004h).
+    expect(PASTE_ENABLE).toBe('\x1b[?2004h');
+    expect(PASTE_DISABLE).toBe('\x1b[?2004l');
+    expect(PASTE_ENABLE).not.toBe(PASTE_DISABLE);
   });
 });
