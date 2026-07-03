@@ -1615,6 +1615,12 @@ export class ChatSession implements ChatSessionLike {
         // queue is kept (Slice-2a decision).
         onEscape: () => { this.duringTurnInput.clearSteer(); requestTurnCancel(this.currentAbortController); },
         onCtrlC:  () => { try { (process as NodeJS.Process).emit('SIGINT'); } catch { /* defensive */ } },
+        // Slice 2c — paint the live during-turn buffer so the user sees their
+        // keystrokes (not blind), labelled with what Enter will do. Empty
+        // buffer (initial, or the reset after submit/cancel) clears the row.
+        onBufferChange: (buffer) => {
+          try { this.opts.display.setComposer(buffer, this.duringTurnInput.getMode()); } catch { /* defensive */ }
+        },
       },
     });
     // Helper: wrap a callback so it only fires for the live turn.
@@ -2565,6 +2571,9 @@ export class ChatSession implements ChatSessionLike {
       // v4.12.1 Slice 2a — detach the during-turn listener + restore raw mode
       // on EVERY exit path (success / error / abort / throw).
       try { detachTurnInput(); } catch { /* defensive — never break turn teardown */ }
+      // Slice 2c — clear the live composer so the row hands cleanly back to the
+      // normal prompt (no stale typed text lingering on the owned row).
+      try { this.opts.display.clearComposer(); } catch { /* defensive */ }
 
       // v4.11 Slice 1 — explicit streaming-handoff boundary, exit
       // side. Mirrors the pauseFrame at the top of runAgentTurn so

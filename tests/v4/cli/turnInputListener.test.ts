@@ -108,6 +108,60 @@ describe('makeKeypressHandler — line buffer + key routing', () => {
   });
 });
 
+describe('makeKeypressHandler — onBufferChange fires per keystroke (Slice 2c)', () => {
+  it('fires once per printable char with the CURRENT buffer', () => {
+    const cb = { ...cbs(), onBufferChange: vi.fn() };
+    const h = makeKeypressHandler(cb);
+    for (const ch of 'hey') h(ch, key(ch));
+    expect(cb.onBufferChange.mock.calls.map((c) => c[0])).toEqual(['h', 'he', 'hey']);
+  });
+
+  it('fires on backspace with the shortened buffer', () => {
+    const cb = { ...cbs(), onBufferChange: vi.fn() };
+    const h = makeKeypressHandler(cb);
+    for (const ch of 'ab') h(ch, key(ch));
+    cb.onBufferChange.mockClear();
+    h(undefined, key('backspace'));
+    expect(cb.onBufferChange).toHaveBeenCalledExactlyOnceWith('a');
+  });
+
+  it('fires with the empty buffer after Enter submits (reset → clears composer)', () => {
+    const cb = { ...cbs(), onBufferChange: vi.fn() };
+    const h = makeKeypressHandler(cb);
+    for (const ch of 'go') h(ch, key(ch));
+    cb.onBufferChange.mockClear();
+    h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenCalledWith('go');
+    expect(cb.onBufferChange).toHaveBeenCalledExactlyOnceWith('');
+  });
+
+  it('fires with the empty buffer after esc cancels', () => {
+    const cb = { ...cbs(), onBufferChange: vi.fn() };
+    const h = makeKeypressHandler(cb);
+    for (const ch of 'x') h(ch, key(ch));
+    cb.onBufferChange.mockClear();
+    h(undefined, key('escape', { sequence: '\x1b' }));
+    expect(cb.onBufferChange).toHaveBeenCalledExactlyOnceWith('');
+  });
+
+  it('does NOT fire for a nav key that leaves the buffer unchanged', () => {
+    const cb = { ...cbs(), onBufferChange: vi.fn() };
+    const h = makeKeypressHandler(cb);
+    h('a', key('a'));
+    cb.onBufferChange.mockClear();
+    h(undefined, key('up'));      // nav — buffer unchanged
+    h(undefined, key('left'));    // nav — buffer unchanged
+    expect(cb.onBufferChange).not.toHaveBeenCalled();
+  });
+
+  it('fires with the paste-stripped buffer for a paste burst', () => {
+    const cb = { ...cbs(), onBufferChange: vi.fn() };
+    const h = makeKeypressHandler(cb);
+    h(`${PASTE_BEGIN}pasted${PASTE_END}`, { sequence: `${PASTE_BEGIN}pasted${PASTE_END}` });
+    expect(cb.onBufferChange).toHaveBeenLastCalledWith('pasted');
+  });
+});
+
 // ── attach/detach lifecycle with a fake stdin ────────────────────────────────
 
 function fakeStdin(over: Partial<RawStdinLike> = {}): RawStdinLike & { rawState: boolean; listeners: number } {

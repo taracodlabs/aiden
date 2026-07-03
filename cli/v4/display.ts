@@ -45,6 +45,7 @@ import { getReplyRenderer } from './replyRenderer';
 // Optional "Sources" footer when AIDEN_CITATIONS=1 (default off).
 import { renderCitationFooter } from './citationFooter';
 import { buildToolPreview } from './toolPreview';
+import { renderComposerBuffer } from './composerRow';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
 // `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
 // through frame helpers so the visible left edge / right margin / wrap
@@ -364,6 +365,16 @@ export class Display {
   private skin: SkinEngine;
   private out: NodeJS.WriteStream;
   private err: NodeJS.WriteStream;
+
+  // ── v4.12.1 Pillar 4 Slice 2c — live during-turn composer ────────────────
+  // The rendered composer suffix (mode label + typed text), woven into
+  // whichever owned bottom row is live (activity indicator OR tool row) so it
+  // survives long tool calls. Empty string = nothing appended (not noisy).
+  private composerText = '';
+  // The active bottom-owner registers a repaint fn here so a keystroke can
+  // refresh it immediately instead of waiting for the owner's next tick. The
+  // indicator + tool-row each set/restore this around their lifetime.
+  private composerRepaint: (() => void) | null = null;
 
   constructor(opts: { skin?: SkinEngine; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}) {
     this.skin = opts.skin ?? getSkinEngine();
@@ -1231,7 +1242,7 @@ export class Display {
       // user-prompt `  ▲ `, the panel `  │ ` bar, and every other
       // structured surface. Prior buildLine started at col 0 which
       // read as misaligned against the rest of the v4.8 chrome.
-      return `  ${prefix}${verb}${dots.padEnd(3, ' ')}${elapsedStr}`;
+      return `  ${prefix}${verb}${dots.padEnd(3, ' ')}${elapsedStr}${this.composerSuffix()}`;
     };
 
     // v4.1.5 Part 1a — Issue M (Windows ConPTY buffering fix).
@@ -1314,10 +1325,21 @@ export class Display {
     // the indicator never moved (no pause/resume), consuming both
     // the indicator row AND the leading blank. The `movedFromInitial`
     // flag below tracks that state.
+    // v4.12.1 Slice 2c — repaint the indicator row in place WITHOUT advancing
+    // the shimmer frame, so a keystroke refreshes the composer suffix live.
+    const paintComposerNow = (): void => {
+      if (stopped || paused || !isTty || !printed) return;
+      type GFlag = typeof globalThis & { __aiden_legacy_indicator_paused?: boolean };
+      if ((globalThis as GFlag).__aiden_legacy_indicator_paused) return;
+      out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
+    };
+
     if (isTty) {
       out.write(`\n${buildLine()}\n`);
       printed = true;
       startTick();
+      // While the indicator owns the bottom row, a keystroke repaints it here.
+      this.setComposerRepaint(paintComposerNow);
     }
 
     return {
@@ -1357,6 +1379,8 @@ export class Display {
         out.write(`${buildLine()}\n`);
         printed = true;
         startTick();
+        // Re-claim composer repaint from the tool row that just finished.
+        this.setComposerRepaint(paintComposerNow);
       },
       setVerb: (newVerb: string) => {
         if (typeof newVerb === 'string' && newVerb.length > 0) verb = newVerb;
@@ -1365,6 +1389,9 @@ export class Display {
         if (stopped) return;
         stopped = true;
         stopTick();
+        // Stop refreshing the composer via this (now-dead) indicator — but
+        // don't clobber a repaint a live tool row may have registered.
+        if (this.composerRepaintIs(paintComposerNow)) this.setComposerRepaint(null);
         // v4.8.1 Slice 2 hotfix #4 — when the indicator never moved
         // (no pause/resume happened during the turn), walk up TWO
         // rows: erase the indicator row AND the leading blank above
@@ -1464,7 +1491,7 @@ export class Display {
         : '';
       return `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
              `${sk.applyColors(padVerb(verb), 'tool')} ` +
-             `${sk.applyColors(detail, 'muted')}${liveSuffix}\n`;
+             `${sk.applyColors(detail, 'muted')}${liveSuffix}${this.composerSuffix()}\n`;
     };
 
     // Outcome row — entire line colored by outcome kind.
@@ -1486,7 +1513,16 @@ export class Display {
     // `retry` (retry is a state announcement and should hold static
     // until the next state change — race-free).
     let tickTimer: ReturnType<typeof setInterval> | null = null;
+    // v4.12.1 Slice 2c — restore the composer repaint the tool row took over
+    // (set below when the row starts; called once when the row settles).
+    let restoreComposerRepaint: (() => void) | null = null;
     const stopTick = (): void => {
+      // Hand the composer repaint back to whoever held it before this tool row
+      // took over (the activity indicator), then stop our ticker.
+      if (restoreComposerRepaint !== null) {
+        this.setComposerRepaint(restoreComposerRepaint);
+        restoreComposerRepaint = null;
+      }
       if (tickTimer !== null) {
         clearInterval(tickTimer);
         tickTimer = null;
@@ -1521,11 +1557,13 @@ export class Display {
       // Tool dispatch in aidenAgent is sequential (one tool at a time
       // per turn) so the assumption "running row is the last written
       // line" holds for the whole tick lifetime; `eraseLast()` is safe.
-      tickTimer = setInterval(() => {
-        if (!printed) return;
-        eraseLast();
-        out.write(runningRow());
-      }, 1000);
+      const repaintRunning = (): void => { if (printed) { eraseLast(); out.write(runningRow()); } };
+      tickTimer = setInterval(repaintRunning, 1000);
+      // v4.12.1 Slice 2c — while the tool row owns the bottom, a keystroke
+      // repaints IT (so the composer stays live during a long tool call, when
+      // the activity indicator is paused). `stopTick` restores the prior
+      // repaint (the indicator's) when the tool settles.
+      restoreComposerRepaint = this.setComposerRepaint(repaintRunning);
     }
     // Non-TTY: hold off until completion (log lines carry final state).
     // No tick — non-TTY sinks (pipes, CI logs) get one line per call
@@ -1755,6 +1793,46 @@ export class Display {
   }
   writeError(text: string): void {
     this.err.write(text);
+  }
+
+  // ── v4.12.1 Pillar 4 Slice 2c — live composer surface ────────────────────
+  /**
+   * Update the live during-turn composer from a keystroke. `buffer` is the
+   * user's typed-so-far (already paste-stripped); `mode` is the busy-Enter
+   * mode. Repaints the active owned bottom row immediately so typing shows
+   * live (not blind). Empty buffer → the suffix disappears (never noisy).
+   */
+  setComposer(buffer: string, mode: 'queue' | 'interrupt' | 'redirect'): void {
+    const next = renderComposerBuffer(buffer, mode, Math.max(20, ((this.out.columns ?? 80) >> 1)));
+    if (next === this.composerText) return;
+    this.composerText = next;
+    this.composerRepaint?.();
+  }
+
+  /** Clear the composer (turn end / handoff back to the normal prompt). */
+  clearComposer(): void {
+    if (this.composerText === '') return;
+    this.composerText = '';
+    this.composerRepaint?.();
+  }
+
+  /** The suffix woven into the live owned bottom row. '' when inactive. */
+  private composerSuffix(): string {
+    return this.composerText ? `   ${this.skin.applyColors(this.composerText, 'muted')}` : '';
+  }
+
+  /** An owned bottom-row painter registers its repaint fn for the duration it
+   *  owns the bottom. Save/restore semantics so the indicator→tool-row→indicator
+   *  handoff keeps keystrokes refreshing the CURRENT owner. Returns the prior. */
+  private setComposerRepaint(fn: (() => void) | null): (() => void) | null {
+    const prev = this.composerRepaint;
+    this.composerRepaint = fn;
+    return prev;
+  }
+
+  /** True when `fn` is the currently-registered composer repaint. */
+  private composerRepaintIs(fn: () => void): boolean {
+    return this.composerRepaint === fn;
   }
 
   // ── Phase 14b helpers ─────────────────────────────────────────────────

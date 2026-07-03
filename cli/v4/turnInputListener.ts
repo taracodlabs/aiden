@@ -40,6 +40,12 @@ export interface TurnInputCallbacks {
   onEscape: () => void;
   /** Ctrl+C pressed — route to the existing SIGINT two-press logic. */
   onCtrlC:  () => void;
+  /**
+   * v4.12.1 Slice 2c — fired on EVERY buffer change (each keystroke,
+   * backspace, paste, and the reset to '' after submit/cancel) with the
+   * current buffer, so the live composer can repaint what the user typed.
+   */
+  onBufferChange?: (buffer: string) => void;
 }
 
 /** Non-text keys that must never land in the line buffer. */
@@ -64,21 +70,25 @@ const NAV_KEYS = new Set([
 export function makeKeypressHandler(cb: TurnInputCallbacks): (str: string | undefined, key: TurnKey) => void {
   let buffer = '';
   let pasting = false;
+  // Fire onBufferChange only when the buffer actually changed (so a nav key
+  // never triggers a needless composer repaint).
+  const notify = (prev: string): void => { if (buffer !== prev) cb.onBufferChange?.(buffer); };
   return (str, key) => {
     const k = key ?? {};
     const seq = k.sequence ?? '';
+    const prev = buffer;
     // ── bracketed-paste markers — never keys; toggle the paste state ────────
     if (seq === PASTE_BEGIN || k.name === 'paste-start') { pasting = true;  return; }
     if (seq === PASTE_END   || k.name === 'paste-end')   { pasting = false; return; }
 
-    if (k.ctrl && k.name === 'c') { buffer = ''; pasting = false; cb.onCtrlC(); return; }
+    if (k.ctrl && k.name === 'c') { buffer = ''; pasting = false; cb.onCtrlC(); notify(prev); return; }
     // Only a BARE ESC cancels — a CSI sequence (paste marker, arrow) does not.
-    if (k.name === 'escape' && (seq === '\x1b' || seq === '')) { buffer = ''; pasting = false; cb.onEscape(); return; }
+    if (k.name === 'escape' && (seq === '\x1b' || seq === '')) { buffer = ''; pasting = false; cb.onEscape(); notify(prev); return; }
     if (k.name === 'return' || k.name === 'enter') {
-      if (pasting) { buffer += '\n'; return; }        // newline inside a paste is literal
-      const line = stripAllPasteMarkers(buffer); buffer = ''; cb.onLine(line); return;
+      if (pasting) { buffer += '\n'; notify(prev); return; }   // newline inside a paste is literal
+      const line = stripAllPasteMarkers(buffer); buffer = ''; cb.onLine(line); notify(prev); return;
     }
-    if (k.name === 'backspace')    { buffer = buffer.slice(0, -1); return; }
+    if (k.name === 'backspace')    { buffer = buffer.slice(0, -1); notify(prev); return; }
     // Ignore control / navigation / modified keys (but NOT a paste burst,
     // which has no key.name and a multi-char str).
     if ((k.ctrl || k.meta) && !(typeof str === 'string' && str.length > 1)) return;
@@ -90,6 +100,7 @@ export function makeKeypressHandler(cb: TurnInputCallbacks): (str: string | unde
       const clean = stripAllPasteMarkers(str).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
       if (clean.length > 0) buffer += clean;
     }
+    notify(prev);
   };
 }
 
