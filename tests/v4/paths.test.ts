@@ -194,7 +194,12 @@ describe('resolveAidenPaths', () => {
 
 describe('resolveUserPath', () => {
   it('quoted absolute value is healed — quotes stripped, never glued onto a base (the reported bug class)', () => {
-    const inner = 'C:\\Users\\shiva\\Documents\\Obsidian\\aiden-memory';
+    // Use a fixture that is absolute ON THE RUNNING PLATFORM — a raw `C:\...`
+    // literal is absolute only on win32 (on POSIX it's relative, so the
+    // "absolute wins" assertion below would falsely fail on Linux/macOS CI).
+    const inner = process.platform === 'win32'
+      ? 'C:\\Users\\shiva\\Documents\\Obsidian\\aiden-memory'
+      : '/home/shiva/Documents/Obsidian/aiden-memory';
     expect(resolveUserPath(`"${inner}"`)).toBe(path.resolve(inner));
     // With an explicit base: the absolute value still wins — no join.
     expect(resolveUserPath(`"${inner}"`, path.resolve('/some/base'))).toBe(path.resolve(inner));

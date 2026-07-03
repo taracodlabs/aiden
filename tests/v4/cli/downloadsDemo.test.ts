@@ -36,7 +36,13 @@ let downloads: string;
 let inbox: string;
 
 beforeEach(async () => {
-  downloads = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-dl-demo-'));
+  // realpath the scratch dir so the paths the test constructs match what the
+  // tools record. The file tools canonicalise via realpath (sandboxFs
+  // realpathWithFallback), which resolves the macOS /var → /private/var symlink
+  // and expands the Windows 8.3 short name (os.tmpdir() = C:\Users\RUNNER~1\…)
+  // to its long form. Without this, `filesTouched` (realpath'd) never equals the
+  // raw os.tmpdir()-based paths on macOS / Windows CI runners.
+  downloads = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-dl-demo-')));
   inbox = path.join(downloads, '_vault-inbox');
   // ~10 files: 2 content-duplicates, 1 fake screenshot, project files, junk.
   await fs.writeFile(path.join(downloads, 'report-final.txt'), 'project alpha report v2');
