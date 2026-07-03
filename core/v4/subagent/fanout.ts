@@ -372,5 +372,10 @@ async function spawnViaPrimitive(args: SpawnViaPrimitiveArgs): Promise<SubagentR
     output:     envelope.ok ? (envelope.summary ?? '') : '',
     error,
     elapsedMs,
+    // v4.12.1 Pillar 3 — carry the child's evidence verdict into the merger
+    // so aggregation can prefer verified answers over bare claims.
+    verified:      envelope.verified,
+    verdict:       envelope.verdict,
+    reasoningOnly: envelope.reasoningOnly,
   };
 }

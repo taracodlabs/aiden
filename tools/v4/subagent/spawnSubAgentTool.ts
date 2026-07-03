@@ -95,11 +95,13 @@ function safeReadPause(): {
 
 const SCHEMA_DESC =
   'Spawn one focused child agent to handle a delegated sub-task synchronously. ' +
-  'Child runs isolated: no parent history, intersected toolset, fresh system prompt. ' +
-  'Returns a structured envelope with summary, metrics, exitReason. ' +
-  'Bounded: max 1 child at a time, no nested spawning, max 200 iterations. ' +
-  'Each spawn pays full agent-startup cost — prefer inline work for tasks ' +
-  'solvable in 1-3 of your own iterations.';
+  'Isolated: no parent history, intersected toolset. Returns an evidence-checked ' +
+  'envelope with a `trust` label the runtime computes by re-checking the child’s ' +
+  'own tool evidence: verified = concrete handles (path/exit/id) re-validated → treat ' +
+  'as fact; unverified = success CLAIMED with no checkable handle → re-check before ' +
+  'trusting; advisory = pure reasoning, no artifact; verification_failed = claimed ' +
+  'artifact absent on re-check → reject. Max 1 child, no nesting, ≤200 iterations. ' +
+  'Prefer inline work for 1-3 iteration tasks.';
 
 export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
   name:        'spawn_sub_agent',
@@ -306,17 +308,44 @@ export function makeSpawnSubAgentTool(
  * format still parse correctly.
  */
 function legacyEnvelopeFrom(env: SubagentResultEnvelope): Record<string, unknown> {
-  const ok = env.status === 'completed';
+  // v4.12.1 Pillar 3 — `ok` is VERIFIED completion, not a clean loop exit.
+  // A child that finished cleanly but whose claimed side-effect failed the
+  // parent-side handle re-check has verdict 'verification_failed' → ok:false.
+  // When the primitive supplied no verdict (older path), fall back to status.
+  const verdict = env.verdict ?? (env.status === 'completed' ? 'completed' : null);
+  const ok = verdict === 'completed';
   // Map coordinator status → legacy status. Legacy used 'interrupted'
   // for cancel; coordinator normalises to 'cancelled'. We surface
   // 'interrupted' here for back-compat.
   const legacyStatus = env.status === 'cancelled' ? 'interrupted' : env.status;
+  const verified      = env.verified === true;
+  const reasoningOnly = env.reasoningOnly === true;
+  const handles       = env.handles ?? [];
   return {
     ok,
     status:         legacyStatus,
     summary:        env.summary || null,
     error:          env.error    ?? null,
     exitReason:     env.exitReason,
+    // ── v4.12.1 Pillar 3 — evidence-required surface the parent MODEL reads ──
+    verdict,
+    verified,
+    reasoningOnly,
+    /** Concrete artifact handles that re-checked clean on the parent side. */
+    handles,
+    /**
+     * The honest trust label for the parent's reasoning:
+     *   verified        — backed by re-checked handles; treat as fact.
+     *   unverified      — summary is a CLAIM with no checkable handle; re-check
+     *                     the artifact yourself before relying on it.
+     *   advisory        — pure-reasoning answer, no artifact possible.
+     *   verification_failed — a claimed artifact was NOT there on re-check.
+     */
+    trust:
+      verdict === 'verification_failed' ? 'verification_failed'
+      : verified                        ? 'verified'
+      : reasoningOnly                   ? 'advisory'
+      : 'unverified',
     metrics: {
       apiCalls:    0,                          // not tracked at envelope layer
       durationMs:  env.durationMs,

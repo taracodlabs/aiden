@@ -103,6 +103,16 @@ export interface SubagentResultEnvelope {
   toolTrace:      CompactToolTraceEntry[];
   /** Optional verified artifact references — also follow-up. */
   artifactRefs?:  string[];
+  // ── v4.12.1 Pillar 3 — evidence-required reporting (threaded from the
+  //    spawnSubAgent primitive; surfaced to the parent by the tool layer) ──
+  /** Verify-before-done verdict over the child's trace after handle re-check. */
+  verdict?:       'completed' | 'completed_unverified' | 'verification_failed' | null;
+  /** True only when concrete proof handles backed the claim AND re-checked. */
+  verified?:      boolean;
+  /** True when the child did no mutating work — advisory, not verified-fact. */
+  reasoningOnly?: boolean;
+  /** The concrete proof handles that survived the parent-side re-check. */
+  handles?:       Array<{ tool: string; kind: string; value: string | number }>;
 }
 
 /** Placeholder compact trace shape — reserved for follow-up wiring. */
@@ -590,6 +600,12 @@ export class SubagentCoordinator {
           estimatedCostUSD: 0,  // priced by future wiring; contract anchor
         },
         toolTrace:      [],
+        // v4.12.1 Pillar 3 — carry the primitive's evidence up to the tool layer.
+        verdict:        result.verdict,
+        verified:       result.verified,
+        reasoningOnly:  result.reasoningOnly,
+        handles:        result.handles,
+        artifactRefs:   result.handles.map((h) => `${h.kind}:${String(h.value)}`),
       };
 
       // Cost rollup into the parent's accumulator.

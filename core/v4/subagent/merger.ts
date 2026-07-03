@@ -48,6 +48,13 @@ export interface SubagentResult {
   error?: string;
   /** Wall-clock elapsed (ms). */
   elapsedMs: number;
+  // ── v4.12.1 Pillar 3 — evidence-required reporting ─────────────────────
+  /** True when this child's claim was backed by re-checked proof handles. */
+  verified?: boolean;
+  /** Verify-before-done verdict over the child's trace after handle re-check. */
+  verdict?: 'completed' | 'completed_unverified' | 'verification_failed' | null;
+  /** True when the child did no mutating work — advisory, not verified-fact. */
+  reasoningOnly?: boolean;
 }
 
 export interface MergeOptions {
@@ -107,11 +114,24 @@ export async function mergeResults(
     };
   }
 
+  // v4.12.1 Pillar 3 — verified-preferring aggregation. A child claiming
+  // success with no re-checked evidence must not out-vote one that proved
+  // its work. For SELECTION strategies (vote/pick-best), when any verified
+  // candidate exists, the pool is restricted to verified ones — a handle-less
+  // "success" simply isn't in the running. 'combine' keeps everyone (it
+  // synthesizes), but every candidate is annotated with its trust label so
+  // the aggregator weights verified content higher.
+  const verified = usable.filter((r) => r.verified === true);
+  const pool =
+    opts.strategy === 'combine'
+      ? usable
+      : (verified.length > 0 ? verified : usable);
+
   const aggregatorLabel =
     `${opts.aggregatorModel.providerId}:${opts.aggregatorModel.modelId}`;
 
   const systemPrompt = buildSystemPrompt(opts.strategy);
-  const userPrompt   = buildUserPrompt(opts.strategy, usable, opts.userQuery);
+  const userPrompt   = buildUserPrompt(opts.strategy, pool, opts.userQuery);
 
   const messages: Message[] = [
     { role: 'system', content: systemPrompt },
@@ -122,7 +142,8 @@ export async function mergeResults(
     scope:       'subagent',
     strategy:    opts.strategy,
     aggregator:  aggregatorLabel,
-    sources:     usable.length,
+    sources:     pool.length,
+    verifiedPreferred: verified.length > 0 && opts.strategy !== 'combine',
   });
 
   try {
@@ -157,11 +178,13 @@ function buildSystemPrompt(strategy: MergeStrategy): string {
         'You are an answer-selection judge. You will be shown a user query and N candidate answers from independent agents.',
         'Pick exactly ONE candidate that best answers the query and return ITS TEXT VERBATIM with no preamble, no commentary, no formatting changes.',
         'Choose the answer that is most factually accurate, complete, and directly addresses the query.',
+        'Each candidate carries a [trust: …] tag: PREFER candidates whose work is `verified` (backed by re-checked evidence); treat `unverified` and `advisory` claims skeptically and never let them out-rank a verified one.',
       ].join(' ');
     case 'pick-best':
       return [
         'You are an answer-selection judge. You will be shown a user query and N candidate answers from independent agents.',
         'Pick the BEST candidate. Output a one-sentence reason on the first line, then a blank line, then the chosen candidate text verbatim.',
+        'Each candidate carries a [trust: …] tag: PREFER `verified` candidates (evidence re-checked); treat `unverified`/`advisory` as claims, not facts.',
         'Format:\nReason: <one sentence>\n\n<chosen candidate verbatim>',
       ].join(' ');
     case 'combine':
@@ -181,8 +204,13 @@ function buildUserPrompt(
   results: SubagentResult[],
   query: string,
 ): string {
+  const trustLabel = (r: SubagentResult): string =>
+    r.verdict === 'verification_failed' ? 'verification_failed'
+    : r.verified === true               ? 'verified'
+    : r.reasoningOnly === true          ? 'advisory'
+    : 'unverified';
   const blocks = results.map((r, i) =>
-    `--- CANDIDATE ${i + 1} (${r.providerId}:${r.modelId}) ---\n${r.output.trim()}`,
+    `--- CANDIDATE ${i + 1} (${r.providerId}:${r.modelId}) [trust: ${trustLabel(r)}] ---\n${r.output.trim()}`,
   ).join('\n\n');
   const action = strategy === 'combine'
     ? 'Synthesize these into one unified answer.'
