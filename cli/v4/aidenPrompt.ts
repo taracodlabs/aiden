@@ -42,6 +42,7 @@ import {
 
 import { findGhost } from './ghostMatch';
 import { getSkinEngine } from './skinEngine';
+import { stripAllPasteMarkers } from './bracketedPaste';
 
 /** Lightweight slash command shape — minimum the dropdown needs. */
 export interface SlashCommandLite {
@@ -169,7 +170,15 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
     ?? ((input: string) => defaultFilter(config.commands, input));
 
   /** Recompute ghost + dropdown for a new value. */
-  function rederive(next: string): void {
+  function rederive(rawNext: string): void {
+    // v4.12.1 — class fix: readline's line buffer (`rl.line`) can carry a
+    // bracketed-paste marker (\x1b[200~ / \x1b[201~) when the terminal wraps a
+    // paste and the stdin interceptor didn't catch it (marker split across
+    // chunks, interceptor disabled, etc.). Strip here — the single choke point
+    // every value update flows through — so a marker never reaches the visible
+    // prompt, the ghost/dropdown derivation, or the submitted value. Idempotent
+    // on already-clean input (history entries, ghost-accept).
+    const next = stripAllPasteMarkers(rawNext);
     setValue(next);
     setGhost(
       findGhost(next, {
