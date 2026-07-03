@@ -63,7 +63,47 @@ describe('DuringTurnInput — mode + onBusyEnter', () => {
   it('isBusyEnterMode guards input', () => {
     expect(isBusyEnterMode('queue')).toBe(true);
     expect(isBusyEnterMode('interrupt')).toBe(true);
-    expect(isBusyEnterMode('steer')).toBe(false);   // Slice 2b, not yet
+    expect(isBusyEnterMode('steer')).toBe(true);    // Slice 2b
     expect(isBusyEnterMode('x')).toBe(false);
+  });
+});
+
+describe('DuringTurnInput — steer (Slice 2b)', () => {
+  it('steer mode: Enter buffers a nudge (does not queue, does not interrupt)', () => {
+    const c = new DuringTurnInput();
+    c.setMode('steer');
+    expect(c.onBusyEnter('use pnpm not npm')).toEqual({ action: 'steered', text: 'use pnpm not npm' });
+    expect(c.count()).toBe(0);                       // not queued
+    expect(c.hasPendingSteer()).toBe(true);
+  });
+
+  it('multiple nudges accumulate (newline-joined); drainSteer takes + clears', () => {
+    const c = new DuringTurnInput();
+    c.setMode('steer');
+    c.onBusyEnter('use pnpm');
+    c.onBusyEnter('skip the tests');
+    expect(c.drainSteer()).toBe('use pnpm\nskip the tests');
+    expect(c.drainSteer()).toBeNull();               // cleared after drain
+    expect(c.hasPendingSteer()).toBe(false);
+  });
+
+  it('clearSteer drops a pending nudge WITHOUT injecting (interrupt supersedes)', () => {
+    const c = new DuringTurnInput();
+    c.setPendingSteer('stale nudge');
+    expect(c.clearSteer()).toBe(true);
+    expect(c.drainSteer()).toBeNull();               // nothing leaks forward
+    expect(c.clearSteer()).toBe(false);              // nothing to clear now
+  });
+
+  it('QUEUE and STEER are independent — they do not interfere', () => {
+    const c = new DuringTurnInput();
+    c.enqueue('run after turn');                      // queued
+    c.setPendingSteer('adjust mid-turn');             // steer
+    // draining the steer leaves the queue intact...
+    expect(c.drainSteer()).toBe('adjust mid-turn');
+    expect(c.count()).toBe(1);
+    // ...and dequeuing leaves no steer resurrected.
+    expect(c.dequeue()).toBe('run after turn');
+    expect(c.hasPendingSteer()).toBe(false);
   });
 });

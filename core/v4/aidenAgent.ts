@@ -426,6 +426,16 @@ export interface RunConversationOptions {
    */
   onUiEvent?:        (name: string, args: Record<string, unknown>) => void;
   /**
+   * v4.12.1 Pillar 4 Slice 2b — mid-turn STEER pull. Called by the loop at the
+   * safe boundary (end of the loop body, after the tool batch, before the next
+   * provider call — history is balanced there). Returns a user nudge to inject
+   * as tool-stream CONTEXT for the next iteration, or null. The loop never owns
+   * the buffer (mirrors `signal`/`onUiEvent`); chatSession's controller does,
+   * and clears it on interrupt. Injected as context, NEVER as an out-of-order
+   * `role:'user'` message.
+   */
+  drainSteer?:       () => string | null;
+  /**
    * v4.11 Slice 4 — optional per-turn `TurnRuntimeContext`. When
    * provided, the loop exposes it via `agent.getCurrentTurnContext()`
    * so the spawn / fanout tool facades can route through the
@@ -2003,6 +2013,26 @@ export class AidenAgent {
         if (remaining / this.maxTurns <= BUDGET_INJECT_FRAC) {
           const last = turnToolMessages[turnToolMessages.length - 1];
           last.content = `${last.content}\n\n[iteration budget: ${remaining} of ${this.maxTurns} turns remaining]`;
+        }
+      }
+
+      // ── v4.12.1 Pillar 4 Slice 2b — mid-turn STEER injection ─────────
+      // THE safe boundary: the prior tool batch's results are all present
+      // (history balanced), and the next provider call hasn't fired. Drain
+      // any pending steer and surface it as CONTEXT — appended to the last
+      // tool message (the budget-hint pattern), or a role:'system' note when
+      // there are no tool messages this iteration (the TurnState-hint pattern).
+      // NEVER a role:'user' message → role alternation / provider invariants
+      // stay intact. Text-only turns break before reaching here, so there is
+      // no half-finished iteration to corrupt.
+      const steer = runOptions.drainSteer?.();
+      if (steer && steer.trim().length > 0) {
+        const note = `[user adjustment mid-turn — apply from here on: ${steer.trim()}]`;
+        if (turnToolMessages.length > 0) {
+          const last = turnToolMessages[turnToolMessages.length - 1];
+          last.content = `${last.content}\n\n${note}`;
+        } else {
+          turnToolMessages.push({ role: 'system', content: note });
         }
       }
 

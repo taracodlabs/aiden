@@ -875,6 +875,9 @@ export class ChatSession implements ChatSessionLike {
         this.lastInterruptAt = now;
         try {
           ctrl?.abort();
+          // v4.12.1 Slice 2b — a hard interrupt supersedes any pending steer,
+          // so a stale nudge never lands on the next unrelated turn.
+          this.duringTurnInput.clearSteer();
         } catch { /* defensive — abort() can't throw, but cheap insurance */ }
         try {
           this.opts.display.dim(
@@ -1599,11 +1602,17 @@ export class ChatSession implements ChatSessionLike {
           const act = this.duringTurnInput.onBusyEnter(text);
           if (act.action === 'queued') {
             try { this.opts.display.dim(`  ✓ queued (${act.count} pending) — runs after this turn`); } catch { /* defensive */ }
+          } else if (act.action === 'steered') {
+            // Slice 2b — buffered; lands after the current tool, next iteration.
+            try { this.opts.display.dim(`  ◆ steering: ${act.text} — applies from the next step`); } catch { /* defensive */ }
           } else if (act.action === 'interrupt') {
             requestTurnCancel(this.currentAbortController);
           }
         },
-        onEscape: () => { requestTurnCancel(this.currentAbortController); },   // cancel turn, keep queue
+        // esc cancels the turn AND drops any pending steer (a hard interrupt
+        // supersedes a nudge — no stale steer leaks onto the next turn). The
+        // queue is kept (Slice-2a decision).
+        onEscape: () => { this.duringTurnInput.clearSteer(); requestTurnCancel(this.currentAbortController); },
         onCtrlC:  () => { try { (process as NodeJS.Process).emit('SIGINT'); } catch { /* defensive */ } },
       },
     });
@@ -1984,6 +1993,10 @@ export class ChatSession implements ChatSessionLike {
         // already wired in v4.6 prep; this single line is the
         // upstream-side trigger.
         signal: turnAbort.signal,
+        // v4.12.1 Slice 2b — mid-turn steer pull. The loop drains this at its
+        // safe boundary and injects the nudge as tool-stream context. The
+        // controller owns the buffer; an interrupt clears it (below).
+        drainSteer: () => this.duringTurnInput.drainSteer(),
         // v4.11 Slice 4 — expose the per-turn runtime context to
         // tools via `agent.getCurrentTurnContext()`. The spawn /
         // fanout facades read it to thread parent signal + cost

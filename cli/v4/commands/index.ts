@@ -26,6 +26,7 @@ import { yolo } from './yolo';
 import { autonomy } from './autonomy';
 import { busy } from './busy';
 import { queue } from './queue';
+import { steer } from './steer';
 import { skin } from './skin';
 // v4.9.0 Slice 1a — unified theme system.
 import { theme } from './theme';
@@ -94,6 +95,7 @@ export {
   autonomy,
   busy,
   queue,
+  steer,
   skin,
   theme,
   skills,
@@ -163,6 +165,7 @@ export const allCommands: SlashCommand[] = [
   autonomy,
   busy,
   queue,
+  steer,
   skin,
   theme,
   skills,

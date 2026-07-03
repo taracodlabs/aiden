@@ -82,6 +82,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   // v4.12.1 Pillar 4 Slice 2a — type-next-while-busy.
   busy: 'System',
   queue: 'System',
+  // v4.12.1 Pillar 4 Slice 2b — mid-turn steer.
+  steer: 'System',
   usage: 'System',
   cron: 'System',
   setup: 'System',

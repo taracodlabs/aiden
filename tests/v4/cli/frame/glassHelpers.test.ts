@@ -32,6 +32,11 @@ describe('renderFooter', () => {
     const i = renderFooter({ busy: true, activeSubagents: 0, mode: 'interrupt', queueCount: 0 });
     expect(i).toContain('enter = cancel turn');
     expect(i).not.toContain('queued');            // no queue count when 0
+
+    // Slice 2b — steer mode.
+    const s = renderFooter({ busy: true, activeSubagents: 0, mode: 'steer' });
+    expect(s).toContain('enter = steer');
+    expect(s).toContain('esc = cancel turn');
   });
 });
 

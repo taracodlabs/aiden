@@ -62,9 +62,9 @@ export interface ChatSessionLike {
    */
   retryLastTurn?(): string | null;
   // ── v4.12.1 Pillar 4 Slice 2a — type-next-while-busy surface ──────────────
-  /** Set what Enter does during a running turn: 'queue' | 'interrupt'. */
-  setBusyMode?(mode: 'queue' | 'interrupt'): void;
-  getBusyMode?(): 'queue' | 'interrupt';
+  /** Set what Enter does during a running turn: 'queue' | 'interrupt' | 'steer'. */
+  setBusyMode?(mode: 'queue' | 'interrupt' | 'steer'): void;
+  getBusyMode?(): 'queue' | 'interrupt' | 'steer';
   /** The pending type-next queue (copy). */
   listQueue?(): string[];
   /** Empty the queue; returns how many were dropped. */
