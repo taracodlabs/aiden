@@ -84,6 +84,7 @@
     "eval:mock": "ts-node evals/cli.ts --suite scoring-smoke --provider mock",
     "eval:gate": "ts-node evals/cli.ts --suite scoring-smoke --provider mock --gate",
     "eval:baseline": "ts-node evals/cli.ts --suite scoring-smoke --provider mock --update-baseline",
+    "eval:live": "ts-node evals/cli.ts --live --provider groq --model llama-3.3-70b-versatile",
     "stress-test": "npx ts-node tests/stressTest.ts",
     "test:all": "npx ts-node tests/e2e/masterTestSuite.ts",
     "test:unit": "npx ts-node tests/e2e/masterTestSuite.ts --part1",

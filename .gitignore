@@ -42,6 +42,10 @@ graphify-out/
 # .gitkeep exemption so a fresh clone has somewhere to write.
 evals/results/*
 !evals/results/.gitkeep
+# v4.14 Slice B — rolling per-scenario reliability history is a runtime artifact
+# (accumulates across nightly live runs, per-environment); the committed
+# expected pass-rates live in evals/baseline-live.json instead.
+evals/reliability.json
 
 # ── Claude Code session state ─────────────────────────────────────────────────
 .claude/worktrees/

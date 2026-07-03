@@ -38,6 +38,11 @@ import path from 'node:path';
 import { runEval, type EvalScenario, type EvalResult } from './runner';
 import { runMockSuite } from './mockRun';
 import { scoreSuite, evaluateGate, type SuiteScorecard } from './score';
+import {
+  runScenarioRepeats, aggregateReliability, compareToBaseline, mergeReliability,
+  isQuarantineCandidate, type LiveComparison,
+} from './live';
+import { loadLiveBaseline, loadReliability, saveReliability } from './liveStore';
 import { SUITES } from './index';
 import type { ProviderAdapter } from '../providers/v4/types';
 import { resolveAidenPaths } from '../core/v4/paths';
@@ -57,16 +62,21 @@ const YELLOW = '\x1b[33m';
 // ── Flag parsing ───────────────────────────────────────────────────────
 
 interface ParsedFlags {
-  suite:          string;
-  scenario?:      string;
-  provider?:      string;
-  model?:         string;
-  timeoutMs?:     number;
-  strict:         boolean;
-  write:          boolean;
-  help:           boolean;
-  gate:           boolean;
-  updateBaseline: boolean;
+  suite:            string;
+  scenario?:        string;
+  provider?:        string;
+  model?:           string;
+  timeoutMs?:       number;
+  strict:           boolean;
+  write:            boolean;
+  help:             boolean;
+  gate:             boolean;
+  updateBaseline:   boolean;
+  // ── v4.14 Slice B — real-model live path (advisory, nightly-bound) ──────
+  live:             boolean;
+  repeats:          number;
+  subset?:          string[];
+  failOnRegression: boolean;
 }
 
 function parseFlags(argv: string[]): ParsedFlags {
@@ -77,22 +87,29 @@ function parseFlags(argv: string[]): ParsedFlags {
     help: false,
     gate: false,
     updateBaseline: false,
+    live: false,
+    repeats: 3,
+    failOnRegression: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const next = argv[i + 1];
     switch (arg) {
-      case '--suite':           out.suite = next; i++; break;
-      case '--scenario':        out.scenario = next; i++; break;
-      case '--provider':        out.provider = next; i++; break;
-      case '--model':           out.model = next; i++; break;
-      case '--timeout':         out.timeoutMs = Number(next); i++; break;
-      case '--strict':          out.strict = true; break;
-      case '--no-write':        out.write = false; break;
-      case '--gate':            out.gate = true; break;
-      case '--update-baseline': out.updateBaseline = true; break;
+      case '--suite':             out.suite = next; i++; break;
+      case '--scenario':          out.scenario = next; i++; break;
+      case '--provider':          out.provider = next; i++; break;
+      case '--model':             out.model = next; i++; break;
+      case '--timeout':           out.timeoutMs = Number(next); i++; break;
+      case '--strict':            out.strict = true; break;
+      case '--no-write':          out.write = false; break;
+      case '--gate':              out.gate = true; break;
+      case '--update-baseline':   out.updateBaseline = true; break;
+      case '--live':              out.live = true; break;
+      case '--repeats':           out.repeats = Math.max(1, Number(next) || 3); i++; break;
+      case '--subset':            out.subset = next.split(',').map((s) => s.trim()).filter(Boolean); i++; break;
+      case '--fail-on-regression': out.failOnRegression = true; break;
       case '--help':
-      case '-h':                out.help = true; break;
+      case '-h':                  out.help = true; break;
       default:
         if (arg.startsWith('--')) {
           // Unknown flag — surface but don't crash; future-proofs CI scripts.
@@ -128,6 +145,11 @@ function printUsage(): void {
     `  ${BOLD}--provider mock${RESET}         deterministic, free, no network (scripted scenarios)`,
     '  --gate                  (mock) score vs evals/baseline.json; exit 1 on capability regression',
     '  --update-baseline       (mock) regenerate evals/baseline.json from this run',
+    '',
+    `  ${BOLD}--live${RESET}                  real-model, repeat-runs, ADVISORY (not the per-PR gate)`,
+    '  --repeats <n>           runs per scenario for the pass-rate (default 3)',
+    '  --subset <a,b,c>        scenario ids to run (default: evals/baseline-live.json subset)',
+    '  --fail-on-regression    (live) exit 1 on a pass-rate regression — nightly opt-in only',
     '',
     `Available suites: ${Object.keys(SUITES).join(', ')}`,
     '',
@@ -289,11 +311,94 @@ async function runMockMode(
   return flags.strict && t.passed < t.total ? 1 : 0;
 }
 
+// ── Live mode (real model, repeat-runs, advisory) ────────────────────────
+
+function fmtClass(c: LiveComparison['classification']): string {
+  const color = c === 'regression' ? RED
+    : c === 'flaky_or_infra' || c === 'inconclusive' ? YELLOW
+    : GREEN;
+  return `${color}${c}${RESET}`;
+}
+
+async function runLiveMode(flags: ParsedFlags): Promise<number> {
+  const baseline = await loadLiveBaseline();
+  const subset = flags.subset ?? baseline?.subset ?? [];
+  if (subset.length === 0) {
+    process.stderr.write(`${RED}✗${RESET} no live subset (pass --subset a,b or seed evals/baseline-live.json).\n`);
+    return 1;
+  }
+  const resolved = await resolveAdapter(flags);
+  if (!resolved) {
+    process.stderr.write(
+      `${RED}✗${RESET} live mode needs a real provider. Set GROQ_API_KEY / TOGETHER_API_KEY or log in, ` +
+      `then re-run (e.g. --provider groq --model llama-3.3-70b-versatile).\n`,
+    );
+    return 1;
+  }
+
+  process.stdout.write(
+    `\n${BOLD}aiden eval — live${RESET}  ${DIM}(advisory · NOT the per-PR gate)${RESET}\n` +
+    `${DIM}provider: ${resolved.provider} / ${resolved.model}  ·  repeats: ${flags.repeats}  ·  aiden v${VERSION}${RESET}\n\n`,
+  );
+
+  const allScenarios = Object.values(SUITES).flat();
+  const records = await loadReliability();
+  let regressions = 0;
+
+  for (const id of subset) {
+    const scenario = allScenarios.find((s) => s.id === id);
+    if (!scenario) {
+      process.stdout.write(`  ${YELLOW}!${RESET} ${id} ${DIM}— not found in any suite; skipped${RESET}\n`);
+      continue;
+    }
+    const outcomes = await runScenarioRepeats(scenario, () => resolved.adapter, {
+      repeats:   flags.repeats,
+      provider:  resolved.provider,
+      model:     resolved.model,
+      timeoutMs: flags.timeoutMs,
+    });
+    const rel = aggregateReliability(id, outcomes, { model: resolved.model, provider: resolved.provider });
+    const entry = baseline?.entries[id];
+    const cmp = entry
+      ? compareToBaseline(rel, entry, { band: baseline?.band })
+      : null;
+    if (cmp?.classification === 'regression') regressions += 1;
+
+    const rate = rel.passRate === null ? 'n/a' : `${rel.passed}/${rel.taskRuns} (${(rel.passRate * 100).toFixed(0)}%)`;
+    const cls  = cmp ? `  ·  ${fmtClass(cmp.classification)}` : '';
+    process.stdout.write(
+      `  ${id.padEnd(46)} ${rate.padEnd(14)} ${DIM}[${rel.outcomes.join(',')}]${RESET}` +
+      `${DIM}  ·  ${rel.infraErrors} infra · p95 ${rel.p95CostTokens}tok/${rel.p95LatencyMs}ms${RESET}${cls}\n`,
+    );
+
+    const merged = mergeReliability(records[id], rel);
+    records[id] = merged;
+    if (isQuarantineCandidate(merged)) {
+      process.stdout.write(`      ${YELLOW}⚠ quarantine candidate${RESET} ${DIM}— rolling pass-rate ${((merged.rollingPassRate ?? 0) * 100).toFixed(0)}%${RESET}\n`);
+    }
+  }
+
+  if (flags.write) {
+    try { await saveReliability(records); process.stdout.write(`\n${DIM}reliability updated: evals/reliability.json${RESET}\n`); }
+    catch (err) { process.stderr.write(`${YELLOW}warn:${RESET} could not save reliability: ${(err as Error).message}\n`); }
+  }
+
+  // Advisory by default — a regression is reported but does NOT fail the run
+  // unless the nightly explicitly opts in with --fail-on-regression.
+  if (regressions > 0) {
+    process.stdout.write(`\n${YELLOW}${BOLD}${regressions} regression flag(s)${RESET}${DIM} — advisory; review before acting.${RESET}\n`);
+    return flags.failOnRegression ? 1 : 0;
+  }
+  process.stdout.write(`\n${GREEN}no regressions vs live baseline${RESET}\n`);
+  return 0;
+}
+
 // ── Main ───────────────────────────────────────────────────────────────
 
 async function main(argv: string[]): Promise<number> {
   const flags = parseFlags(argv);
   if (flags.help) { printUsage(); return 0; }
+  if (flags.live) return runLiveMode(flags);
 
   // Pick the scenarios to run.
   let scenarios: EvalScenario[];
