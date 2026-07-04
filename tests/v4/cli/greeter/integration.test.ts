@@ -134,7 +134,7 @@ describe('renderGreeter — speaks when an offer wins', () => {
 });
 
 describe('renderGreeter — continuity from distillation', () => {
-  it('reads newest distillation and emits continuity-open-item when open_items[0] exists', async () => {
+  it('reads newest distillation and emits the warm recall welcome from open_items[0]', async () => {
     // Seed a distillation.
     const distDir = path.join(root, 'distillations');
     await fs.mkdir(distDir, { recursive: true });
@@ -149,9 +149,11 @@ describe('renderGreeter — continuity from distillation', () => {
     await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
     await renderGreeter({ paths, version: VERSION, display, now: NOW });
 
+    // v4.14 Bug 1 — the recall tier now renders buildWelcomeLine (identity
+    // paint), not the old "Last session left this open" template.
     expect(writes).toHaveLength(1);
     expect(writes[0]).toBe(
-      '  Last session left this open: "decide redis vs postgres for session store".\n\n',
+      '  Welcome back! Last time: decide redis vs postgres for session store. Continue, or something new?\n\n',
     );
   });
 });
@@ -172,6 +174,40 @@ describe('renderGreeter — reconciliation closes pending offers from prior boot
     const h = await readHistory(paths);
     expect(h!.offers).toHaveLength(1);
     expect(h!.offers[0].response).toBe('accepted');
+  });
+});
+
+describe('renderGreeter — durable last-session marker (v4.14 Bug 1)', () => {
+  it('refreshes lastSessionAt to ~now on every boot (the stuck-timestamp fix)', async () => {
+    // Seed a STALE marker — the exact failure mode of the bug (a frozen
+    // timestamp that never moved). A real session must refresh it.
+    const OLD = '2026-05-01T00:00:00.000Z';
+    await writeHistory(paths, mkHistory({
+      lastSessionAt: OLD, lastGreetingAt: OLD, lastCwd: process.cwd(),
+    }));
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+
+    const h = await readHistory(paths);
+    expect(h!.lastSessionAt).toBe(NOW.toISOString());   // refreshed on use
+    expect(h!.lastSessionAt).not.toBe(OLD);             // no longer frozen
+  });
+
+  it('first-ever launch seeds lastSessionAt so the NEXT boot has a real gap', async () => {
+    expect(await readHistory(paths)).toBeNull();         // first launch
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+    const h = await readHistory(paths);
+    expect(h!.lastSessionAt).toBe(NOW.toISOString());
+  });
+
+  it('writes lastSessionAt even for a pre-v4.14 file that lacks it', async () => {
+    // Old file: lastGreetingAt present, lastSessionAt absent (mkHistory omits it).
+    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    const before = await readHistory(paths);
+    expect(before!.lastSessionAt).toBeUndefined();       // absent in the old file
+
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+    const after = await readHistory(paths);
+    expect(after!.lastSessionAt).toBe(NOW.toISOString()); // now durable
   });
 });
 

@@ -39,6 +39,12 @@ const paint = {
   paintAccent: (s: string) => `<a>${s}</a>`,
 };
 
+/** ISO timestamp N hours before NOW — drives the durable last-session gate
+ *  (v4.14 Bug 1: welcome-back now keys off history.lastSessionAt, not the
+ *  frozen distillation mtime). */
+const hoursAgoIso = (h: number, from: Date = NOW): string =>
+  new Date(from.getTime() - h * 3600 * 1000).toISOString();
+
 describe('selectOffer — kill switch', () => {
   it('returns null when history.disabled === true (no matter what scanners say)', () => {
     const r = selectOffer({
@@ -50,51 +56,59 @@ describe('selectOffer — kill switch', () => {
   });
 });
 
-describe('selectOffer — Tier 2 priority (continuity)', () => {
-  it('open-item beats decision beats welcome-back when all qualify', () => {
+describe('selectOffer — Tier 2 welcome (v4.14 merged: recall > time-gap)', () => {
+  it('recall prefers the open item over the decision when both qualify', () => {
     const r = selectOffer({
-      scan: mkScan({ hoursSinceLastSession: 50 }),
+      scan: mkScan(),
       history: mkHistory(),
       now: NOW, ...paint,
+      lastSessionAt: hoursAgoIso(50),
       openItem: 'decide redis-vs-postgres',
       lastDecision: 'shipped v4.9.2',
     });
-    expect(r?.templateId).toBe('continuity-open-item');
+    expect(r?.templateId).toBe('welcome-back');
+    expect(r?.speech).toContain('decide redis-vs-postgres');
+    expect(r?.speech).not.toContain('shipped v4.9.2');
   });
 
-  it('falls through to decision when open-item missing', () => {
+  it('recall uses the decision when the open item is missing', () => {
     const r = selectOffer({
-      scan: mkScan({ hoursSinceLastSession: 50 }),
+      scan: mkScan(),
       history: mkHistory(),
       now: NOW, ...paint,
+      lastSessionAt: hoursAgoIso(50),
       openItem: null,
       lastDecision: 'shipped v4.9.2',
     });
-    expect(r?.templateId).toBe('continuity-decision');
+    expect(r?.templateId).toBe('welcome-back');
+    expect(r?.speech).toContain('shipped v4.9.2');
   });
 
-  it('falls through to welcome-back when continuity missing AND hoursSinceLastSession >= 24', () => {
+  it('fires the time-gap welcome when no recall AND last session >= 24h ago', () => {
     const r = selectOffer({
-      scan: mkScan({ hoursSinceLastSession: 30 }),
+      scan: mkScan(),
       history: mkHistory(),
       now: NOW, ...paint,
+      lastSessionAt: hoursAgoIso(30),
     });
     expect(r?.templateId).toBe('welcome-back');
+    expect(r?.speech).toContain('Welcome back');
   });
 
-  it('skips welcome-back when hoursSinceLastSession < 24', () => {
+  it('skips the time-gap welcome when the last session was < 24h ago', () => {
     const r = selectOffer({
-      scan: mkScan({ hoursSinceLastSession: 8 }),
+      scan: mkScan(),
       history: mkHistory(),
       now: NOW, ...paint,
+      lastSessionAt: hoursAgoIso(8),
     });
     // No tier-2 candidate; with hour 19 (≥18) and no tier-2, time-of-day fires.
     expect(r?.templateId).toBe('time-of-day-evening');
   });
 
-  it('skips welcome-back when no prior session (hoursSinceLastSession === null)', () => {
+  it('skips the welcome when no prior session (lastSessionAt absent)', () => {
     const r = selectOffer({
-      scan: mkScan({ hoursSinceLastSession: null }),
+      scan: mkScan(),
       history: mkHistory(),
       now: NOW, ...paint,
     });
@@ -233,23 +247,26 @@ describe('selectOffer — silence rule', () => {
   });
 });
 
-describe('selectOffer — Offer.speech is the templated text', () => {
-  it('continuity-open-item produces the expected speech string', () => {
+describe('selectOffer — Offer.speech is the welcome line', () => {
+  it('recall welcome produces the warm summary line', () => {
     const r = selectOffer({
       scan: mkScan(),
       history: mkHistory(),
       now: NOW, ...paint,
+      lastSessionAt: hoursAgoIso(50),
       openItem: 'sql migration',
     });
-    expect(r?.speech).toBe('Last session left this open: <m>"sql migration"</m>.');
+    expect(r?.speech).toBe('Welcome back! Last time: <m>sql migration</m>. Continue, or something new?');
   });
 
-  it('welcome-back produces the expected speech string', () => {
+  it('time-gap welcome produces a human phrase, never raw hours', () => {
     const r = selectOffer({
-      scan: mkScan({ hoursSinceLastSession: 31 }),
+      scan: mkScan(),
       history: mkHistory(),
       now: NOW, ...paint,
+      lastSessionAt: hoursAgoIso(31),   // ~1.3 days → "yesterday"
     });
-    expect(r?.speech).toBe('Welcome back. Last session ended 31h ago.');
+    expect(r?.speech).toBe('Welcome back — last session was yesterday.');
+    expect(r?.speech).not.toMatch(/\d+\s*h\b/);
   });
 });

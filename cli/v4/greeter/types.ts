@@ -124,6 +124,23 @@ export interface GreeterHistory {
   v:               1;
   firstLaunchAt:   string;          // ISO-8601 — never mutated after first write
   lastGreetingAt:  string;          // ISO-8601 — updated on every renderGreeter call
+  /**
+   * ISO-8601 — the durable "last real session" marker. Written = now on
+   * EVERY boot (session start), so on the NEXT boot the value read here is
+   * the previous session's start time — the reliable basis for the
+   * "welcome back" time-gap. Session-start is chosen over clean-exit because
+   * boot always happens; an exit handler can be skipped by a crash, a
+   * `kill -9`, or a closed terminal. Optional for back-compat: files written
+   * before this field existed fall back to `lastGreetingAt` (which the
+   * greeter has always rewritten every boot).
+   *
+   * Bug-fix note (v4.14): the pre-fix greeter derived "hours since last
+   * session" from the newest distillation file's mtime — a value that only
+   * refreshes when a distillation is written, NOT on ordinary use. That made
+   * the banner freeze on a stale number ("934h ago") every boot. This field
+   * is the durable replacement.
+   */
+  lastSessionAt?:  string;
   lastCwd?:        string;
   offers:          GreeterOfferRecord[];
   /** Kill switch from /greeter off. Defaults to false. */

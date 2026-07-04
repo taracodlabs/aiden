@@ -2881,8 +2881,12 @@ export class ChatSession implements ChatSessionLike {
         // v4.12 — speaks-first onboarding for a brand-new user (USER.md
         // empty + marker absent). When the intro fires, skip the
         // /walkthrough tip so the first screen stays uncluttered.
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { renderOnboardingIntro } = require('./onboarding/speakFirst') as typeof import('./onboarding/speakFirst');
+        // v4.14 — dynamic `import` (not a relative `require`): the require
+        // form fails to resolve under the test runner, which silently swallowed
+        // onboarding so its intro NEVER fired in tests and the greeter-
+        // suppression path was untested. `import()` resolves in both the runner
+        // and the compiled CJS build.
+        const { renderOnboardingIntro } = await import('./onboarding/speakFirst');
         onboarded = await renderOnboardingIntro({ paths: this.opts.paths, out: process.stdout });
         if (!onboarded) {
           // eslint-disable-next-line @typescript-eslint/no-var-requires

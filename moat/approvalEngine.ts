@@ -42,6 +42,7 @@
 import {
   matchesHardBlock,
   decideAutonomy,
+  isNeverBlanketAllow,
   levelRank,
   type AutonomyPolicy,
 } from './autonomy';
@@ -546,6 +547,16 @@ export class ApprovalEngine {
     }
 
     // Allowlist short-circuit (user-recorded).
+    //
+    // v4.14 UX (Bug 2) — a recorded grant IS honoured here, including a
+    // destructive op the user explicitly reviewed and approved in a
+    // `plan_approval` BATCH (which records `allowForSession` for that exact
+    // signature). What's prevented — one layer up — is a destructive/external/
+    // spend call ever becoming a BLANKET grant from a single-tool prompt: the
+    // prompt UI withholds the Session/Always choices for those classes
+    // (callbacks.decisionChoicesFor) and the recording path below refuses to
+    // store one (isNeverBlanketAllow). So "ask each time" holds for ad-hoc
+    // dangerous calls, while a reviewed per-batch approval still executes.
     const sig = argSignature(req.toolName, req.args);
     const key = `${req.toolName}::${sig}`;
     if (this.sessionAllow.has(key)) {
@@ -663,12 +674,18 @@ export class ApprovalEngine {
 
     if (decision === 'deny') return false;
     if (decision === 'allow') return true;
+    // v4.14 UX (Bug 2) — a blanket grant (session or always) is recorded ONLY
+    // for safe classes. If the user picks Session/Always on a destructive /
+    // external-send / spend call, honour it as a ONE-TIME allow (run it now)
+    // but do NOT record the blanket — the next such call asks again. The UI
+    // (callbacks.decisionChoicesFor) already withholds these options for
+    // floor-gated calls; this is the engine-level backstop.
     if (decision === 'allow_session') {
-      this.allowForSession(req.toolName, sig);
+      if (!isNeverBlanketAllow(req)) this.allowForSession(req.toolName, sig);
       return true;
     }
     if (decision === 'allow_always') {
-      this.allowAlways(req.toolName, sig);
+      if (!isNeverBlanketAllow(req)) this.allowAlways(req.toolName, sig);
       return true;
     }
     return false;

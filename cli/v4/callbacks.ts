@@ -24,6 +24,7 @@ import type {
   ApprovalDecision,
   RiskTier,
 } from '../../moat/approvalEngine';
+import { isNeverBlanketAllow } from '../../moat/autonomy';
 import type { SkillProposal } from '../../moat/skillTeacher';
 import type { PlannerGuardDecision } from '../../moat/plannerGuard';
 import type { CompressionResult } from '../../core/v4/contextCompressor';
@@ -120,14 +121,22 @@ function primaryArgKindFor(args: Record<string, unknown>): string {
   return 'this call';
 }
 
-function decisionChoicesFor(args: Record<string, unknown>): { name: string; value: ApprovalDecision }[] {
-  const kind = primaryArgKindFor(args);
-  return [
-    { name: 'Once',                     value: 'allow' },
-    { name: `Session (${kind})`,        value: 'allow_session' },
-    { name: `Always (${kind})`,         value: 'allow_always' },
-    { name: 'Deny',                     value: 'deny' },
+function decisionChoicesFor(req: ApprovalRequest): { name: string; value: ApprovalDecision }[] {
+  const kind = primaryArgKindFor(req.args);
+  const choices: { name: string; value: ApprovalDecision }[] = [
+    { name: 'Once', value: 'allow' },
   ];
+  // v4.14 UX (Bug 2) — Session / Always (blanket grants) are offered ONLY for
+  // safe, reversible classes. Destructive / external-send / spend calls get
+  // Once / Deny only: they must be confirmed every time, never blanket-allowed
+  // (which is how blind-yes gets trained). The engine enforces the same floor
+  // as a backstop even if a caller bypasses this UI.
+  if (!isNeverBlanketAllow(req)) {
+    choices.push({ name: `Session (${kind})`, value: 'allow_session' });
+    choices.push({ name: `Always (${kind})`,  value: 'allow_always' });
+  }
+  choices.push({ name: 'Deny', value: 'deny' });
+  return choices;
 }
 
 const KNOWN_TIERS: ReadonlySet<RiskTier> = new Set(['safe', 'caution', 'dangerous']);
@@ -528,7 +537,7 @@ export class CliCallbacks {
       // argSignature's primary-arg extractor).
       choice = await prompts.select({
         message: 'Decision',
-        choices: decisionChoicesFor(req.args),
+        choices: decisionChoicesFor(req),
       });
     } catch {
       // User hit Ctrl+C or otherwise cancelled — fail closed.

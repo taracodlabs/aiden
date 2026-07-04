@@ -36,6 +36,8 @@
  *   • Reads always allowed. Budgets (BE.1) are orthogonal and always enforced.
  */
 
+import path from 'node:path';
+
 import type { ApprovalRequest, RiskTier } from './approvalEngine';
 import { detectDangerousPatterns } from './dangerousPatterns';
 
@@ -157,10 +159,43 @@ function writePathOf(req: ApprovalRequest): string | null {
     || null;
   return raw ? normalizePath(raw) : null;
 }
+/** True when a normalized path string is absolute (POSIX `/…` or Windows `X:…`). */
+function isAbsoluteNorm(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:/.test(p);
+}
+
+/**
+ * Workspace containment, resolving RELATIVE paths against the workspace root
+ * first. v4.14 (Bug 2): tools frequently pass a relative path (`notes.txt`,
+ * `src/x.ts`) rather than an absolute one — those are relative to the cwd,
+ * which IS the workspace root, so they belong under it. Resolving also
+ * collapses `..`, so an ESCAPING relative path (`../../etc/passwd`) lands
+ * OUTSIDE the root and correctly still asks. Empty roots → never contained.
+ */
 function isUnderWorkspace(p: string, roots: string[]): boolean {
   if (roots.length === 0) return false;
   const np = normalizePath(p);
-  return roots.some((r) => np === r || np.startsWith(r.endsWith('/') ? r : r + '/'));
+  // Absolute → compare as-is; relative → resolve against the first root (cwd).
+  const abs = isAbsoluteNorm(np)
+    ? np
+    : normalizePath(path.posix.normalize(`${roots[0]}/${np}`));
+  return roots.some((r) => abs === r || abs.startsWith(r.endsWith('/') ? r : r + '/'));
+}
+
+/**
+ * v4.14 UX (Bug 2) — action classes that must be confirmed per-occurrence and
+ * may NEVER be blanket-allowed (neither "allow for session" nor "allow
+ * always"): destructive / irreversible, external sends, and external spend.
+ * The ApprovalEngine consults this so a Session/Always grant can suppress the
+ * SAME safe category twenty times over, but a destructive/external/spend call
+ * still asks every single time. Reuses `decideAutonomy`'s own floor
+ * classifiers so the "always ask" set and the "never blanket" set can't drift.
+ */
+export function isNeverBlanketAllow(req: ApprovalRequest): boolean {
+  if (req.riskTier === 'dangerous' || req.effects?.irreversible === true) return true;
+  if (isExternalSend(req)) return true;                 // includes effects.externalSpend
+  if (req.effects?.externalSpend === true) return true; // explicit, in case a spend isn't a "send"
+  return false;
 }
 
 /**

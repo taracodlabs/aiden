@@ -62,6 +62,8 @@ export async function readHistory(
       v:               1,
       firstLaunchAt:   typeof parsed.firstLaunchAt   === 'string' ? parsed.firstLaunchAt   : new Date().toISOString(),
       lastGreetingAt:  typeof parsed.lastGreetingAt  === 'string' ? parsed.lastGreetingAt  : new Date().toISOString(),
+      // Optional durable session marker; absent in files written before v4.14.
+      lastSessionAt:   typeof parsed.lastSessionAt   === 'string' ? parsed.lastSessionAt   : undefined,
       lastCwd:         typeof parsed.lastCwd === 'string' ? parsed.lastCwd : undefined,
       offers:          Array.isArray(parsed.offers) ? parsed.offers : [],
       disabled:        parsed.disabled === true,

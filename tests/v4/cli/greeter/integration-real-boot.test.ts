@@ -238,7 +238,7 @@ describe('renderStartupCard — greeter wiring', () => {
     expect(h!.disabled).toBe(true);
   });
 
-  it('with seeded distillation containing open_items[0]: continuity-open-item appears in real chatSession output', async () => {
+  it('with seeded distillation containing open_items[0]: the warm recall welcome appears in real chatSession output', async () => {
     // Pre-seed: a prior history file (so we're not in first-launch path)
     // + a distillation with an open item. Force lastCwd to match
     // process.cwd() so the cwd-changed offer doesn't shadow Tier 2.
@@ -260,10 +260,10 @@ describe('renderStartupCard — greeter wiring', () => {
 
     const text = chunks.join('');
     // The exact greeter speech must appear in the captured output.
-    // This is the proof-of-life: the chatSession's real boot path
-    // invoked renderGreeter, which selected the continuity-open-item
-    // template, which wrote to display.
-    expect(text).toContain('Last session left this open: "decide on redis vs postgres for session store"');
+    // This is the proof-of-life: the chatSession's real boot path invoked
+    // renderGreeter, which built the recall welcome (buildWelcomeLine) from
+    // the distillation's open item, which wrote to display.
+    expect(text).toContain('Welcome back! Last time: decide on redis vs postgres for session store');
   });
 
   it('with seeded update cache: update-available appears in real chatSession output', async () => {
@@ -281,6 +281,10 @@ describe('renderStartupCard — greeter wiring', () => {
     const now = new Date();
     await writeHistory(paths, mkHistory({
       lastCwd: process.cwd(),
+      // v4.14 — a RECENT last session so the Tier-2 time-gap welcome doesn't
+      // fire and shadow the update (the greeter reads the real clock; the
+      // default seed's old lastGreetingAt would otherwise read as a >24h gap).
+      lastSessionAt: now.toISOString(),
       offers: [{
         id:        `time-of-day-evening-${isoDateLocal(now)}`,
         offeredAt: now.toISOString(),

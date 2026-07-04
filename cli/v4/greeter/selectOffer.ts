@@ -31,6 +31,7 @@ import {
   WELCOME_BACK_THRESHOLD_HOURS,
 } from './types';
 import { TEMPLATES } from './templates';
+import { buildWelcomeLine } from './welcomeLine';
 
 /**
  * The selector takes a `paint` bag rather than building one — keeps the
@@ -51,6 +52,15 @@ export interface SelectOfferInput {
   openItem?:      string | null;
   /** Most-recent distillation's decisions[0] (or null when none). */
   lastDecision?:  string | null;
+  /**
+   * v4.14 Bug 1 — the durable "previous session" timestamp (ISO-8601) or
+   * null. This is the RELIABLE basis for the welcome-back time-gap; the old
+   * distillation-mtime path (scan.hoursSinceLastSession) froze on a stale
+   * value. Supplied by the orchestrator from history.lastSessionAt.
+   */
+  lastSessionAt?: string | null;
+  /** v4.14 Bug 1 — deterministic rotation seed for the no-history fallback. */
+  rotateSeed?:    number;
 }
 
 export function selectOffer(input: SelectOfferInput): Offer | null {
@@ -59,30 +69,35 @@ export function selectOffer(input: SelectOfferInput): Offer | null {
 
   const today = isoDateLocal(input.now);
 
-  // ── Tier 2: continuity ----------------------------------------------
-  // The orchestrator wires open_items + decisions from the most-recent
-  // distillation. Prefer open-item over decision (open work is more
-  // actionable; closed decisions are recap).
-  if (input.openItem && input.openItem.length > 0) {
-    return buildOffer('continuity-open-item', 2, undefined, {
-      openItem: input.openItem,
-    }, input);
-  }
-  if (input.lastDecision && input.lastDecision.length > 0) {
-    return buildOffer('continuity-decision', 2, undefined, {
-      decision: input.lastDecision,
-    }, input);
-  }
-
-  // welcome-back: always fires when hoursSinceLastSession >= 24, no
-  // decay. (Per dispatch: not really an offer — a continuity signal.)
-  if (
-    input.scan.hoursSinceLastSession !== null &&
-    input.scan.hoursSinceLastSession >= WELCOME_BACK_THRESHOLD_HOURS
-  ) {
-    return buildOffer('welcome-back', 2, undefined, {
-      hoursAgo: input.scan.hoursSinceLastSession,
-    }, input);
+  // ── Tier 2: welcome / continuity ------------------------------------
+  // v4.14 Bug 1 — one warm, recall-aware line via the pure buildWelcomeLine,
+  // replacing the three old templates (continuity-open-item /
+  // continuity-decision / the raw-hours welcome-back). It fires when EITHER:
+  //   • a recall summary exists (open item preferred over last decision —
+  //     open work is more actionable), regardless of elapsed time, OR
+  //   • the durable last-session gap has crossed the welcome threshold.
+  // The gap is computed from history.lastSessionAt (reliable), NOT the
+  // frozen distillation mtime that caused the stuck "934h ago".
+  const recallSummary =
+    (input.openItem && input.openItem.length > 0) ? input.openItem :
+    (input.lastDecision && input.lastDecision.length > 0) ? input.lastDecision :
+    null;
+  const gapHours = hoursSince(input.lastSessionAt ?? null, input.now);
+  if (recallSummary || (gapHours !== null && gapHours >= WELCOME_BACK_THRESHOLD_HOURS)) {
+    const speech = buildWelcomeLine({
+      now:           input.now,
+      lastSessionAt: input.lastSessionAt ?? null,
+      recallSummary,
+      paintMuted:    input.paintMuted,
+      paintAccent:   input.paintAccent,
+      rotateSeed:    input.rotateSeed,
+    });
+    return {
+      id:         `welcome-back-${today}`,
+      templateId: 'welcome-back',
+      tier:       2,
+      speech,
+    };
   }
 
   // ── Tier 3: environment ---------------------------------------------
@@ -138,6 +153,18 @@ function isDecayedRecently(
     o.response === 'ignored' &&
     Date.parse(o.offeredAt) >= cutoffMs,
   );
+}
+
+/**
+ * Elapsed hours since an ISO-8601 timestamp, or null when the timestamp is
+ * missing / unparseable. v4.14 Bug 1 — drives the welcome-back time gate off
+ * the durable last-session marker instead of the frozen distillation mtime.
+ */
+function hoursSince(iso: string | null, now: Date): number | null {
+  if (!iso) return null;
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return null;
+  return Math.max(0, (now.getTime() - then) / (1000 * 60 * 60));
 }
 
 /** YYYY-MM-DD in the local timezone (matches the "good evening at 6pm

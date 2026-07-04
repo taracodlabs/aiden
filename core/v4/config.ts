@@ -34,7 +34,7 @@ import yaml from 'js-yaml';
 
 import type { AidenPaths } from './paths';
 import type { ConfigProvider } from '../../providers/v4/runtimeResolver';
-import { type AutonomyLevel, isAutonomyLevel, levelFromApprovalMode } from '../../moat/autonomy';
+import { type AutonomyLevel, isAutonomyLevel } from '../../moat/autonomy';
 
 export type ApprovalMode = 'manual' | 'smart' | 'off';
 
@@ -207,17 +207,34 @@ function setDotted(obj: Record<string, unknown>, key: string, value: unknown): v
 
 /**
  * v4.12.1 Pillar 2 — resolve the configured autonomy level. Explicit
- * `agent.autonomy` wins; otherwise derive from `approval_mode` (back-compat,
- * → 'Assistant'). Invalid values fall back to the derived default rather than
- * throwing — a typo must never silently RAISE autonomy.
+ * `agent.autonomy` wins; a typo must never silently RAISE autonomy, so an
+ * invalid value falls through to the default rather than throwing.
+ *
+ * v4.14 UX (Bug 2) — the DEFAULT is now `Partner`, not `Assistant`.
+ *
+ * Why: the old default (Assistant, `allowWrite: 'ask'`) prompted on EVERY
+ * write, including routine safe/reversible workspace-internal writes and
+ * moves — the "asks too often" nag that trains blind-yes. `Partner` is the
+ * level the dial already defines as "acts freely INSIDE the workspace;
+ * destructive + external-send + out-of-scope still ask." It auto-allows only
+ * the genuinely-safe class and KEEPS EVERY FLOOR intact (destructive,
+ * external send, spend, shell, out-of-workspace all still ask; the hard-block
+ * set still denies). Choosing Partner-as-default — rather than loosening
+ * Assistant (which would collapse two distinct levels into one) — keeps all
+ * three levels meaningful: Observer (read-only) < Assistant (asks at every
+ * write) < Partner (workspace writes auto). No floor is touched.
+ *
+ * A user who explicitly opted into the cautious `approval_mode: manual` is
+ * respected → Assistant (asks at every write boundary). Everything else
+ * (smart / off / unset) → Partner.
  */
 export function resolveConfiguredAutonomyLevel(config: {
   getValue<T = unknown>(key: string, fallback?: T): T;
 }): AutonomyLevel {
   const raw = config.getValue<string | undefined>('agent.autonomy', undefined);
   if (isAutonomyLevel(raw)) return raw;
-  const mode = config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'smart');
-  return levelFromApprovalMode(mode);
+  const mode = config.getValue<'manual' | 'smart' | 'off' | undefined>('agent.approval_mode', undefined);
+  return mode === 'manual' ? 'Assistant' : 'Partner';
 }
 
 export class ConfigManager implements ConfigProvider {

@@ -82,6 +82,7 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
       v:               1,
       firstLaunchAt:   now.toISOString(),
       lastGreetingAt:  now.toISOString(),
+      lastSessionAt:   now.toISOString(),   // durable marker — seeds the NEXT boot's gap
       lastCwd:         cwd,
       offers:          [],
       disabled:        false,
@@ -107,15 +108,23 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
   });
 
   // ── Pick at most one offer to render this boot ----------------------
+  // v4.14 Bug 1 — the durable "previous session" timestamp. `lastSessionAt`
+  // is written every boot; on files predating it, fall back to
+  // `lastGreetingAt` (also rewritten every boot) so the first upgraded boot
+  // still shows a real gap instead of the old frozen distillation-mtime value.
+  const lastSessionAt = existing.lastSessionAt ?? existing.lastGreetingAt ?? null;
   const distillation = await loadLatestDistillation(opts.paths, fsImpl);
   const offer: Offer | null = selectOffer({
-    scan:         scanForReconcile,
-    history:      reconciled,
+    scan:          scanForReconcile,
+    history:       reconciled,
     now,
-    paintMuted:   (s) => opts.display.paint(s, 'muted'),
-    paintAccent:  (s) => c.accent(s),
-    openItem:     distillation?.openItem,
-    lastDecision: distillation?.lastDecision,
+    paintMuted:    (s) => opts.display.paint(s, 'muted'),
+    paintAccent:   (s) => c.accent(s),
+    openItem:      distillation?.openItem,
+    lastDecision:  distillation?.lastDecision,
+    lastSessionAt,
+    // Deterministic per-day rotation for the no-history fallback line.
+    rotateSeed:    now.getDate(),
   });
 
   // ── Render (or stay silent) -----------------------------------------
@@ -125,9 +134,14 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
   }
 
   // ── Persist updated history -----------------------------------------
+  // v4.14 Bug 1 — refresh the durable session marker on EVERY boot. This is
+  // the write that was missing: because the old code leaned on distillation
+  // mtime (rarely written), the gap froze. Session-start is the durable
+  // write point — it always runs, unlike a clean-exit handler.
   const updated: GreeterHistory = {
     ...reconciled,
     lastGreetingAt: now.toISOString(),
+    lastSessionAt:  now.toISOString(),
     lastCwd:        cwd,
     offers: offer
       ? [...reconciled.offers, {
