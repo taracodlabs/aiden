@@ -74,6 +74,55 @@ export const skills: SlashCommand = {
       return {};
     }
 
+    // v4.14 Pillar 6 Slice A — /skills health. The precondition gate: which
+    // skills can actually run HERE (env vars present, binaries on PATH, OS
+    // matches) vs. which need setup or aren't available. No execution — pure
+    // declared-precondition check. A "needs setup" skill still LOADS; it's just
+    // honestly flagged so it's not silently advertised as ready.
+    if (sub === 'health') {
+      if (!ctx.skillLoader) {
+        ctx.display.warn('Skill loader not wired.');
+        return {};
+      }
+      const skills = await ctx.skillLoader.list();
+      const label: Record<string, string> = {
+        ready: 'ready', needs_setup: 'needs setup', unavailable: 'unavailable',
+      };
+      const rows = skills.map((s) => {
+        const r = s.readiness ?? { status: 'ready' as const, missing: [] };
+        const needs = r.status === 'ready'
+          ? '—'
+          : r.missing.map((m) => (m.kind === 'env' ? m.name : `${m.kind}:${m.name}`)).join(', ');
+        return { name: s.name, status: label[r.status] ?? r.status, needs, _status: r.status };
+      });
+      const counts = rows.reduce(
+        (a, r) => { a[r._status] = (a[r._status] ?? 0) + 1; return a; },
+        {} as Record<string, number>,
+      );
+      ctx.display.write(
+        renderTable(
+          rows.map(({ name, status, needs }) => ({ name, status, needs })),
+          [
+            { key: 'name',   header: 'Name',   align: 'left', minWidth: 16 },
+            { key: 'status', header: 'Status', align: 'left', minWidth: 12,
+              color: (_v, row) => {
+                const st = (row as { status: string }).status;
+                if (st === 'ready')       return 'success';
+                if (st === 'unavailable') return 'muted';
+                return 'warn';   // needs setup
+              } },
+            { key: 'needs',  header: 'Needs',  align: 'left', flex: true },
+          ],
+          {
+            title:        'Skill health',
+            totalCount:   `${counts.ready ?? 0} ready · ${counts.needs_setup ?? 0} need setup · ${counts.unavailable ?? 0} unavailable`,
+            emptyMessage: 'no skills installed',
+          },
+        ),
+      );
+      return {};
+    }
+
     // v4.9.5 Slice 1 — /skills setup. Re-invokes the curated install
     // flow used by the onboarding wizard. Per Phase B Q3 (cut #2):
     // ships additive — installs missing skills, no reconciliation /

@@ -84,6 +84,7 @@ import type { Message as ProviderMessage } from '../../providers/v4/types';
 import { SkillCommands } from '../../core/v4/skillCommands';
 import { AidenAgent } from '../../core/v4/aidenAgent';
 import { PromptBuilder, narrowSkillDesc } from '../../core/v4/promptBuilder';
+import { readinessNote } from '../../core/v4/skillReadiness';
 import { PersonalityManager } from '../../core/v4/personality';
 import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 // v4.11 preflight compression — wire the dormant Phase 13 compressor
@@ -2081,13 +2082,20 @@ export async function buildAgentRuntime(
     // demote off-posture / low-trust skills to names-only (name kept, teaser
     // dropped). Every name still ships; bodies stay a skill_view away.
     skillsList = loaded.map((s) => {
-      const su = s as { name: string; description?: string; category?: string; trustLevel?: string; userModified?: boolean };
+      const su = s as {
+        name: string; description?: string; category?: string; trustLevel?: string;
+        userModified?: boolean;
+        readiness?: import('../../core/v4/skillReadiness').SkillReadiness;
+      };
       return {
         name: su.name,
         description: narrowSkillDesc(su.description ?? ''),
         category: su.category,
         trustLevel: su.trustLevel,
         userModified: su.userModified,
+        // v4.14 Pillar 6 Slice A — mark non-ready skills so the model isn't told
+        // a skill is usable when its preconditions aren't satisfied here.
+        readinessNote: su.readiness ? readinessNote(su.readiness) : undefined,
       };
     });
   } catch {

@@ -434,6 +434,12 @@ export interface SkillIndexEntry {
   category?: string;
   trustLevel?: string;
   userModified?: boolean;
+  /**
+   * v4.14 Pillar 6 Slice A — precondition status shown to the model so it isn't
+   * told a skill is usable when its env/binary/platform preconditions aren't
+   * met (e.g. "needs setup: CENSYS_API_ID"). Absent ⇒ ready ⇒ no marker.
+   */
+  readinessNote?: string;
 }
 
 /**
@@ -464,10 +470,13 @@ function formatSkillsSection(
   skills: ReadonlyArray<SkillIndexEntry>,
   loadedToolsets: ReadonlySet<string>,
 ): string {
-  // Demoted entries render NAME-ONLY (teaser dropped); full entries keep the teaser.
-  const lines = skills.map((s) =>
-    shouldDemoteSkill(s, loadedToolsets) ? `- ${s.name}` : `- ${s.name}: ${s.description}`,
-  );
+  // Demoted entries render NAME-ONLY (teaser dropped); full entries keep the
+  // teaser. v4.14 — a non-ready skill appends its readiness note so the model
+  // knows it must be set up before it can be used.
+  const lines = skills.map((s) => {
+    const base = shouldDemoteSkill(s, loadedToolsets) ? `- ${s.name}` : `- ${s.name}: ${s.description}`;
+    return s.readinessNote ? `${base}  [${s.readinessNote}]` : base;
+  });
   return [
     HEADER_SKILLS,
     '',

@@ -145,6 +145,23 @@ describe('PromptBuilder', () => {
     expect(out).toContain('youtube-player: play music on youtube');
   });
 
+  it('4c-r. v4.14 — a non-ready skill shows its readiness note so the model knows it needs setup', async () => {
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      skillsList: [
+        { name: 'censys', description: 'internet asset discovery', readinessNote: 'needs setup: CENSYS_API_ID' },
+        { name: 'arxiv',  description: 'search papers' },   // ready → no marker
+      ],
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).toContain('censys: internet asset discovery  [needs setup: CENSYS_API_ID]');
+    // A ready skill carries no marker.
+    expect(out).toContain('arxiv: search papers');
+    expect(out).not.toContain('arxiv: search papers  [');
+  });
+
   it('4d. skills slot omitted entirely when no skills supplied (Phase 16g)', async () => {
     // Empty skillsList stays out of the prompt — the mandatory framing
     // would be confusing if there's nothing to scan.

@@ -6,6 +6,11 @@ version: 1.0.0
 origin: aiden
 license: Apache-2.0
 tags: docker, containers, images, volumes, networks, compose, dockerode, devops, deployment
+metadata:
+  aiden:
+    required_binaries:
+      - name: docker
+        help: Install Docker Desktop / Engine — https://docs.docker.com/get-docker/
 ---
 
 # Docker Container Management

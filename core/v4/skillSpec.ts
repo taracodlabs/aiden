@@ -46,6 +46,16 @@ export interface AidenSkillEnvVar {
   help?: string;
 }
 
+/**
+ * v4.14 Pillar 6 Slice A — a CLI binary the skill shells out to (docker,
+ * nano-pdf, …). The readiness gate checks it's on PATH before advertising the
+ * skill as usable. `help` is shown when it's missing.
+ */
+export interface AidenSkillBinary {
+  name: string;
+  help?: string;
+}
+
 export interface SkillFrontmatter {
   name: string;
   description: string;
@@ -97,8 +107,16 @@ export interface SkillFrontmatter {
       requires_toolsets?: string[];
       config?: AidenSkillConfig[];
       required_environment_variables?: AidenSkillEnvVar[];
+      /** v4.14 Pillar 6 Slice A — CLI binaries the skill needs on PATH. */
+      required_binaries?: AidenSkillBinary[];
     };
   };
+  /**
+   * v4.14 Pillar 6 Slice A — legacy v3 top-level env declaration (the 6
+   * security skills: `env_required: [CENSYS_API_ID, …]`). The readiness gate
+   * reads this alongside the v4 `metadata.aiden.required_environment_variables`.
+   */
+  env_required?: string[];
   /** Trust level — assigned during install/scan, not authored. */
   _trustLevel?: TrustLevel;
   /** Source identifier — assigned during install. */

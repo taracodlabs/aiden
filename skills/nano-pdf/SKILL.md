@@ -6,6 +6,11 @@ version: 1.0.0
 origin: aiden
 license: Apache-2.0
 tags: pdf, edit, merge, split, compress, redact, nano-pdf, cli, document, watermark
+metadata:
+  aiden:
+    required_binaries:
+      - name: nano-pdf
+        help: Install the nano-pdf CLI — npm i -g nano-pdf
 ---
 
 # nano-pdf — Natural-Language PDF Editing

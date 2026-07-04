@@ -38,6 +38,7 @@ import {
   parseSkillContent,
   type ParsedSkill,
 } from './skillSpec';
+import { computeReadiness, type SkillReadiness } from './skillReadiness';
 import {
   createNullLogger,
   type AidenFileLogger,
@@ -55,6 +56,8 @@ export interface SkillSummary {
   // it (and the "(uncredited)" warn-marker for community skills
   // without an `author` field).
   author?: string;
+  /** v4.14 Pillar 6 Slice A — precondition verdict ("can this skill run here?"). */
+  readiness?: SkillReadiness;
 }
 
 export interface SkillLoaderOptions {
@@ -152,6 +155,8 @@ export class SkillLoader {
       userModified: undefined, // SkillLoader doesn't know; BundledManifest does.
       filePath: s.filePath,
       author: s.frontmatter.author,
+      // v4.14 Pillar 6 Slice A — cheap precondition verdict ("can it run here?").
+      readiness: computeReadiness(s.frontmatter),
     }));
   }
 

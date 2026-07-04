@@ -17,6 +17,7 @@
 
 import type { ConfigManager } from './config';
 import type { ParsedSkill, Platform } from './skillSpec';
+import { requiredEnvVars } from './skillReadiness';
 
 const PLATFORM: Platform =
   process.platform === 'win32'
@@ -64,12 +65,17 @@ export class SkillsConfig {
     return out;
   }
 
+  /**
+   * v4.14 Pillar 6 Slice A — now reads BOTH the v4
+   * `metadata.aiden.required_environment_variables` and the legacy v3 top-level
+   * `env_required` (the 6 security skills used the latter, which this method
+   * previously ignored). Shares the collector with the readiness gate, so the
+   * env-precondition check is live on the readiness path instead of dead code.
+   */
   checkRequiredEnvVars(
     skill: ParsedSkill,
   ): { ok: boolean; missing: string[] } {
-    const required =
-      skill.frontmatter.metadata?.aiden?.required_environment_variables ?? [];
-    const missing = required
+    const missing = requiredEnvVars(skill.frontmatter)
       .map((r) => r.name)
       .filter((name) => !process.env[name]);
     return { ok: missing.length === 0, missing };
