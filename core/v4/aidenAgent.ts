@@ -436,6 +436,15 @@ export interface RunConversationOptions {
    */
   drainSteer?:       () => string | null;
   /**
+   * v4.14 — PAUSE gate. Called by the loop at the SAME safe boundary as
+   * `drainSteer` (history balanced, before the next provider call). Awaits
+   * while the user has paused the turn and resolves on /resume — or on abort,
+   * so a Ctrl+C during a pause unblocks and the top-of-loop signal check
+   * cancels cleanly. Omitted by daemon agents + unit tests (no interactive
+   * pause) — a missing hook means "never pauses".
+   */
+  waitForResumeIfPaused?: (signal?: AbortSignal) => Promise<void>;
+  /**
    * v4.11 Slice 4 — optional per-turn `TurnRuntimeContext`. When
    * provided, the loop exposes it via `agent.getCurrentTurnContext()`
    * so the spawn / fanout tool facades can route through the
@@ -2037,6 +2046,14 @@ export class AidenAgent {
       }
 
       messages.push(...turnToolMessages);
+
+      // ── v4.14 — PAUSE gate at the SAME safe boundary ─────────────────
+      // If the user paused mid-turn, freeze HERE (history balanced, before the
+      // next provider call fires). Resumes on /resume; an abort during a pause
+      // unblocks the waiter so the top-of-loop signal check stops the turn.
+      if (runOptions.waitForResumeIfPaused) {
+        await runOptions.waitForResumeIfPaused(runOptions.signal);
+      }
       // Loop continues — provider gets the tool results next iteration.
     }
 

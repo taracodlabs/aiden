@@ -42,6 +42,20 @@ export function isBusyEnterMode(s: unknown): s is BusyEnterMode {
   return s === 'queue' || s === 'interrupt' || s === 'redirect';
 }
 
+/**
+ * Read the persisted preferred busy-mode from config (`agent.busyMode`) so the
+ * user's choice survives a restart — the boot path seeds `DuringTurnInput` with
+ * it. A missing/garbage value coerces to the safe default 'queue' and never
+ * RAISES to interrupt/redirect. Kept cli-side (config only needs `getValue`) so
+ * core never depends on this module.
+ */
+export function resolveConfiguredBusyMode(
+  config?: { getValue<T = unknown>(key: string, fallback?: T): T },
+): BusyEnterMode {
+  const raw = config?.getValue<string | undefined>('agent.busyMode', undefined);
+  return isBusyEnterMode(raw) ? raw : 'queue';
+}
+
 /** What the keypress source should DO with an Enter pressed during a turn. */
 export type BusyEnterAction =
   | { action: 'queued';  count: number; text: string }

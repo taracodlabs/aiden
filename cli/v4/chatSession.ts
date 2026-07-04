@@ -114,7 +114,7 @@ import { installResizeGuard } from './resizeGuard';
 import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { captureArtifactFromTrace } from '../../core/v4/daemon/artifactStore';
 // v4.12.1 Pillar 4 Slice 2a — type-next-while-busy.
-import { DuringTurnInput, type BusyEnterMode } from './duringTurnInput';
+import { DuringTurnInput, resolveConfiguredBusyMode, type BusyEnterMode } from './duringTurnInput';
 import { attachTurnInputListener } from './turnInputListener';
 import { requestTurnCancel } from './frame/interruptControls';
 
@@ -658,6 +658,9 @@ export class ChatSession implements ChatSessionLike {
     // still applies after the engine is frozen at boot.
     if (opts.yoloMode) opts.approvalEngine.setMode('off', { userInitiated: true });
     if (opts.resumeHistory) this.history = [...opts.resumeHistory];
+    // v4.14 — restore the persisted preferred busy-mode (agent.busyMode) so a
+    // /busy choice survives a restart. Default 'queue' when unset/garbage.
+    try { this.duringTurnInput.setMode(resolveConfiguredBusyMode(opts.config)); } catch { /* safe */ }
     // v4.14 Pillar 5 Slice C — emit autonomy_changed when the dial is set. The
     // dial changes at the prompt (no active run), so runId is null here: the
     // live subscriber sees it and durable persistence is skipped.
@@ -1651,6 +1654,20 @@ export class ChatSession implements ChatSessionLike {
     const detachTurnInput = attachTurnInputListener({
       cb: {
         onLine: (text) => {
+          // v4.14 — during-turn control words act IMMEDIATELY (never queued).
+          // Pause/resume are only meaningful mid-turn, so they live here (like
+          // the Enter-modes), not as prompt-level slash commands.
+          const word = text.trim().toLowerCase();
+          if (word === '/pause') {
+            const ok = this.duringTurnInput.requestPause();
+            try { this.opts.display.dim(ok ? '  ‖ paused — /resume to continue (Ctrl+C still stops)' : '  ‖ already paused'); } catch { /* defensive */ }
+            return;
+          }
+          if (word === '/resume') {
+            const ok = this.duringTurnInput.resume();
+            try { this.opts.display.dim(ok ? '  ▸ resumed' : '  ▸ not paused'); } catch { /* defensive */ }
+            return;
+          }
           const act = this.duringTurnInput.onBusyEnter(text);
           if (act.action === 'queued') {
             try { this.opts.display.dim(`  ✓ queued (${act.count} pending) — runs after this turn`); } catch { /* defensive */ }
@@ -2055,6 +2072,9 @@ export class ChatSession implements ChatSessionLike {
         // safe boundary and injects the nudge as tool-stream context. The
         // controller owns the buffer; an interrupt clears it (below).
         drainSteer: () => this.duringTurnInput.drainSteer(),
+        // v4.14 — PAUSE gate. The loop awaits this at the SAME safe boundary;
+        // /pause freezes the turn, /resume (or a Ctrl+C abort) unblocks it.
+        waitForResumeIfPaused: (sig) => this.duringTurnInput.waitWhilePaused(sig),
         // v4.11 Slice 4 — expose the per-turn runtime context to
         // tools via `agent.getCurrentTurnContext()`. The spawn /
         // fanout facades read it to thread parent signal + cost

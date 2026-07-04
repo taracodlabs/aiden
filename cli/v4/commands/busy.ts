@@ -42,7 +42,13 @@ export const busy: SlashCommand = {
       return {};
     }
     session.setBusyMode(arg);
-    ctx.display.success(NOTE[arg]);
+    // v4.14 — persist the preferred mode so it survives a restart. Boot re-reads
+    // it via resolveConfiguredBusyMode(agent.busyMode). Session-only if no config.
+    let persisted = false;
+    if (ctx.config) {
+      try { ctx.config.set('agent.busyMode', arg); await ctx.config.save(); persisted = true; } catch { /* best-effort */ }
+    }
+    ctx.display.success(`${NOTE[arg]}${persisted ? ' — persisted across restarts.' : ''}`);
     return {};
   },
 };
