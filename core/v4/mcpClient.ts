@@ -54,6 +54,7 @@ import { McpToolFilter, type ToolFilterConfig } from './mcp/filters';
 import { McpCredentialFilter } from './mcp/credentialFilter';
 import { scrubString } from './logger/redact';
 import type { McpAuthProvider } from './mcp/mcpAuth';
+import { buildMcpAuthRequiredResult } from './mcp/authRequired';
 
 // v4.12 — MCP success results are EXTERNAL, untrusted content reaching the model
 // (same threat class as B5.1 browser-extracted content): T1 secrets-into-model
@@ -631,8 +632,14 @@ export class McpClient {
       );
     }
     if (server.status === 'needs-auth') {
-      throw new Error(
-        `MCP server "${serverName}" needs authorization — run /mcp auth ${serverName} (do NOT retry).`,
+      // v4.14 — a TYPED auth_required result (success:false), NOT a raw throw:
+      // the verifier flags it failed, the classifier marks it non-recoverable
+      // auth, and verify-before-done blocks the task from reaching `completed`
+      // on an auth-failed side effect. Never a raw error the model misreads.
+      return buildMcpAuthRequiredResult(
+        serverName,
+        'server needs authorization (no valid token)',
+        `Run /mcp auth ${serverName} to authorize.`,
       );
     }
     // Slice 2b — tool-call circuit breaker. Only for a ready server: 2a's
@@ -664,10 +671,17 @@ export class McpClient {
       // 3b — token rejected even after the transport's refresh+retry-once → the
       // server is locked. Transition to needs-auth (not a flapping-tool breaker
       // failure) so /mcp shows 🔑 and the model stops trying until re-auth.
+      // v4.14 — RETURN the typed auth_required result rather than throwing a raw
+      // string: the old throw ("needs re-authorization") matched NO auth pattern
+      // and classified as `other`/recoverable — a blind-retry-the-auth-wall risk
+      // and a fake-success vector. Typed → non-recoverable auth → completion is
+      // blocked ("needs reauth for <provider>"), never narrated as done.
       if (this.isAuthError(message)) {
         this.markNeedsAuth(server);
-        throw new Error(
-          `MCP server "${serverName}" needs re-authorization — run /mcp auth ${serverName} (do NOT retry).`,
+        return buildMcpAuthRequiredResult(
+          serverName,
+          'token rejected after refresh (revoked or expired)',
+          `Run /mcp auth ${serverName} to re-authorize.`,
         );
       }
       if (useBreaker) this.recordBreakerFailure(server);          // call-level failure

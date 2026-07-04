@@ -121,7 +121,7 @@ describe('runMcpDeviceFlow', () => {
     const u = mkUa();
     const result = await runMcpDeviceFlow({ config: CFG, server: 'github', ua: u.ua, fetchImpl, now: () => 0 });
     expect(result.accessToken).toBe('at-123');
-    expect(u.logs.join('\n')).toMatch(/Enter code:\s+WXYZ-1234/);
+    expect(u.logs.join('\n')).toMatch(/Enter the code:\s+WXYZ-1234/);
     expect(u.opened[0]).toContain('code=WXYZ-1234'); // opened the pre-filled URL
     expect(fetchImpl.tokenCalls).toBe(3);            // pending, pending, success
   });
@@ -144,6 +144,24 @@ describe('runMcpDeviceFlow', () => {
       .rejects.toThrow(/expired.*again/i);
   });
 
+  it('shows the URL, code, expiry and cancel instruction (headless-safe UX)', async () => {
+    const u = mkUa();
+    await runMcpDeviceFlow({ config: CFG, server: 'gh', ua: u.ua, fetchImpl: mkFetch(DEVICE_OK, [TOKEN_OK]), now: () => 0 });
+    const out = u.logs.join('\n');
+    expect(out).toContain('https://prov.example/activate'); // URL ALWAYS printed (SSH/WSL safe)
+    expect(out).toContain('WXYZ-1234');                     // code
+    expect(out).toMatch(/expires in ~\d+ min/);             // expiry
+    expect(out).toMatch(/Ctrl\+C to cancel/);               // cancel instruction
+  });
+
+  it('an aborted signal cancels the poller cleanly (no hang, clear error)', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const fetchImpl = mkFetch(DEVICE_OK, [{ status: 400, body: { error: 'authorization_pending' } }]);
+    await expect(runMcpDeviceFlow({ config: CFG, server: 'gh', ua: mkUa().ua, fetchImpl, now: () => 0, signal: controller.signal }))
+      .rejects.toThrow(/Cancelled/);
+  });
+
   it('deadline exceeded → times out (never polls forever)', async () => {
     // Clock advances: 1st read sets the deadline (t=0 → deadline=900s), the next
     // read is already past it → the while-loop is skipped → clean timeout.
@@ -151,6 +169,6 @@ describe('runMcpDeviceFlow', () => {
     const now = () => (calls++ === 0 ? 0 : 10_000_000);
     const fetchImpl = mkFetch(DEVICE_OK, [{ status: 400, body: { error: 'authorization_pending' } }]);
     await expect(runMcpDeviceFlow({ config: CFG, server: 's', ua: mkUa().ua, fetchImpl, now }))
-      .rejects.toThrow(/Timed out/);
+      .rejects.toThrow(/code expired/);
   });
 });

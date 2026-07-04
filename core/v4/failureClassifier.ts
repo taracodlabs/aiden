@@ -54,6 +54,7 @@
 
 import type { ToolCallResult } from '../../providers/v4/types';
 import type { VerificationResult } from './verifier';
+import { readAuthRequired } from './mcp/authRequired';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -171,6 +172,23 @@ export class FailureClassifier {
     result:       ToolCallResult,
   ): ClassificationResult | null {
     if (verification.ok) return null;
+    // v4.14 — GLOBAL pre-check: a typed `auth_required` envelope (from ANY tool,
+    // e.g. an MCP call whose token died and couldn't refresh) is an auth wall.
+    // Classify it as NON-RECOVERABLE auth so recovery never blind-retries it —
+    // this is the anti-fake-success guarantee, robust where the substring auth
+    // patterns below are not (the old raw "needs re-authorization" string
+    // matched none of them and fell through to `other`/recoverable).
+    const authEnv = readAuthRequired(result);
+    if (authEnv) {
+      return {
+        category:    'auth',
+        confidence:  0.99,
+        reason:      `needs reauth for ${authEnv.provider}`,
+        recoverable: false,
+        recoveryHint: { action: 'request_user_action', detail: authEnv.reauth_hint || `re-authorize ${authEnv.provider}` },
+        matchedPattern: 'auth_required',
+      };
+    }
     return this.resolve(toolName)(verification, toolName, args, result);
   }
 }

@@ -182,6 +182,11 @@ export interface RunDeviceFlowDeps {
   fetchImpl?: FetchImpl;
   /** Injected clock for deterministic tests. Defaults to Date.now. */
   now?: () => number;
+  /**
+   * Cancel the poller cleanly (Ctrl+C). Checked at each poll boundary; when
+   * aborted the flow throws a clear "cancelled" error instead of polling on.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -194,23 +199,30 @@ export async function runMcpDeviceFlow(deps: RunDeviceFlowDeps): Promise<OAuthFl
   const now = deps.now ?? Date.now;
 
   const auth = await requestDeviceAuthorization(deps.config, fetchImpl);
+  const aborted = (): boolean => deps.signal?.aborted === true;
+  const cancel = (): Error => new Error(`Cancelled device authorization for "${deps.server}".`);
 
+  // Clear terminal UX: ALWAYS print the URL + code (SSH/WSL/headless-safe), the
+  // expiry, the waiting state, and the cancel instruction — then best-effort
+  // open the browser (never rely on it).
+  const expiresMin = Math.max(1, Math.round(auth.expiresInSeconds / 60));
   deps.ua.log('');
-  deps.ua.log(`To connect "${deps.server}":`);
-  deps.ua.log(`  1. Open:        ${auth.verificationUri}`);
-  deps.ua.log(`  2. Enter code:  ${auth.userCode}`);
+  deps.ua.log(`To connect "${deps.server}", authorize in your browser:`);
+  deps.ua.log(`  1. Open this URL:  ${auth.verificationUri}`);
+  deps.ua.log(`  2. Enter the code: ${auth.userCode}`);
   deps.ua.log('');
-  deps.ua.log('Waiting for you to authorize in the browser…');
-  // Best-effort browser open (prefer the pre-filled URL when the server gives one).
+  deps.ua.log(`This code expires in ~${expiresMin} min. Waiting for approval…  (press Ctrl+C to cancel)`);
   await deps.ua.openBrowser(auth.verificationUriComplete ?? auth.verificationUri).catch(() => undefined);
 
   let intervalSec = auth.intervalSeconds;
   const deadline = now() + auth.expiresInSeconds * 1000;
 
   // Give the user a moment before the first poll.
+  if (aborted()) throw cancel();
   await deps.ua.sleep(intervalSec * 1000);
 
   while (now() < deadline) {
+    if (aborted()) throw cancel();
     const outcome = await pollDeviceTokenOnce(deps.config, auth.deviceCode, fetchImpl);
     switch (outcome.kind) {
       case 'success':
@@ -229,5 +241,5 @@ export async function runMcpDeviceFlow(deps: RunDeviceFlowDeps): Promise<OAuthFl
     }
     await deps.ua.sleep(intervalSec * 1000);
   }
-  throw new Error(`Timed out waiting for you to authorize "${deps.server}".`);
+  throw new Error(`The code expired before "${deps.server}" was authorized. Run \`/mcp auth ${deps.server}\` to try again.`);
 }

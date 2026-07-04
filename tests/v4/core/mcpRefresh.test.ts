@@ -159,8 +159,8 @@ class AuthFailTransport implements McpTransport {
   close(): Promise<void> { return Promise.resolve(); }
 }
 
-describe('McpClient.callTool — persistent auth error → needs-auth', () => {
-  it('transitions to needs-auth, unregisters tools, tells the model to re-auth', async () => {
+describe('McpClient.callTool — persistent auth error → typed auth_required (v4.14)', () => {
+  it('returns a TYPED auth_required result (not a raw throw), locks the server needs-auth', async () => {
     const registry = new ToolRegistry();
     const client = createMcpClient(registry, {
       log: () => {},
@@ -171,7 +171,19 @@ describe('McpClient.callTool — persistent auth error → needs-auth', () => {
     expect(server.status).toBe('ready');
     expect(registry.get('mcp_gm_t')).toBeDefined();
 
-    await expect(client.callTool('gm', 't', {})).rejects.toThrow(/re-authorization|run \/mcp auth/);
+    // v4.14 anti-fake-success — the auth failure comes back as a first-class
+    // typed result the runtime understands, never a raw exception the model
+    // could misread as transient.
+    const result = await client.callTool('gm', 't', {}) as {
+      success: boolean; error: string;
+      auth_required?: { provider: string; retryable: boolean; reauth_hint: string };
+    };
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/^auth_required:/);
+    expect(result.auth_required?.provider).toBe('gm');
+    expect(result.auth_required?.retryable).toBe(false);
+    expect(result.auth_required?.reauth_hint).toMatch(/\/mcp auth gm/);
+
     expect(client.get('gm')?.status).toBe('needs-auth');
     expect(client.get('gm')?.tools).toEqual([]);
     expect(registry.get('mcp_gm_t')).toBeUndefined();
