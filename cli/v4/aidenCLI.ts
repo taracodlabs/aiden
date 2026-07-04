@@ -167,7 +167,7 @@ import { ChannelManager } from '../../core/channels/manager';
 import { TelegramAdapter } from '../../core/channels/telegram';
 import { registerEnvChannels } from './channelBoot';
 import { gateway } from '../../core/gateway';
-import { createBootLogger } from '../../core/v4/logger';
+import { createBootLogger, CoreLogger, FileSink } from '../../core/v4/logger';
 
 import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
@@ -1849,10 +1849,28 @@ export async function buildAgentRuntime(
   }
 
   // MCP setup (best-effort — connection failures are non-fatal).
-  const mcpResult = await setupMcpFromConfig(config, toolRegistry, { paths }).catch(
+  // v4.14 Fix 1 — route ALL background MCP connection chatter (reconnect
+  // attempts, retry backoff, give-up, disconnects) to a FILE sink only, never
+  // stderr. The default mcpClient logger console.warn'd, which in an interactive
+  // REPL spliced into the user's chat stream. A file-only CoreLogger keeps
+  // housekeeping out of the conversation entirely.
+  const mcpLog = new CoreLogger({ sinks: paths.logsDir ? [new FileSink({ dir: paths.logsDir, name: 'aiden-mcp' })] : [] });
+  const mcpResult = await setupMcpFromConfig(config, toolRegistry, {
+    paths,
+    log: (level, msg) => { const fn = (mcpLog as unknown as Record<string, (m: string) => void>)[level]; if (typeof fn === 'function') fn.call(mcpLog, msg); },
+  }).catch(
     () => ({ client: null, connected: [], failures: {} }),
   );
   const mcpClient = mcpResult.client ?? null;
+  // v4.14 Fix 1 — the ONLY MCP thing that surfaces to the user: a calm, one-time
+  // actionable hint for servers that need authorization. Background chatter
+  // above stays in the log file.
+  try {
+    const needsAuth = (mcpClient?.list() ?? []).filter((s) => s.status === 'needs-auth').map((s) => s.config.name);
+    if (needsAuth.length > 0) {
+      display.dim(`  MCP: ${needsAuth.join(', ')} ${needsAuth.length === 1 ? 'needs' : 'need'} authorization — run \`/mcp auth ${needsAuth[0]}\`.`);
+    }
+  } catch { /* never let the hint break boot */ }
 
   // ── Phase 12 moat: resolve modes from config + CLI flags ─────────────
   const plannerGuardMode = coerceMode<PlannerGuardMode>(

@@ -10,7 +10,7 @@
  * (pre-fill, transport:'streamable' for http, oauth defers connect + hints).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { mcp } from '../../../../cli/v4/commands/mcpManage';
+import { mcp, extractClientIdFlag } from '../../../../cli/v4/commands/mcpManage';
 import {
   MCP_CATALOG,
   findCatalogEntry,
@@ -171,5 +171,42 @@ describe('/mcp catalog add — funnels the gate', () => {
     await mcp.handler(ctx);
     expect(text(display)).toContain('already configured');
     expect(confirm).not.toHaveBeenCalled();
+  });
+});
+
+// ── Fix 3 — --client-id persists with the entry (no env var required) ─────────
+describe('extractClientIdFlag', () => {
+  it('parses --client-id <id> and removes it from the rest', () => {
+    expect(extractClientIdFlag(['--client-id', 'Ov23abc'])).toEqual({ clientId: 'Ov23abc', rest: [] });
+  });
+  it('parses --client-id=<id>', () => {
+    expect(extractClientIdFlag(['--client-id=Ov23xyz', '/dir'])).toEqual({ clientId: 'Ov23xyz', rest: ['/dir'] });
+  });
+  it('no flag → undefined, args pass through', () => {
+    expect(extractClientIdFlag(['/some/dir'])).toEqual({ clientId: undefined, rest: ['/some/dir'] });
+  });
+  it('blank value → undefined', () => {
+    expect(extractClientIdFlag(['--client-id', '  '])).toEqual({ clientId: undefined, rest: [] });
+  });
+});
+
+describe('/mcp catalog add github --client-id — persists the public client id', () => {
+  it('stores --client-id into the server config oauth.clientId (safe to persist)', async () => {
+    const cfg = fakeConfig();
+    const confirm = vi.fn(async () => true);
+    const { ctx } = buildCtx(['catalog', 'add', 'github', '--client-id', 'Ov23-live-id'], fakeClient(), { config: cfg as never, confirm });
+    await mcp.handler(ctx);
+    const stored = cfg.getValue('mcp.servers.github') as { http?: { oauth?: { clientId?: string } } };
+    expect(stored?.http?.oauth?.clientId).toBe('Ov23-live-id'); // read back on every future boot
+    expect(JSON.stringify(stored)).not.toMatch(/secret/i);       // no secret stored (device flow)
+  });
+
+  it('--client-id on a non-OAuth entry is ignored with a note (not stored)', async () => {
+    const cfg = fakeConfig();
+    const confirm = vi.fn(async () => true);
+    const { ctx, display } = buildCtx(['catalog', 'add', 'memory', '--client-id', 'X'], fakeClient(), { config: cfg as never, confirm });
+    await mcp.handler(ctx);
+    expect(text(display)).toMatch(/--client-id ignored/);
+    expect(JSON.stringify(cfg.getValue('mcp.servers.memory'))).not.toContain('X');
   });
 });

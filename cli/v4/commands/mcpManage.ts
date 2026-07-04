@@ -284,9 +284,36 @@ async function handleCatalogAdd(ctx: SlashCommandContext, slug: string, extraArg
     display.printError(`No catalog entry '${slug}'.`, 'Run /mcp catalog to see available servers.');
     return;
   }
+  // v4.14 Fix 3 — pull `--client-id <id>` out of the args and PERSIST it with the
+  // server entry (public OAuth client id — safe to store, no secret). /mcp auth
+  // then reads it from the stored config first, so add-once → auth works on every
+  // future boot with zero env vars.
+  const { clientId, rest } = extractClientIdFlag(extraArgs);
   // Surface the entry's security notes before the gate.
   if (entry.securityNotes) display.dim(entry.securityNotes);
-  await addServer(ctx, entry.slug, catalogEntryToRawConfig(entry, extraArgs), { authType: entry.auth });
+  const raw = catalogEntryToRawConfig(entry, rest);
+  if (clientId) {
+    if (raw.type === 'http' && raw.http.oauth) {
+      raw.http.oauth = { ...raw.http.oauth, clientId };
+    } else {
+      display.dim(`(--client-id ignored — '${entry.slug}' is not an OAuth server)`);
+    }
+  }
+  await addServer(ctx, entry.slug, raw, { authType: entry.auth });
+}
+
+/** Pull `--client-id <id>` (or `--client-id=<id>`) out of a catalog-add arg list. */
+export function extractClientIdFlag(args: string[]): { clientId?: string; rest: string[] } {
+  const rest: string[] = [];
+  let clientId: string | undefined;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (a === '--client-id' && i + 1 < args.length) { clientId = args[i + 1]; i += 1; continue; }
+    if (a.startsWith('--client-id=')) { clientId = a.slice('--client-id='.length); continue; }
+    rest.push(a);
+  }
+  const trimmed = clientId?.trim();
+  return { clientId: trimmed ? trimmed : undefined, rest };
 }
 
 /** `/mcp remove <name>` — light confirm → disconnect live → prune config. */
@@ -466,11 +493,16 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
   const oauthCfg = entry.http.oauth;
   let staticClient: StaticOAuthClient | undefined;
   if (oauthCfg?.deviceAuthorizationEndpoint) {
-    const clientId = (process.env[`AIDEN_MCP_${name.toUpperCase()}_CLIENT_ID`] ?? oauthCfg.clientId ?? '').trim();
+    // v4.14 Fix 3 — read the client id from the STORED server config FIRST (set
+    // via `/mcp catalog add <slug> --client-id <id>`), env var only as an
+    // optional fallback. The public client id persists with the entry, so
+    // add-once → auth works on every future boot with zero env vars.
+    const clientId = (oauthCfg.clientId || process.env[`AIDEN_MCP_${name.toUpperCase()}_CLIENT_ID`] || '').trim();
     if (!clientId) {
       display.printError(
         `'${name}' needs a registered OAuth client id to authorize.`,
-        `Set AIDEN_MCP_${name.toUpperCase()}_CLIENT_ID to your registered app's client id, then retry.`,
+        `Re-add it with the id: \`/mcp catalog add ${name} --client-id <your-app-client-id>\` ` +
+          `(or set AIDEN_MCP_${name.toUpperCase()}_CLIENT_ID).`,
       );
       return;
     }

@@ -81,6 +81,14 @@ export interface McpHttpConfig {
   /** v4.12 Slice 3c — wire shape. 'streamable' (MCP 2025-03-26, default) or the
    *  legacy 'sse' (2024-11-05 POST /messages + GET /sse). */
   transport?: 'streamable' | 'sse';
+  /**
+   * v4.14 — static OAuth client for providers without Dynamic Client
+   * Registration (public client id + RFC 8628 device endpoint; no secret). Its
+   * presence means "this server needs OAuth": until a token is stored, connect()
+   * marks the server `needs-auth` QUIETLY rather than running the reconnect-retry
+   * loop against an un-authorized endpoint.
+   */
+  oauth?: { clientId?: string; deviceAuthorizationEndpoint?: string; scopes?: string[] };
 }
 
 export interface McpServerConfig {
@@ -341,7 +349,14 @@ export class McpClient {
     // v4.12 Slice 3a.3 — resolve OAuth state for hosted servers before connecting.
     if (config.type === 'http' && this.authProvider) {
       const auth = await this.authProvider.resolve(config.name);
-      if (auth.state === 'needs-auth') {
+      // v4.14 Fix 2 — a server whose config DECLARES OAuth but has no token yet
+      // resolves to 'none' (nothing persisted until /mcp auth runs). Treat that
+      // exactly like 'needs-auth': mark it quietly, do NOT establish, do NOT run
+      // the reconnect-retry loop against an un-authorized endpoint. Reconnect-
+      // retry is only for servers that WERE authorized and then dropped. No token
+      // = wait quietly, never a "giving up" alarm.
+      const declaresOAuth = !!config.http?.oauth?.deviceAuthorizationEndpoint;
+      if (auth.state === 'needs-auth' || (auth.state === 'none' && declaresOAuth)) {
         // Known but locked: visible, NOT connected, never blocks. No handshake,
         // no reconnect timer — `/mcp auth <name>` transitions it to ready.
         const locked: McpServer = {
