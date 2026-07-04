@@ -16,6 +16,7 @@ import path from 'node:path';
 import type { SlashCommand } from '../commandRegistry';
 import { renderTable } from '../table';
 import { isQuarantineCandidate } from '../../../core/v4/reliability';
+import { computeSkillFreshness, freshnessCell, loadManifestForFreshness } from '../../../core/v4/skillFreshness';
 import { CandidateStore } from '../../../core/v4/skillMining/candidateStore';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import { parseSkillContent } from '../../../core/v4/skillSpec';
@@ -93,7 +94,13 @@ export const skills: SlashCommand = {
       const trust = new Map(
         (ctx.agent?.skillOutcomeTracker?.snapshot() ?? []).map((o) => [o.skillName, o]),
       );
+      // v4.14 Pillar 6 Slice C — freshness vs the upstream manifest (advisory,
+      // cached + resilient; offline just reads "? offline", never an error).
+      const manifest = await loadManifestForFreshness().catch(
+        () => ({ available: false, entries: new Map() } as Awaited<ReturnType<typeof loadManifestForFreshness>>),
+      );
       let flaky = 0;
+      let updates = 0;
       const rows = skills.map((s) => {
         const r = s.readiness ?? { status: 'ready' as const, missing: [] };
         const needs = r.status === 'ready'
@@ -106,7 +113,17 @@ export const skills: SlashCommand = {
         const trustCell = !rel || rel.rollingPassRate === null
           ? '—'
           : `${Math.round(rel.rollingPassRate * 100)}%${quarantine ? ' ⚠ flaky' : ''}`;
-        return { name: s.name, status: label[r.status] ?? r.status, needs, trust: trustCell, _status: r.status, _flaky: quarantine };
+        const fresh = computeSkillFreshness(
+          { version: s.version },
+          manifest.entries.get(s.name) ?? null,
+          { manifestUnavailable: !manifest.available },
+        );
+        if (fresh.status === 'update_available') updates += 1;
+        return {
+          name: s.name, status: label[r.status] ?? r.status, needs, trust: trustCell,
+          freshness: freshnessCell(fresh),
+          _status: r.status, _flaky: quarantine, _fresh: fresh.status,
+        };
       });
       const counts = rows.reduce(
         (a, r) => { a[r._status] = (a[r._status] ?? 0) + 1; return a; },
@@ -114,7 +131,7 @@ export const skills: SlashCommand = {
       );
       ctx.display.write(
         renderTable(
-          rows.map(({ name, status, needs, trust: t }) => ({ name, status, needs, trust: t })),
+          rows.map(({ name, status, needs, trust: t, freshness }) => ({ name, status, trust: t, freshness, needs })),
           [
             { key: 'name',   header: 'Name',   align: 'left', minWidth: 16 },
             { key: 'status', header: 'Status', align: 'left', minWidth: 12,
@@ -126,16 +143,26 @@ export const skills: SlashCommand = {
               } },
             { key: 'trust',  header: 'Trust',  align: 'left', minWidth: 10,
               color: (v) => (typeof v === 'string' && v.includes('flaky') ? 'warn' : undefined) },
+            { key: 'freshness', header: 'Freshness', align: 'left', minWidth: 12,
+              color: (v) => {
+                const f = typeof v === 'string' ? v : '';
+                if (f.startsWith('⬆')) return 'warn';
+                if (f === 'current')   return 'success';
+                return 'muted';   // local / ? offline
+              } },
             { key: 'needs',  header: 'Needs',  align: 'left', flex: true },
           ],
           {
             title:        'Skill health',
             totalCount:   `${counts.ready ?? 0} ready · ${counts.needs_setup ?? 0} need setup · ${counts.unavailable ?? 0} unavailable` +
-              (flaky > 0 ? ` · ${flaky} flaky` : ''),
+              (flaky > 0 ? ` · ${flaky} flaky` : '') + (updates > 0 ? ` · ${updates} updatable` : ''),
             emptyMessage: 'no skills installed',
           },
         ),
       );
+      if (updates > 0) {
+        ctx.display.dim(`  ${updates} skill${updates === 1 ? '' : 's'} ${updates === 1 ? 'has' : 'have'} an update available — run \`aiden skills update <name>\`.`);
+      }
       return {};
     }
 

@@ -264,10 +264,31 @@ export class SkillsHub {
   ): Promise<HubSearchResult[]> {
     throw new Error(NOT_IMPLEMENTED);
   }
+  /**
+   * v4.14 Pillar 6 Slice C — DETECTION only (advisory). Compares installed
+   * skill versions to the upstream manifest via the resilient, cached freshness
+   * path. Offline / fetch failure → an empty list (never throws). The actual
+   * download/update remains `update()` (still Phase-14, deliberately untouched).
+   */
   async checkForUpdates(): Promise<
     Array<{ name: string; currentVersion: string; latestVersion: string }>
   > {
-    throw new Error(NOT_IMPLEMENTED);
+    const { SkillLoader } = await import('./skillLoader');
+    const { loadManifestForFreshness, computeSkillFreshness } = await import('./skillFreshness');
+    const installed = await new SkillLoader(this.paths).list();
+    const manifest = await loadManifestForFreshness();
+    const out: Array<{ name: string; currentVersion: string; latestVersion: string }> = [];
+    for (const s of installed) {
+      const f = computeSkillFreshness(
+        { version: s.version },
+        manifest.entries.get(s.name) ?? null,
+        { manifestUnavailable: !manifest.available },
+      );
+      if (f.status === 'update_available') {
+        out.push({ name: s.name, currentVersion: f.installedVersion ?? '', latestVersion: f.latestVersion ?? '' });
+      }
+    }
+    return out;
   }
   async update(_name: string): Promise<{ ok: boolean; reason?: string }> {
     throw new Error(NOT_IMPLEMENTED);
