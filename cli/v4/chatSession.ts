@@ -2274,6 +2274,12 @@ export class ChatSession implements ChatSessionLike {
               taskId:   replTaskId != null ? String(replTaskId) : undefined,
             });
           } catch { /* telemetry must never break finalization */ }
+          // v4.14 Pillar 6 Slice B — grade the skills used this turn against the
+          // same verdict, folding trust + emitting skill_outcome. Internally
+          // safe; wrapped again so trust bookkeeping never breaks the turn.
+          try {
+            this.opts.agent.skillOutcomeTracker?.recordTurnVerdict(fin.status, this.pillarSink(replRunId));
+          } catch { /* skill trust must never break finalization */ }
           if (result.finishReason === 'stop') {
             // Crash-honesty intermediate state (see Gap 1).
             replTaskStore.setStatus(replTaskId, 'pending_verification');

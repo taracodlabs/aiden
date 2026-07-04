@@ -5,225 +5,189 @@
  * Aiden — local-first agent.
  */
 /**
- * Phase v4.1.2-slice4 — SkillOutcomeTracker unit + persistence coverage.
- *
- * Verifies the slice4 attribution semantics:
- *   - skill_view opens a 5-tool-call window for that skill
- *   - downstream tool calls in the window attribute success/failure
- *   - skill_view itself does NOT attribute back to itself
- *   - another skill_view supersedes (last-write-wins)
- *   - window closes after 5 calls
- *   - persistence round-trips via the sidecar JSON
- *   - failure classification matches the slice4 rules
- *     (success===false, error truthy, otherwise success)
+ * v4.14 Pillar 6 Slice B — SkillOutcomeTracker, migrated onto the shared
+ * rolling-reliability record. Trust is now graded by the run's real task
+ * VERDICT (recordTurnVerdict), not the old noisy tool-success window. The
+ * window survives only to attach a `lastError` for context. Emits a
+ * `skill_outcome` event; a telemetry failure never breaks the turn.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {
-  SkillOutcomeTracker,
-  ATTRIBUTION_WINDOW,
-  isFailure,
-} from '../../../core/v4/skillOutcomeTracker';
-import type {
-  ToolCallRequest,
-  ToolCallResult,
-} from '../../../providers/v4/types';
+import { SkillOutcomeTracker, isFailure } from '../../../core/v4/skillOutcomeTracker';
+import { isQuarantineCandidate } from '../../../core/v4/reliability';
+import type { PillarEventSink } from '../../../core/v4/pillarEvents';
+import type { ToolCallRequest, ToolCallResult } from '../../../providers/v4/types';
 
-const okCall = (name: string, args: Record<string, unknown> = {}): ToolCallRequest => ({
-  id: `${name}-${Math.random().toString(36).slice(2, 8)}`,
-  name,
-  arguments: args,
-});
-const okResult = (name: string, payload: unknown = { ok: true }): ToolCallResult => ({
-  id:     'r-' + Math.random().toString(36).slice(2, 8),
-  name,
-  result: payload,
-});
-const errResult = (name: string, error = 'boom'): ToolCallResult => ({
-  id:     'r-' + Math.random().toString(36).slice(2, 8),
-  name,
-  result: { error, success: false },
-});
+const call = (name: string, args: Record<string, unknown> = {}): ToolCallRequest =>
+  ({ id: `${name}-${Math.random().toString(36).slice(2, 8)}`, name, arguments: args });
+const okResult = (name: string, payload: unknown = { ok: true }): ToolCallResult =>
+  ({ id: 'r', name, result: payload });
+const errResult = (name: string, error = 'boom'): ToolCallResult =>
+  ({ id: 'r', name, result: { error, success: false } });
 
-let tmpDir: string;
-let persistPath: string;
+/** Fire a full skill_view (before+after) so the skill is active this turn. */
+function view(t: SkillOutcomeTracker, name: string): void {
+  t.onTool(call('skill_view', { name }), 'before');
+  t.onTool(call('skill_view', { name }), 'after', okResult('skill_view'));
+}
 
+let tmpDir: string; let persistPath: string;
 beforeEach(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-skill-outcome-'));
   persistPath = path.join(tmpDir, '.skill-outcomes.json');
 });
-
 afterEach(async () => {
-  // maxRetries handles the rare case where a fire-and-forget persist
-  // is still resolving when cleanup runs (Windows holds the file
-  // briefly even after the JS side resolves).
   await fs.rm(tmpDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 });
 
-// Tracker exposes flush() — wait for the in-flight persist queue to drain.
-
-describe('SkillOutcomeTracker', () => {
-  it('skill_view opens an attribution window and records load', async () => {
+describe('SkillOutcomeTracker — verdict-graded trust', () => {
+  it('skill_view records load + lastUsed; no outcome until a verdict', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'after', okResult('skill_view'));
-    const snap = t.snapshot();
-    expect(snap).toHaveLength(1);
-    expect(snap[0].skillName).toBe('foo');
-    expect(snap[0].loaded).toBe(1);
-    expect(snap[0].toolSuccesses).toBe(0);
-    expect(snap[0].toolFailures).toBe(0);
-    expect(snap[0].lastUsed).toBeTypeOf('string');
-  });
-
-  it('attributes downstream tool successes within the window', async () => {
-    const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'after', okResult('skill_view'));
-    for (let i = 0; i < 3; i += 1) {
-      t.onTool(okCall('file_read', { path: `/tmp/${i}` }), 'before');
-      t.onTool(okCall('file_read', { path: `/tmp/${i}` }), 'after', okResult('file_read'));
-    }
+    view(t, 'foo');
     const s = t.snapshot()[0];
-    expect(s.toolSuccesses).toBe(3);
-    expect(s.toolFailures).toBe(0);
-  });
-
-  it('attributes downstream tool failures within the window', async () => {
-    const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'after', okResult('skill_view'));
-    t.onTool(okCall('file_read'), 'before');
-    t.onTool(okCall('file_read'), 'after', errResult('file_read', 'ENOENT'));
-    const s = t.snapshot()[0];
-    expect(s.toolSuccesses).toBe(0);
-    expect(s.toolFailures).toBe(1);
-    expect(s.lastError?.message).toBe('ENOENT');
-  });
-
-  it('does NOT attribute the skill_view call itself', () => {
-    const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'after', okResult('skill_view'));
-    const s = t.snapshot()[0];
-    expect(s.toolSuccesses).toBe(0);
-    expect(s.toolFailures).toBe(0);
-    // load counter incremented but no attribution on the view itself.
+    expect(s.skillName).toBe('foo');
     expect(s.loaded).toBe(1);
+    expect(s.lastUsed).toBeTypeOf('string');
+    expect(s.reliability.lastOutcomes).toEqual([]);       // no verdict yet
+    expect(s.reliability.rollingPassRate).toBeNull();
   });
 
-  it('closes the window after ATTRIBUTION_WINDOW tool calls', () => {
+  it('recordTurnVerdict(completed) → a PASS folded into the active skill', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'after', okResult('skill_view'));
-    // Window = 5. Fire 7 tool calls — only the first 5 should attribute.
-    for (let i = 0; i < 7; i += 1) {
-      t.onTool(okCall('file_read'), 'before');
-      t.onTool(okCall('file_read'), 'after', okResult('file_read'));
+    view(t, 'foo');
+    t.recordTurnVerdict('completed');
+    const rel = t.snapshot()[0].reliability;
+    expect(rel.lastOutcomes).toEqual(['pass']);
+    expect(rel.rollingPassRate).toBe(1);
+    expect(rel.totalPassed).toBe(1);
+  });
+
+  it('a skill active in a verification_failed run → a FAIL (negative signal)', () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    view(t, 'foo');
+    t.recordTurnVerdict('verification_failed');
+    const rel = t.snapshot()[0].reliability;
+    expect(rel.lastOutcomes).toEqual(['fail']);
+    expect(rel.rollingPassRate).toBe(0);
+  });
+
+  it('completed_unverified → pass; failed → fail', () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    view(t, 'a'); t.recordTurnVerdict('completed_unverified');
+    view(t, 'b'); t.recordTurnVerdict('failed');
+    const a = t.snapshot().find((s) => s.skillName === 'a')!;
+    const b = t.snapshot().find((s) => s.skillName === 'b')!;
+    expect(a.reliability.lastOutcomes).toEqual(['pass']);
+    expect(b.reliability.lastOutcomes).toEqual(['fail']);
+  });
+
+  it('grades EVERY skill used in the turn against the one verdict', () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    view(t, 'x'); view(t, 'y');
+    t.recordTurnVerdict('verification_failed');
+    for (const name of ['x', 'y']) {
+      expect(t.snapshot().find((s) => s.skillName === name)!.reliability.lastOutcomes).toEqual(['fail']);
     }
-    const s = t.snapshot()[0];
-    expect(s.toolSuccesses).toBe(ATTRIBUTION_WINDOW);
+    // active set cleared — a later verdict does NOT re-grade them.
+    view(t, 'z'); t.recordTurnVerdict('completed');
+    expect(t.snapshot().find((s) => s.skillName === 'x')!.reliability.lastOutcomes).toEqual(['fail']);
   });
 
-  it('another skill_view supersedes the window (last-write-wins)', () => {
+  it('a chronically-failing skill → quarantine candidate', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    // Open window for foo, then 2 successful tool calls...
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'foo' }), 'after', okResult('skill_view'));
-    t.onTool(okCall('file_read'), 'before');
-    t.onTool(okCall('file_read'), 'after', okResult('file_read'));
-    t.onTool(okCall('file_read'), 'before');
-    t.onTool(okCall('file_read'), 'after', okResult('file_read'));
-    // ...then bar takes over. The next 3 calls attribute to bar.
-    t.onTool(okCall('skill_view', { name: 'bar' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'bar' }), 'after', okResult('skill_view'));
-    for (let i = 0; i < 3; i += 1) {
-      t.onTool(okCall('file_read'), 'before');
-      t.onTool(okCall('file_read'), 'after', okResult('file_read'));
-    }
-    const snaps = t.snapshot();
-    const foo = snaps.find((s) => s.skillName === 'foo')!;
-    const bar = snaps.find((s) => s.skillName === 'bar')!;
-    expect(foo.toolSuccesses).toBe(2);
-    expect(bar.toolSuccesses).toBe(3);
+    for (let i = 0; i < 6; i += 1) { view(t, 'flaky'); t.recordTurnVerdict('verification_failed'); }
+    const rel = t.snapshot()[0].reliability;
+    expect(rel.rollingPassRate).toBe(0);
+    expect(isQuarantineCandidate(rel)).toBe(true);
   });
 
-  it('skill_view with empty name is ignored (does not open a window)', () => {
+  it('a mostly-passing skill is NOT quarantined', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: '' }), 'before');
-    t.onTool(okCall('skill_view', { name: '   ' }), 'before');
-    // Subsequent tool call should NOT be attributed to anything.
-    t.onTool(okCall('file_read'), 'before');
-    t.onTool(okCall('file_read'), 'after', okResult('file_read'));
+    for (let i = 0; i < 6; i += 1) { view(t, 'good'); t.recordTurnVerdict('completed'); }
+    expect(isQuarantineCandidate(t.snapshot()[0].reliability)).toBe(false);
+  });
+
+  it('captures lastError from a failed tool inside the window (context only)', () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    view(t, 'foo');
+    t.onTool(call('file_read'), 'before');
+    t.onTool(call('file_read'), 'after', errResult('file_read', 'ENOENT'));
+    expect(t.snapshot()[0].lastError?.message).toBe('ENOENT');
+  });
+
+  it('skill_view with an empty name is ignored', () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    t.onTool(call('skill_view', { name: '' }), 'before');
+    t.recordTurnVerdict('completed');
     expect(t.snapshot()).toHaveLength(0);
   });
 
-  it('snapshot is sorted by load count descending', () => {
+  it('snapshot sorted by load count descending', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    for (let i = 0; i < 3; i += 1) {
-      t.onTool(okCall('skill_view', { name: 'rare' }), 'before');
-      t.onTool(okCall('skill_view', { name: 'rare' }), 'after', okResult('skill_view'));
-    }
-    for (let i = 0; i < 5; i += 1) {
-      t.onTool(okCall('skill_view', { name: 'common' }), 'before');
-      t.onTool(okCall('skill_view', { name: 'common' }), 'after', okResult('skill_view'));
-    }
-    const snaps = t.snapshot();
-    expect(snaps[0].skillName).toBe('common');
-    expect(snaps[1].skillName).toBe('rare');
+    for (let i = 0; i < 3; i += 1) view(t, 'rare');
+    for (let i = 0; i < 5; i += 1) view(t, 'common');
+    expect(t.snapshot()[0].skillName).toBe('common');
   });
 
-  it('persists outcomes to disk and a fresh tracker hydrates them', async () => {
+  it('emits skill_outcome to both sinks; a throwing sink is swallowed', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: 'persist-me' }), 'before');
-    t.onTool(okCall('skill_view', { name: 'persist-me' }), 'after', okResult('skill_view'));
-    t.onTool(okCall('file_read'), 'before');
-    t.onTool(okCall('file_read'), 'after', okResult('file_read'));
-    await t.flush();
+    const live: string[] = []; const durable: string[] = [];
+    const sink: PillarEventSink = {
+      runId: 1,
+      onEvent: (n) => live.push(n),
+      runStore: { emitEventRich: (o) => { durable.push(String(o.name)); return 1; } },
+    };
+    view(t, 'foo');
+    t.recordTurnVerdict('completed', sink);
+    expect(live).toContain('skill_outcome');
+    expect(durable).toContain('skill_outcome');
 
-    // Construct a fresh tracker over the same path. The first
-    // skill_view triggers synchronous hydration before its bump.
+    // A throwing durable sink never propagates out of the turn.
     const t2 = new SkillOutcomeTracker(persistPath);
-    t2.onTool(okCall('skill_view', { name: 'persist-me' }), 'before');
+    view(t2, 'bar');
+    const throwing: PillarEventSink = { runId: 1, runStore: { emitEventRich: () => { throw new Error('DB down'); } } };
+    expect(() => t2.recordTurnVerdict('completed', throwing)).not.toThrow();
+  });
+
+  it('persists the reliability record; a fresh tracker hydrates it', async () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    view(t, 'persist-me'); t.recordTurnVerdict('completed');
+    await t.flush();
+    const t2 = new SkillOutcomeTracker(persistPath);
+    view(t2, 'persist-me');   // triggers hydration
     const s = t2.snapshot().find((x) => x.skillName === 'persist-me')!;
-    // Original record had loaded=1 + 1 success; the new view bumps to loaded=2.
-    expect(s.loaded).toBe(2);
-    expect(s.toolSuccesses).toBe(1);
+    expect(s.loaded).toBe(2);                       // 1 hydrated + 1 new view
+    expect(s.reliability.totalPassed).toBe(1);      // the persisted pass survived
     await t2.flush();
+  });
+
+  it('tolerates a pre-migration sidecar (old toolSuccesses shape) — still loads, reliability fresh', async () => {
+    await fs.writeFile(persistPath, JSON.stringify({
+      oldskill: { skillName: 'oldskill', loaded: 3, toolSuccesses: 5, toolFailures: 2, lastUsed: '2026-01-01T00:00:00Z' },
+    }), 'utf-8');
+    const t = new SkillOutcomeTracker(persistPath);
+    view(t, 'oldskill');
+    const s = t.snapshot()[0];
+    expect(s.skillName).toBe('oldskill');
+    expect(s.loaded).toBe(4);                        // migrated loaded (3) + this view
+    expect(s.reliability.lastOutcomes).toEqual([]);  // rolling record started clean
+    await t.flush();
   });
 
   it('survives a corrupt sidecar file (parse failure → empty start)', async () => {
     await fs.writeFile(persistPath, 'not valid json {{{', 'utf-8');
     const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(okCall('skill_view', { name: 'recover' }), 'before');
+    view(t, 'recover');
     expect(t.snapshot()[0].skillName).toBe('recover');
     await t.flush();
   });
 });
 
-describe('isFailure (failure classification)', () => {
-  it('treats undefined result as success (no signal)', () => {
-    expect(isFailure(undefined)).toBe(false);
-  });
-  it('treats top-level success===false as failure', () => {
-    expect(isFailure({ id: 'x', name: 'x', result: { success: false } } as unknown as ToolCallResult)).toBe(true);
-  });
-  it('treats inner success===false as failure', () => {
-    expect(isFailure({ id: 'x', name: 'x', result: { success: false, foo: 1 } } as unknown as ToolCallResult)).toBe(true);
-  });
-  it('treats truthy error string as failure', () => {
-    expect(isFailure({ id: 'x', name: 'x', result: { error: 'ENOENT' } } as unknown as ToolCallResult)).toBe(true);
-  });
-  it('treats {error: {message}} as failure', () => {
-    expect(isFailure({ id: 'x', name: 'x', result: { error: { message: 'bad' } } } as unknown as ToolCallResult))
-      .toBe(true);
-  });
-  it('treats {ok: true} as success', () => {
-    expect(isFailure({ id: 'x', name: 'x', result: { ok: true } })).toBe(false);
-  });
-  it('treats {success: true, content: ...} as success', () => {
-    expect(isFailure({ id: 'x', name: 'x', result: { success: true, content: 'hi' } })).toBe(false);
-  });
+describe('isFailure (failure classification — unchanged)', () => {
+  it('undefined → success (no signal)', () => expect(isFailure(undefined)).toBe(false));
+  it('top-level success===false → failure', () => expect(isFailure({ id: 'x', name: 'x', result: { success: false } } as unknown as ToolCallResult)).toBe(true));
+  it('truthy error string → failure', () => expect(isFailure({ id: 'x', name: 'x', result: { error: 'ENOENT' } } as unknown as ToolCallResult)).toBe(true));
+  it('{ok:true} → success', () => expect(isFailure({ id: 'x', name: 'x', result: { ok: true } })).toBe(false));
 });

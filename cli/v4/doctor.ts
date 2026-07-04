@@ -23,6 +23,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { resolveAidenPaths, type AidenPaths } from '../../core/v4/paths';
+import { isQuarantineCandidate } from '../../core/v4/reliability';
 import { LicenseClient, hasLicense } from '../../core/v4/license';
 import { checkForUpdate } from '../../core/v4/update/checkUpdate';
 import type { Display } from './display';
@@ -270,15 +271,20 @@ export function skillOutcomeResults(
   if (snaps.length === 0) return [];
   const out: CheckResult[] = [];
   for (const s of snaps.slice(0, topN)) {
-    const attributed = s.toolSuccesses + s.toolFailures;
-    const rate = attributed === 0
+    // v4.14 Pillar 6 Slice B — read the rolling verdict record, not the old
+    // tool-success counters.
+    const rel = s.reliability;
+    const rate = rel.rollingPassRate === null
       ? '—'
-      : `${Math.round((s.toolSuccesses / attributed) * 100)}% success`;
+      : `${Math.round(rel.rollingPassRate * 100)}% pass`;
+    const quarantine = isQuarantineCandidate(rel);
     const last = s.lastUsed
       ? `, last ${humanAge(Date.now() - new Date(s.lastUsed).getTime())} ago`
       : '';
-    const message = `loaded ${s.loaded}, ${s.toolSuccesses} ok, ${s.toolFailures} err (${rate})${last}`;
-    const passed = s.toolFailures === 0;
+    const flag = quarantine ? ' ⚠ flaky' : '';
+    const message = `loaded ${s.loaded}, ${rel.totalPassed}/${rel.totalTaskRuns} verified (${rate})${flag}${last}`;
+    // Passing = not chronically failing. A clean/short history stays green.
+    const passed = !quarantine;
     out.push({
       name: s.skillName,
       group: 'Skill outcomes',
@@ -420,11 +426,12 @@ export function renderSkillOutcomesSection(
 
   const lines: string[] = ['\nSkill outcomes (top ' + Math.min(topN, snaps.length) + ' by load count)'];
   for (const s of snaps.slice(0, topN)) {
-    const attributed = s.toolSuccesses + s.toolFailures;
-    const rate = attributed === 0
+    const rel = s.reliability;
+    const rate = rel.rollingPassRate === null
       ? '—'
-      : `${Math.round((s.toolSuccesses / attributed) * 100)}% success`;
-    const stats = `loaded ${s.loaded}, ${s.toolSuccesses} ok, ${s.toolFailures} err  (${rate})`;
+      : `${Math.round(rel.rollingPassRate * 100)}% pass`;
+    const flag = isQuarantineCandidate(rel) ? '  ⚠ flaky' : '';
+    const stats = `loaded ${s.loaded}, ${rel.totalPassed}/${rel.totalTaskRuns} verified  (${rate})${flag}`;
     const last  = s.lastUsed
       ? `  last ${humanAge(Date.now() - new Date(s.lastUsed).getTime())} ago`
       : '';

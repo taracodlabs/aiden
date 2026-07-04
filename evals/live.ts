@@ -26,6 +26,10 @@
  */
 
 import type { ProviderAdapter } from '../providers/v4/types';
+import {
+  foldOutcomes, isQuarantineCandidate as isQuarantineBase,
+  type ReliabilityOutcome, type RollingReliability,
+} from '../core/v4/reliability';
 import { runEval, type EvalScenario, type EvalResult } from './runner';
 
 // ── infra-error classification ───────────────────────────────────────────
@@ -52,7 +56,8 @@ export function classifyInfra(result: EvalResult): { infra: boolean; kind?: stri
 
 // ── repeat-runs ──────────────────────────────────────────────────────────
 
-export type RunOutcomeKind = 'pass' | 'fail' | 'infra';
+// The eval outcome kind IS the generic reliability outcome — one vocabulary.
+export type RunOutcomeKind = ReliabilityOutcome;
 
 export interface RunOutcome {
   kind:       RunOutcomeKind;
@@ -241,18 +246,10 @@ export function compareToBaseline(
 
 // ── reliability record (rolling, persisted) ──────────────────────────────
 
-export interface ReliabilityRecord {
+export interface ReliabilityRecord extends RollingReliability {
   scenarioId:       string;
   model:            string;
   provider:         string;
-  /** Rolling window of the most recent outcomes (capped). */
-  lastOutcomes:     RunOutcomeKind[];
-  totalRuns:        number;
-  totalTaskRuns:    number;
-  totalPassed:      number;
-  totalInfra:       number;
-  /** Pass-rate over the rolling window's genuine runs; null if all infra. */
-  rollingPassRate:  number | null;
   medianCostTokens: number;
   p95CostTokens:    number;
   medianLatencyMs:  number;
@@ -265,19 +262,14 @@ export function mergeReliability(
   rel: ScenarioReliability,
   histCap = 50,
 ): ReliabilityRecord {
-  const last = [...(prev?.lastOutcomes ?? []), ...rel.outcomes].slice(-histCap);
-  const task = last.filter((o) => o !== 'infra');
-  const passed = last.filter((o) => o === 'pass').length;
+  // Rolling window + pass-rate + totals come from the shared core primitive;
+  // the eval record adds its scenario identity + cost/latency percentiles.
+  const rolling = foldOutcomes(prev, rel.outcomes, histCap);
   return {
+    ...rolling,
     scenarioId:       rel.scenarioId,
     model:            rel.model,
     provider:         rel.provider,
-    lastOutcomes:     last,
-    totalRuns:        (prev?.totalRuns ?? 0) + rel.runs,
-    totalTaskRuns:    (prev?.totalTaskRuns ?? 0) + rel.taskRuns,
-    totalPassed:      (prev?.totalPassed ?? 0) + rel.passed,
-    totalInfra:       (prev?.totalInfra ?? 0) + rel.infraErrors,
-    rollingPassRate:  task.length > 0 ? passed / task.length : null,
     medianCostTokens: rel.medianCostTokens,
     p95CostTokens:    rel.p95CostTokens,
     medianLatencyMs:  rel.medianLatencyMs,
@@ -287,7 +279,5 @@ export function mergeReliability(
 
 /** True when a scenario is chronically flaky and should be quarantined. */
 export function isQuarantineCandidate(rec: ReliabilityRecord, floor = 0.5, minRuns = 6): boolean {
-  return rec.lastOutcomes.filter((o) => o !== 'infra').length >= minRuns
-    && rec.rollingPassRate !== null
-    && rec.rollingPassRate < floor;
+  return isQuarantineBase(rec, floor, minRuns);
 }

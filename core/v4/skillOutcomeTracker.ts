@@ -46,20 +46,31 @@ import type {
   ToolCallResult,
 } from '../../providers/v4/types';
 import type { SubsystemHealthTracker } from './subsystemHealth';
+import {
+  foldOutcomes, isQuarantineCandidate, emptyRolling,
+  type RollingReliability, type ReliabilityOutcome,
+} from './reliability';
+import { emitSkillOutcome, type PillarEventSink } from './pillarEvents';
 
-/** Per-skill outcome record persisted to `.skill-outcomes.json`. */
+/**
+ * Per-skill outcome record persisted to `.skill-outcomes.json`.
+ *
+ * v4.14 Pillar 6 Slice B — trust now folds through the SAME rolling-reliability
+ * record the Pillar-5 eval path uses (rolling pass-rate + quarantine). The
+ * primary signal is the run's real task VERDICT (completed → pass,
+ * verification_failed → fail), not the old noisy tool-success window; the
+ * attribution window survives only to attach a `lastError` for context.
+ */
 export interface SkillOutcome {
-  skillName:     string;
-  /** Times `skill_view` fired with this name. */
-  loaded:        number;
-  /** Attributed tool calls within the window that succeeded. */
-  toolSuccesses: number;
-  /** Attributed tool calls within the window that failed. */
-  toolFailures:  number;
+  skillName:   string;
+  /** Times `skill_view` fired with this name (usage frequency). */
+  loaded:      number;
+  /** Rolling trust: last-N verdict outcomes, rolling pass-rate, quarantine. */
+  reliability: RollingReliability;
   /** ISO timestamp of the most recent `skill_view` for this skill. */
-  lastUsed?:     string;
+  lastUsed?:   string;
   /** Length-capped message of the most recent attributed tool failure. */
-  lastError?:    { message: string; at: string };
+  lastError?:  { message: string; at: string };
 }
 
 /**
@@ -83,8 +94,10 @@ export type ToolCallPhase = 'before' | 'after';
 export class SkillOutcomeTracker {
   /** Currently-loaded skill (last skill_view, while its window is open). */
   private currentSkill: string | null = null;
-  /** Tool calls remaining in the current attribution window. */
+  /** Tool calls remaining in the current attribution window (lastError only). */
   private remaining    = 0;
+  /** Skills skill_view'd since the last verdict — graded together at finalize. */
+  private activeThisTurn: Set<string> = new Set();
   /** In-memory outcomes, keyed by skill name. Hydrated lazily. */
   private outcomes: Map<string, SkillOutcome> = new Map();
   /** True once we've attempted hydration from disk. */
@@ -128,6 +141,7 @@ export class SkillOutcomeTracker {
     this.ensureHydratedSync();
     this.currentSkill = name;
     this.remaining    = ATTRIBUTION_WINDOW;
+    this.activeThisTurn.add(name);   // graded at the turn's verdict
     this.bump(name, (o) => {
       o.loaded   += 1;
       o.lastUsed  = new Date().toISOString();
@@ -144,25 +158,57 @@ export class SkillOutcomeTracker {
     if (call.name === 'skill_view')        return;
     if (!this.currentSkill || this.remaining <= 0) return;
 
-    const skill  = this.currentSkill;
-    const failed = isFailure(result);
-    this.bump(skill, (o) => {
-      if (failed) {
-        o.toolFailures += 1;
-        const msg = extractErrorMessage(result);
-        if (msg) {
-          o.lastError = {
-            message: truncate(msg, ERROR_MESSAGE_CAP),
-            at:      new Date().toISOString(),
-          };
-        }
-      } else {
-        o.toolSuccesses += 1;
+    // v4.14 — the window no longer bumps a pass/fail counter (the verdict does
+    // that at finalize); it survives only to attach a `lastError` for context.
+    if (isFailure(result)) {
+      const msg = extractErrorMessage(result);
+      if (msg) {
+        this.bump(this.currentSkill, (o) => {
+          o.lastError = { message: truncate(msg, ERROR_MESSAGE_CAP), at: new Date().toISOString() };
+        });
+        void this.queuePersist();
       }
-    });
+    }
     this.remaining -= 1;
     if (this.remaining === 0) this.currentSkill = null;
-    void this.queuePersist();
+  }
+
+  /**
+   * v4.14 Pillar 6 Slice B — grade every skill used this turn against the run's
+   * REAL task verdict, folding one outcome into each skill's rolling record and
+   * emitting a `skill_outcome` event. `completed` / `completed_unverified` →
+   * pass; `verification_failed` / `failed` → fail. Called once at finalization
+   * (chatSession, where computeTaskFinalization runs). Safe: an emit failure
+   * never propagates, and the verdict fold never throws into the turn.
+   */
+  recordTurnVerdict(verdict: string, sink?: PillarEventSink): void {
+    if (this.activeThisTurn.size === 0) return;
+    try {
+      this.ensureHydratedSync();
+      const outcome: ReliabilityOutcome =
+        (verdict === 'completed' || verdict === 'completed_unverified') ? 'pass' : 'fail';
+      for (const name of this.activeThisTurn) {
+        this.bump(name, (o) => { o.reliability = foldOutcomes(o.reliability, [outcome]); });
+        const rec = this.outcomes.get(name)!;
+        if (sink) {
+          try {
+            emitSkillOutcome(sink, {
+              skill:      name,
+              outcome,
+              verdict,
+              passRate:   rec.reliability.rollingPassRate,
+              quarantine: isQuarantineCandidate(rec.reliability),
+            });
+          } catch { /* telemetry must never break the turn */ }
+        }
+      }
+      void this.queuePersist();
+    } catch { /* trust bookkeeping must never break the turn */ }
+    finally {
+      this.activeThisTurn.clear();
+      this.currentSkill = null;
+      this.remaining    = 0;
+    }
   }
 
   /**
@@ -185,9 +231,8 @@ export class SkillOutcomeTracker {
   private bump(skillName: string, mutator: (o: SkillOutcome) => void): void {
     const cur = this.outcomes.get(skillName) ?? {
       skillName,
-      loaded:        0,
-      toolSuccesses: 0,
-      toolFailures:  0,
+      loaded:      0,
+      reliability: emptyRolling(),
     };
     mutator(cur);
     this.outcomes.set(skillName, cur);
@@ -214,11 +259,14 @@ export class SkillOutcomeTracker {
         for (const [name, val] of Object.entries(parsed as Record<string, unknown>)) {
           if (val && typeof val === 'object' && !Array.isArray(val)) {
             const v = val as Partial<SkillOutcome>;
+            // v4.14 — tolerate the pre-migration shape (toolSuccesses/Failures,
+            // no `reliability`): keep loaded/lastError, start the rolling record
+            // fresh. One tracker, migrated cleanly — no parallel sidecar.
+            const rel = v.reliability;
             this.outcomes.set(name, {
-              skillName:     v.skillName     ?? name,
-              loaded:        Number(v.loaded        ?? 0),
-              toolSuccesses: Number(v.toolSuccesses ?? 0),
-              toolFailures:  Number(v.toolFailures  ?? 0),
+              skillName:   v.skillName ?? name,
+              loaded:      Number(v.loaded ?? 0),
+              reliability: rel && typeof rel === 'object' && Array.isArray(rel.lastOutcomes) ? rel : emptyRolling(),
               ...(v.lastUsed  ? { lastUsed:  v.lastUsed  } : {}),
               ...(v.lastError ? { lastError: v.lastError } : {}),
             });

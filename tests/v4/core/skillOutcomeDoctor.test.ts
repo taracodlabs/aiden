@@ -83,30 +83,29 @@ describe('renderSkillOutcomesSection', () => {
     expect(out.indexOf('alpha')).toBeLessThan(out.indexOf('beta'));
   });
 
-  it('shows success percentage when there are attributed tool calls', () => {
+  it('shows the rolling pass-rate from graded verdicts', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    t.onTool(view('mixed'), 'before');
-    t.onTool(view('mixed'), 'after', ok('skill_view'));
-    t.onTool(tool('file_read'), 'before');
-    t.onTool(tool('file_read'), 'after', ok('file_read'));     // 1 ok
-    t.onTool(tool('file_read'), 'before');
-    t.onTool(tool('file_read'), 'after', err('file_read', 'x')); // 1 err
-    t.onTool(tool('file_read'), 'before');
-    t.onTool(tool('file_read'), 'after', err('file_read', 'y')); // 1 err
-    t.onTool(tool('file_read'), 'before');
-    t.onTool(tool('file_read'), 'after', ok('file_read'));     // 1 ok
+    // v4.14 — trust is graded by the verdict, not tool attribution. One pass +
+    // one fail → 50% pass.
+    t.onTool(view('mixed'), 'before'); t.recordTurnVerdict('completed');
+    t.onTool(view('mixed'), 'before'); t.recordTurnVerdict('verification_failed');
     const out = renderSkillOutcomesSection(t);
-    expect(out).toContain('50% success');
+    expect(out).toContain('50% pass');
   });
 
-  it('shows an em-dash for skills with no downstream attribution yet', () => {
+  it('shows an em-dash for a skill loaded but not yet graded', () => {
     const t = new SkillOutcomeTracker(persistPath);
     t.onTool(view('untested'), 'before');
     t.onTool(view('untested'), 'after', ok('skill_view'));
     const out = renderSkillOutcomesSection(t);
     expect(out).toContain('untested');
-    // Display dash for an unrated skill: rate is "—" (em dash).
-    expect(out).toMatch(/loaded 1, 0 ok, 0 err  \(—\)/);
+    expect(out).toMatch(/loaded 1, 0\/0 verified  \(—\)/);
+  });
+
+  it('flags a chronically-failing skill as ⚠ flaky', () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    for (let i = 0; i < 6; i += 1) { t.onTool(view('bad'), 'before'); t.recordTurnVerdict('verification_failed'); }
+    expect(renderSkillOutcomesSection(t)).toContain('⚠ flaky');
   });
 
   it('spotlights the most recent failure with a ↳ row', () => {

@@ -15,6 +15,7 @@ import path from 'node:path';
 
 import type { SlashCommand } from '../commandRegistry';
 import { renderTable } from '../table';
+import { isQuarantineCandidate } from '../../../core/v4/reliability';
 import { CandidateStore } from '../../../core/v4/skillMining/candidateStore';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import { parseSkillContent } from '../../../core/v4/skillSpec';
@@ -88,12 +89,24 @@ export const skills: SlashCommand = {
       const label: Record<string, string> = {
         ready: 'ready', needs_setup: 'needs setup', unavailable: 'unavailable',
       };
+      // v4.14 Pillar 6 Slice B — trust from the reliability record (advisory).
+      const trust = new Map(
+        (ctx.agent?.skillOutcomeTracker?.snapshot() ?? []).map((o) => [o.skillName, o]),
+      );
+      let flaky = 0;
       const rows = skills.map((s) => {
         const r = s.readiness ?? { status: 'ready' as const, missing: [] };
         const needs = r.status === 'ready'
           ? '—'
           : r.missing.map((m) => (m.kind === 'env' ? m.name : `${m.kind}:${m.name}`)).join(', ');
-        return { name: s.name, status: label[r.status] ?? r.status, needs, _status: r.status };
+        const rec = trust.get(s.name);
+        const rel = rec?.reliability;
+        const quarantine = rel ? isQuarantineCandidate(rel) : false;
+        if (quarantine) flaky += 1;
+        const trustCell = !rel || rel.rollingPassRate === null
+          ? '—'
+          : `${Math.round(rel.rollingPassRate * 100)}%${quarantine ? ' ⚠ flaky' : ''}`;
+        return { name: s.name, status: label[r.status] ?? r.status, needs, trust: trustCell, _status: r.status, _flaky: quarantine };
       });
       const counts = rows.reduce(
         (a, r) => { a[r._status] = (a[r._status] ?? 0) + 1; return a; },
@@ -101,7 +114,7 @@ export const skills: SlashCommand = {
       );
       ctx.display.write(
         renderTable(
-          rows.map(({ name, status, needs }) => ({ name, status, needs })),
+          rows.map(({ name, status, needs, trust: t }) => ({ name, status, needs, trust: t })),
           [
             { key: 'name',   header: 'Name',   align: 'left', minWidth: 16 },
             { key: 'status', header: 'Status', align: 'left', minWidth: 12,
@@ -111,11 +124,14 @@ export const skills: SlashCommand = {
                 if (st === 'unavailable') return 'muted';
                 return 'warn';   // needs setup
               } },
+            { key: 'trust',  header: 'Trust',  align: 'left', minWidth: 10,
+              color: (v) => (typeof v === 'string' && v.includes('flaky') ? 'warn' : undefined) },
             { key: 'needs',  header: 'Needs',  align: 'left', flex: true },
           ],
           {
             title:        'Skill health',
-            totalCount:   `${counts.ready ?? 0} ready · ${counts.needs_setup ?? 0} need setup · ${counts.unavailable ?? 0} unavailable`,
+            totalCount:   `${counts.ready ?? 0} ready · ${counts.needs_setup ?? 0} need setup · ${counts.unavailable ?? 0} unavailable` +
+              (flaky > 0 ? ` · ${flaky} flaky` : ''),
             emptyMessage: 'no skills installed',
           },
         ),

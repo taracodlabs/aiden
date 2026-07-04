@@ -80,3 +80,15 @@ export function emitNeedsConfirmation(sink: PillarEventSink, v: { tool: string; 
 export function emitCostUpdated(sink: PillarEventSink, v: { inputTokens: number; outputTokens: number; totalTokens: number }): void {
   emitPillarEvent(sink, 'cost_updated', v);
 }
+
+/**
+ * v4.14 Pillar 6 Slice B — a skill that was active in a finalized run, tagged
+ * with the run's verdict-derived outcome + the skill's rolling trust. Flows on
+ * the SAME stream as artifact_verified so the cockpit reads skill health there.
+ */
+export function emitSkillOutcome(
+  sink: PillarEventSink,
+  v: { skill: string; outcome: 'pass' | 'fail'; verdict: string; passRate: number | null; quarantine: boolean },
+): void {
+  emitPillarEvent(sink, 'skill_outcome', v);
+}
