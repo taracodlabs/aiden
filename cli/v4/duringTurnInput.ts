@@ -5,18 +5,30 @@
  * Aiden — local-first agent.
  */
 /**
- * cli/v4/duringTurnInput.ts — v4.12.1 Pillar 4 Slice 2a.
+ * cli/v4/duringTurnInput.ts — v4.12.1 Pillar 4 Slice 2a; extended v4.14.
  *
- * The pure, renderer-agnostic controller for "type to Aiden while a turn is
- * running." It owns the type-next QUEUE and the busy-Enter MODE — no stdin, no
- * render, so it's fully unit-testable headlessly. Both the frame and legacy
- * keypress sources feed this one controller.
+ * The pure, renderer-agnostic ENGINE for "type to Aiden while a turn is
+ * running." It owns the type-next QUEUE, the busy-Enter MODE, the PAUSE gate,
+ * the BACKGROUND-handoff intent, and the plain-language indicator text — no
+ * stdin, no render, no timers, so it's fully unit-testable headlessly. Every
+ * live-input surface drives this ONE engine: the terminal steering bar AND the
+ * future dashboard are just adapters over it (this is the reusable-engine seam
+ * — nothing terminal-specific lives here).
  *
- * Modes: 'queue' (Enter-while-busy queues the message for after the turn — the
- * safe default), 'interrupt' (Enter cancels the turn), and 'redirect' (v4.12.1
- * Slice 2b — Enter injects a mid-turn nudge as tool-stream context at the safe
- * loop boundary; user-facing command is `/redirect`). `esc` is a distinct
+ * Enter-modes (what Enter does mid-turn): 'queue' (queue the message for after
+ * the turn — the safe default), 'interrupt' (cancel the turn), and 'redirect'
+ * (v4.12.1 Slice 2b — inject a mid-turn nudge as tool-stream context at the
+ * safe loop boundary; user-facing command is `/redirect`). `esc` is a distinct
  * always-live interrupt key handled by the keypress source, NOT a mode.
+ *
+ * Orthogonal controls (v4.14, driven by commands, not Enter-modes):
+ *   • PAUSE — freeze the loop at its next safe boundary; resume on command. The
+ *     engine holds only the flag + a waiter list; the loop awaits
+ *     `waitWhilePaused` at the SAME boundary steer injects at.
+ *   • BACKGROUND — a one-shot intent the session reads to hand the running turn
+ *     to the durable-run substrate; the engine never touches the daemon.
+ *   • Steer SALVAGE — if a turn ends with a steer still buffered (no safe
+ *     boundary was reached), it's moved to the queue, never silently dropped.
  *
  * Internal identifiers (pendingSteer / drainSteer / clearSteer / the 'steered'
  * action) keep the original verb — only the user-facing surface says redirect.
@@ -39,7 +51,7 @@ export type BusyEnterAction =
 
 export class DuringTurnInput {
   private queue: string[] = [];
-  private mode: BusyEnterMode = 'queue';
+  private mode: BusyEnterMode;
   /**
    * v4.12.1 Slice 2b — the pending mid-turn steer. Buffered here (a member of
    * chatSession's controller, so "on the session" per the design) and drained
@@ -47,6 +59,16 @@ export class DuringTurnInput {
    * Multiple nudges before the boundary accumulate (newline-joined).
    */
   private pendingSteer: string | null = null;
+
+  // v4.14 — orthogonal controls (pause gate + background handoff intent).
+  private paused = false;
+  private resumeWaiters: Array<() => void> = [];
+  private backgroundRequested = false;
+
+  /** `initialMode` restores a persisted preferred busy-mode at session boot. */
+  constructor(initialMode: BusyEnterMode = 'queue') {
+    this.mode = isBusyEnterMode(initialMode) ? initialMode : 'queue';
+  }
 
   // ── Mode ─────────────────────────────────────────────────────────────────
   setMode(mode: BusyEnterMode): void { this.mode = mode; }
@@ -119,5 +141,90 @@ export class DuringTurnInput {
     }
     const count = this.enqueue(text);
     return { action: 'queued', count, text: text.trim() };
+  }
+
+  // ── Pause / Resume (v4.14) ────────────────────────────────────────────────
+  /** Request a freeze. The loop, at its next safe boundary, awaits
+   *  `waitWhilePaused`. Returns false if already paused (idempotent). */
+  requestPause(): boolean {
+    if (this.paused) return false;
+    this.paused = true;
+    return true;
+  }
+
+  isPaused(): boolean { return this.paused; }
+
+  /** Resume from a pause; wakes every boundary awaiting `waitWhilePaused`.
+   *  Returns true if it was actually paused. */
+  resume(): boolean {
+    if (!this.paused) return false;
+    this.paused = false;
+    const waiters = this.resumeWaiters;
+    this.resumeWaiters = [];
+    for (const w of waiters) w();
+    return true;
+  }
+
+  /**
+   * Await here at a safe loop boundary while paused. Resolves immediately when
+   * not paused; otherwise when `resume()` fires — or when the turn's abort
+   * signal aborts, so Ctrl+C during a pause still cancels cleanly (the loop
+   * then sees `signal.aborted`). Renderer-agnostic: only a flag + waiter list,
+   * no timers, no stdin.
+   */
+  waitWhilePaused(signal?: AbortSignal): Promise<void> {
+    if (!this.paused || signal?.aborted) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.resumeWaiters.push(resolve);
+      signal?.addEventListener('abort', () => resolve(), { once: true });
+    });
+  }
+
+  // ── Background handoff (v4.14) ────────────────────────────────────────────
+  /** Flag the running turn to be handed to the durable-run substrate. The
+   *  session reads this via `takeBackgroundRequest` and does the handoff — the
+   *  engine never touches the daemon. */
+  requestBackground(): void { this.backgroundRequested = true; }
+
+  /** Read + clear the background-handoff intent (one-shot). */
+  takeBackgroundRequest(): boolean {
+    const b = this.backgroundRequested;
+    this.backgroundRequested = false;
+    return b;
+  }
+
+  hasBackgroundRequest(): boolean { return this.backgroundRequested; }
+
+  // ── Steer salvage (v4.14) ─────────────────────────────────────────────────
+  /**
+   * Called when a turn ENDS with a steer still buffered — the loop never
+   * reached a safe injection boundary (e.g. a text-only turn that finished
+   * before any tool batch). Rather than silently dropping the nudge, move it to
+   * the type-next queue so it runs next, and return it so the UI can show a
+   * visible "couldn't steer mid-turn — queued instead" note. Null when there
+   * was nothing pending.
+   */
+  salvageSteerToQueue(): string | null {
+    const s = this.drainSteer();
+    if (s === null) return null;
+    this.enqueue(s);
+    return s;
+  }
+
+  // ── Indicator text (v4.14) — shared by the terminal bar AND the dashboard ──
+  /** ONE clear current action for the busy bar, in plain language. */
+  enterActionLabel(): string {
+    if (this.paused) return 'paused';
+    switch (this.mode) {
+      case 'interrupt': return 'Enter → stop turn';
+      case 'redirect':  return 'Enter → steer';
+      default:          return 'Enter → queue';
+    }
+  }
+
+  /** The compact one-line busy hint: current action + how to switch + stop. */
+  busyHint(): string {
+    if (this.paused) return 'Paused · /resume to continue · Ctrl+C stop';
+    return `${this.enterActionLabel()} · /busy to change · Ctrl+C stop`;
   }
 }
