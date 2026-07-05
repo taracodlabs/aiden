@@ -20,9 +20,13 @@
 
 export type ComposerMode = 'queue' | 'interrupt' | 'redirect';
 
-/** Human label for the mode's Enter action. */
+/** Plain-language verb for what Enter does in this mode (v4.14 — was the raw
+ *  mode name; users read "steer ▸ …" more clearly than "redirect ▸ …"). */
+const PLAIN_LABEL: Readonly<Record<ComposerMode, string>> = {
+  queue: 'queue', interrupt: 'stop', redirect: 'steer',
+};
 export function modeLabel(mode: ComposerMode): string {
-  return mode;   // 'queue' | 'interrupt' | 'redirect' — verb reads as "queue ▸ …"
+  return PLAIN_LABEL[mode];
 }
 
 /**

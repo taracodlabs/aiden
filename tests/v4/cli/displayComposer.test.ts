@@ -38,7 +38,7 @@ describe('Display composer — live during-turn paint', () => {
     chunks.length = 0;
     d.setComposer('deploy now', 'redirect');
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('redirect ▸ deploy now');
+    expect(painted).toContain('steer ▸ deploy now');
     ind.stop();
   });
 
@@ -89,7 +89,7 @@ describe('Display composer — live during-turn paint', () => {
     ind.resume();          // indicator reclaims the bottom
     chunks.length = 0;
     d.setComposer('back', 'redirect');
-    expect(stripAnsi(chunks.join(''))).toContain('redirect ▸ back');
+    expect(stripAnsi(chunks.join(''))).toContain('steer ▸ back');
     ind.stop();
   });
 
@@ -130,9 +130,56 @@ describe('Display composer — live during-turn paint', () => {
     // chatSession passes an already-stripped buffer; the row shows it verbatim.
     d.setComposer('npm run build', 'redirect');
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('redirect ▸ npm run build');
+    expect(painted).toContain('steer ▸ npm run build');
     expect(painted).not.toContain('[200~');
     expect(painted).not.toContain('[201~');
+    ind.stop();
+  });
+});
+
+// ── v4.14 BUG 2 — the ALWAYS-visible input lane (persistent hint) ────────────
+describe('Display composer — persistent busy hint (input lane always visible)', () => {
+  it('setBusyHint shows the plain-language hint in the row BEFORE any keystroke', () => {
+    const { d, chunks } = makeDisplay();
+    const ind = d.activityIndicator('thinking');
+    chunks.length = 0;
+    d.setBusyHint('Enter → steer · /busy to change · Ctrl+C stop');   // turn start, nothing typed
+    const painted = stripAnsi(chunks.join(''));
+    expect(painted).toContain('Enter → steer');   // input lane visible with zero typing
+    ind.stop();
+  });
+
+  it('typing OVERRIDES the hint with the live buffer; clearing the buffer falls BACK to the hint', () => {
+    const { d, chunks } = makeDisplay();
+    const ind = d.activityIndicator('thinking');
+    d.setBusyHint('Enter → queue · /busy to change · Ctrl+C stop');
+    d.setComposer('hello', 'queue');
+    expect(stripAnsi(chunks.join(''))).toContain('queue ▸ hello');   // typed text wins
+    chunks.length = 0;
+    d.setComposer('', 'queue');                                       // user cleared their line
+    expect(stripAnsi(chunks.join(''))).toContain('Enter → queue');   // hint returns (lane stays visible)
+    ind.stop();
+  });
+
+  it('the hint SURVIVES a tool call (rides the tool row, like the typed composer)', () => {
+    const { d, chunks } = makeDisplay();
+    const ind = d.activityIndicator('thinking');
+    d.setBusyHint('Enter → steer · /busy to change · Ctrl+C stop');
+    ind.pause();
+    const row = d.toolRow('web_research', { query: 'q' });
+    const painted = stripAnsi(chunks.join(''));
+    expect(painted).toContain('Enter → steer');   // visible + typeable during a long tool call
+    row.ok(120);
+    ind.stop();
+  });
+
+  it('clearComposer drops the hint too (turn end hands back to the normal prompt)', () => {
+    const { d, chunks } = makeDisplay();
+    const ind = d.activityIndicator('thinking');
+    d.setBusyHint('Enter → steer · /busy to change · Ctrl+C stop');
+    chunks.length = 0;
+    d.clearComposer();
+    expect(stripAnsi(chunks.join(''))).not.toContain('Enter → steer');
     ind.stop();
   });
 });

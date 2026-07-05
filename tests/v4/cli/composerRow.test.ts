@@ -11,11 +11,11 @@
 import { describe, it, expect } from 'vitest';
 import { renderComposerBuffer, modeLabel } from '../../../cli/v4/composerRow';
 
-describe('modeLabel — the Enter-action verb', () => {
-  it('maps each busy mode to its label', () => {
+describe('modeLabel — the plain-language Enter-action verb', () => {
+  it('maps each busy mode to a plain-language verb', () => {
     expect(modeLabel('queue')).toBe('queue');
-    expect(modeLabel('interrupt')).toBe('interrupt');
-    expect(modeLabel('redirect')).toBe('redirect');
+    expect(modeLabel('interrupt')).toBe('stop');     // v4.14 — was 'interrupt'
+    expect(modeLabel('redirect')).toBe('steer');     // v4.14 — was 'redirect'
   });
 });
 
@@ -27,8 +27,8 @@ describe('renderComposerBuffer — mode label + live text', () => {
 
   it('prefixes the typed text with the mode label + ▸', () => {
     expect(renderComposerBuffer('hello', 'queue')).toBe('queue ▸ hello');
-    expect(renderComposerBuffer('do X', 'redirect')).toBe('redirect ▸ do X');
-    expect(renderComposerBuffer('stop', 'interrupt')).toBe('interrupt ▸ stop');
+    expect(renderComposerBuffer('do X', 'redirect')).toBe('steer ▸ do X');
+    expect(renderComposerBuffer('stop', 'interrupt')).toBe('stop ▸ stop');
   });
 
   it('tail-truncates a long line (keeps the cursor end, ellipsis at the front)', () => {

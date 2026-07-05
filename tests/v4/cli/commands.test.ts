@@ -59,7 +59,7 @@ function makeCtx(over: Record<string, unknown> = {}) {
 }
 
 describe('barrel exports', () => {
-  it('allCommands has 57 entries with unique names', () => {
+  it('allCommands has 58 entries with unique names', () => {
     // Phase 16b.3 added /identity (17 → 18).
     // Phase 16b.4 added /debug-prompt (18 → 19).
     // Phase 16c added /streaming (19 → 20).
@@ -95,9 +95,10 @@ describe('barrel exports', () => {
     // v4.12.1 Pillar 4 Slice 2a added /busy + /queue (53 → 55).
     // v4.12.1 Pillar 4 Slice 2b added /redirect (55 → 56).
     // v4.14 added /auto (one-command Partner opt-in) (56 → 57).
-    expect(allCommands.length).toBe(57);
+    // v4.14 added /mode (friendly trust-level viewer/switcher) (57 → 58).
+    expect(allCommands.length).toBe(58);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(57);
+    expect(names.size).toBe(58);
   });
 
   it('every command exposes name, description, category', () => {

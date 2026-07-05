@@ -371,6 +371,11 @@ export class Display {
   // whichever owned bottom row is live (activity indicator OR tool row) so it
   // survives long tool calls. Empty string = nothing appended (not noisy).
   private composerText = '';
+  // v4.14 BUG 2 — the PERSISTENT plain-language busy hint ("Enter → steer ·
+  // …"). Set at turn start so the input lane is ALWAYS visible during a turn
+  // (not only after the user types); shown when `composerText` is empty. Empty
+  // = no turn running (or handed back to the normal prompt).
+  private busyComposerHint = '';
   // The active bottom-owner registers a repaint fn here so a keystroke can
   // refresh it immediately instead of waiting for the owner's next tick. The
   // indicator + tool-row each set/restore this around their lifetime.
@@ -1809,16 +1814,37 @@ export class Display {
     this.composerRepaint?.();
   }
 
-  /** Clear the composer (turn end / handoff back to the normal prompt). */
-  clearComposer(): void {
-    if (this.composerText === '') return;
-    this.composerText = '';
+  /**
+   * v4.14 BUG 2 — set the PERSISTENT plain-language busy hint so the input lane
+   * is visible the moment a turn starts (before any keystroke). Called at turn
+   * start and whenever the hint changes (e.g. pause/resume). Repaints the live
+   * owned bottom row so it shows immediately.
+   */
+  setBusyHint(hint: string): void {
+    if (hint === this.busyComposerHint) return;
+    this.busyComposerHint = hint;
     this.composerRepaint?.();
   }
 
-  /** The suffix woven into the live owned bottom row. '' when inactive. */
+  /** Clear the composer (turn end / handoff back to the normal prompt). Drops
+   *  BOTH the typed text and the persistent busy hint. */
+  clearComposer(): void {
+    if (this.composerText === '' && this.busyComposerHint === '') return;
+    this.composerText = '';
+    this.busyComposerHint = '';
+    this.composerRepaint?.();
+  }
+
+  /**
+   * The suffix woven into the live owned bottom row. While the user is typing,
+   * show the typed text; otherwise, during a turn, show the persistent
+   * plain-language hint so the input lane is ALWAYS visible; '' only when no
+   * turn is running.
+   */
   private composerSuffix(): string {
-    return this.composerText ? `   ${this.skin.applyColors(this.composerText, 'muted')}` : '';
+    if (this.composerText) return `   ${this.skin.applyColors(this.composerText, 'muted')}`;
+    if (this.busyComposerHint) return `   ${this.skin.applyColors(this.busyComposerHint, 'muted')}`;
+    return '';
   }
 
   /** An owned bottom-row painter registers its repaint fn for the duration it

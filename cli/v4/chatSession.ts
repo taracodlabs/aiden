@@ -115,6 +115,7 @@ import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { captureArtifactFromTrace } from '../../core/v4/daemon/artifactStore';
 // v4.12.1 Pillar 4 Slice 2a — type-next-while-busy.
 import { DuringTurnInput, resolveConfiguredBusyMode, type BusyEnterMode } from './duringTurnInput';
+import { modeStatusLine } from './commands/mode';
 import { attachTurnInputListener } from './turnInputListener';
 import { requestTurnCancel } from './frame/interruptControls';
 
@@ -1660,12 +1661,18 @@ export class ChatSession implements ChatSessionLike {
           const word = text.trim().toLowerCase();
           if (word === '/pause') {
             const ok = this.duringTurnInput.requestPause();
-            try { this.opts.display.dim(ok ? '  ‖ paused — /resume to continue (Ctrl+C still stops)' : '  ‖ already paused'); } catch { /* defensive */ }
+            try {
+              this.opts.display.dim(ok ? '  ‖ paused — /resume to continue (Ctrl+C still stops)' : '  ‖ already paused');
+              this.opts.display.setBusyHint(this.duringTurnInput.busyHint()); // reflect paused state in the bar
+            } catch { /* defensive */ }
             return;
           }
           if (word === '/resume') {
             const ok = this.duringTurnInput.resume();
-            try { this.opts.display.dim(ok ? '  ▸ resumed' : '  ▸ not paused'); } catch { /* defensive */ }
+            try {
+              this.opts.display.dim(ok ? '  ▸ resumed' : '  ▸ not paused');
+              this.opts.display.setBusyHint(this.duringTurnInput.busyHint());
+            } catch { /* defensive */ }
             return;
           }
           const act = this.duringTurnInput.onBusyEnter(text);
@@ -1691,6 +1698,11 @@ export class ChatSession implements ChatSessionLike {
         },
       },
     });
+    // v4.14 BUG 2 — show the input lane the MOMENT the turn starts (a persistent
+    // plain-language hint), so the user sees they can type/steer/queue without
+    // having to type first. It rides the same owned bottom row (indicator / tool
+    // row) that already survives streaming, and is cleared at turn end below.
+    try { this.opts.display.setBusyHint(this.duringTurnInput.busyHint()); } catch { /* defensive */ }
     // Helper: wrap a callback so it only fires for the live turn.
     // R1 guard — late events from a cancelled turn early-return.
     // `wrapTurnId` accepts (callback, undefined) and returns
@@ -2943,6 +2955,13 @@ export class ChatSession implements ChatSessionLike {
         });
       }
     } catch { /* never let the greeter crash boot */ }
+
+    // v4.14 BUG 1 — show the trust level calmly at boot so the user always knows
+    // how autonomous Aiden is right now, and that /mode changes it. One dim line.
+    try {
+      const lvl = this.opts.approvalEngine?.getAutonomyPolicy()?.level;
+      if (lvl) display.dim(`  ${modeStatusLine(lvl)}  ·  /mode to change`);
+    } catch { /* never break boot */ }
 
     // v4.9.0 pre-ship UI: hint moved BEFORE the closing rule so the
     // rule sits adjacent to the active prompt (it becomes the visual
