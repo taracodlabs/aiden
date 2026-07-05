@@ -1,3 +1,18 @@
+## v4.14.1 — 2026-07-05
+
+The input bar is always there, and connecting a server is one command.
+
+(The v4.11 → v4.14.0 line shipped via GitHub Releases; this entry resumes the changelog at the v4.14.x point release.)
+
+- **One-tap MCP connect.** `/mcp connect <name>` adds the server, authorizes it, and connects — one command, no env vars, no three-step dance.
+- **Always-present steering bar.** The input line stays live while Aiden works. Steer it mid-task, queue your next message, or stop with Ctrl+C — in both idle and busy.
+- **`/mode` — pick your trust level.** Safe by default: Aiden asks before risky, spendy, or out-of-folder actions. `/mode auto` opts into hands-off; the floors always hold.
+- **Warm intro + greeting.** Aiden asks your name once and actually uses it, and the boot greeting knows how long you've been away.
+
+Fixes: no more "[compress] refused" noise on a fresh chat; the busy-hint text is width-safe.
+
+---
+
 ## v4.10.0 — 2026-05-26
 
 Aiden becomes inspectable, durable, and finally streams properly.
