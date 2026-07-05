@@ -3482,6 +3482,10 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
           commands: opts.commands ?? [],
           history,
           theme:    promptTheme as never,
+          // v4.14 — persistent plain-language idle hint on the MAIN prompt (the
+          // "▲" line), so idle shows a neat bar with a hint, not a bare glyph.
+          // Skipped on the "… " multi-line continuation.
+          hint:     prompt.includes('▲') ? 'Type your message · /help · /mode' : undefined,
         });
         const trimmed = (value ?? '').trim();
         // Append to disk history. Awaited so the write flushes before

@@ -686,9 +686,11 @@ Reply with ONE word: safe, caution, or dangerous.`;
     //   - error + invariantViolation    → warn with the specific cause
     //   - error (auxiliary throw)       → warn with the wrapped message
     //   - success                       → verbose-only dim line
+    // v4.14 — a refusal (too short / aux unavailable) is internal housekeeping,
+    // NOT something to surface in the user's chat. The auto path no longer even
+    // attempts below threshold (see aidenAgent), so this is belt-and-braces:
+    // stay SILENT in chat. (Genuine errors below still explain a degradation.)
     if (result.refused && !result.error) {
-      const detail = result.errorMessage ?? 'conversation too short';
-      this.display.dim(`[compress] refused — ${detail}`);
       return;
     }
     if (result.error) {

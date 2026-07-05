@@ -1814,7 +1814,7 @@ export class Display {
    * live (not blind). Empty buffer → the suffix disappears (never noisy).
    */
   setComposer(buffer: string, mode: 'queue' | 'interrupt' | 'redirect'): void {
-    const next = renderComposerBuffer(buffer, mode, Math.max(20, ((this.out.columns ?? 80) >> 1)));
+    const next = renderComposerBuffer(buffer, mode, this.composerAvail());
     if (next === this.composerText) return;
     this.composerText = next;
     this.paintComposerSurface();
@@ -1884,10 +1884,30 @@ export class Display {
    * input line is ALWAYS visible; '' when no turn is running OR when the fixed
    * lane owns the composer (then the lane paints it, not the suffix).
    */
+  /**
+   * Columns available for the composer suffix, reserving room for the owned
+   * row's indicator/tool prefix ("  ⋯ thinking… Ns   ") so the WHOLE row fits
+   * one line. Without this the busy hint overflowed → the terminal wrapped it →
+   * the single-line erase-repaint could only show the wrapped TAIL
+   * ("…change · Ctrl+C stop"). v4.14 fix.
+   */
+  private composerAvail(): number {
+    return Math.max(12, (this.out.columns ?? 80) - 30);
+  }
+
   private composerSuffix(): string {
     if (this.composerLane?.isActive()) return '';
-    if (this.composerText) return `   ${this.skin.applyColors(this.composerText, 'muted')}`;
-    if (this.busyComposerHint) return `   ${this.skin.applyColors(this.busyComposerHint, 'muted')}`;
+    const a = this.composerAvail();
+    // Typed text keeps the CURSOR END; the hint keeps the FRONT ("Enter → …")
+    // with a trailing ellipsis — never the wrapped tail, never mid-word garbage.
+    if (this.composerText) {
+      const t = this.composerText.length <= a ? this.composerText : '…' + this.composerText.slice(-(a - 1));
+      return `   ${this.skin.applyColors(t, 'muted')}`;
+    }
+    if (this.busyComposerHint) {
+      const h = this.busyComposerHint.length <= a ? this.busyComposerHint : this.busyComposerHint.slice(0, a - 1) + '…';
+      return `   ${this.skin.applyColors(h, 'muted')}`;
+    }
     return '';
   }
 

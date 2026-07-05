@@ -67,9 +67,21 @@ export interface AidenPromptConfig {
   theme?: Partial<Theme>;
   /** Max dropdown rows visible at once. Default 8. */
   dropdownLimit?: number;
+  /** v4.14 — persistent plain-language idle hint shown in the footer when no
+   *  ghost/dropdown is active (e.g. "Type your message · /help · /mode"). */
+  hint?: string;
 }
 
 const DEFAULT_DROPDOWN_LIMIT = 8;
+
+/**
+ * v4.14 — show the persistent idle hint ONLY when nothing else owns the footer
+ * (no ghost preview, no slash dropdown) and the prompt is idle. Pure so the
+ * idle-bar behaviour is unit-testable without driving inquirer/a PTY.
+ */
+export function shouldShowIdleHint(hasFooterContent: boolean, hint: string | undefined, status: string): boolean {
+  return !hasFooterContent && typeof hint === 'string' && hint.length > 0 && status === 'idle';
+}
 
 /** Strip ANSI for width math. */
 function stripAnsi(s: string): string {
@@ -416,6 +428,15 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   }
 
   const footerParts = [ghostLine, dropdownLines].filter((s): s is string => typeof s === 'string' && s.length > 0);
+
+  // v4.14 — persistent plain-language IDLE hint. When nothing else owns the
+  // footer (no ghost preview, no slash dropdown), show the calm hint so the
+  // idle bar is neat + informative every prompt, not a bare `▲`. Mirrors the
+  // busy bar's always-visible hint — one consistent, plain-language surface.
+  if (shouldShowIdleHint(footerParts.length > 0, config.hint, status)) {
+    footerParts.push(`  ${dim(config.hint as string)}`);
+  }
+
   const footer = footerParts.length > 0 ? footerParts.join('\n') : undefined;
 
   return footer ? [line, footer] : line;

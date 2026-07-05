@@ -51,11 +51,19 @@ describe('frame source-contract guard', () => {
   it('frame directory exists with the expected source set', () => {
     const files = readdirSync(FRAME_DIR).filter((f) => f.endsWith('.ts') || f.endsWith('.tsx'));
     expect(files.sort()).toEqual([
+      // v4.14 — the Ink single-owner frame: pure event→state core + render tree
+      // + runtime. All driver-routed (no raw stdout/ANSI), so the single-writer
+      // contract below still holds; the per-file guard proves it.
+      'coalescer.ts',
       'composer.ts',
+      'composerModel.ts',
+      'frameReducer.ts',
       // v4.12.1 Pillar 4 Slice 1 — pure glass-dashboard models (no stdout/ANSI;
       // the frame renderer paints them; the driver-only contract still holds).
       'glassHelpers.ts',
       'index.ts',
+      'inkApp.ts',
+      'inkRuntime.ts',
       'interruptControls.ts',
       'runtime.ts',
       'state.ts',

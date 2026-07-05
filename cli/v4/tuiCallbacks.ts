@@ -247,10 +247,8 @@ Reply with ONE word: safe, caution, or dangerous.`;
 
   /** Compression sink. Inline. */
   onCompression = (result: CompressionResult): void => {
-    if (result.refused) {
-      this.opts.appendHistory(
-        '{gray-fg}[compress] refused — conversation too short{/gray-fg}',
-      );
+    // v4.14 — a refusal is internal housekeeping; never surface it in chat.
+    if (result.refused && !result.error) {
       return;
     }
     if (result.error) {
