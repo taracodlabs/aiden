@@ -477,7 +477,7 @@ describe('CliCallbacks.onCompression', () => {
     }
   });
 
-  it('reports refusal cleanly', () => {
+  it('a refusal is SILENT in chat (v4.14 — housekeeping, never a user-facing line)', () => {
     const { display, output } = makeDisplay();
     const cb = new CliCallbacks({ display });
     cb.onCompression({
@@ -487,7 +487,8 @@ describe('CliCallbacks.onCompression', () => {
       preservedRecentCount: 0,
       refused: true,
     });
-    expect(output()).toMatch(/refused/);
+    expect(output()).not.toMatch(/refused|\[compress\]/);   // no "[compress] refused" leak
+    expect(output().trim()).toBe('');
   });
 });
 

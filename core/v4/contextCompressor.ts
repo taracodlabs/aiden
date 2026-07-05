@@ -109,6 +109,17 @@ export class ContextCompressor {
   }
 
   /**
+   * v4.14 — whether the AUTO path should even ATTEMPT compression. Below the
+   * minimum message count a fresh/short conversation can only be REFUSED, and a
+   * refusal is a non-event that must never reach the user's chat. Gating the
+   * attempt here means "no attempt → no refusal message" at the source. The
+   * manual `/compress` command bypasses this (it always attempts + explains).
+   */
+  shouldAutoAttempt(messageCount: number): boolean {
+    return messageCount >= MIN_FOR_COMPRESSION;
+  }
+
+  /**
    * v4.11 retrofit — accepts an optional `tools` array. When supplied,
    * the threshold check counts tool-schema tokens (principle #2) so the
    * 68-tool catalog (6-13K tokens) influences when compression fires.

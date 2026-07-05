@@ -838,7 +838,11 @@ export class AidenAgent {
     //     (network reset mid-summary, etc.); it now synthesises an
     //     error envelope + fires the callback so the user sees the
     //     abort rather than wondering why nothing happened.
-    if (this.contextCompressor) {
+    // v4.14 — do NOT attempt auto-compression on a below-threshold (fresh /
+    // short) conversation: it could only be refused, and a refusal is internal
+    // housekeeping that must never surface in the user's chat. No attempt → no
+    // "[compress] refused" leak. Manual /compress still attempts (own command).
+    if (this.contextCompressor && this.contextCompressor.shouldAutoAttempt(messages.length)) {
       try {
         const result = await this.contextCompressor.compress(
           messages,
