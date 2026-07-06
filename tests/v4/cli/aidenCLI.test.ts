@@ -159,4 +159,47 @@ describe('aiden CLI', () => {
     await main(argv, hooks);
     expect(out.join('')).toMatch(/deferred to v4\.1/i);
   });
+
+  it('aiden pairing prints the v4.1 deferral (registered, just hidden)', async () => {
+    const { argv, hooks, out } = captureMain(['pairing']);
+    await main(argv, hooks);
+    expect(out.join('')).toMatch(/deferred to v4\.1/i);
+  });
+
+  it('aiden update prints the v4.1 deferral (registered, just hidden)', async () => {
+    const { argv, hooks, out } = captureMain(['update']);
+    await main(argv, hooks);
+    expect(out.join('')).toMatch(/deferred to v4\.1/i);
+  });
+
+  it('--help HIDES the four deferred commands (batch/gateway/pairing/update)', async () => {
+    const out: string[] = [];
+    const writeOut = (t: string) => out.push(t);
+    // Commander writes help to stdout and exits via process.exit; intercept both.
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`__exit__:${code}`);
+    }) as never);
+    const stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: any) => {
+      out.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return true;
+    }) as never);
+    try {
+      await main(['node', 'aiden', '--help'], { writeOut });
+    } catch {
+      // commander triggers process.exit(0) on --help
+    } finally {
+      exitSpy.mockRestore();
+      stdoutSpy.mockRestore();
+    }
+    const text = out.join('');
+    // sanity: real commands still listed (help isn't empty/broken)
+    expect(text).toMatch(/Usage:/);
+    expect(text).toMatch(/setup/);
+    // the four deferred commands share this UNIQUE description — hidden ⇒ gone.
+    expect(text).not.toMatch(/deferred to v4\.1/i);
+    // and none appear as a command entry (commander lists them as `  <name> …`).
+    for (const name of ['batch', 'gateway', 'pairing', 'update']) {
+      expect(text).not.toMatch(new RegExp(`^\\s+${name}\\b`, 'm'));
+    }
+  });
 });

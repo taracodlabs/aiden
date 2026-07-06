@@ -800,9 +800,14 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       if (code !== 0) process.exit(code);
     });
 
+  // Single source of truth for deferred / not-yet-built top-level commands.
+  // Each is registered { hidden: true } so it DROPS from `aiden --help` (never
+  // looks like a working command) yet stays callable and answers honestly if a
+  // user guesses the name. Add a future half-built command to this array and it
+  // auto-hides — no menu edits, no separate flag to keep in sync.
   for (const cmd of ['batch', 'gateway', 'pairing', 'update']) {
     program
-      .command(cmd)
+      .command(cmd, { hidden: true })
       .description(`(deferred to v4.1)`)
       .action(() => {
         const out = opts.writeOut ?? ((t) => process.stdout.write(t));
