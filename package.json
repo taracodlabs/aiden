@@ -1,6 +1,6 @@
 {
   "name": "aiden-runtime",
-  "version": "4.14.3",
+  "version": "4.15.0",
   "publishConfig": {
     "access": "public"
   },
@@ -104,7 +104,6 @@
     "uninstall": "powershell -ExecutionPolicy Bypass -File scripts\\uninstall.ps1",
     "livepulse": "powershell -ExecutionPolicy Bypass -File scripts\\livepulse.ps1",
     "obfuscate": "javascript-obfuscator dist/ --output dist/ --compact true --string-array true --rotate-string-array true --string-array-threshold 0.75",
-    "release": "node scripts/release.js",
     "release:npm": "powershell -ExecutionPolicy Bypass -File scripts/release-npm.ps1"
   },
   "build": {

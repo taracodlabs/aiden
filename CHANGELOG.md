@@ -1,3 +1,15 @@
+## v4.15.0 — 2026-07-07
+
+One safety net across every provider call, and two display fixes.
+
+- **Unified provider preflight — one gate every model call passes through.** Main turn, fallback, vision, distiller, merger, sub-agent, compression, auxiliary: every call now runs through a single message check before it leaves for the provider, and no caller can skip it. It repairs structure without ever inventing a fact — a tool call that never got a result gets an honest "result unavailable" stub (never a fake success), orphaned or duplicate tool results are dropped, malformed tool arguments are repaired. Two sharp cases it closes for good: if Aiden was killed mid-tool, the dangling call is stripped on resume so it can't loop forever re-issuing a destructive command; and a tool blocked by the approval layer still gets a "blocked" result, so the next turn stays valid instead of erroring out.
+- **The steering-bar hint stays in the bar.** During a fast multi-tool burst the busy hint ("Enter → …") could bleed into the tool-activity rows. The bottom row now has a single owner — only the live row repaints — so the hint stays put no matter how fast tools fire.
+- **Windows paths render with real colons.** A path in inline code (`` `C:\Users\…` ``) was showing an internal escape token in place of the colon. Inline code now decodes it, so `` `C:\Users\shiva` `` reads correctly.
+
+Internal: `npm run release` now runs the intended one-command release script — a duplicate `package.json` key was silently shadowing it with a stale one.
+
+---
+
 ## v4.14.3 — 2026-07-06
 
 Four fixes and a memory-safety guardrail.
