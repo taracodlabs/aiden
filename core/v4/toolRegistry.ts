@@ -42,7 +42,7 @@ import type { AidenPaths } from './paths';
 import type { SessionManager } from './sessionManager';
 import type { MemoryManager } from './memoryManager';
 import type { ProcessRegistry } from './processRegistry';
-import type { ApprovalEngine } from '../../moat/approvalEngine';
+import type { ApprovalEngine, ApprovalRequest } from '../../moat/approvalEngine';
 import type { SSRFProtection } from '../../moat/ssrfProtection';
 import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
@@ -433,7 +433,7 @@ export class ToolRegistry {
             preview = undefined;
           }
         }
-        const allowed = await context.approvalEngine.checkApproval({
+        const approvalReq: ApprovalRequest = {
           toolName: call.name,
           category: handler.category,
           args,
@@ -449,13 +449,19 @@ export class ToolRegistry {
           // shows an "Effects:" line; tools without `effects` get
           // no extra line (graceful degradation).
           effects:  handler.effects,
-        });
+        };
+        const allowed = await context.approvalEngine.checkApproval(approvalReq);
         if (!allowed) {
+          // Phase 6 — keep the "denied by approval engine" phrase (downstream
+          // detectors match it) AND append the honest why + how-to-allow:
+          // which gate fired (hard-block / autonomy-floor / manual-deny) and
+          // the safe way forward.
+          const why = context.approvalEngine.explainDenial(approvalReq);
           return {
             id: call.id,
             name: call.name,
             result: null,
-            error: 'Tool execution denied by approval engine',
+            error: `Tool execution denied by approval engine — ${why}`,
           };
         }
       }

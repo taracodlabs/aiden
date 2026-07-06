@@ -392,6 +392,35 @@ export class ApprovalEngine {
     return this.autonomyPolicy;
   }
 
+  /**
+   * Phase 6 — the honest WHY + HOW-TO-ALLOW for a denied request. A pure
+   * re-derivation of the SAME gates `checkApproval` used, so it's safe to call
+   * right after `checkApproval` returns false. Turns a bare "denied by approval
+   * engine" into an actionable message: which gate fired and the safe way
+   * forward (raise the mode, approve when prompted, or "never allowed").
+   */
+  explainDenial(req: ApprovalRequest): string {
+    const hb = matchesHardBlock(req);
+    if (hb.blocked) {
+      return (
+        `it's blocked by the safety floor (${hb.reason}) and is never allowed at ` +
+        `any level — not even auto mode or --yolo. If you truly need it, run it ` +
+        `yourself outside Aiden.`
+      );
+    }
+    if (this.autonomyPolicy && decideAutonomy(this.autonomyPolicy, req) === 'deny') {
+      const tier = req.riskTier ? `${req.riskTier} ` : '';
+      return (
+        `your current mode (${this.autonomyPolicy.level}) denies ${tier}actions. ` +
+        `Raise it with \`/mode auto\` to allow, or approve this one action when prompted.`
+      );
+    }
+    return (
+      `you declined it at the approval prompt. It'll ask again next time — approve ` +
+      `it then, or run \`/mode auto\` to stop being asked for actions like this.`
+    );
+  }
+
   /** Mark this engine as a subagent's — `ask` becomes escalate-to-parent. */
   markSubagent(): void {
     this.subagent = true;

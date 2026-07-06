@@ -24,6 +24,11 @@ import os from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { resolveAidenPaths, resolveAidenRoot, type AidenPaths } from '../../core/v4/paths';
 import { ConfigManager, resolveConfiguredAutonomyLevel } from '../../core/v4/config';
+import {
+  readProviderDecision,
+  describeOrigin,
+  type ProviderDecision,
+} from '../../core/v4/providerDecision';
 // Light path helper ONLY — never import the `core/v4/daemon` barrel here (it
 // pulls proper-lockfile, which registers ref'd process signal handlers that pin
 // the event loop open and force a teardown-racing process.exit()).
@@ -429,8 +434,17 @@ export function sessionCounterResults(
 /** Already-resolved inputs for the Setup rows (pure formatter consumes these). */
 export interface SetupInputs {
   paths: AidenPaths;
-  /** Active model + provider, tagged by where the value came from. */
-  model: { provider: string; model: string; source: 'live' | 'saved' };
+  /** Active model + provider, tagged by where the value came from.
+   *  Phase 6: `origin` is the boot decision provenance (flag / config / auto /
+   *  fallback), and `reason` the fallback reason if one happened — both from the
+   *  persisted ProviderDecision, so doctor explains WHERE the pick came from. */
+  model: {
+    provider: string;
+    model:    string;
+    source:   'live' | 'saved';
+    origin?:  string;
+    reason?:  string;
+  };
   /** Names of the tools actually shipped to the model (getSchemas, not list()). */
   enabledToolNames: string[];
   /** Permission mode as the friendly autonomy level, tagged by source. */
@@ -462,6 +476,11 @@ export function setupResults(inp: SetupInputs): CheckResult[] {
   return [
     { name: 'active model',  group: 'Setup', passed: true,
       message: `${inp.model.provider} / ${inp.model.model}  (${inp.model.source})` },
+    // Phase 6 — where that pick came from (flag / config / auto / fallback), and
+    // the reason if a fallback happened. Shown only when a decision was recorded.
+    ...(inp.model.origin
+      ? ([{ name: 'model source', group: 'Setup', passed: true, message: inp.model.origin }] as CheckResult[])
+      : []),
     { name: 'tools enabled', group: 'Setup', passed: true, message: toolsMsg },
     { name: 'mode',          group: 'Setup', passed: true,
       message: `${inp.mode.level} (${autonomyShort(inp.mode.level)})  (${inp.mode.source})` },
@@ -484,6 +503,9 @@ export interface SetupSources {
   };
   /** Test seam — override daemon liveness so specs don't depend on a real daemon. */
   daemonRunning?: boolean;
+  /** Phase 6 — the boot provider decision. Undefined = read from disk via paths
+   *  (the durable, out-of-process source); pass `null` in tests for "no decision". */
+  providerDecision?: ProviderDecision | null;
 }
 
 function nonEmpty(v: unknown): string | undefined {
@@ -566,17 +588,26 @@ export async function resolveSetupInputs(src: SetupSources): Promise<SetupInputs
     } catch { config = undefined; }
   }
 
+  // Phase 6 — the persisted boot decision (durable, out-of-process). A test may
+  // override it (including `null`); otherwise it's read from disk via paths.
+  const decision: ProviderDecision | null =
+    src.providerDecision !== undefined ? src.providerDecision : readProviderDecision(src.paths);
+  const origin = decision ? describeOrigin(decision) : undefined;
+  const reason = decision?.fallbackReason;
+
   // Active model — live session value wins, else saved config.
   let liveProvider: string | undefined;
   let liveModel: string | undefined;
   try { liveProvider = nonEmpty(src.session?.getCurrentProvider?.()); } catch { /* no live */ }
   try { liveModel    = nonEmpty(src.session?.getCurrentModel?.()); } catch { /* no live */ }
   const model = (liveProvider && liveModel)
-    ? { provider: liveProvider, model: liveModel, source: 'live' as const }
+    ? { provider: liveProvider, model: liveModel, source: 'live' as const, origin, reason }
     : {
         provider: config?.getValue<string>('model.provider', 'unknown') ?? 'unknown',
         model:    config?.getValue<string>('model.modelId', 'unknown') ?? 'unknown',
         source:   'saved' as const,
+        origin,
+        reason,
       };
 
   // Mode — the friendly autonomy level. Live approval engine wins, else saved.

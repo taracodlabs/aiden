@@ -57,6 +57,59 @@ describe('doctor Setup group — pure formatter (setupResults)', () => {
     expect(live.find((r) => r.name === 'mode')?.message).toBe('Partner (auto)  (live)');
     expect(setupResults(base).find((r) => r.name === 'mode')?.message).toBe('Assistant (safe)  (saved)');
   });
+});
+
+// ── Phase 6 — the provider decision row (where the active model came from) ────
+describe('doctor Setup — Phase 6 provider decision row', () => {
+  it('no decision origin → no "model source" row (shape unchanged)', () => {
+    expect(setupResults(base).some((r) => r.name === 'model source')).toBe(false);
+  });
+
+  it('a non-fallback decision shows where the pick came from', async () => {
+    const setup = await resolveSetupInputs({
+      paths,
+      providerDecision: {
+        provider: 'ollama', model: 'llama3.2', source: 'cli-flag',
+        requestedExplicit: true, attempts: [{ providerId: 'ollama', ok: true }],
+      },
+    });
+    const row = setupResults(setup).find((r) => r.name === 'model source');
+    expect(row?.message).toContain('from --provider/--model');
+  });
+
+  it('a fallback decision surfaces the durable reason + fix command (queryable from doctor)', async () => {
+    const setup = await resolveSetupInputs({
+      paths,
+      providerDecision: {
+        provider: 'groq', model: 'llama-3.3-70b-versatile', source: 'persisted-config',
+        requestedProvider: 'claude-pro', requestedExplicit: false,
+        fallbackReason: 'OAuth token for claude-pro is expired. Run `/auth refresh claude-pro`.',
+        attempts: [
+          { providerId: 'claude-pro', ok: false, reason: 'expired' },
+          { providerId: 'groq', ok: true },
+        ],
+      },
+    });
+    const row = setupResults(setup).find((r) => r.name === 'model source');
+    expect(row?.message).toContain('claude-pro unavailable');
+    expect(row?.message).toContain('/auth refresh claude-pro');   // fix command reaches doctor
+    expect(row?.message).toContain('fell back to groq');
+  });
+
+  it('an EXPLICIT --provider failure is labelled explicit, never a "default"', async () => {
+    const setup = await resolveSetupInputs({
+      paths,
+      providerDecision: {
+        provider: 'chatgpt-plus', model: 'gpt-5.5', source: 'cli-flag',
+        requestedProvider: 'ollama', requestedExplicit: true,
+        fallbackReason: "Model 'gemma4:e4b' not found for provider 'ollama'.",
+        attempts: [],
+      },
+    });
+    const row = setupResults(setup).find((r) => r.name === 'model source');
+    expect(row?.message).toContain('you asked for ollama');
+    expect(row?.message).not.toContain('previous default');
+  });
 
   it('tools row shows the count and caps the preview at six', () => {
     const many = setupResults({ ...base, enabledToolNames: Array.from({ length: 10 }, (_, i) => `t${i}`) });

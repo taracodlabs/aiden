@@ -24,6 +24,7 @@ import crypto from 'node:crypto';
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 import { fileReadHandle } from '../../../core/v4/toolOutputCap';
+import { protectedPathMessage } from '../utils/paths';
 
 const MAX_OUTPUT = 5000;
 
@@ -97,7 +98,7 @@ export const fileReadTool: ToolHandler = {
     if (isDenied(raw)) {
       return {
         success: false,
-        error: 'Access denied: protected path (credentials/keys/.env)',
+        error: protectedPathMessage(raw),
       };
     }
     // v4.4 Phase 2 — sandbox preflight (no-op when AIDEN_SANDBOX!=1).

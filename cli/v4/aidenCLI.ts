@@ -60,6 +60,12 @@ import {
 import { ensureSoulMdSeeded } from '../../core/v4/soulSeed';
 import { setVisionProvider } from '../../core/v4/visionClient';
 import { ConfigManager, resolveConfiguredAutonomyLevel } from '../../core/v4/config';
+import {
+  writeProviderDecision,
+  isExplicitSource,
+  type ProviderDecision,
+  type ProviderAttempt,
+} from '../../core/v4/providerDecision';
 import { resolveAutonomyPolicy, type AutonomyLevel } from '../../moat/autonomy';
 import { SessionStore } from '../../core/v4/sessionStore';
 import { SessionManager } from '../../core/v4/sessionManager';
@@ -892,7 +898,13 @@ async function resolveFirstWorkingProvider(
   config: ConfigManager,
   paths: AidenPaths,
   excludeProviderId: string,
-): Promise<{ adapter: import('../../providers/v4/types').ProviderAdapter; providerId: string; modelId: string } | null> {
+): Promise<{
+  result: { adapter: import('../../providers/v4/types').ProviderAdapter; providerId: string; modelId: string } | null;
+  attempts: ProviderAttempt[];
+}> {
+  // Every candidate we try is recorded (ok + reason) so the decision trace can
+  // show WHAT got skipped and WHY — not just the one that won.
+  const attempts: ProviderAttempt[] = [];
   const candidates: Array<{ id: string; model: string }> = [];
   const seen = new Set<string>([excludeProviderId]);
 
@@ -931,12 +943,14 @@ async function resolveFirstWorkingProvider(
         config,
         paths,
       });
-      return { adapter, providerId: cand.id, modelId: cand.model };
-    } catch {
-      // not resolvable — try the next candidate
+      attempts.push({ providerId: cand.id, ok: true });
+      return { result: { adapter, providerId: cand.id, modelId: cand.model }, attempts };
+    } catch (err) {
+      // Record WHY this candidate was skipped instead of swallowing it.
+      attempts.push({ providerId: cand.id, ok: false, reason: (err as Error).message });
     }
   }
-  return null;
+  return { result: null, attempts };
 }
 
 /**
@@ -1347,6 +1361,14 @@ export async function buildAgentRuntime(
   const credentialResolver = new CredentialResolver(paths.authJson);
   const resolver = new RuntimeResolver(credentialResolver);
   let adapter;
+  // Phase 6 — the provider decision trace. Populated at THIS single resolution
+  // seam and hung on AgentRuntime + persisted, so doctor / boot / diagnostics
+  // all tell the same honest story: what won, where it came from, and — on a
+  // fallback — the durable reason plus every provider tried.
+  const requestedProvider   = providerId;
+  const requestedExplicit   = isExplicitSource(bootSource);
+  const decisionAttempts: ProviderAttempt[] = [];
+  let fallbackReason: string | undefined;
   if (exploreMode) {
     // Phase 30.2.1 — wizard skipped. Use a NullAdapter so AidenAgent
     // construction succeeds; ChatSession will intercept chat attempts
@@ -1357,6 +1379,7 @@ export async function buildAgentRuntime(
   } else {
     try {
       adapter = await resolver.resolve({ providerId, modelId, config, paths });
+      decisionAttempts.push({ providerId, ok: true });
     } catch (err) {
       // v4.11 provider-auth resilience: the selected default failed to
       // resolve (expired OAuth token, missing key, …). Hard-exiting here
@@ -1364,16 +1387,28 @@ export async function buildAgentRuntime(
       // /model). Instead: warn, fall back to the first OTHER provider that
       // actually resolves, and only drop to a NullAdapter (recovery mode)
       // if nothing resolves — the REPL must still load either way.
+      const reason = (err as Error).message;
+      fallbackReason = reason;
+      decisionAttempts.push({ providerId, ok: false, reason });
+      // Phase 6 — honest wording: an EXPLICIT --provider that failed is never
+      // mislabelled as a "default". The reason carries any fix command the
+      // resolver embedded (e.g. `/auth refresh <provider>` for an expiry).
       display.warn(
-        `Provider '${providerId}' unavailable: ${(err as Error).message}`,
+        requestedExplicit
+          ? `You asked for '${requestedProvider}', but it failed: ${reason}`
+          : `Provider '${requestedProvider}' unavailable: ${reason}`,
       );
       const fb = await resolveFirstWorkingProvider(resolver, config, paths, providerId);
-      if (fb) {
-        adapter    = fb.adapter;
-        providerId = fb.providerId;
-        modelId    = fb.modelId;
-        display.dim(
-          `[boot] fell back to ${providerId} · ${modelId}  (previous default unavailable)`,
+      decisionAttempts.push(...fb.attempts);
+      if (fb.result) {
+        adapter    = fb.result.adapter;
+        providerId = fb.result.providerId;
+        modelId    = fb.result.modelId;
+        // Phase 6 — say WHAT was asked for, WHY it failed, and WHAT won.
+        display.warn(
+          requestedExplicit
+            ? `[boot] you asked for ${requestedProvider}; it failed (${reason}); fell back to ${providerId} · ${modelId}`
+            : `[boot] ${requestedProvider} unavailable (${reason}); fell back to ${providerId} · ${modelId}`,
         );
       } else {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1397,6 +1432,19 @@ export async function buildAgentRuntime(
       );
     }
   }
+
+  // Phase 6 — freeze the decision (single source of truth) and persist it so a
+  // later, separate `aiden doctor` process can read the same honest story.
+  const providerDecision: ProviderDecision = {
+    provider: providerId,
+    model:    modelId,
+    source:   bootSource,
+    requestedProvider: requestedProvider !== providerId ? requestedProvider : undefined,
+    requestedExplicit,
+    fallbackReason,
+    attempts: decisionAttempts,
+  };
+  writeProviderDecision(paths, providerDecision);
 
   // Phase 16b.1: wrap chat_completions providers in a FallbackAdapter so
   // 429s on Groq slot 1 transparently retry Groq slot 2/3 and Together.
@@ -3326,6 +3374,8 @@ export async function buildAgentRuntime(
     // expected auto-pick to kick in — surfacing the source closes the
     // information asymmetry.
     bootSource,
+    // Phase 6 — the durable provider decision trace (also persisted to disk).
+    providerDecision,
     resumeSessionId,
     fallbackAdapter,
     personalityManager,
@@ -3402,6 +3452,13 @@ export interface AgentRuntime {
     | 'cli-flag-partial'
     | 'config-partial'
     | 'hardcoded-fallback';
+  /**
+   * Phase 6 — the durable provider decision trace: which provider+model won,
+   * where the original pick came from, whether it was explicit, and — on a
+   * fallback — the reason plus every provider tried. Also persisted to disk
+   * (via writeProviderDecision) so `aiden doctor` can read it out-of-process.
+   */
+  providerDecision: ProviderDecision;
   resumeSessionId: string | undefined;
   /** Phase 16b.1: present when a multi-slot fallback chain is active. */
   fallbackAdapter: FallbackAdapter | null;

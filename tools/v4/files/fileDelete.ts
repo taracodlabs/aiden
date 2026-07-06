@@ -18,7 +18,7 @@
 import { promises as fs } from 'node:fs';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { isProtectedPath, isFilesystemRoot } from '../utils/paths';
+import { isProtectedPath, isFilesystemRoot, protectedPathMessage } from '../utils/paths';
 import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 export const fileDeleteTool: ToolHandler = {
@@ -68,7 +68,7 @@ export const fileDeleteTool: ToolHandler = {
     const raw = String(args.path ?? args.file ?? '').trim();
     if (!raw) return { success: false, error: 'No path provided' };
     if (isProtectedPath(raw)) {
-      return { success: false, error: 'Access denied: protected path' };
+      return { success: false, error: protectedPathMessage(raw) };
     }
     // v4.4 Phase 2 — sandbox preflight (no-op when AIDEN_SANDBOX!=1).
     const policy = isPathAllowed(raw, 'delete', ctx.cwd);

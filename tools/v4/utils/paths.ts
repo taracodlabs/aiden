@@ -41,6 +41,21 @@ export function isProtectedPath(p: string): boolean {
   return DENY_PATTERNS.some((re) => re.test(norm));
 }
 
+/**
+ * The one honest refusal for a protected path, shared by every file tool.
+ * Says WHY it's off-limits (credentials / keys / .env / Aiden's own config)
+ * and that it's a hard, non-waivable limit — modelled on the sandbox message's
+ * "reason + safe way forward" format so users aren't left with a bare "blocked".
+ */
+export function protectedPathMessage(p: string): string {
+  return (
+    `Access denied: '${p}' is a protected path — credentials, SSH/GPG keys, ` +
+    `.env files, or Aiden's own config. Aiden can't read or write these, and ` +
+    `this is a hard safety limit that can't be waived (not even in auto mode). ` +
+    `If you genuinely need this, do it yourself outside Aiden.`
+  );
+}
+
 export function expandPath(input: string, cwd: string): string {
   const home = os.homedir();
   let p = input;
