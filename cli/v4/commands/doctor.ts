@@ -21,6 +21,8 @@ import type { SlashCommand } from '../commandRegistry';
 import {
   renderHealthBox,
   runDoctor,
+  resolveSetupInputs,
+  setupResults,
   subsystemHealthResults,
   skillOutcomeResults,
   sessionCounterResults,
@@ -38,6 +40,19 @@ export const doctor: SlashCommand = {
     }
     ctx.display.info('Running diagnostic checks...');
     const report = await runDoctor({ paths: ctx.paths });
+    // v4.14.x — Setup group with LIVE runtime state: the session's active
+    // model, the approval engine's mode, and the live tool registry. Anything
+    // a live source doesn't provide falls back to saved config (labelled).
+    try {
+      const setup = await resolveSetupInputs({
+        paths:          ctx.paths,
+        config:         ctx.config,
+        session:        ctx.session,
+        approvalEngine: ctx.approvalEngine,
+        toolRegistry:   ctx.toolRegistry,
+      });
+      report.results.push(...setupResults(setup));
+    } catch { /* informational group — never fail /doctor */ }
     // v4.1.3-essentials doctor-polish: pull in-process subsystem
     // health + skill-outcome data into the same report so they
     // render as additional grouped sections inside the health box,

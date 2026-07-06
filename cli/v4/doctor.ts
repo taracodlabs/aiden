@@ -18,11 +18,15 @@
  *
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
 import { resolveAidenPaths, type AidenPaths } from '../../core/v4/paths';
+import { ConfigManager, resolveConfiguredAutonomyLevel } from '../../core/v4/config';
+
+/** The read-only slice of ConfigManager the Setup resolver needs (getValue). */
+type ConfigLike = { getValue<T = unknown>(key: string, fallback?: T): T };
 import { isQuarantineCandidate } from '../../core/v4/reliability';
 import { LicenseClient, hasLicense } from '../../core/v4/license';
 import { checkForUpdate } from '../../core/v4/update/checkUpdate';
@@ -40,6 +44,7 @@ import { detectBackend, missingBackendMessage, listKnownBackends } from '../../c
  * liveness) get their own groups appended after the main set.
  */
 export type DoctorGroup =
+  | 'Setup'
   | 'Providers'
   | 'Inference'
   | 'System tools'
@@ -57,6 +62,9 @@ export type DoctorGroup =
  * hierarchy stable even if `runDoctor` reorders its check sequence.
  */
 export const DOCTOR_GROUP_ORDER: readonly DoctorGroup[] = [
+  // v4.14.x — "what's my current setup" leads the box: active model, enabled
+  // tools, permission mode, memory files, daemon. Informational (always green).
+  'Setup',
   'Providers',
   'Inference',
   'System tools',
@@ -399,6 +407,195 @@ export function sessionCounterResults(
   }
 
   return rows;
+}
+
+// ─── v4.14.x — Setup group: current runtime state ─────────────────────
+//
+// Five items the user most often wants at a glance ("what am I actually
+// running right now?"): active model, enabled tools, permission mode, where
+// memory lives, and whether the daemon is up. Rendered through the SAME
+// grouped health box (reuses CheckResult / renderHealthBox / pipe-safe
+// fallback). All rows pass — they report state, they don't judge it — so the
+// group never affects the exit code.
+//
+// Memory prints as TWO rows (MEMORY.md + USER.md) so each absolute path shows
+// in full; a single combined row would exceed the box's 100-col cap and
+// truncate the second path.
+
+/** Already-resolved inputs for the Setup rows (pure formatter consumes these). */
+export interface SetupInputs {
+  paths: AidenPaths;
+  /** Active model + provider, tagged by where the value came from. */
+  model: { provider: string; model: string; source: 'live' | 'saved' };
+  /** Names of the tools actually shipped to the model (getSchemas, not list()). */
+  enabledToolNames: string[];
+  /** Permission mode as the friendly autonomy level, tagged by source. */
+  mode: { level: string; source: 'live' | 'saved' };
+  daemonRunning: boolean;
+}
+
+/** Friendly short form for an autonomy level, mirroring `/mode`. */
+function autonomyShort(level: string): string {
+  if (level === 'Partner')   return 'auto';
+  if (level === 'Assistant') return 'safe';
+  if (level === 'Observer')  return 'observer';
+  return level.toLowerCase();
+}
+
+/**
+ * Build the "Setup" group rows from already-resolved inputs. Pure + fully
+ * deterministic so it unit-tests without touching config / registry / daemon.
+ */
+export function setupResults(inp: SetupInputs): CheckResult[] {
+  const n = inp.enabledToolNames.length;
+  // Cap the preview at 4 names so the whole row (incl. "+N more") fits the box's
+  // 100-col ceiling without truncating the count — the number is the point.
+  const SHOWN = 4;
+  const preview = inp.enabledToolNames.slice(0, SHOWN).join(', ');
+  const toolsMsg = n === 0
+    ? 'none enabled'
+    : `${n} enabled — ${preview}${n > SHOWN ? `, +${n - SHOWN} more` : ''}`;
+  return [
+    { name: 'active model',  group: 'Setup', passed: true,
+      message: `${inp.model.provider} / ${inp.model.model}  (${inp.model.source})` },
+    { name: 'tools enabled', group: 'Setup', passed: true, message: toolsMsg },
+    { name: 'mode',          group: 'Setup', passed: true,
+      message: `${inp.mode.level} (${autonomyShort(inp.mode.level)})  (${inp.mode.source})` },
+    { name: 'MEMORY.md',     group: 'Setup', passed: true, message: inp.paths.memoryMd },
+    { name: 'USER.md',       group: 'Setup', passed: true, message: inp.paths.userMd },
+    { name: 'daemon',        group: 'Setup', passed: true,
+      message: inp.daemonRunning ? 'running' : 'stopped' },
+  ];
+}
+
+/** Live sources the resolver reads when present; all optional so the standalone
+ *  CLI (no live agent) degrades to saved config + a freshly-built registry. */
+export interface SetupSources {
+  paths: AidenPaths;
+  config?: ConfigLike;
+  session?: { getCurrentProvider?(): string; getCurrentModel?(): string };
+  approvalEngine?: { getAutonomyPolicy?(): { level?: string } | undefined };
+  toolRegistry?: {
+    getSchemas(f?: string[], c?: unknown, e?: string[]): Array<{ name: string }>;
+  };
+  /** Test seam — override daemon liveness so specs don't depend on a real daemon. */
+  daemonRunning?: boolean;
+}
+
+function nonEmpty(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+/** Enabled tool names = the profile-filtered `getSchemas(...)` set (what the
+ *  model actually sees), NOT the full `list()`. Builds a default registry when
+ *  no live one is supplied. Any failure degrades to []. */
+function resolveEnabledToolNames(
+  registry: SetupSources['toolRegistry'],
+  toolProfile: string | undefined,
+  customToolsets: string[] | undefined,
+): string[] {
+  try {
+    let reg = registry;
+    if (!reg) {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { ToolRegistry } = require('../../core/v4/toolRegistry') as typeof import('../../core/v4/toolRegistry');
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { registerAllTools } = require('../../tools/v4') as typeof import('../../tools/v4');
+      const r = new ToolRegistry();
+      registerAllTools(r);
+      reg = r;
+    }
+    let toolsets: string[] | undefined;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { resolveBootProfile } = require('../../core/v4/toolProfiles') as typeof import('../../core/v4/toolProfiles');
+      const rp = resolveBootProfile(process.env.AIDEN_TOOL_PROFILE, toolProfile, customToolsets);
+      toolsets = rp.toolsets as string[] | undefined;
+    } catch { toolsets = undefined; }
+    return reg.getSchemas(toolsets, 'repl').map((s) => s.name);
+  } catch {
+    return [];
+  }
+}
+
+/** On-disk daemon liveness: the in-process bootstrap handle if active, else a
+ *  live PID in runtime.lock (covers a daemon running in another process). */
+function defaultDaemonRunning(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const daemon = require('../../core/v4/daemon') as {
+      getDaemonHandle: () => { active?: boolean; instanceId?: string | null } | null;
+      daemonRuntimeLockPath: (root: string) => string;
+    };
+    const handle = daemon.getDaemonHandle();
+    if (handle?.active && handle.instanceId) return true;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { resolveAidenRoot } = require('../../core/v4/paths') as typeof import('../../core/v4/paths');
+    const lockPath = daemon.daemonRuntimeLockPath(resolveAidenRoot());
+    if (!existsSync(lockPath)) return false;
+    const pid = Number.parseInt(readFileSync(lockPath, 'utf-8').split(/\r?\n/)[1] ?? '', 10);
+    if (!Number.isFinite(pid)) return false;
+    try { process.kill(pid, 0); return true; }
+    catch (e) { return (e as NodeJS.ErrnoException).code === 'EPERM'; }
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve `SetupInputs` from whatever sources are available. A live session /
+ * approval engine wins (labelled `live`); otherwise saved config values are
+ * read (labelled `saved`). Every branch is defensive — a resolution failure
+ * yields an honest fallback value, never a thrown error that would break the
+ * whole health box.
+ */
+export async function resolveSetupInputs(src: SetupSources): Promise<SetupInputs> {
+  // Saved config — the fallback for model, mode, and the tool profile. Kept as
+  // the ConfigManager (a ConfigProvider) so `getValue` + the autonomy resolver
+  // read straight through it.
+  let config = src.config;
+  if (!config) {
+    try {
+      const cm = new ConfigManager(src.paths);
+      await cm.load();
+      config = cm;
+    } catch { config = undefined; }
+  }
+
+  // Active model — live session value wins, else saved config.
+  let liveProvider: string | undefined;
+  let liveModel: string | undefined;
+  try { liveProvider = nonEmpty(src.session?.getCurrentProvider?.()); } catch { /* no live */ }
+  try { liveModel    = nonEmpty(src.session?.getCurrentModel?.()); } catch { /* no live */ }
+  const model = (liveProvider && liveModel)
+    ? { provider: liveProvider, model: liveModel, source: 'live' as const }
+    : {
+        provider: config?.getValue<string>('model.provider', 'unknown') ?? 'unknown',
+        model:    config?.getValue<string>('model.modelId', 'unknown') ?? 'unknown',
+        source:   'saved' as const,
+      };
+
+  // Mode — the friendly autonomy level. Live approval engine wins, else saved.
+  let liveLevel: string | undefined;
+  try { liveLevel = nonEmpty(src.approvalEngine?.getAutonomyPolicy?.()?.level); } catch { /* no live */ }
+  let savedLevel = 'Assistant';
+  if (config) {
+    try { savedLevel = resolveConfiguredAutonomyLevel(config); } catch { /* keep default */ }
+  }
+  const mode = liveLevel
+    ? { level: liveLevel, source: 'live' as const }
+    : { level: savedLevel, source: 'saved' as const };
+
+  const enabledToolNames = resolveEnabledToolNames(
+    src.toolRegistry,
+    config?.getValue<string | undefined>('agent.tool_profile', undefined),
+    config?.getValue<string[] | undefined>('agent.tool_profile_toolsets', undefined),
+  );
+  const daemonRunning = typeof src.daemonRunning === 'boolean'
+    ? src.daemonRunning
+    : defaultDaemonRunning();
+
+  return { paths: src.paths, model, enabledToolNames, mode, daemonRunning };
 }
 
 /**
@@ -1346,6 +1543,15 @@ export function renderHealthBox(report: DoctorReport, display: Display): string 
  */
 export async function runDoctorCli(opts?: DoctorOptions): Promise<DoctorReport> {
   const report = await runDoctor(opts);
+
+  // v4.14.x — the Setup group (current runtime state). Standalone CLI has no
+  // live agent, so it resolves saved config + a freshly-built registry +
+  // on-disk daemon liveness. Best-effort: a failure drops the group rather
+  // than breaking the whole health box.
+  try {
+    const setup = await resolveSetupInputs({ paths: opts?.paths ?? resolveAidenPaths() });
+    report.results.push(...setupResults(setup));
+  } catch { /* informational group — never fail the report */ }
 
   // v4.1.3-essentials doctor-polish: Path-A unification — the CLI
   // path now uses the SAME `renderHealthBox` renderer as `/doctor`
