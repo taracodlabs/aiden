@@ -22,8 +22,12 @@ import { promises as fs, existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { execFileSync, spawn } from 'node:child_process';
-import { resolveAidenPaths, type AidenPaths } from '../../core/v4/paths';
+import { resolveAidenPaths, resolveAidenRoot, type AidenPaths } from '../../core/v4/paths';
 import { ConfigManager, resolveConfiguredAutonomyLevel } from '../../core/v4/config';
+// Light path helper ONLY — never import the `core/v4/daemon` barrel here (it
+// pulls proper-lockfile, which registers ref'd process signal handlers that pin
+// the event loop open and force a teardown-racing process.exit()).
+import { daemonRuntimeLockPath } from '../../core/v4/daemon/daemonConfig';
 
 /** The read-only slice of ConfigManager the Setup resolver needs (getValue). */
 type ConfigLike = { getValue<T = unknown>(key: string, fallback?: T): T };
@@ -518,20 +522,18 @@ function resolveEnabledToolNames(
   }
 }
 
-/** On-disk daemon liveness: the in-process bootstrap handle if active, else a
- *  live PID in runtime.lock (covers a daemon running in another process). */
+/**
+ * On-disk daemon liveness — a read that opens NOTHING (no live handle, no heavy
+ * import). The daemon (in-process OR a separate process) writes `runtime.lock`
+ * with its PID when it acquires the runtime lock at boot, so the lock file +
+ * `process.kill(pid, 0)` is authoritative for both cases. Deliberately avoids
+ * the `core/v4/daemon` barrel + `getDaemonHandle()`: importing the barrel pulls
+ * proper-lockfile, whose signal-exit registers ref'd SIGNALWRAP handles that pin
+ * the loop open and turn the doctor's exit into a UV_HANDLE_CLOSING race.
+ */
 function defaultDaemonRunning(): boolean {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const daemon = require('../../core/v4/daemon') as {
-      getDaemonHandle: () => { active?: boolean; instanceId?: string | null } | null;
-      daemonRuntimeLockPath: (root: string) => string;
-    };
-    const handle = daemon.getDaemonHandle();
-    if (handle?.active && handle.instanceId) return true;
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { resolveAidenRoot } = require('../../core/v4/paths') as typeof import('../../core/v4/paths');
-    const lockPath = daemon.daemonRuntimeLockPath(resolveAidenRoot());
+    const lockPath = daemonRuntimeLockPath(resolveAidenRoot());
     if (!existsSync(lockPath)) return false;
     const pid = Number.parseInt(readFileSync(lockPath, 'utf-8').split(/\r?\n/)[1] ?? '', 10);
     if (!Number.isFinite(pid)) return false;
@@ -556,8 +558,10 @@ export async function resolveSetupInputs(src: SetupSources): Promise<SetupInputs
   let config = src.config;
   if (!config) {
     try {
+      // Sync read — an async `load()` here leaves a FileHandle close op in
+      // flight that races the doctor's process.exit() (UV_HANDLE_CLOSING).
       const cm = new ConfigManager(src.paths);
-      await cm.load();
+      cm.loadSync();
       config = cm;
     } catch { config = undefined; }
   }

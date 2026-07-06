@@ -39,6 +39,22 @@ describe('ConfigManager', () => {
     expect(cfg.memory.provider).toBe('default');
   });
 
+  it('1b. loadSync mirrors load — defaults when missing, parses + merges when present', async () => {
+    // Sync twin of load(); used by teardown-sensitive callers (e.g. `doctor`,
+    // which force-exits) so no async FileHandle close races process.exit().
+    expect(mgr.loadSync().model.provider).toBe(DEFAULT_CONFIG.model.provider);   // missing → defaults
+    await fs.writeFile(
+      configPath,
+      ['model:', '  provider: groq', '  modelId: llama-3.3-70b-versatile', ''].join('\n'),
+      'utf8',
+    );
+    const sync = new ConfigManager(resolveAidenPaths({ rootOverride: tmpDir })).loadSync();
+    const asyncCfg = await new ConfigManager(resolveAidenPaths({ rootOverride: tmpDir })).load();
+    expect(sync.model.provider).toBe('groq');
+    expect(sync.model.modelId).toBe('llama-3.3-70b-versatile');
+    expect(sync).toEqual(asyncCfg);   // sync and async paths agree
+  });
+
   it('2. load parses a real config.yaml and merges over defaults', async () => {
     await fs.writeFile(
       configPath,

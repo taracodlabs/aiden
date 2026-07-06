@@ -103,6 +103,21 @@ describe('doctor Setup group — live-vs-saved resolution (resolveSetupInputs)',
     expect(inp.daemonRunning).toBe(true);
   });
 
+  it('daemon check opens NOTHING — registers no signal handlers (light lock read, not the daemon barrel)', async () => {
+    // Regression: the daemon-liveness check must not import `core/v4/daemon`
+    // (the barrel), which pulls proper-lockfile → signal-exit registers ref'd
+    // SIGNALWRAP handles that pin the event loop and force a teardown-racing
+    // process.exit() (the Windows UV_HANDLE_CLOSING crash). The light lock-file
+    // read registers zero signal listeners. Run with NO daemonRunning seam so
+    // the real check executes, and stubs elsewhere so nothing else loads.
+    const sig = () =>
+      process.listenerCount('SIGINT') + process.listenerCount('SIGTERM') + process.listenerCount('SIGHUP');
+    const before = sig();
+    const inp = await resolveSetupInputs({ paths, config: savedCfg, toolRegistry: toolReg });
+    expect(typeof inp.daemonRunning).toBe('boolean');   // the read still works
+    expect(sig()).toBe(before);                         // …and pulled no signal handlers
+  });
+
   it('a session missing a value falls back to saved (no half-live row)', async () => {
     const inp = await resolveSetupInputs({
       paths, config: savedCfg, toolRegistry: toolReg, daemonRunning: false,

@@ -28,7 +28,7 @@
  * commands to Phase 13 — only the parser surface is needed now.
  */
 
-import { promises as fs } from 'node:fs';
+import { promises as fs, readFileSync } from 'node:fs';
 import path from 'node:path';
 import yaml from 'js-yaml';
 
@@ -254,6 +254,29 @@ export class ConfigManager implements ConfigProvider {
         err instanceof Error &&
         (err as NodeJS.ErrnoException).code === 'ENOENT'
       ) {
+        this.cfg = deepClone(DEFAULT_CONFIG);
+        this.rawText = null;
+        return this.cfg;
+      }
+      throw err;
+    }
+    this.rawText = raw;
+    this.cfg = parseAndMerge(raw);
+    return this.cfg;
+  }
+
+  /**
+   * Synchronous variant of `load()`. Same merge semantics, but reads the file
+   * with `readFileSync` so callers on a teardown-sensitive path — e.g. `doctor`,
+   * which force-exits via `process.exit()` — don't leave an async FileHandle
+   * close operation racing that exit (the Windows `UV_HANDLE_CLOSING` crash).
+   */
+  loadSync(): AidenConfig {
+    let raw: string;
+    try {
+      raw = readFileSync(this.paths.configYaml, 'utf8');
+    } catch (err: unknown) {
+      if (err instanceof Error && (err as NodeJS.ErrnoException).code === 'ENOENT') {
         this.cfg = deepClone(DEFAULT_CONFIG);
         this.rawText = null;
         return this.cfg;
