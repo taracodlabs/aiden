@@ -20,6 +20,7 @@ import { promises as fs } from 'node:fs';
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { isProtectedPath } from '../utils/paths';
 import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
+import { writeFileVerified } from '../../../core/v4/writeFileVerified';
 
 export const filePatchTool: ToolHandler = {
   schema: {
@@ -128,11 +129,16 @@ export const filePatchTool: ToolHandler = {
       const next = replaceAll
         ? original.split(find).join(replace)
         : original.replace(find, replace);
-      await fs.writeFile(resolved, next, 'utf-8');
+      // Shared choke-point: atomic write + read-back verification. `bytes` is
+      // the verified on-disk length; a verification failure throws and is
+      // surfaced below as an error, never a false success.
+      const verified = await writeFileVerified(resolved, next);
       return {
         success: true,
         path: resolved,
         replacements: replaceAll ? occurrences : 1,
+        bytes: verified.bytes,
+        verified: true,
       };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

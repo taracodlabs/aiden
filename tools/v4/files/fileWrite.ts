@@ -16,12 +16,12 @@
  */
 
 import { promises as fs } from 'node:fs';
-import path from 'node:path';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { isProtectedPath } from '../utils/paths';
 import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 import { truncatePreview } from '../../../core/v4/dryRun';
+import { writeFileVerified } from '../../../core/v4/writeFileVerified';
 
 export const fileWriteTool: ToolHandler = {
   schema: {
@@ -84,12 +84,16 @@ export const fileWriteTool: ToolHandler = {
     const content = typeof args.content === 'string' ? args.content : '';
     const resolved = policy.resolvedPath;
     try {
-      await fs.mkdir(path.dirname(resolved), { recursive: true });
-      await fs.writeFile(resolved, content, 'utf-8');
+      // Shared choke-point: atomic write + read-back verification. `bytes` is
+      // the ACTUAL on-disk length (verified), not the intended-length guess a
+      // bare fs.writeFile would let us claim. A verification failure throws and
+      // is surfaced below as an honest error rather than a false success.
+      const verified = await writeFileVerified(resolved, content);
       return {
         success: true,
         path: resolved,
-        bytes: Buffer.byteLength(content, 'utf-8'),
+        bytes: verified.bytes,
+        verified: true,
       };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

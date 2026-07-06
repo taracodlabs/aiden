@@ -241,6 +241,34 @@ describe('file_patch', () => {
   });
 });
 
+describe('verified writes — file_write + file_patch route through writeFileVerified', () => {
+  it('file_write returns verified:true with the ACTUAL on-disk byte length', async () => {
+    const target = path.join(tmp, 'verified.txt');
+    const content = 'verified content — ✓';
+    const r = (await fileWriteTool.execute({ path: target, content }, ctx)) as {
+      success: boolean; verified?: boolean; bytes?: number;
+    };
+    expect(r.success).toBe(true);
+    expect(r.verified).toBe(true);                                  // only the helper sets this
+    expect(r.bytes).toBe(Buffer.byteLength(content, 'utf-8'));
+    expect(r.bytes).toBe((await fs.stat(target)).size);            // matches disk exactly
+  });
+
+  it('file_patch returns verified:true with the on-disk byte length after the edit', async () => {
+    const target = path.join(tmp, 'patched.txt');
+    await fs.writeFile(target, 'the OLD value stays');
+    const r = (await filePatchTool.execute(
+      { path: target, find: 'OLD', replace: 'NEW-and-longer' },
+      ctx,
+    )) as { success: boolean; verified?: boolean; bytes?: number; replacements?: number };
+    expect(r.success).toBe(true);
+    expect(r.verified).toBe(true);
+    expect(r.replacements).toBe(1);
+    expect(r.bytes).toBe((await fs.stat(target)).size);
+    expect(await fs.readFile(target, 'utf-8')).toBe('the NEW-and-longer value stays');
+  });
+});
+
 describe('file_delete', () => {
   it('20. deletes a file', async () => {
     const target = path.join(tmp, 'del.txt');
