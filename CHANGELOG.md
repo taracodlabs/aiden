@@ -1,3 +1,15 @@
+## v4.14.3 — 2026-07-06
+
+Four fixes and a memory-safety guardrail.
+
+- **Deferred commands hidden.** `aiden --help` no longer lists the half-built `batch` / `gateway` / `pairing` / `update` commands — they drop from the menu but still answer honestly if you guess one.
+- **`aiden doctor` — a Setup section.** The health box now leads with your current runtime state: active model + provider, enabled tools, permission mode, where MEMORY.md / USER.md live, and daemon status. (Also fixed a Windows crash-on-exit the new section exposed.)
+- **Verified file writes.** `file_write` and `file_patch` confirm the bytes actually landed on disk (atomic write + read-back) instead of trusting "no error = success", and report the real on-disk size.
+- **Memory provenance tags.** Every memory entry carries a source label Aiden can see: `[said]` (you told it), `[saw]` (tool evidence), `[guess]` (inferred). A lower-trust source can't overwrite a higher-trust one — a guess can never wipe something you said.
+- **Memory encoding guardrail.** All memory reads/writes go through one UTF-8 doorway (atomic + read-back verified), so the encoding can never drift — `§` and smart quotes stay correct on disk.
+
+---
+
 ## v4.14.1 — 2026-07-05
 
 The input bar is always there, and connecting a server is one command.
