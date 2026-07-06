@@ -34,6 +34,7 @@ import type {
 } from '../../../core/v4/subagent/coordinator';
 // v4.6 Phase 3A — operator kill-switch.
 import { getSpawnPause } from '../../../core/v4/subagent/spawnPause';
+import { trustLabelOf } from '../../../core/v4/subagent/evidenceRecheck';
 
 // ── Factory dependencies ───────────────────────────────────────────────────
 
@@ -318,9 +319,10 @@ function legacyEnvelopeFrom(env: SubagentResultEnvelope): Record<string, unknown
   // for cancel; coordinator normalises to 'cancelled'. We surface
   // 'interrupted' here for back-compat.
   const legacyStatus = env.status === 'cancelled' ? 'interrupted' : env.status;
-  const verified      = env.verified === true;
-  const reasoningOnly = env.reasoningOnly === true;
-  const handles       = env.handles ?? [];
+  const verified          = env.verified === true;
+  const reasoningOnly      = env.reasoningOnly === true;
+  const unconfirmedRemote  = env.unconfirmedRemote === true;
+  const handles            = env.handles ?? [];
   return {
     ok,
     status:         legacyStatus,
@@ -331,21 +333,20 @@ function legacyEnvelopeFrom(env: SubagentResultEnvelope): Record<string, unknown
     verdict,
     verified,
     reasoningOnly,
+    /** Phase 7 (G1) — a remote claim with no local proof; not "verified". */
+    unconfirmedRemote,
     /** Concrete artifact handles that re-checked clean on the parent side. */
     handles,
     /**
-     * The honest trust label for the parent's reasoning:
-     *   verified        — backed by re-checked handles; treat as fact.
-     *   unverified      — summary is a CLAIM with no checkable handle; re-check
-     *                     the artifact yourself before relying on it.
-     *   advisory        — pure-reasoning answer, no artifact possible.
-     *   verification_failed — a claimed artifact was NOT there on re-check.
+     * The honest trust label for the parent's reasoning (shared taxonomy):
+     *   verified            — backed by re-checked handles; treat as fact.
+     *   partial             — some work verified, a remote claim unconfirmed.
+     *   unconfirmed_remote  — helper-reported a remote action, no local proof.
+     *   advisory            — pure-reasoning answer, no artifact possible.
+     *   unverified          — a claim with no checkable handle; re-check yourself.
+     *   verification_failed — a claimed artifact was missing / empty / stub.
      */
-    trust:
-      verdict === 'verification_failed' ? 'verification_failed'
-      : verified                        ? 'verified'
-      : reasoningOnly                   ? 'advisory'
-      : 'unverified',
+    trust: trustLabelOf({ verdict, verified, reasoningOnly, unconfirmedRemote }),
     metrics: {
       apiCalls:    0,                          // not tracked at envelope layer
       durationMs:  env.durationMs,

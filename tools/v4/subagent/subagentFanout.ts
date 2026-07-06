@@ -277,6 +277,14 @@ export function makeSubagentFanoutTool(
         output:     env.status === 'completed' ? env.summary : '',
         error:      env.error,
         elapsedMs:  env.durationMs,
+        // Phase 7 — carry the per-child evidence into the merge so the trust
+        // labels + verified-pool restriction actually fire in the real fanout
+        // path (this wiring was previously dropped, leaving the merger's trust
+        // machinery inert outside its unit test).
+        verified:          env.verified,
+        verdict:           env.verdict,
+        reasoningOnly:     env.reasoningOnly,
+        unconfirmedRemote: env.unconfirmedRemote,
       }));
       const aggOverride     = resolveAggregatorOverride();
       const aggregatorModel = aggOverride ?? factory.resolveActiveModel();

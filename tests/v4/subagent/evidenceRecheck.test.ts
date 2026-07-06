@@ -22,6 +22,7 @@ import {
   extractProofHandles,
   recheckHandles,
   deriveSubagentEvidence,
+  trustLabelOf,
 } from '../../../core/v4/subagent/evidenceRecheck';
 
 /** Build a trace entry. `ok`-verified mutating writes default to a good result. */
@@ -140,5 +141,88 @@ describe('deriveSubagentEvidence', () => {
     const ev = deriveSubagentEvidence(trace, { existsSync: existsTrue });
     expect(ev.verdict).toBe('verification_failed');
     expect(ev.ok).toBe(false);
+  });
+});
+
+// ── G2 — existence is not proof: empty / placeholder files are failed claims ──
+describe('recheckHandles — G2 stub / empty file downgrade', () => {
+  const present = () => true;
+  it('a file that exists but is EMPTY → failure (existence alone is not verified)', () => {
+    const h = extractProofHandles([wroteFile('/tmp/empty.txt')]);
+    const r = recheckHandles(h, { existsSync: present, readFile: () => '   \n\t ' });
+    expect(r.allPass).toBe(false);
+    expect(r.failures[0].reason).toMatch(/empty/);
+  });
+
+  it('a file whose whole body is a stub marker (TODO) → failure', () => {
+    const h = extractProofHandles([wroteFile('/tmp/stub.ts')]);
+    const r = recheckHandles(h, { existsSync: present, readFile: () => '// TODO: implement later' });
+    expect(r.allPass).toBe(false);
+    expect(r.failures[0].reason).toMatch(/placeholder stub/);
+  });
+
+  it('a real file with substantial content → survives', () => {
+    const h = extractProofHandles([wroteFile('/tmp/real.ts')]);
+    const r = recheckHandles(h, { existsSync: present, readFile: () => 'export const answer = 42;\nfunction real() { return answer; }\n' });
+    expect(r.allPass).toBe(true);
+    expect(r.handles).toHaveLength(1);
+  });
+
+  it('a LONG file that merely contains "TODO" is NOT a stub (low false-positive)', () => {
+    const big = 'function real() {\n  // TODO: refine later\n  return doWork();\n}\n'.repeat(4);
+    const h = extractProofHandles([wroteFile('/tmp/big.ts')]);
+    expect(recheckHandles(h, { existsSync: present, readFile: () => big }).allPass).toBe(true);
+  });
+
+  it('deriveSubagentEvidence: a claimed EMPTY file downgrades verified → verification_failed', () => {
+    const ev = deriveSubagentEvidence([wroteFile('/tmp/empty.txt')], { existsSync: present, readFile: () => '' });
+    expect(ev.verdict).toBe('verification_failed');
+    expect(ev.verified).toBe(false);
+    expect(ev.ok).toBe(false);
+  });
+});
+
+// ── G1 — remote object_id/URL: honest "unconfirmed", never silently "verified" ──
+describe('recheckHandles / deriveSubagentEvidence — G1 remote handle honesty', () => {
+  it('object_id with NO probe → unconfirmed (not a verified handle, not a failure)', () => {
+    const r = recheckHandles([{ tool: 'create_pr', kind: 'object_id', value: 'PR#42' }]);
+    expect(r.allPass).toBe(true);              // never a hard local failure
+    expect(r.handles).toHaveLength(0);         // does NOT count as verified evidence
+    expect(r.unconfirmed).toHaveLength(1);
+  });
+
+  it('a remote-only child is unconfirmedRemote, NOT verified — "PR created" is not confirmed', () => {
+    const trace: HonestyTraceEntry[] = [
+      entry({ name: 'create_pr', handlerMutates: true, result: { id: 'PR#42' } }),
+    ];
+    const ev = deriveSubagentEvidence(trace);
+    expect(ev.verdict).toBe('completed');
+    expect(ev.verified).toBe(false);
+    expect(ev.unconfirmedRemote).toBe(true);
+  });
+
+  it('probeRemote=false → the claimed remote object is a hallucination (failure)', () => {
+    const r = recheckHandles([{ tool: 'create_pr', kind: 'object_id', value: 'PR#nope' }], { probeRemote: () => false });
+    expect(r.allPass).toBe(false);
+    expect(r.failures[0].reason).toMatch(/not found/);
+  });
+
+  it('probeRemote=true → confirmed; counts as a verified handle', () => {
+    const r = recheckHandles([{ tool: 'create_pr', kind: 'object_id', value: 'PR#42' }], { probeRemote: () => true });
+    expect(r.allPass).toBe(true);
+    expect(r.handles).toHaveLength(1);
+    expect(r.unconfirmed).toHaveLength(0);
+  });
+});
+
+// ── the shared trust taxonomy ────────────────────────────────────────────────
+describe('trustLabelOf — one honest taxonomy', () => {
+  it('maps each state to its label (verification_failed dominates)', () => {
+    expect(trustLabelOf({ verdict: 'verification_failed', verified: true })).toBe('verification_failed');
+    expect(trustLabelOf({ verified: true })).toBe('verified');
+    expect(trustLabelOf({ verified: true, unconfirmedRemote: true })).toBe('partial');
+    expect(trustLabelOf({ unconfirmedRemote: true })).toBe('unconfirmed_remote');
+    expect(trustLabelOf({ reasoningOnly: true })).toBe('advisory');
+    expect(trustLabelOf({})).toBe('unverified');
   });
 });

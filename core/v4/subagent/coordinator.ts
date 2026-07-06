@@ -111,6 +111,8 @@ export interface SubagentResultEnvelope {
   verified?:      boolean;
   /** True when the child did no mutating work — advisory, not verified-fact. */
   reasoningOnly?: boolean;
+  /** Phase 7 (G1) — child claimed a remote action it couldn't confirm locally. */
+  unconfirmedRemote?: boolean;
   /** The concrete proof handles that survived the parent-side re-check. */
   handles?:       Array<{ tool: string; kind: string; value: string | number }>;
 }
@@ -601,11 +603,12 @@ export class SubagentCoordinator {
         },
         toolTrace:      [],
         // v4.12.1 Pillar 3 — carry the primitive's evidence up to the tool layer.
-        verdict:        result.verdict,
-        verified:       result.verified,
-        reasoningOnly:  result.reasoningOnly,
-        handles:        result.handles,
-        artifactRefs:   result.handles.map((h) => `${h.kind}:${String(h.value)}`),
+        verdict:           result.verdict,
+        verified:          result.verified,
+        reasoningOnly:     result.reasoningOnly,
+        unconfirmedRemote: result.unconfirmedRemote,
+        handles:           result.handles,
+        artifactRefs:      result.handles.map((h) => `${h.kind}:${String(h.value)}`),
       };
 
       // Cost rollup into the parent's accumulator.

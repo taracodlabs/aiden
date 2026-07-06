@@ -94,3 +94,56 @@ describe('mergeResults — verified-preferring selection', () => {
     expect(p).not.toContain('failed claim');            // verified pool excludes it
   });
 });
+
+// ── Phase 7 (G4) — the combine leak: unverified claims can't become fact ──────
+describe('mergeResults — combine trust (G4)', () => {
+  it('a verification_failed claim is EXCLUDED from the synthesis and flagged in the footer', async () => {
+    const { adapter, lastUserPrompt } = captureAdapter();
+    const results = [
+      R(0, 'real work I proved', { verified: true }),
+      R(1, 'a file I never wrote', { verified: false, verdict: 'verification_failed' }),
+    ];
+    const out = await mergeResults(results, opts(adapter, 'combine'));
+    const p = lastUserPrompt();
+    expect(p).toContain('real work I proved');
+    expect(p).not.toContain('a file I never wrote');    // failed claim never reaches synthesis
+    // and the merged answer carries an honest provenance footer
+    expect(out.merged).toContain('AGGREGATED');
+    expect(out.merged).toContain('failed verification (excluded)');
+    expect(out.merged).toMatch(/NOT established fact/i);
+  });
+
+  it('when EVERY candidate failed verification, nothing is synthesized as fact', async () => {
+    const { adapter } = captureAdapter();
+    const results = [
+      R(0, 'ghost one', { verified: false, verdict: 'verification_failed' }),
+      R(1, 'ghost two', { verified: false, verdict: 'verification_failed' }),
+    ];
+    const out = await mergeResults(results, opts(adapter, 'combine'));
+    expect(adapter.call).not.toHaveBeenCalled();         // no aggregator call at all
+    expect(out.merged).toMatch(/every candidate.*failed verification/i);
+    expect(out.merged).not.toContain('ghost');
+  });
+
+  it('an unconfirmed remote claim is labelled unconfirmed_remote (not verified) and flagged', async () => {
+    const { adapter, lastUserPrompt } = captureAdapter();
+    const results = [
+      R(0, 'wrote a local file', { verified: true }),
+      R(1, 'opened a PR',        { verified: false, unconfirmedRemote: true }),
+    ];
+    const out = await mergeResults(results, opts(adapter, 'combine'));
+    const p = lastUserPrompt();
+    expect(p).toContain('[trust: unconfirmed_remote]');  // the remote claim is not "verified"
+    expect(out.merged).toContain('helper-reported (unconfirmed remote action)');
+  });
+
+  it('an all-verified combine gets NO nagging footer', async () => {
+    const { adapter } = captureAdapter();
+    const results = [
+      R(0, 'proven A', { verified: true }),
+      R(1, 'proven B', { verified: true }),
+    ];
+    const out = await mergeResults(results, opts(adapter, 'combine'));
+    expect(out.merged).toBe('AGGREGATED');               // clean, no provenance caveat
+  });
+});

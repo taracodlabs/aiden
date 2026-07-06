@@ -33,6 +33,7 @@
 import type { Message, ProviderAdapter } from '../../../providers/v4/types';
 import type { Logger } from '../logger/logger';
 import { noopLogger } from '../logger/factory';
+import { trustLabelOf } from './evidenceRecheck';
 
 export type MergeStrategy = 'all' | 'vote' | 'pick-best' | 'combine';
 
@@ -55,6 +56,8 @@ export interface SubagentResult {
   verdict?: 'completed' | 'completed_unverified' | 'verification_failed' | null;
   /** True when the child did no mutating work — advisory, not verified-fact. */
   reasoningOnly?: boolean;
+  /** Phase 7 (G1) — child claimed a remote action it couldn't confirm locally. */
+  unconfirmedRemote?: boolean;
 }
 
 export interface MergeOptions {
@@ -118,14 +121,29 @@ export async function mergeResults(
   // success with no re-checked evidence must not out-vote one that proved
   // its work. For SELECTION strategies (vote/pick-best), when any verified
   // candidate exists, the pool is restricted to verified ones — a handle-less
-  // "success" simply isn't in the running. 'combine' keeps everyone (it
-  // synthesizes), but every candidate is annotated with its trust label so
-  // the aggregator weights verified content higher.
+  // "success" simply isn't in the running.
   const verified = usable.filter((r) => r.verified === true);
-  const pool =
-    opts.strategy === 'combine'
-      ? usable
-      : (verified.length > 0 ? verified : usable);
+  // Phase 7 (G4) — close the combine leak. `combine` used to synthesize
+  // EVERYONE, so a verification_failed claim (a file it never wrote) could land
+  // in the merged answer as unqualified fact. Drop the failed claims from the
+  // synthesis pool; if that leaves nothing, say so honestly rather than
+  // synthesizing known-false claims.
+  let pool: SubagentResult[];
+  if (opts.strategy === 'combine') {
+    const trustworthy = usable.filter((r) => r.verdict !== 'verification_failed');
+    if (trustworthy.length === 0) {
+      return {
+        merged:
+          '[Aggregator: every candidate\'s claim failed verification (claimed artifacts ' +
+          'were missing, empty, or stubs on re-check) — nothing could be confirmed, so ' +
+          'there is no verified answer to combine.]',
+        aggregator: '',
+      };
+    }
+    pool = trustworthy;
+  } else {
+    pool = verified.length > 0 ? verified : usable;
+  }
 
   const aggregatorLabel =
     `${opts.aggregatorModel.providerId}:${opts.aggregatorModel.modelId}`;
@@ -153,7 +171,12 @@ export async function mergeResults(
       stream: false,
     });
     const text = extractFinalText(out);
-    return { merged: text, aggregator: aggregatorLabel };
+    // Phase 7 (G4) — carry the trust verdict INTO the merged output. For a
+    // synthesis, append an honest provenance footer over ALL usable sources
+    // (incl. any excluded from the pool) so unverified/failed claims can't read
+    // as established fact.
+    const footer = opts.strategy === 'combine' ? buildTrustFooter(usable) : '';
+    return { merged: text + footer, aggregator: aggregatorLabel };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     logger.warn('subagent merge: aggregator failed', {
@@ -192,6 +215,7 @@ function buildSystemPrompt(strategy: MergeStrategy): string {
         'You are a synthesis aggregator. You will be shown a user query and N candidate answers from independent agents.',
         'Produce ONE unified answer that integrates the strongest points from each candidate.',
         'Resolve disagreements by stating both positions when sources diverge factually; collapse redundancy where they agree.',
+        'Each candidate carries a [trust: …] tag. A `verified` claim is backed by re-checked evidence — state it plainly. Treat `unverified`, `unconfirmed_remote`, and `advisory` claims as CLAIMS, not facts: include them only if you qualify them (e.g. "a helper reported, unconfirmed, that …"). Never present an unverified or unconfirmed-remote claim as established fact.',
         'Do not name the candidates. Speak directly. No meta-commentary about being an aggregator.',
       ].join(' ');
     default:
@@ -204,13 +228,8 @@ function buildUserPrompt(
   results: SubagentResult[],
   query: string,
 ): string {
-  const trustLabel = (r: SubagentResult): string =>
-    r.verdict === 'verification_failed' ? 'verification_failed'
-    : r.verified === true               ? 'verified'
-    : r.reasoningOnly === true          ? 'advisory'
-    : 'unverified';
   const blocks = results.map((r, i) =>
-    `--- CANDIDATE ${i + 1} (${r.providerId}:${r.modelId}) [trust: ${trustLabel(r)}] ---\n${r.output.trim()}`,
+    `--- CANDIDATE ${i + 1} (${r.providerId}:${r.modelId}) [trust: ${trustLabelOf(r)}] ---\n${r.output.trim()}`,
   ).join('\n\n');
   const action = strategy === 'combine'
     ? 'Synthesize these into one unified answer.'
@@ -218,6 +237,36 @@ function buildUserPrompt(
     ? 'Pick the best candidate.'
     : 'Pick the best candidate verbatim.';
   return `USER QUERY:\n${query}\n\n${blocks}\n\n${action}`;
+}
+
+/**
+ * Phase 7 (G4) — an honest provenance footer for a combined answer. Counts the
+ * trust label of every usable source (incl. any the pool excluded) so the
+ * reader knows what was actually confirmed. Returns '' when every source was
+ * verified (nothing to caveat).
+ */
+function buildTrustFooter(all: SubagentResult[]): string {
+  const counts: Record<string, number> = {};
+  for (const r of all) { const l = trustLabelOf(r); counts[l] = (counts[l] ?? 0) + 1; }
+  // Only caveat when there's a real claim-of-fact risk. All-`verified` or
+  // all-`advisory` (pure reasoning) syntheses carry nothing to qualify, so no
+  // nagging footer on the common research-ensemble case.
+  const flagged =
+    (counts.unverified ?? 0) + (counts.unconfirmed_remote ?? 0) +
+    (counts.verification_failed ?? 0) + (counts.partial ?? 0);
+  if (flagged === 0) return '';
+  const parts: string[] = [];
+  const add = (k: string, label: string) => { if (counts[k]) parts.push(`${counts[k]} ${label}`); };
+  add('verified',            'verified');
+  add('partial',             'partly verified');
+  add('unconfirmed_remote',  'helper-reported (unconfirmed remote action)');
+  add('advisory',            'advisory (reasoning only)');
+  add('unverified',          'unverified');
+  add('verification_failed', 'failed verification (excluded)');
+  return (
+    `\n\n---\nProvenance of the ${all.length} source${all.length === 1 ? '' : 's'} behind this answer: ` +
+    `${parts.join(', ')}. Unverified, unconfirmed-remote, and failed claims are NOT established fact.`
+  );
 }
 
 function extractFinalText(out: unknown): string {

@@ -122,6 +122,12 @@ export interface SubAgentResult {
    * fake evidence for these.
    */
   reasoningOnly: boolean;
+  /**
+   * Phase 7 (G1) — the child claimed a remote action (created a record / URL /
+   * object id) that could not be confirmed locally. Honest "helper-reported,
+   * unconfirmed" — the parent must not read it as confirmed fact.
+   */
+  unconfirmedRemote: boolean;
   /** The concrete proof handles that survived the parent-side re-check. */
   handles: ProofHandle[];
   /**
@@ -295,6 +301,7 @@ export async function spawnSubAgent(
         evidence:       null,
         verified:       false,
         reasoningOnly:  false,
+        unconfirmedRemote: false,
         handles:        [],
         escalations:    [],
       };
@@ -469,15 +476,17 @@ export async function spawnSubAgent(
   let evidence: TaskEvidence | null = null;
   let verified = false;
   let reasoningOnly = false;
+  let unconfirmedRemote = false;
   let handles: ProofHandle[] = [];
 
   if (status === 'completed') {
     const ev = deriveSubagentEvidence(childTrace);
-    verdict       = ev.verdict;
-    evidence      = ev.evidence;
-    verified      = ev.verified;
-    reasoningOnly = ev.reasoningOnly;
-    handles       = ev.handles;
+    verdict           = ev.verdict;
+    evidence          = ev.evidence;
+    verified          = ev.verified;
+    reasoningOnly     = ev.reasoningOnly;
+    unconfirmedRemote = ev.unconfirmedRemote;
+    handles           = ev.handles;
   }
 
   // Pillar 3: `ok` now means VERIFIED completion, not a clean loop exit.
@@ -501,6 +510,7 @@ export async function spawnSubAgent(
     evidence,
     verified,
     reasoningOnly,
+    unconfirmedRemote,
     handles,
     escalations,
   };
@@ -546,6 +556,7 @@ function failureEnvelope(opts: {
     evidence:       null,
     verified:       false,
     reasoningOnly:  false,
+    unconfirmedRemote: false,
     handles:        [],
     escalations:    [],
   };
