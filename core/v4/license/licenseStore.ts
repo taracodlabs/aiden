@@ -29,8 +29,8 @@
  *
  *   - Code execution under this user account on this machine. Anything
  *     that can run `node` as this user can call `loadLicense()` and read
- *     the same key out. v4.1 will move to OS keychain (DPAPI / Keychain /
- *     libsecret) for actual secret-boundary protection.
+ *     the same key out. A real secret boundary would require OS keychain
+ *     bindings (DPAPI / Keychain / libsecret), which Aiden does not bundle.
  *
  * Honest framing: this is OBFUSCATION, not PROTECTION. The /license
  * status surface and the audit doc both say so explicitly.

@@ -13,8 +13,9 @@
  * per call. The screenshot file lives under `workspace/screenshots/`.
  *
  * Read-only because no DOM is mutated, even though the underlying
- * browser process is long-lived. Phase 8 will add navigation tools
- * (which DO mutate observable state) behind the approval engine.
+ * browser process is long-lived. The navigation tools (browserNavigate/
+ * Click/Fill/Type/Scroll) DO mutate observable state and are gated by the
+ * approval engine; this screenshot is not.
  *
  * Status: PHASE 7. Read-only.
  */

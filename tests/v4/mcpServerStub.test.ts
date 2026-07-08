@@ -4,11 +4,11 @@ import {
   AIDEN_MCP_SERVER_TOOLS,
 } from '../../core/v4/mcpServerStub';
 
-describe('AidenMcpServer (Phase 11 stub)', () => {
-  it('start() throws Phase 11 stub error', async () => {
+describe('AidenMcpServer (lightweight stub)', () => {
+  it('start() throws a stub error pointing to the real server', async () => {
     const s = new AidenMcpServer({ stdio: true });
-    await expect(s.start()).rejects.toThrow(/Phase 11 stub/);
-    await expect(s.start()).rejects.toThrow(/v4\.1/);
+    await expect(s.start()).rejects.toThrow(/stub/);
+    await expect(s.start()).rejects.toThrow(/core\/v4\/mcp\/server/);
   });
 
   it('constructor accepts stdio + port options without error', () => {
@@ -17,7 +17,7 @@ describe('AidenMcpServer (Phase 11 stub)', () => {
     expect(() => new AidenMcpServer()).not.toThrow();
   });
 
-  it('exposes the planned 10-tool surface for v4.1', () => {
+  it('exposes the planned 10-tool surface', () => {
     expect(AIDEN_MCP_SERVER_TOOLS).toHaveLength(10);
     expect(AIDEN_MCP_SERVER_TOOLS).toEqual([
       'conversations_list',

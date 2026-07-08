@@ -75,7 +75,7 @@ export interface AidenMcpServerOptions {
 }
 
 const PHASE_11_STUB_MESSAGE =
-  'AidenMcpServer is a Phase 11 stub. The full server (10 tools, gateway-backed) lands in v4.1.';
+  'AidenMcpServer is a lightweight stub; the full gateway-backed server lives under core/v4/mcp/server/.';
 
 export class AidenMcpServer {
   readonly tools = AIDEN_MCP_SERVER_TOOLS;

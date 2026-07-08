@@ -29,9 +29,9 @@
  *   - Code execution under the same user account on this machine.
  *     Any process that can run `node` as this user can call into this
  *     module and read the same key out. There is no OS-level secret
- *     boundary in v4.0 — that requires Windows DPAPI / macOS Keychain
- *     / Linux libsecret bindings (a native module like `keytar` or
- *     `node-windows-dpapi`). Real OS keychain integration lands in v4.1.
+ *     boundary — that requires Windows DPAPI / macOS Keychain / Linux
+ *     libsecret bindings (a native module like `keytar` or
+ *     `node-windows-dpapi`), which Aiden does not currently bundle.
  *
  * Honest framing: this is OBFUSCATION, not PROTECTION. The /auth status
  * surface and the audit doc both say so explicitly. Users deserve to

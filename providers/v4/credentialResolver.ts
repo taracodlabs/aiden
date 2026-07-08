@@ -15,8 +15,8 @@
  * Storage: a single auth.json file at:
  *   - Windows : %LOCALAPPDATA%\aiden\auth.json
  *   - Linux/Mac: ~/.aiden/auth.json
- * (Phase 4 hardcodes these paths; core/v4/paths.ts will own them in a later
- * phase.) On POSIX, auth.json is chmod 600 after every write.
+ * (These paths are owned by core/v4/paths.ts.) On POSIX, auth.json is
+ * chmod 600 after every write.
  *
  * Status: PHASE 4 — load / save / preflight refresh stub.
  *   The actual OAuth refresh HTTP calls are stubbed (logged, no network).

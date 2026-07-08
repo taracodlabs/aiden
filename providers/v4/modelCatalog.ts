@@ -112,8 +112,8 @@ export const MODEL_CATALOG: ModelEntry[] = [
   // endpoint requires its own slug list — the plain OpenAI API names
   // (`gpt-5`, `gpt-5-mini`, `gpt-5-codex`) get rejected with HTTP 400
   // "model is not supported when using Codex with a ChatGPT account"
-  // for many accounts. The slugs below are the authoritative list. v4.1
-  // will replace this hardcode with a live `/codex/models` probe.
+  // for many accounts. The slugs below are the authoritative list —
+  // refreshed manually from the live `/codex/models` probe.
   {
     id: 'gpt-5.1-codex-max',
     displayName: 'GPT-5.1 Codex Max',

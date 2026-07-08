@@ -13,9 +13,9 @@
  * and continue, so a missing npx package or a wedged HTTP endpoint
  * can't take Aiden down.
  *
- * Phase 14 will wire this into the CLI lifecycle (`aiden start`,
- * `/reload-mcp`). For now the helper is plumbed but not auto-invoked
- * at agent boot — callers wire it themselves where appropriate.
+ * Wired into the CLI lifecycle: aidenCLI invokes `setupMcpFromConfig` at
+ * boot and `/reload-mcp` re-runs it. The helper stays side-effect-free so
+ * callers control exactly when it runs.
  *
  * Status: PHASE 11.
  */
