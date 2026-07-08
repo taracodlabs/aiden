@@ -34,9 +34,26 @@ export interface RunEventReader {
   listEventsScoped(opts: ListEventsScopedOptions): RunEventRich[];
 }
 
+/** One recent session for the sidebar — a readable label, never a raw id. */
+export interface SessionSummary {
+  id:         string;
+  label:      string;
+  lastActive: number;
+  provider?:  string | null;
+  model?:     string | null;
+}
+
+/** Optional read port for the sidebar's recent-sessions list. Read-only. */
+export interface SessionLister {
+  listSessions(): SessionSummary[];
+}
+
 export interface WorkbenchBridgeOptions {
   /** Read port over the shared run-event store (a RunStore satisfies this). */
   reader:      RunEventReader;
+  /** Optional read port for the recent-sessions sidebar (a SELECT over the
+   *  durable session store). When absent, /api/sessions returns []. */
+  sessions?:   SessionLister;
   /** Loopback port. Default 4280. Pass 0 for an ephemeral port (tests). */
   port?:       number;
   /** Bind host. Default 127.0.0.1 — this phase never binds off-box. */
@@ -129,6 +146,15 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       return;
     }
 
+    // The sidebar's recent-sessions list — readable labels, read-only.
+    if (url.pathname === '/api/sessions') {
+      let list: SessionSummary[] = [];
+      try { list = opts.sessions ? opts.sessions.listSessions() : []; }
+      catch (e) { log(`session list failed: ${(e as Error).message}`); }
+      sendJson(res, 200, list);
+      return;
+    }
+
     // The dashboard's live feed: ALL recent events across sessions/runs, streamed
     // as plain SSE `message` frames (name is in the data) so one EventSource with
     // a single onmessage handler renders everything.
@@ -152,7 +178,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-      endpoints: ['GET /', 'GET /api/health', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events'],
+      endpoints: ['GET /', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events'],
     });
   });
 

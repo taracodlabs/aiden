@@ -469,11 +469,13 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .action(async (cmdOpts: { port?: number; open?: boolean }) => {
       const { startWorkbenchBridge } = await import('../../core/v4/workbench/bridgeServer');
       const { openBrowser }          = await import('../../core/v4/workbench/openBrowser');
+      const { createSessionLister }  = await import('../../core/v4/workbench/sessionList');
       const paths    = resolveAidenPaths();
       const dbPath   = daemonDbPath(paths.root);
       const runStore = createRunStore({ db: openDaemonDb(dbPath) });
+      const sessions = createSessionLister(new SessionStore(paths.sessionsDb));
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
-      const bridge   = await startWorkbenchBridge({ reader: runStore, port });
+      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, port });
       const dashUrl  = `http://${bridge.host}:${bridge.port}/`;
       process.stdout.write(
         `\n  Aiden Workbench — live dashboard (read-only)\n` +
