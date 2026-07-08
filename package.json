@@ -72,6 +72,7 @@
     "release": "node scripts/release.mjs",
     "postinstall": "node scripts/postinstall.js",
     "start": "node dist-bundle/index.js serve",
+    "workbench": "node dist/cli/v4/aidenCLI.js workbench",
     "electron": "electron electron/main.js",
     "dist": "node scripts/prepare-electron.js && electron-builder --win --publish never && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.main='./dist/index.js';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');console.log('  main restored → ./dist/index.js')\"",
     "dist:dir": "node scripts/prepare-electron.js && electron-builder --win --dir --publish never",

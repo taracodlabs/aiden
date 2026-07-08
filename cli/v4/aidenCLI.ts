@@ -457,6 +457,34 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       process.exit(await runQuery(merged.query, merged, opts));
     });
 
+  // v4.14.6 — Workbench event-stream bridge launcher. Read-only web view of live
+  // runs; opens the shared daemon run_events store and streams over SSE. Binds
+  // 127.0.0.1 and prints the URL. (Also runnable via `npm run workbench`.)
+  program
+    .command('workbench')
+    .description('Start the Workbench bridge — a read-only web view of live runs (SSE)')
+    .option('--port <n>', 'Port to bind on 127.0.0.1 (default 4280)', (v: string) => Number.parseInt(v, 10))
+    .action(async (cmdOpts: { port?: number }) => {
+      const { startWorkbenchBridge } = await import('../../core/v4/workbench/bridgeServer');
+      const paths    = resolveAidenPaths();
+      const dbPath   = daemonDbPath(paths.root);
+      const runStore = createRunStore({ db: openDaemonDb(dbPath) });
+      const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
+      const bridge   = await startWorkbenchBridge({ reader: runStore, port });
+      process.stdout.write(
+        `\n  Aiden Workbench bridge (read-only) is live\n` +
+        `    URL:    http://${bridge.host}:${bridge.port}\n` +
+        `    events: GET /api/sessions/<sessionId>/events   (SSE replay + live tail)\n` +
+        `            GET /api/runs/<runId>/events            (SSE replay + live tail)\n` +
+        `    health: GET /api/health\n` +
+        `    store:  ${dbPath}\n` +
+        `  Ctrl+C to stop.\n\n`,
+      );
+      const shutdown = (): void => { void bridge.close().finally(() => process.exit(0)); };
+      process.on('SIGINT',  shutdown);
+      process.on('SIGTERM', shutdown);
+    });
+
   program
     .command('setup')
     .description('Run the setup wizard (provider + model + API key)')
