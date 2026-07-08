@@ -74,7 +74,7 @@ export class GrowthEngine {
   // Tracked for confidence scoring — future use
 
   logSuccess(_task: string, _tools: string[]): void {
-    // No-op for now; confidence scoring uses failure ratio
+    // No-op — confidence scoring uses the failure ratio
   }
 
   // ── Analyse failure log and surface opportunities ─────────────

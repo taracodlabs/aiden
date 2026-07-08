@@ -5,10 +5,10 @@
 
 // core/tools/gmailTool.ts — Gmail integration foundation.
 //
-// v1: App Password + IMAP stub. The IMAP call is deliberately
+// App Password + IMAP stub. The IMAP call is deliberately
 //     guarded behind a try/catch so missing packages don't crash
-//     the server. Full IMAP read will land in v1.2 once the
-//     imap-simple package is added to dependencies.
+//     the server. Full IMAP read is stubbed — it engages only if the
+//     imap-simple package is present in dependencies.
 //
 // NOTE: imap-simple brings transitive vulns
 // (semver/tough-cookie/qs/form-data). Acceptable

@@ -570,7 +570,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('--rate-limit <n>', 'Webhook requests/min (default 30).', (v: string) => Number.parseInt(v, 10))
     .option('--max-body-bytes <n>', 'Webhook max body cap (default 1048576).', (v: string) => Number.parseInt(v, 10))
     .option('--idempotency-ttl-ms <n>', 'Webhook idempotency TTL (default 3600000).', (v: string) => Number.parseInt(v, 10))
-    .option('--deliver-only', 'Phase 3 stub: accept + log; Phase 5 will dispatch via channel.')
+    .option('--deliver-only', 'Accept + log the request without dispatching it to the agent this turn (deliver-only).')
     // v4.5 Phase 4a — email IMAP options.
     .option('--host <host>', 'IMAP host (for add email).')
     .option('--port <n>', 'IMAP port (default 993).', (v: string) => Number.parseInt(v, 10))
@@ -815,10 +815,10 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   for (const cmd of ['batch', 'gateway', 'pairing', 'update']) {
     program
       .command(cmd, { hidden: true })
-      .description(`(deferred to v4.1)`)
+      .description(`(not yet implemented)`)
       .action(() => {
         const out = opts.writeOut ?? ((t) => process.stdout.write(t));
-        out(`'aiden ${cmd}' is deferred to v4.1.\n`);
+        out(`'aiden ${cmd}' is not yet implemented.\n`);
       });
   }
 
@@ -3959,7 +3959,7 @@ async function runSkillsSubcommand(
     case 'install':
     case 'uninstall':
     case 'reset':
-      out(`'aiden skills ${action}' is deferred to v4.1 alongside the gateway.\n`);
+      out(`'aiden skills ${action}' is not yet implemented.\n`);
       break;
     default:
       out(`Unknown skills action '${action}'. Use: list | view <name>.\n`);

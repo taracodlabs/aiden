@@ -363,7 +363,7 @@ async function handleWebhookRequest(ctx: HandlerCtx): Promise<void> {
     });
 
     if (spec.spec.deliverOnly) {
-      log('info', `[webhook] deliver_only stub for ${routeId} — Phase 5 will dispatch via channel target`);
+      log('info', `[webhook] deliver_only route ${routeId} — trigger recorded, no agent dispatch this turn`);
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
