@@ -46,10 +46,25 @@ describe('createSessionLister — readable labels, never raw ids', () => {
     expect(row.label.endsWith('…')).toBe(true);
   });
 
-  it('neutral fallback when untitled and no user message', () => {
+  it('falls back to a timestamp label when untitled and no user message', () => {
     const s = new SessionStore(':memory:');
     const rec = s.createSession({});
-    expect(rowFor(s, rec.id).label).toBe('(untitled session)');
+    const label = rowFor(s, rec.id).label;
+    expect(label).toMatch(/^Session · \d{4}-\d\d-\d\d \d\d:\d\d$/);   // readable time, not "(untitled)"
+    expect(label).not.toBe(rec.id);
+  });
+
+  it('strips bracketed-paste artifacts from a pasted first message', () => {
+    const s = new SessionStore(':memory:');
+    const rec = s.createSession({});
+    s.appendMessage(rec.id, { role: 'user', content: '\x1b[200~paste me\x1b[201~ then more' });
+    expect(rowFor(s, rec.id).label).toBe('paste me then more');
+  });
+
+  it('strips ESC-stripped leftovers ([200~ / [201~) from a title too', () => {
+    const s = new SessionStore(':memory:');
+    const rec = s.createSession({ title: '[200~fix the parser[201~' });
+    expect(rowFor(s, rec.id).label).toBe('fix the parser');
   });
 
   it('carries lastActive and keeps the id aligned for /api/sessions/:id/events', () => {

@@ -15,19 +15,35 @@
 import type { SessionStore, SessionRecord } from '../sessionStore';
 import type { SessionLister, SessionSummary } from './bridgeServer';
 
+/** Strip bracketed-paste markers (ESC[200~ / ESC[201~, and their ESC-stripped
+ *  `[200~`/`200~` leftovers) that can leak into a pasted message. */
+function stripPasteArtifacts(s: string): string {
+  return s.replace(/\x1b?\[?20[01]~/g, '');
+}
+/** Normalize a candidate label: de-paste, collapse whitespace, trim. */
+function clean(s: string): string {
+  return stripPasteArtifacts(s ?? '').replace(/\s+/g, ' ').trim();
+}
+/** Compact UTC timestamp for the fallback label, e.g. "2026-07-08 12:10". */
+function fmtTs(ts: number): string {
+  return new Date(ts).toISOString().slice(0, 16).replace('T', ' ');
+}
+
 /** A readable one-line label for a session — never the raw id. */
 function labelFor(store: SessionStore, s: SessionRecord): string {
-  const title = (s.title ?? '').trim();
+  const title = clean(s.title ?? '');
   if (title) return title;
   // No distilled title yet — fall back to a snippet of the first user message.
   try {
-    const first = store.getMessages(s.id).find((m) => m.role === 'user' && (m.content ?? '').trim());
+    const first = store.getMessages(s.id).find((m) => m.role === 'user' && clean(m.content ?? ''));
     if (first) {
-      const oneLine = first.content.replace(/\s+/g, ' ').trim();
-      return oneLine.length > 72 ? oneLine.slice(0, 72) + '…' : oneLine;
+      const line = clean(first.content);
+      if (line) return line.length > 72 ? line.slice(0, 72) + '…' : line;
     }
-  } catch { /* fall through to the neutral label */ }
-  return '(untitled session)';
+  } catch { /* fall through to the timestamp label */ }
+  // Better than a generic string: name the session by when it was last active.
+  const ts = s.updatedAt || s.createdAt || 0;
+  return ts ? 'Session · ' + fmtTs(ts) : 'Session';
 }
 
 /**
