@@ -49,8 +49,10 @@ export class ResponseCache {
 
   constructor() {
     this.load()
-    // Cleanup expired entries every 5 minutes
-    setInterval(() => this.cleanup(), 5 * 60 * 1000)
+    // Cleanup expired entries every 5 minutes. `.unref()` so this background
+    // timer never keeps the event loop alive — otherwise every CLI command has
+    // to hard-quit instead of exiting cleanly once its work is done.
+    setInterval(() => this.cleanup(), 5 * 60 * 1000).unref()
   }
 
   // ── Key hashing ───────────────────────────────────────────────

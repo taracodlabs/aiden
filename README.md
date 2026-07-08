@@ -10,7 +10,7 @@
 
 Autonomous AI Engine — local-first, Windows-native, yours to own
 
-74 skills · 60 tools · 19 providers · 9 channels · AGPL-3.0
+67 skills · 68 tools · 19 providers · 9 channels · AGPL-3.0
 
 Windows · Linux · WSL · macOS (API Mode)
 ```
@@ -20,7 +20,7 @@ Windows · Linux · WSL · macOS (API Mode)
 
 **Autonomous AI Engine — local-first, Windows-native, yours to own**
 
-*74 skills · 60 tools · 19 providers · 9 channels · AGPL-3.0*
+*67 skills · 68 tools · 19 providers · 9 channels · AGPL-3.0*
 
 <br>
 
@@ -94,7 +94,7 @@ Windows · Linux · WSL · macOS (API Mode)
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.13.0](https://img.shields.io/badge/Latest-v4.13.0-4ADE80?style=flat-square)
+![v4.14.5](https://img.shields.io/badge/Latest-v4.14.5-4ADE80?style=flat-square)
 
 </div>
 
@@ -146,6 +146,15 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 
 
 <br>
+
+## What's new in v4.14.5
+
+**A reliability release — the same Aiden, steadier under the hood.**
+
+- **Message delivery is sealed per turn.** Every channel — Telegram, Discord, Slack, Signal, iMessage, email, SMS, WhatsApp, webhook — now carries its own frozen destination, so concurrent replies can never cross-route. A permanently-dead target (bot blocked, chat deleted) is remembered and skipped instead of retried forever, and a transient failure mid-reply no longer abandons the rest of a long message.
+- **Honest providers.** A unified provider preflight plus a boot-decision trace explain which provider was chosen and why. Failures surface the real reason — no more "failed: failed" — and an explicitly-requested provider that fails says so plainly instead of quietly swapping.
+- **Trustworthy subagents.** Helper-agent claims are re-checked against real evidence: stub/empty files, combined-output leaks, and unverifiable remote claims are caught before Aiden trusts a result.
+- **Cleaner internals.** Retired dead v3 modules, corrected stale scaffolding comments, and fixed a background cache timer that was forcing every command to hard-quit instead of exiting cleanly.
 
 ## What's new in v4.13
 
