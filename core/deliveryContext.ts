@@ -66,6 +66,25 @@ export interface DeliveryReceipt {
    * attempt). Absent on normal live sends.
    */
   replayed?: boolean
+  /**
+   * v4.15 delivery-isolation — the driver sets this when the failure means the
+   * TARGET is permanently unreachable (bot blocked, chat/user deleted → 403/404),
+   * not a transient hiccup. The seam reads it at the choke-point to retire the
+   * target (markTargetDead) so proactive / multi-chunk sends stop hammering it.
+   */
+  terminal?: boolean
+  /**
+   * v4.15 delivery-isolation — true when the seam SKIPPED this send because the
+   * target is currently marked dead. Nothing was handed to the driver. Reversible:
+   * the next inbound from the target revives it.
+   */
+  skippedDead?: boolean
+  /**
+   * v4.15 delivery-isolation — true when a multi-chunk delivery sent SOME but not
+   * all chunks (a transient chunk failure no longer abandons the rest). `ok` is
+   * false, but the message was partially delivered.
+   */
+  partial?: boolean
 }
 
 /**
@@ -117,6 +136,90 @@ export interface DeliveryContext {
   ): Promise<DeliveryReceipt>
 }
 
+// ── Dead-target memory (v4.15 — delivery isolation) ──────────────────────────
+//
+// A target that returns a TERMINAL failure (bot blocked / chat gone → 403/404)
+// is remembered so proactive or multi-chunk sends stop hammering it. REVERSIBLE:
+// a fresh inbound from the target revives it (gateway.routeMessage calls
+// reviveTarget). In-memory only — a durable dead-letter store is intentionally
+// deferred (the focused slice keeps the choke-point, not the persistence).
+
+const deadTargets = new Map<string, { reason: string; since: number }>()
+const targetKey = (platform: string, chatId: string): string => `${platform}:${chatId}`
+
+/** Retire a target after a terminal failure — future sends to it are skipped. */
+export function markTargetDead(platform: string, chatId: string, reason: string): void {
+  deadTargets.set(targetKey(platform, chatId), { reason, since: Date.now() })
+}
+/** True while a target is retired. */
+export function isTargetDead(platform: string, chatId: string): boolean {
+  return deadTargets.has(targetKey(platform, chatId))
+}
+/** The reason a target was retired, if it is. */
+export function deadTargetReason(platform: string, chatId: string): string | undefined {
+  return deadTargets.get(targetKey(platform, chatId))?.reason
+}
+/** Revive a target — called on every fresh inbound (proves reachability again).
+ *  Returns true if it had been dead. */
+export function reviveTarget(platform: string, chatId: string): boolean {
+  return deadTargets.delete(targetKey(platform, chatId))
+}
+/** Test-only — clear the dead-target registry between cases. */
+export function _resetDeadTargets(): void {
+  deadTargets.clear()
+}
+
+/**
+ * Classify a caught send error as TERMINAL for its target — i.e. the target is
+ * permanently unreachable (bot blocked, chat/user deleted): HTTP 403/404 or a
+ * platform equivalent. Transient errors (timeouts, 429, 5xx) are NOT terminal,
+ * so they never retire a target. Shared by every channel's deliver primitive so
+ * the classification is uniform.
+ */
+export function isTerminalDeliveryError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const e = err as Record<string, any>
+  const status =
+    e.status ?? e.statusCode ?? e.code ??
+    e.response?.status ?? e.response?.statusCode ??
+    e.response?.body?.error_code ?? e.error_code
+  if (status === 403 || status === 404 || status === '403' || status === '404') return true
+  const msg = String(e.message ?? e.response?.body?.description ?? '').toLowerCase()
+  return /\b(403|404)\b|forbidden|not found|blocked by the user|bot was blocked|chat not found|user is deactivated/.test(msg)
+}
+
+/** Capabilities for a plain-text push channel (no chunking/media/edit wired). */
+export const TEXT_DELIVERY_CAPABILITIES: DeliveryCapabilities = {
+  edit: false, chunkLongMessages: false, media: [], voiceBubble: false, reactions: false,
+}
+
+/**
+ * Shared binding factory for text channels (signal, imessage, whatsapp, email,
+ * slack, twilio, webhook). The channel supplies ONE `deliver(text)` primitive
+ * that sends to its already-bound target and reports terminal reachability; this
+ * wraps it into a DeliveryBinding whose driver routes 'final'/'status' text and
+ * rejects not-yet-wired kinds honestly. Mirrors Telegram's buildDeliveryBinding,
+ * minus the platform-specific chunking/first-message hint.
+ */
+export function buildTextDeliveryBinding(
+  deliver: (text: string) => Promise<{ ok: boolean; terminal?: boolean }>,
+  opts: { capabilities?: DeliveryCapabilities; firstMessageHint?: string } = {},
+): DeliveryBinding {
+  return {
+    capabilities:     opts.capabilities ?? TEXT_DELIVERY_CAPABILITIES,
+    firstMessageHint: opts.firstMessageHint,
+    driver: {
+      deliver: async (kind, payload) => {
+        if (kind === 'final' || kind === 'status') {
+          const r = await deliver(payload.text ?? '')
+          return { ok: r.ok, kind, terminal: r.terminal }
+        }
+        return { ok: false, kind, error: `sealed text delivery does not route '${kind}'` }
+      },
+    },
+  }
+}
+
 /**
  * Construct an immutable-per-turn DeliveryContext. Called by
  * `gateway.routeMessage` from the inbound IncomingMessage. The returned object
@@ -137,7 +240,23 @@ export function createDeliveryContext(
     firstMessageHint: binding.firstMessageHint,
     send(kind, payload, options) {
       const p: DeliveryPayload = typeof payload === 'string' ? { text: payload } : payload
-      return binding.driver.deliver(kind, p, options)
+      // Dead-target skip — a target retired by a prior terminal 403/404 is
+      // skipped (nothing reaches the driver) until a fresh inbound revives it.
+      if (isTargetDead(routing.platform, routing.chatId)) {
+        return Promise.resolve({
+          ok: false, kind, skippedDead: true,
+          error: `${routing.platform}:${routing.chatId} marked dead — skipped` +
+            ` (${deadTargetReason(routing.platform, routing.chatId) ?? 'terminal failure'})`,
+        })
+      }
+      return binding.driver.deliver(kind, p, options).then((receipt) => {
+        // A terminal failure retires the target so we stop hammering it —
+        // reversible on the next inbound (gateway.routeMessage → reviveTarget).
+        if (receipt.terminal) {
+          markTargetDead(routing.platform, routing.chatId, receipt.error ?? 'terminal delivery failure')
+        }
+        return receipt
+      })
     },
   }
   return Object.freeze(ctx)

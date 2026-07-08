@@ -23,6 +23,11 @@ import axios from 'axios'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
+import {
+  buildTextDeliveryBinding,
+  isTerminalDeliveryError,
+  type DeliveryBinding,
+} from '../deliveryContext'
 
 export class SignalAdapter implements ChannelAdapter {
   readonly name = 'signal'
@@ -86,16 +91,30 @@ export class SignalAdapter implements ChannelAdapter {
   }
 
   async send(target: string, message: string): Promise<void> {
-    if (!this.healthy) return
+    await this.deliverSealed(target, message)
+  }
+
+  // v4.15 delivery-isolation — the real send primitive: reports ok + whether the
+  // failure was TERMINAL (target unreachable) so the seam can retire it.
+  private async deliverSealed(target: string, message: string): Promise<{ ok: boolean; terminal?: boolean }> {
+    if (!this.healthy) return { ok: false }
     try {
       await axios.post(
         `${this.baseUrl}/v2/send`,
         { message, number: this.myNumber, recipients: [target] },
         { timeout: 10000 },
       )
+      return { ok: true }
     } catch (e: any) {
       this.log.error(`send error:${e.message}`)
+      return { ok: false, terminal: isTerminalDeliveryError(e) }
     }
+  }
+
+  // v4.15 — the sealed per-turn delivery binding: 'final'/'status' text routes to
+  // the frozen `target` (never a shared "current recipient").
+  private buildDeliveryBinding(target: string): DeliveryBinding {
+    return buildTextDeliveryBinding((text) => this.deliverSealed(target, text))
   }
 
   isHealthy(): boolean { return this.healthy }
@@ -129,8 +148,9 @@ export class SignalAdapter implements ChannelAdapter {
         const sender = envelope.source ?? envelope.sourceNumber ?? ''
         if (!this.isAllowed(sender)) continue
 
-        const response = await this.processMessage(sender, sender, dm.message)
-        await this.send(sender, response)
+        // v4.15 — deliver THROUGH the seam: the reply carries its own frozen
+        // sealed address (sender), so the return string is no longer self-sent.
+        await this.processMessage(sender, sender, dm.message, this.buildDeliveryBinding(sender))
       }
     } catch (e: any) {
       // Don't spam logs on transient poll errors
@@ -145,7 +165,7 @@ export class SignalAdapter implements ChannelAdapter {
     return this.allowedNumbers.has(number)
   }
 
-  private async processMessage(channelId: string, userId: string, text: string): Promise<string> {
+  private async processMessage(channelId: string, userId: string, text: string, delivery?: DeliveryBinding): Promise<string> {
     try {
       return await gateway.routeMessage({
         channel:   'signal',
@@ -153,7 +173,7 @@ export class SignalAdapter implements ChannelAdapter {
         userId,
         text,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.log.error(`routeMessage error:${e.message}`)
       return '❌ Something went wrong. Try again.'

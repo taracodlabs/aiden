@@ -34,7 +34,8 @@ import { randomUUID } from 'node:crypto'
 
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
-import type { DeliveryBinding, DeliveryCapabilities } from '../deliveryContext'
+import type { DeliveryBinding, DeliveryCapabilities, DeliveryReceipt } from '../deliveryContext'
+import { isTerminalDeliveryError } from '../deliveryContext'
 import { noopLogger, type Logger } from '../v4/logger'
 import { TelegramRateLimiter } from './telegram-rate-limit'
 import { TelegramGroupStore } from './telegram-groups'
@@ -83,6 +84,17 @@ const TELEGRAM_DELIVERY_CAPABILITIES: DeliveryCapabilities = {
 // Byte-identical text to the pre-migration tip.
 const TELEGRAM_FIRST_MESSAGE_HINT =
   '_Tip: Continue this conversation on your desktop dashboard with full context._'
+
+// v4.15 delivery-isolation — the outcome of a multi-chunk delivery. `partial`
+// means some chunks landed and some didn't (a transient failure no longer
+// abandons the rest); `terminal` means the target is unreachable (403/blocked).
+interface DeliverToChatResult {
+  ok:        boolean
+  sent:      number
+  total:     number
+  partial?:  boolean
+  terminal?: boolean
+}
 
 /**
  * Phase v4.1-3.2 — build fingerprint.
@@ -636,7 +648,7 @@ export class TelegramAdapter implements ChannelAdapter {
 
     // Register outbound delivery so gateway.deliver() / broadcast() work.
     gateway.registerChannel('telegram', async (msg) => {
-      return this.deliverToChat(msg.channelId, msg.text)
+      return (await this.deliverToChat(msg.channelId, msg.text)).ok
     })
 
     // Surface bot commands in the Telegram client's `/` menu. Best-effort —
@@ -1896,8 +1908,11 @@ export class TelegramAdapter implements ChannelAdapter {
       driver: {
         deliver: async (kind, payload) => {
           if (kind === 'final' || kind === 'status') {
-            const ok = await this.deliverToChat(chatId, payload.text ?? '')
-            return { ok, kind }
+            const r = await this.deliverToChat(chatId, payload.text ?? '')
+            const receipt: DeliveryReceipt = { ok: r.ok, kind }
+            if (r.terminal) receipt.terminal = true   // → seam retires the target
+            if (r.partial)  receipt.partial  = true   // → some chunks landed, some didn't
+            return receipt
           }
           return {
             ok:    false,
@@ -2104,45 +2119,66 @@ export class TelegramAdapter implements ChannelAdapter {
 
   // ── Outbound ─────────────────────────────────────────────────
 
-  private async deliverToChat(chatId: string, text: string): Promise<boolean> {
-    if (!this.client) return false
+  private async deliverToChat(chatId: string, text: string): Promise<DeliverToChatResult> {
+    if (!this.client) return { ok: false, sent: 0, total: 0 }
 
     const chunks = this.chunkAtBoundary(text, MAX_MESSAGE_CHARS)
+    let sent = 0
+    let terminal = false
     for (const chunk of chunks) {
-      try {
-        await this.client.sendMessage(chatId, chunk, { parse_mode: DEFAULT_PARSE_MODE })
-      } catch (e: any) {
-        // Retry once without parse_mode in case the chunk's markdown is
-        // malformed (Telegram is strict about Markdown V1). Keeps replies
-        // visible even when the model emits broken backticks.
-        const message = (e?.message ?? '').toLowerCase()
-        if (message.includes('parse')) {
-          try {
-            await this.client.sendMessage(chatId, chunk)
-            continue
-          } catch (inner: any) {
-            this.logError(`sendMessage retry failed: ${this.scrubToken(inner?.message)}`)
-            return false
-          }
-        }
-        // Telegram returns 429 with a `parameters.retry_after` field
-        // surfaced by node-telegram-bot-api as `e.response.parameters`.
-        const retryAfter = e?.response?.body?.parameters?.retry_after
-        if (typeof retryAfter === 'number' && retryAfter > 0 && retryAfter <= 10) {
-          await new Promise(r => setTimeout(r, retryAfter * 1000))
-          try {
-            await this.client.sendMessage(chatId, chunk, { parse_mode: DEFAULT_PARSE_MODE })
-            continue
-          } catch (inner: any) {
-            this.logError(`sendMessage post-429 failed: ${this.scrubToken(inner?.message)}`)
-            return false
-          }
-        }
-        this.logError(`sendMessage failed: ${this.scrubToken(e?.message)}`)
-        return false
+      const outcome = await this.sendChunk(chatId, chunk)
+      if (outcome === 'sent') { sent++; continue }
+      if (outcome === 'terminal') {
+        // Target is gone (bot blocked / chat deleted) — every remaining chunk
+        // would fail identically, so stop and signal the dead-target guard.
+        terminal = true
+        break
       }
+      // v4.15 — a TRANSIENT chunk failure no longer abandons the rest: log it
+      // and keep going so a single bad chunk can't swallow the whole reply.
     }
-    return true
+    const total = chunks.length
+    // ok when every chunk landed (0 chunks = empty reply = vacuously ok, as before).
+    return { ok: sent === total, partial: sent > 0 && sent < total, terminal, sent, total }
+  }
+
+  // Send ONE chunk with the unchanged parse-mode + bounded 429 retries. Returns
+  // 'sent', 'terminal' (target unreachable — 403/blocked/chat-gone), or
+  // 'transient' (a recoverable failure the caller should step past).
+  private async sendChunk(chatId: string, chunk: string): Promise<'sent' | 'terminal' | 'transient'> {
+    try {
+      await this.client!.sendMessage(chatId, chunk, { parse_mode: DEFAULT_PARSE_MODE })
+      return 'sent'
+    } catch (e: any) {
+      // Retry once without parse_mode in case the chunk's markdown is malformed
+      // (Telegram is strict about Markdown V1). Keeps replies visible even when
+      // the model emits broken backticks.
+      const message = (e?.message ?? '').toLowerCase()
+      if (message.includes('parse')) {
+        try {
+          await this.client!.sendMessage(chatId, chunk)
+          return 'sent'
+        } catch (inner: any) {
+          this.logError(`sendMessage retry failed: ${this.scrubToken(inner?.message)}`)
+          return isTerminalDeliveryError(inner) ? 'terminal' : 'transient'
+        }
+      }
+      // Telegram returns 429 with a `parameters.retry_after` field surfaced by
+      // node-telegram-bot-api as `e.response.parameters`.
+      const retryAfter = e?.response?.body?.parameters?.retry_after
+      if (typeof retryAfter === 'number' && retryAfter > 0 && retryAfter <= 10) {
+        await new Promise(r => setTimeout(r, retryAfter * 1000))
+        try {
+          await this.client!.sendMessage(chatId, chunk, { parse_mode: DEFAULT_PARSE_MODE })
+          return 'sent'
+        } catch (inner: any) {
+          this.logError(`sendMessage post-429 failed: ${this.scrubToken(inner?.message)}`)
+          return isTerminalDeliveryError(inner) ? 'terminal' : 'transient'
+        }
+      }
+      this.logError(`sendMessage failed: ${this.scrubToken(e?.message)}`)
+      return isTerminalDeliveryError(e) ? 'terminal' : 'transient'
+    }
   }
 
   // ── Helpers ──────────────────────────────────────────────────

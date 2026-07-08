@@ -29,6 +29,11 @@ import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
 import { resolveUserPath } from '../v4/paths'
+import {
+  buildTextDeliveryBinding,
+  isTerminalDeliveryError,
+  type DeliveryBinding,
+} from '../deliveryContext'
 
 export class WhatsAppAdapter implements ChannelAdapter {
   readonly name = 'whatsapp'
@@ -118,10 +123,8 @@ export class WhatsAppAdapter implements ChannelAdapter {
       const senderNumber = msg.from.replace('@c.us', '').replace(/^0/, '+')
       if (!this.isAllowed(senderNumber)) return
 
-      const response = await this.processMessage(msg.from, senderNumber, msg.body)
-      await msg.reply(response).catch((e: Error) =>
-        this.log.error(`reply error:${e.message}`),
-      )
+      // v4.15 — deliver THROUGH the seam (frozen sealed address = msg.from).
+      await this.processMessage(msg.from, senderNumber, msg.body, this.buildDeliveryBinding(msg.from))
     })
 
     try {
@@ -143,12 +146,26 @@ export class WhatsAppAdapter implements ChannelAdapter {
   }
 
   async send(target: string, message: string): Promise<void> {
-    if (!this.client || !this.healthy) return
+    await this.deliverSealed(target, message)
+  }
+
+  // v4.15 delivery-isolation — the real send primitive: reports ok + terminal.
+  private async deliverSealed(target: string, message: string): Promise<{ ok: boolean; terminal?: boolean }> {
+    if (!this.client || !this.healthy) return { ok: false }
     // Ensure target has @c.us suffix
     const chatId = target.includes('@') ? target : `${target.replace('+', '')}@c.us`
-    await this.client.sendMessage(chatId, message).catch((e: Error) =>
-      this.log.error(`send error:${e.message}`),
-    )
+    try {
+      await this.client.sendMessage(chatId, message)
+      return { ok: true }
+    } catch (e: any) {
+      this.log.error(`send error:${e.message}`)
+      return { ok: false, terminal: isTerminalDeliveryError(e) }
+    }
+  }
+
+  // v4.15 — the sealed per-turn delivery binding (frozen target).
+  private buildDeliveryBinding(target: string): DeliveryBinding {
+    return buildTextDeliveryBinding((text) => this.deliverSealed(target, text))
   }
 
   isHealthy(): boolean { return this.healthy }
@@ -160,7 +177,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
     return this.allowedNumbers.has(number)
   }
 
-  private async processMessage(chatId: string, userId: string, text: string): Promise<string> {
+  private async processMessage(chatId: string, userId: string, text: string, delivery?: DeliveryBinding): Promise<string> {
     try {
       return await gateway.routeMessage({
         channel:   'whatsapp',
@@ -168,7 +185,7 @@ export class WhatsAppAdapter implements ChannelAdapter {
         userId,
         text,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.log.error(`routeMessage error:${e.message}`)
       return '❌ Something went wrong. Try again.'

@@ -31,6 +31,7 @@ import type { Express, Request, Response } from 'express'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
+import { buildTextDeliveryBinding, type DeliveryBinding } from '../deliveryContext'
 import {
   argsHashOf,
   guardContentAddressedSend,
@@ -122,17 +123,20 @@ export class WebhookAdapter implements ChannelAdapter {
         this.runAndCallback(fullMessage, callbackUrl, context).catch(() => {})
       } else {
         // ── Sync mode ──────────────────────────────────────
+        // v4.15 — deliver THROUGH the seam: the driver writes { response } to
+        // THIS response object (a per-request local), not returned-then-sent.
         try {
-          const response = await gateway.routeMessage({
+          await gateway.routeMessage({
             channel:   'api',
             channelId: 'webhook',
             userId:    'webhook',
             text:      fullMessage,
             timestamp: Date.now(),
-          })
-          res.json({ response })
+          }, this.buildResponseBinding(res))
+          // Safety net — never leave the request hanging if the seam didn't write.
+          if (!res.headersSent) res.json({ response: '' })
         } catch (e: any) {
-          res.status(500).json({ error: e.message ?? 'Internal error' })
+          if (!res.headersSent) res.status(500).json({ error: e.message ?? 'Internal error' })
         }
       }
     })
@@ -149,6 +153,15 @@ export class WebhookAdapter implements ChannelAdapter {
 
   /** Not applicable — webhook is request-response, not push-based */
   async send(_target: string, _message: string): Promise<void> {}
+
+  // v4.15 — the sealed per-request delivery binding: the driver writes the JSON
+  // reply to THIS response object (a per-request local, never shared state).
+  private buildResponseBinding(res: Response): DeliveryBinding {
+    return buildTextDeliveryBinding((text) => {
+      if (!res.headersSent) res.json({ response: text })
+      return Promise.resolve({ ok: true })
+    })
+  }
 
   isHealthy(): boolean { return this.healthy }
 

@@ -20,7 +20,8 @@
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
-import type { Application } from 'express'
+import { buildTextDeliveryBinding, type DeliveryBinding } from '../deliveryContext'
+import type { Application, Response } from 'express'
 
 // SMS max segment length per GSM spec
 const SMS_CHUNK_SIZE = 160
@@ -34,6 +35,20 @@ function chunkSms(text: string): string[] {
     remaining = remaining.substring(SMS_CHUNK_SIZE)
   }
   return chunks
+}
+
+const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+
+/** Render a reply as TwiML — Twilio turns each <Message> into an SMS segment. */
+function toTwiml(text: string): string {
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<Response>',
+    ...chunkSms(text).map(chunk =>
+      `  <Message>${chunk.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Message>`,
+    ),
+    '</Response>',
+  ].join('\n')
 }
 
 export class TwilioAdapter implements ChannelAdapter {
@@ -95,22 +110,16 @@ export class TwilioAdapter implements ChannelAdapter {
         const body  = req.body?.Body ?? ''
 
         if (!this.isAllowed(from)) {
-          res.send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>')
+          res.send(EMPTY_TWIML)
           return
         }
 
-        const response = await this.processMessage(from, from, body)
-
-        // Reply via TwiML (Twilio Markup Language) — Twilio sends this as SMS
-        const twiml = [
-          '<?xml version="1.0" encoding="UTF-8"?>',
-          '<Response>',
-          ...chunkSms(response).map(chunk =>
-            `  <Message>${chunk.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</Message>`
-          ),
-          '</Response>',
-        ].join('\n')
-        res.send(twiml)
+        // v4.15 — deliver THROUGH the seam: the TwiML reply is written by the
+        // driver bound to THIS request/response, not returned-then-sent.
+        await this.processMessage(from, from, body, this.buildResponseBinding(res))
+        // Safety net — if the seam never wrote (e.g. processor error swallowed
+        // upstream), close the request with an empty TwiML so it never hangs.
+        if (!res.headersSent) res.send(EMPTY_TWIML)
       })
     }
 
@@ -156,7 +165,16 @@ export class TwilioAdapter implements ChannelAdapter {
     return this.allowedNumbers.has(number)
   }
 
-  private async processMessage(channelId: string, userId: string, text: string): Promise<string> {
+  // v4.15 — the sealed per-request delivery binding: the driver writes the TwiML
+  // reply to THIS response object (a per-request local, never shared state).
+  private buildResponseBinding(res: Response): DeliveryBinding {
+    return buildTextDeliveryBinding((text) => {
+      if (!res.headersSent) res.send(toTwiml(text))
+      return Promise.resolve({ ok: true })
+    })
+  }
+
+  private async processMessage(channelId: string, userId: string, text: string, delivery?: DeliveryBinding): Promise<string> {
     try {
       return await gateway.routeMessage({
         channel:   'sms',
@@ -164,7 +182,7 @@ export class TwilioAdapter implements ChannelAdapter {
         userId,
         text,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.log.error(`routeMessage error:${e.message}`)
       return 'Something went wrong. Try again.'

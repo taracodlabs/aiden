@@ -22,6 +22,7 @@ import { sessionRouter } from './sessionRouter'
 import { noopLogger, type Logger } from './v4/logger'
 import {
   createDeliveryContext,
+  reviveTarget,
   type DeliveryBinding,
   type DeliveryContext,
 } from './deliveryContext'
@@ -142,6 +143,10 @@ class Gateway {
     const session        = sessionRouter.getSession(message.userId, message.channel)
     session.messageCount++
     message.sessionId    = session.sessionId
+
+    // v4.15 delivery-isolation — a fresh inbound proves the target is reachable
+    // again, so revive it if a prior terminal 403/404 had retired it.
+    reviveTarget(message.channel, message.channelId)
 
     // DC.1 — build the immutable-per-turn delivery context from the inbound
     // message. Routing authority (platform/chatId/threadId) is frozen here and

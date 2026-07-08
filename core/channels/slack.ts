@@ -28,6 +28,11 @@ import { App, LogLevel } from '@slack/bolt'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
+import {
+  buildTextDeliveryBinding,
+  isTerminalDeliveryError,
+  type DeliveryBinding,
+} from '../deliveryContext'
 
 export class SlackAdapter implements ChannelAdapter {
   readonly name = 'slack'
@@ -77,10 +82,8 @@ export class SlackAdapter implements ChannelAdapter {
       if (msg.bot_id || msg.subtype) return                          // ignore bots & system messages
       if (this.allowedChannels.size > 0 && !this.allowedChannels.has(msg.channel)) return
 
-      const response = await this.processMessage(msg.channel, msg.user ?? 'unknown', msg.text ?? '')
-      await say({ text: response, thread_ts: msg.ts }).catch((e: Error) =>
-        this.log.error(`say error: ${e.message}`),
-      )
+      // v4.15 — deliver THROUGH the seam (frozen channel + thread), no self-say.
+      await this.processMessage(msg.channel, msg.user ?? 'unknown', msg.text ?? '', msg.ts, this.buildDeliveryBinding(msg.channel, msg.ts))
     })
 
     // ── App mentions (@Aiden) ────────────────────────────────
@@ -89,10 +92,8 @@ export class SlackAdapter implements ChannelAdapter {
 
       // Strip the @mention prefix from the message
       const text = (event.text ?? '').replace(/<@[^>]+>/g, '').trim()
-      const response = await this.processMessage(event.channel, event.user, text)
-      await say({ text: response, thread_ts: event.ts }).catch((e: Error) =>
-        this.log.error(`mention reply error: ${e.message}`),
-      )
+      // v4.15 — deliver THROUGH the seam (frozen channel + thread), no self-say.
+      await this.processMessage(event.channel, event.user, text, event.ts, this.buildDeliveryBinding(event.channel, event.ts))
     })
 
     // ── Slash command /aiden ─────────────────────────────────
@@ -102,10 +103,8 @@ export class SlackAdapter implements ChannelAdapter {
         await say('⚠️ This channel is not authorized for Aiden.')
         return
       }
-      const response = await this.processMessage(command.channel_id, command.user_id, command.text)
-      await say(response).catch((e: Error) =>
-        this.log.error(`slash reply error: ${e.message}`),
-      )
+      // v4.15 — deliver THROUGH the seam (frozen channel), no self-say.
+      await this.processMessage(command.channel_id, command.user_id, command.text, undefined, this.buildDeliveryBinding(command.channel_id))
     })
 
     // Register outbound delivery so gateway.deliver() and broadcast() work
@@ -141,24 +140,43 @@ export class SlackAdapter implements ChannelAdapter {
   }
 
   async send(channelId: string, message: string): Promise<void> {
-    await this.app?.client.chat.postMessage({ channel: channelId, text: message }).catch((e: Error) =>
-      this.log.error(`send error: ${e.message}`),
-    )
+    await this.deliverSealed(channelId, message)
+  }
+
+  // v4.15 delivery-isolation — the real send primitive: posts to the frozen
+  // channel (optionally threaded), reports ok + terminal (channel_not_found /
+  // not_in_channel → the target is retired).
+  private async deliverSealed(channelId: string, text: string, threadTs?: string): Promise<{ ok: boolean; terminal?: boolean }> {
+    if (!this.app) return { ok: false }
+    try {
+      await this.app.client.chat.postMessage({ channel: channelId, text, ...(threadTs ? { thread_ts: threadTs } : {}) })
+      return { ok: true }
+    } catch (e: any) {
+      this.log.error(`send error: ${e.message}`)
+      const slackTerminal = /channel_not_found|not_in_channel|is_archived|account_inactive/.test(String(e?.data?.error ?? e?.message ?? ''))
+      return { ok: false, terminal: slackTerminal || isTerminalDeliveryError(e) }
+    }
+  }
+
+  // v4.15 — the sealed per-turn delivery binding (frozen channel + thread).
+  private buildDeliveryBinding(channelId: string, threadTs?: string): DeliveryBinding {
+    return buildTextDeliveryBinding((text) => this.deliverSealed(channelId, text, threadTs))
   }
 
   isHealthy(): boolean { return this.healthy }
 
   // ── Helpers ────────────────────────────────────────────────
 
-  private async processMessage(channelId: string, userId: string, text: string): Promise<string> {
+  private async processMessage(channelId: string, userId: string, text: string, threadId?: string, delivery?: DeliveryBinding): Promise<string> {
     try {
       return await gateway.routeMessage({
         channel:   'slack',
         channelId,
         userId,
         text,
+        threadId,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.log.error(`routeMessage error: ${e.message}`)
       return '❌ Something went wrong. Try again.'

@@ -20,8 +20,10 @@ import { TelegramAdapter } from '../../../core/channels/telegram';
 
 function mkAdapter() {
   const a = new TelegramAdapter() as any;
-  const deliverToChat = vi.fn(async () => true);
-  a.deliverToChat = deliverToChat;               // spy the unchanged primitive
+  // v4.15 — deliverToChat now returns a structured result (ok + chunk/terminal
+  // detail) so the seam can retire dead targets and report partial delivery.
+  const deliverToChat = vi.fn(async () => ({ ok: true, sent: 1, total: 1 }));
+  a.deliverToChat = deliverToChat;               // spy the primitive
   return { a, deliverToChat };
 }
 

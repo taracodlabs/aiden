@@ -31,6 +31,11 @@ import nodemailer from 'nodemailer'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
+import {
+  buildTextDeliveryBinding,
+  isTerminalDeliveryError,
+  type DeliveryBinding,
+} from '../deliveryContext'
 
 interface RawEmail {
   messageId: string
@@ -225,11 +230,12 @@ export class EmailAdapter implements ChannelAdapter {
 
         this.processedIds.add(msgId)
 
-        // Route message to agent
-        const response = await this.processMessage(senderEmail, senderEmail, this.extractText(body))
-
-        // Reply via SMTP
-        await this.replyEmail(senderEmail, subject, response)
+        // v4.15 — route + deliver THROUGH the seam: the threaded SMTP reply
+        // carries its own frozen sealed address (recipient + subject).
+        await this.processMessage(
+          senderEmail, senderEmail, this.extractText(body),
+          this.buildDeliveryBinding(senderEmail, subject),
+        )
 
         // Mark message as seen
         try {
@@ -247,8 +253,10 @@ export class EmailAdapter implements ChannelAdapter {
     }
   }
 
-  private async replyEmail(to: string, originalSubject: string, body: string): Promise<void> {
-    if (!this.transporter) return
+  // v4.15 delivery-isolation — threaded reply primitive: reports ok + terminal
+  // (a bounced/rejected recipient is terminal so the seam retires it).
+  private async replyEmail(to: string, originalSubject: string, body: string): Promise<{ ok: boolean; terminal?: boolean }> {
+    if (!this.transporter) return { ok: false }
     const subject = originalSubject.startsWith('Re:') ? originalSubject : `Re: ${originalSubject}`
     try {
       await this.transporter.sendMail({
@@ -258,9 +266,17 @@ export class EmailAdapter implements ChannelAdapter {
         text:    body,
         headers: { 'X-Aiden-Reply': '1' },
       })
+      return { ok: true }
     } catch (e: any) {
       this.log.error(`reply error:${e.message}`)
+      return { ok: false, terminal: isTerminalDeliveryError(e) }
     }
+  }
+
+  // v4.15 — the sealed per-turn delivery binding: the reply carries its own
+  // frozen recipient + threaded subject (never a shared "current sender").
+  private buildDeliveryBinding(to: string, subject: string): DeliveryBinding {
+    return buildTextDeliveryBinding((text) => this.replyEmail(to, subject, text))
   }
 
   private extractText(raw: string): string {
@@ -278,7 +294,7 @@ export class EmailAdapter implements ChannelAdapter {
     return this.allowedSenders.has(email.toLowerCase())
   }
 
-  private async processMessage(channelId: string, userId: string, text: string): Promise<string> {
+  private async processMessage(channelId: string, userId: string, text: string, delivery?: DeliveryBinding): Promise<string> {
     try {
       return await gateway.routeMessage({
         channel:   'email',
@@ -286,7 +302,7 @@ export class EmailAdapter implements ChannelAdapter {
         userId,
         text,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.log.error(`routeMessage error:${e.message}`)
       return 'Something went wrong processing your email. Please try again.'

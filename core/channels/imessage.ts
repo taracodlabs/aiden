@@ -24,6 +24,11 @@ import { WebSocket } from 'ws'
 import { gateway } from '../gateway'
 import type { ChannelAdapter } from './adapter'
 import { noopLogger, type Logger } from '../v4/logger'
+import {
+  buildTextDeliveryBinding,
+  isTerminalDeliveryError,
+  type DeliveryBinding,
+} from '../deliveryContext'
 
 export class IMessageAdapter implements ChannelAdapter {
   readonly name = 'imessage'
@@ -90,7 +95,12 @@ export class IMessageAdapter implements ChannelAdapter {
   }
 
   async send(target: string, message: string): Promise<void> {
-    if (!this.healthy) return
+    await this.deliverSealed(target, message)
+  }
+
+  // v4.15 delivery-isolation — the real send primitive: reports ok + terminal.
+  private async deliverSealed(target: string, message: string): Promise<{ ok: boolean; terminal?: boolean }> {
+    if (!this.healthy) return { ok: false }
     try {
       await axios.post(
         `${this.baseUrl}/api/v1/message/text`,
@@ -100,9 +110,16 @@ export class IMessageAdapter implements ChannelAdapter {
           timeout: 10000,
         },
       )
+      return { ok: true }
     } catch (e: any) {
       this.log.error(`send error:${e.message}`)
+      return { ok: false, terminal: isTerminalDeliveryError(e) }
     }
+  }
+
+  // v4.15 — the sealed per-turn delivery binding (frozen target).
+  private buildDeliveryBinding(target: string): DeliveryBinding {
+    return buildTextDeliveryBinding((text) => this.deliverSealed(target, text))
   }
 
   isHealthy(): boolean { return this.healthy }
@@ -147,8 +164,9 @@ export class IMessageAdapter implements ChannelAdapter {
 
         if (!this.isAllowed(sender)) return
 
-        const response = await this.processMessage(chatId || sender, sender, text)
-        await this.send(chatId || sender, response)
+        // v4.15 — deliver THROUGH the seam (frozen sealed address), no self-send.
+        const target = chatId || sender
+        await this.processMessage(target, sender, text, this.buildDeliveryBinding(target))
       } catch (e: any) {
         this.log.error(`message parse error:${e.message}`)
       }
@@ -171,7 +189,7 @@ export class IMessageAdapter implements ChannelAdapter {
     return this.allowedNumbers.has(number)
   }
 
-  private async processMessage(channelId: string, userId: string, text: string): Promise<string> {
+  private async processMessage(channelId: string, userId: string, text: string, delivery?: DeliveryBinding): Promise<string> {
     try {
       return await gateway.routeMessage({
         channel:   'imessage',
@@ -179,7 +197,7 @@ export class IMessageAdapter implements ChannelAdapter {
         userId,
         text,
         timestamp: Date.now(),
-      })
+      }, delivery)
     } catch (e: any) {
       this.log.error(`routeMessage error:${e.message}`)
       return '❌ Something went wrong. Try again.'
