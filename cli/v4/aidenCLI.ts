@@ -457,29 +457,35 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       process.exit(await runQuery(merged.query, merged, opts));
     });
 
-  // v4.14.6 — Workbench event-stream bridge launcher. Read-only web view of live
-  // runs; opens the shared daemon run_events store and streams over SSE. Binds
-  // 127.0.0.1 and prints the URL. (Also runnable via `npm run workbench`.)
+  // v4.14.6 — Aiden Workbench launcher. Serves a read-only live dashboard page
+  // (dark, orange) backed by the shared daemon run_events store over SSE, binds
+  // 127.0.0.1, auto-opens the browser, and prints the URL. (Also `npm run web`.)
   program
-    .command('workbench')
-    .description('Start the Workbench bridge — a read-only web view of live runs (SSE)')
+    .command('web')
+    .alias('workbench')
+    .description('Open the Aiden Workbench — a read-only live dashboard in your browser')
     .option('--port <n>', 'Port to bind on 127.0.0.1 (default 4280)', (v: string) => Number.parseInt(v, 10))
-    .action(async (cmdOpts: { port?: number }) => {
+    .option('--no-open', 'Do not auto-open the browser (just print the URL)')
+    .action(async (cmdOpts: { port?: number; open?: boolean }) => {
       const { startWorkbenchBridge } = await import('../../core/v4/workbench/bridgeServer');
+      const { openBrowser }          = await import('../../core/v4/workbench/openBrowser');
       const paths    = resolveAidenPaths();
       const dbPath   = daemonDbPath(paths.root);
       const runStore = createRunStore({ db: openDaemonDb(dbPath) });
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
       const bridge   = await startWorkbenchBridge({ reader: runStore, port });
+      const dashUrl  = `http://${bridge.host}:${bridge.port}/`;
       process.stdout.write(
-        `\n  Aiden Workbench bridge (read-only) is live\n` +
-        `    URL:    http://${bridge.host}:${bridge.port}\n` +
-        `    events: GET /api/sessions/<sessionId>/events   (SSE replay + live tail)\n` +
-        `            GET /api/runs/<runId>/events            (SSE replay + live tail)\n` +
+        `\n  Aiden Workbench — live dashboard (read-only)\n` +
+        `    open:   ${dashUrl}\n` +
+        `    feed:   GET /api/events                     (SSE, all recent activity)\n` +
+        `    scoped: GET /api/sessions/<id>/events  |  /api/runs/<id>/events\n` +
         `    health: GET /api/health\n` +
         `    store:  ${dbPath}\n` +
         `  Ctrl+C to stop.\n\n`,
       );
+      // Commander maps `--no-open` to `open === false`; default (undefined) opens.
+      if (cmdOpts.open !== false) openBrowser(dashUrl);
       const shutdown = (): void => { void bridge.close().finally(() => process.exit(0)); };
       process.on('SIGINT',  shutdown);
       process.on('SIGTERM', shutdown);

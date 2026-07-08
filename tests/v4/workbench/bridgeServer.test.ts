@@ -197,3 +197,37 @@ describe('Workbench bridge — ordered replay + live tail', () => {
     expect(Number(resumed.id)).toBe(id2);                   // id1 skipped, first frame is id2
   });
 });
+
+// ── The dashboard page + the browser feed ────────────────────────────────────
+
+function httpGet(port: number, path: string): Promise<{ status: number; contentType: string; body: string }> {
+  return new Promise((resolve) => {
+    http.get({ host: '127.0.0.1', port, path }, (res) => {
+      let b = ''; res.setEncoding('utf8');
+      res.on('data', (c) => (b += c));
+      res.on('end', () => resolve({ status: res.statusCode ?? 0, contentType: String(res.headers['content-type'] ?? ''), body: b }));
+    });
+  });
+}
+
+describe('Workbench dashboard page + /api/events feed', () => {
+  it('GET / serves the dark dashboard HTML (not JSON)', async () => {
+    const { status, contentType, body } = await httpGet(bridge.port, '/');
+    expect(status).toBe(200);
+    expect(contentType).toMatch(/text\/html/);
+    expect(body).toContain('<title>Aiden Workbench');
+    expect(body).toContain('#FF6B35');                      // the orange identity
+    expect(body).toContain("new EventSource('/api/events')"); // wired to the live feed
+    expect(body).not.toContain('"ok":true');                // it's the page, not the health JSON
+  });
+
+  it('★ GET /api/events streams recent events as UNNAMED message frames (name is in data)', async () => {
+    const c = sseClient(bridge.port, '/api/events');
+    const idV = emit('artifact_verified', 'artifact.verified', { verdict: 'completed', verified: true, handles: 1 });
+    const f = await c.waitFor((x) => Number(x.id) === idV);
+    expect(f.event).toBeUndefined();                        // no SSE event name → one onmessage handles all
+    expect(f.data.name).toBe('artifact_verified');
+    expect(f.data.payload.verified).toBe(true);
+    c.close();
+  });
+});

@@ -27,6 +27,7 @@
 
 import http from 'node:http';
 import type { RunEventRich, ListEventsScopedOptions } from '../daemon/runStore';
+import { WORKBENCH_DASHBOARD_HTML } from './dashboardHtml';
 
 /** The one capability the bridge needs — a narrow read port over the run store. */
 export interface RunEventReader {
@@ -115,8 +116,24 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     const url = new URL(req.url ?? '/', `http://${host}`);
 
+    // The dashboard page — a single self-contained dark view of the live feed.
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      const body = Buffer.from(WORKBENCH_DASHBOARD_HTML, 'utf8');
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length });
+      res.end(body);
+      return;
+    }
+
     if (url.pathname === '/api/health') {
       sendJson(res, 200, { ok: true, service: 'aiden-workbench-bridge', readOnly: true });
+      return;
+    }
+
+    // The dashboard's live feed: ALL recent events across sessions/runs, streamed
+    // as plain SSE `message` frames (name is in the data) so one EventSource with
+    // a single onmessage handler renders everything.
+    if (url.pathname === '/api/events') {
+      streamEvents(req, res, { scope: 'all', limit: pageLimit }, false);
       return;
     }
 
@@ -135,11 +152,11 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-      endpoints: ['GET /api/health', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events'],
+      endpoints: ['GET /', 'GET /api/health', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events'],
     });
   });
 
-  function streamEvents(req: http.IncomingMessage, res: http.ServerResponse, scope: ListEventsScopedOptions): void {
+  function streamEvents(req: http.IncomingMessage, res: http.ServerResponse, scope: ListEventsScopedOptions, named = true): void {
     res.writeHead(200, {
       'Content-Type':      'text/event-stream; charset=utf-8',
       'Cache-Control':     'no-cache, no-transform',
@@ -163,8 +180,14 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         if (r.id <= lastId) continue;
         lastId = r.id;
         const wire = toWire(r);
+        // Named endpoints tag each frame with its emission name (programmatic
+        // clients dispatch per type); the browser feed omits it so a single
+        // onmessage handler receives everything (the name is in the data).
+        const frame = named
+          ? `id: ${wire.id}\nevent: ${sseEventName(wire.name ?? wire.kind)}\ndata: ${JSON.stringify(wire)}\n\n`
+          : `id: ${wire.id}\ndata: ${JSON.stringify(wire)}\n\n`;
         try {
-          res.write(`id: ${wire.id}\nevent: ${sseEventName(wire.name ?? wire.kind)}\ndata: ${JSON.stringify(wire)}\n\n`);
+          res.write(frame);
         } catch { /* client gone — the close handler cleans up */ }
       }
     };
