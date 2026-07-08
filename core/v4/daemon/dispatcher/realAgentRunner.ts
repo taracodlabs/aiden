@@ -396,6 +396,27 @@ export function createRealAgentRunner(
         log('error', `[real-runner] runConversation threw eventId=${input.triggerEventId}: ${invocationError.slice(0, 500)}`);
       }
 
+      // Route the agent's final WRITTEN reply to consumers. The CLI renders
+      // `result.finalContent` as the agent's turn; the web dashboard has no other
+      // channel for it (tool detail rides the tool_call_* events), so surface it
+      // as a dedicated run_event it can render as the assistant's chat message.
+      // Persistence-only — a locked DB must never break dispatch.
+      const finalReply = result?.finalContent ?? '';
+      if (finalReply.trim()) {
+        try {
+          opts.runStore.emitEventRich({
+            runId,
+            category:   'assistant',
+            kind:       'assistant.message',
+            name:       'assistant_message',
+            sessionId:  input.sessionId,
+            payload:    { text: finalReply },
+            visibility: 'user',
+            source:     'daemon',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
+      }
+
       // ── 9: post-turn budget consume + dispatcher:completed ─────────────
       const finalSnapshot = consumePostTurn({
         tracker,

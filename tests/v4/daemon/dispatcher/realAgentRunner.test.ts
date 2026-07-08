@@ -177,6 +177,29 @@ describe('createRealAgentRunner — event emission', () => {
     expect(names).toContain('tool_call_started');
     expect(names).toContain('tool_call_completed');
   });
+
+  it('emits assistant_message carrying the agent\'s finalContent (the chat reply)', async () => {
+    const builder: AgentBuilder = () =>
+      stubAgent({ finishReason: 'stop', finalContent: 'Hello! How can I help?' } as unknown as AidenAgentResult);
+    const runner = createRealAgentRunner({
+      db, runStore, agentBuilder: builder, persistedDefault: PERSISTED,
+    });
+    const result = await runner.invoke(mkInput());
+    const events = runStore.listEvents(result.runId);
+    const reply = events.find((e) => e.name === 'assistant_message');
+    expect(reply).toBeTruthy();
+    expect(JSON.parse(reply!.payload).text).toBe('Hello! How can I help?');
+  });
+
+  it('emits NO assistant_message when the agent produced no written text', async () => {
+    const builder: AgentBuilder = () => stubAgent(mkResult({ finishReason: 'stop' }));
+    const runner = createRealAgentRunner({
+      db, runStore, agentBuilder: builder, persistedDefault: PERSISTED,
+    });
+    const result = await runner.invoke(mkInput());
+    const events = runStore.listEvents(result.runId);
+    expect(events.some((e) => e.name === 'assistant_message')).toBe(false);
+  });
 });
 
 describe('createRealAgentRunner — failure paths', () => {

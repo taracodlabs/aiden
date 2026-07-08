@@ -118,12 +118,20 @@ function verb(name: string): string {
   return s.charAt(0).toUpperCase() + s.slice(1);
 }
 
+/** Per-turn mutable state the router threads across events. */
+interface TurnState { gotReply: boolean }
+
 /** Translate ONE v4 run_event into handler calls. Returns true when the event is
  *  terminal for the run (so the caller can finish the turn). */
-function routeEvent(ev: V4Event, h: TurnHandlers): boolean {
+function routeEvent(ev: V4Event, h: TurnHandlers, state: TurnState): boolean {
   const n = ev.name || ev.kind || '';
   const p = ev.payload || {};
   switch (n) {
+    case 'assistant_message':
+      // The agent's final WRITTEN reply — the conversational text for the bubble.
+      state.gotReply = true;
+      h.onReply?.(String(p.text ?? ''));
+      return false;
     case 'tool_call_started':
       h.onActivity?.({ kind: 'tool', label: verb(p.toolName || 'tool'), status: 'running' });
       return false;
@@ -143,11 +151,12 @@ function routeEvent(ev: V4Event, h: TurnHandlers): boolean {
       if (p.totalTokens != null) h.onTokens?.(p.totalTokens);
       return false;
     case 'ui_task_update':
-      if (p.text) h.onReply?.(String(p.text));
-      else h.onThinking?.(p.stage || 'working', p.message || ('step ' + (p.step ?? '')));
+      // Progress narration → the thinking strip, not the reply bubble.
+      h.onThinking?.(String(p.stage || 'working'), String(p.text || p.message || ('step ' + (p.step ?? ''))));
       return false;
     case 'ui_task_done':
-      if (p.summary) h.onReply?.(String(p.summary));
+      // Only a fallback reply — if the agent emitted no assistant_message text.
+      if (!state.gotReply && p.summary) { state.gotReply = true; h.onReply?.(String(p.summary)); }
       h.onDone?.({ summary: p.summary ? String(p.summary) : '' });
       return true;
     case 'task_cancelled':
@@ -183,6 +192,7 @@ export function runTask(message: string, handlers: TurnHandlers): Promise<void> 
     let settled = false;
     let idle: ReturnType<typeof setTimeout> | null = null;
     let es: EventSource | null = null;
+    const state: TurnState = { gotReply: false };
 
     const finish = (info: { stopped?: boolean; summary?: string; error?: string }): void => {
       if (settled) return;
@@ -220,7 +230,7 @@ export function runTask(message: string, handlers: TurnHandlers): Promise<void> 
         return;
       }
       if (ev.runId !== ours) return;
-      const done = routeEvent(ev, handlers);
+      const done = routeEvent(ev, handlers, state);
       if (done) { finish({}); return; }
       bumpIdle();
     };
