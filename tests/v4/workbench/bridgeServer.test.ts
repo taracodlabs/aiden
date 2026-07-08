@@ -210,14 +210,17 @@ function httpGet(port: number, path: string): Promise<{ status: number; contentT
   });
 }
 
-describe('Workbench dashboard page + /api/events feed', () => {
-  it('GET / serves the dark dashboard HTML (not JSON)', async () => {
+describe('Workbench dashboard shell + feed', () => {
+  it('GET / serves the dark dashboard SHELL (sidebar + feed, not JSON)', async () => {
     const { status, contentType, body } = await httpGet(bridge.port, '/');
     expect(status).toBe(200);
     expect(contentType).toMatch(/text\/html/);
     expect(body).toContain('<title>Aiden Workbench');
     expect(body).toContain('#FF6B35');                      // the orange identity
-    expect(body).toContain("new EventSource('/api/events')"); // wired to the live feed
+    expect(body).toContain('class="sidebar"');              // the Claude-style shell
+    expect(body).toContain('id="sessions"');                // recent-sessions list
+    expect(body).toContain("fetch('/api/sessions')");       // sidebar data source
+    expect(body).toContain("connect('/api/events'");        // live feed wired
     expect(body).not.toContain('"ok":true');                // it's the page, not the health JSON
   });
 
@@ -229,5 +232,22 @@ describe('Workbench dashboard page + /api/events feed', () => {
     expect(f.data.name).toBe('artifact_verified');
     expect(f.data.payload.verified).toBe(true);
     c.close();
+  });
+
+  it('GET /api/sessions returns the readable session list when a lister is wired', async () => {
+    const stub = { listSessions: () => [{ id: 'sess-A', label: 'fix the parser', lastActive: 123, provider: 'anthropic', model: 'x' }] };
+    const b2 = await startWorkbenchBridge({ reader: runStore, sessions: stub, port: 0, pollMs: 30 });
+    const { status, body } = await httpGet(b2.port, '/api/sessions');
+    expect(status).toBe(200);
+    const list = JSON.parse(body);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ id: 'sess-A', label: 'fix the parser' });   // label, never the raw id
+    await b2.close();
+  });
+
+  it('GET /api/sessions returns [] when no lister is wired', async () => {
+    const { status, body } = await httpGet(bridge.port, '/api/sessions');
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toEqual([]);
   });
 });

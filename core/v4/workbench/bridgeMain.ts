@@ -24,17 +24,21 @@ import { resolveAidenPaths } from '../paths';
 import { daemonDbPath } from '../daemon/daemonConfig';
 import { openDaemonDb } from '../daemon/db/connection';
 import { createRunStore } from '../daemon/runStore';
+import { SessionStore } from '../sessionStore';
 import { startWorkbenchBridge } from './bridgeServer';
+import { createSessionLister } from './sessionList';
 
 async function main(): Promise<void> {
   const paths  = resolveAidenPaths();
   const dbPath = daemonDbPath(paths.root);
   const db     = openDaemonDb(dbPath);
   const runStore = createRunStore({ db });
+  const sessions = createSessionLister(new SessionStore(paths.sessionsDb));
 
   const port = Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
   const bridge = await startWorkbenchBridge({
     reader: runStore,
+    sessions,
     port,
     log: (m) => console.log(`[workbench-bridge] ${m}`),
   });
