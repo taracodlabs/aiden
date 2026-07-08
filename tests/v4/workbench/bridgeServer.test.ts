@@ -327,3 +327,71 @@ describe('Workbench write path — token-gated POST /api/tasks', () => {
     expect(body).toContain('auto-denied');                   // clear "needs approval — auto-denied" surfacing
   });
 });
+
+// ── The steer path — token-gated POST /api/tasks/:runId/cancel ────────────────
+
+describe('Workbench steer — token-gated POST /api/tasks/:runId/cancel', () => {
+  const TOKEN = 'secret-token-abc123';
+  const enq = { enqueue: () => ({ accepted: true, triggerEventId: 1 }) };
+  function withCancel(calls: number[]) {
+    const cancel = { cancel: (id: number) => { calls.push(id); return { accepted: true, runId: id }; } };
+    return startWorkbenchBridge({ reader: runStore, enqueue: enq, cancel, token: TOKEN, port: 0, pollMs: 30 });
+  }
+
+  it('★ rejects a stop with NO token (401); canceller NOT called', async () => {
+    const calls: number[] = []; const b = await withCancel(calls);
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {});
+    expect(r.status).toBe(401);
+    expect(calls).toHaveLength(0);
+    await b.close();
+  });
+
+  it('★ WITH the token, stops the run (202) and calls the canceller with the runId', async () => {
+    const calls: number[] = []; const b = await withCancel(calls);
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(202);
+    expect(JSON.parse(r.body)).toMatchObject({ accepted: true, runId });
+    expect(calls).toEqual([runId]);
+    await b.close();
+  });
+
+  it('rejects a cross-origin stop even WITH the token (403)', async () => {
+    const calls: number[] = []; const b = await withCancel(calls);
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN, Origin: 'http://evil.example.com' });
+    expect(r.status).toBe(403);
+    expect(calls).toHaveLength(0);
+    await b.close();
+  });
+
+  it('stop is DISABLED when no canceller is wired (503)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, enqueue: enq, token: TOKEN, port: 0 });
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(503);
+    await b.close();
+  });
+
+  it('★ a real runStore-backed stop marks the run cancelled + surfaces task_cancelled in the feed', async () => {
+    // The exact port `aiden web` wires: setStatus('cancelled') + a feed event.
+    const canceller = {
+      cancel: (id: number) => {
+        runStore.setStatus(id, 'cancelled', { finishReason: 'stopped from workbench web' });
+        runStore.emitEvent(id, 'task_cancelled', { source: 'workbench-web', reason: 'stopped from dashboard' });
+        return { accepted: true, runId: id };
+      },
+    };
+    const b = await startWorkbenchBridge({ reader: runStore, enqueue: enq, cancel: canceller, token: TOKEN, port: 0 });
+    const r = await httpPost(b.port, `/api/tasks/${runId}/cancel`, {}, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(202);
+    expect(runStore.get(runId)?.status).toBe('cancelled');   // durably stopped
+    const evs = runStore.listEventsScoped({ scope: 'run_id', runId, limit: 100 });
+    expect(evs.some((e) => e.kind === 'task_cancelled')).toBe(true);   // shown in the live feed
+    await b.close();
+  });
+
+  it('the page has a Stop control that posts to /cancel', async () => {
+    const { body } = await httpGet(bridge.port, '/');
+    expect(body).toContain('id="composer-stop"');
+    expect(body).toContain("'/api/tasks/' + encodeURIComponent(id) + '/cancel'");
+    expect(body).toContain('task_cancelled');                // the feed renders the stop
+  });
+});

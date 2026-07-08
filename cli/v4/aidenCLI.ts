@@ -493,8 +493,23 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           return { accepted: true, triggerEventId: r.id, duplicate: !r.inserted };
         },
       };
+      // STEER path: the stop button cancels a running job by run id. We record
+      // the stop durably — mark the run `cancelled` (so the dispatcher won't
+      // dispatch it again) and emit a `task_cancelled` event so it shows in the
+      // feed. We never abort the agent in-process from here.
+      const FINAL_RUN = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+      const cancel = {
+        cancel(runId: number): { accepted: boolean; runId: number; alreadyFinal?: boolean } {
+          const run = runStore.get(runId);
+          if (!run) return { accepted: false, runId };
+          if (FINAL_RUN.has(String(run.status))) return { accepted: true, runId, alreadyFinal: true };
+          runStore.setStatus(runId, 'cancelled', { finishReason: 'stopped from workbench web' });
+          runStore.emitEvent(runId, 'task_cancelled', { source: 'workbench-web', reason: 'stopped from dashboard' });
+          return { accepted: true, runId };
+        },
+      };
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
-      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, enqueue, token, port });
+      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, enqueue, cancel, token, port });
       const dashUrl  = `http://${bridge.host}:${bridge.port}/`;
       const daemonUp = process.env.AIDEN_DAEMON === '1';
       process.stdout.write(

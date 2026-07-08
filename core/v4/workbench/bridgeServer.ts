@@ -63,6 +63,23 @@ export interface TaskEnqueuer {
   enqueue(task: { message: string; sessionId?: string }): EnqueueResult;
 }
 
+/** Result of a stop/cancel request against a run. */
+export interface CancelResult {
+  accepted:      boolean;
+  runId:         number;
+  /** True when the run was already in a terminal state — nothing to stop. */
+  alreadyFinal?: boolean;
+}
+
+/** Optional STEER port — requests cancellation of a running job by run id. Like
+ *  the enqueuer, the bridge never touches the agent; the port records the stop
+ *  durably on the shared store (terminal status + a visible `task_cancelled`
+ *  feed event) so the dispatcher stops dispatching the job and the dashboard
+ *  shows it. When absent, POST /api/tasks/:runId/cancel returns 503. */
+export interface TaskCanceller {
+  cancel(runId: number): CancelResult;
+}
+
 export interface WorkbenchBridgeOptions {
   /** Read port over the shared run-event store (a RunStore satisfies this). */
   reader:      RunEventReader;
@@ -71,6 +88,8 @@ export interface WorkbenchBridgeOptions {
   sessions?:   SessionLister;
   /** Optional WRITE port for the chat input. Absent → POST /api/tasks is 503. */
   enqueue?:    TaskEnqueuer;
+  /** Optional STEER port for the stop button. Absent → cancel is 503. */
+  cancel?:     TaskCanceller;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -173,9 +192,11 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
   const server = http.createServer((req, res) => {
     const url = new URL(req.url ?? '/', `http://${host}`);
 
-    // The ONE write endpoint — token-gated (see handlePostTask). Every other
+    // The write endpoints — both token-gated (see passesWriteGate). Every other
     // non-GET is rejected.
     if (req.method === 'POST' && url.pathname === '/api/tasks') { handlePostTask(req, res); return; }
+    const cancelMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
+    if (req.method === 'POST' && cancelMatch) { handleCancelTask(req, res, cancelMatch[1]); return; }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The dashboard page — a single self-contained dark view. The per-launch
@@ -227,7 +248,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-      endpoints: ['GET /', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events'],
+      endpoints: ['GET /', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel'],
     });
   });
 
@@ -278,34 +299,40 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     res.on('error', stop);
   }
 
-  // ── the one write path: POST /api/tasks (token-gated) ──────────────────────
+  // ── the write path: shared token/CSRF gate + the two write endpoints ───────
   //
-  // Security posture (defense in depth):
+  // Security posture (defense in depth), applied identically to every write:
   //   1. A per-launch token MUST match — no token, no write (closes the "any
   //      local process / any website can command Aiden" hole).
   //   2. The Origin (when the browser sends one) must be this dashboard's own —
   //      a cross-site page can't forge a same-origin write.
-  //   3. The task is only ENQUEUED onto the daemon's safe job path; the bridge
-  //      never runs the agent, so approvals/safe-mode are enforced downstream.
-  function handlePostTask(req: http.IncomingMessage, res: http.ServerResponse): void {
-    // (1) token gate.
-    if (!opts.token) { sendJson(res, 503, { error: 'write path not enabled' }); return; }
+  //   3. Writes never run the agent: `POST /api/tasks` only ENQUEUES onto the
+  //      daemon's safe job path, and the stop endpoint only records a durable
+  //      cancel — approvals/safe-mode stay enforced downstream.
+  //
+  // Returns true when the request cleared the gate; otherwise it has already
+  // written the rejection and the caller must return.
+  function passesWriteGate(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+    if (!opts.token) { sendJson(res, 503, { error: 'write path not enabled' }); return false; }
     const raw = req.headers['x-workbench-token'];
     const hdr = Array.isArray(raw) ? raw[0] : raw;
     const bearer = /^Bearer\s+(\S+)/i.exec(String(req.headers['authorization'] ?? ''));
     const provided = hdr ?? (bearer ? bearer[1] : '');
-    if (provided !== opts.token) { sendJson(res, 401, { error: 'unauthorized — missing or bad workbench token' }); return; }
+    if (provided !== opts.token) { sendJson(res, 401, { error: 'unauthorized — missing or bad workbench token' }); return false; }
 
-    // (2) reject cross-origin / non-loopback (CSRF defense).
     const origin = String(req.headers['origin'] ?? '');
     if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin)) {
-      sendJson(res, 403, { error: 'cross-origin write refused' }); return;
+      sendJson(res, 403, { error: 'cross-origin write refused' }); return false;
     }
     const hostHdr = String(req.headers['host'] ?? '');
     if (hostHdr && !/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(hostHdr)) {
-      sendJson(res, 403, { error: 'non-loopback host refused' }); return;
+      sendJson(res, 403, { error: 'non-loopback host refused' }); return false;
     }
+    return true;
+  }
 
+  function handlePostTask(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
     readJsonBody(req, 64 * 1024).then((body) => {
       const message = typeof body?.message === 'string' ? body.message.trim() : '';
       if (!message) { sendJson(res, 400, { error: 'body requires a non-empty "message"' }); return; }
@@ -319,6 +346,25 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         sendJson(res, 500, { error: 'enqueue failed' });
       }
     }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  // Stop/steer: request cancellation of a running job by run id. The bridge
+  // hands the run id to the injected canceller (which marks it cancelled on the
+  // shared store + surfaces a `task_cancelled` feed event); it never aborts the
+  // agent in-process. Idempotent — cancelling an already-finished run is a no-op.
+  function handleCancelTask(req: http.IncomingMessage, res: http.ServerResponse, rawRunId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    req.resume();   // drain any body (browsers send Content-Length: 0)
+    const runId = Number(decodeURIComponent(rawRunId));
+    if (!Number.isFinite(runId)) { sendJson(res, 400, { error: 'runId must be numeric' }); return; }
+    if (!opts.cancel) { sendJson(res, 503, { error: 'stop unavailable (daemon not wired)' }); return; }
+    try {
+      const result = opts.cancel.cancel(runId);
+      sendJson(res, 202, { accepted: result.accepted, runId: result.runId, alreadyFinal: result.alreadyFinal ?? false });
+    } catch (e) {
+      log(`cancel failed: ${(e as Error).message}`);
+      sendJson(res, 500, { error: 'cancel failed' });
+    }
   }
 
   return new Promise<WorkbenchBridge>((resolve, reject) => {
