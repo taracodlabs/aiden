@@ -107,3 +107,67 @@ export function classifyCommand(input: string): {
   const reason = matches[0]?.description;
   return { tier, matches, reason };
 }
+
+// ── Read-only command allowlist (v4.14.6) ────────────────────────────────────
+//
+// `shell_exec` is a `dangerous` floor because it runs arbitrary commands. But a
+// plain read-only search/inspect command (rg, grep, ls, cat, …) mutates nothing
+// and never needs an approval prompt. `isReadOnlyCommand` proves a command is
+// read-only so the tool layer can treat it like `file_read`. It is deliberately
+// CONSERVATIVE: anything it cannot prove read-only falls back to normal approval.
+
+/** Basename-matched (case-insensitive, .exe-stripped) commands that only read. */
+const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
+  // search / text-read
+  'rg', 'ripgrep', 'grep', 'egrep', 'fgrep', 'ag',
+  'cat', 'type', 'head', 'tail', 'nl', 'wc', 'cut', 'uniq', 'comm',
+  // filesystem-inspect
+  'ls', 'dir', 'tree', 'find', 'stat', 'file', 'realpath', 'basename', 'dirname',
+  'pwd', 'which', 'where',
+  // PowerShell read-only cmdlets
+  'get-content', 'get-childitem', 'select-string', 'get-item', 'measure-object',
+]);
+
+// Metacharacters that could redirect to a file, chain another command, spawn a
+// substitution, or background a job — any of these disqualifies the fast-path.
+// (Bare `<` input-redirect is intentionally allowed — it only reads a file.)
+const UNSAFE_META = /(?:>>?|<\(|>\(|\$\(|[;&\x60\n])/;
+// `find` flags that let it run or delete arbitrary things.
+const FIND_SIDE_EFFECTS = /\s-(?:delete|exec|execdir|ok|okdir|fprintf?|fls)\b/;
+
+/** Remove fully-literal quoted spans so a `|`/`>` INSIDE a quoted search pattern
+ *  (e.g. `rg 'foo|bar'`) can't be mistaken for a pipe/redirect. Double-quoted
+ *  spans are stripped ONLY when they contain no `$`/backtick, so a command
+ *  substitution hidden in double quotes still trips UNSAFE_META. */
+function stripLiterals(cmd: string): string {
+  return cmd
+    .replace(/'[^']*'/g, ' ')                  // single-quoted → fully literal
+    .replace(/"(?:[^"$\x60\\]|\\.)*"/g, ' ');  // double-quoted w/o $ or backtick
+}
+
+function leadingToken(stage: string): string | null {
+  const first = stage.trim().split(/\s+/)[0] ?? '';
+  const base = first.replace(/^.*[\\/]/, '').replace(/\.exe$/i, '').toLowerCase();
+  return base || null;
+}
+
+/**
+ * True when `command` is a genuinely read-only shell invocation — a single
+ * command or a pipeline where EVERY stage leads with a known read-only command,
+ * with no output redirection, chaining, backgrounding, or command substitution,
+ * and no dangerous/caution pattern anywhere. Conservative by construction: if it
+ * cannot prove read-only, it returns false (→ normal approval).
+ */
+export function isReadOnlyCommand(command: string): boolean {
+  const raw = command.trim();
+  if (!raw) return false;
+  const bare = stripLiterals(raw);
+  if (UNSAFE_META.test(bare)) return false;               // redirect / chain / subst / background
+  if (classifyCommand(raw).tier !== 'safe') return false; // any dangerous/caution pattern
+  for (const stage of bare.split('|')) {
+    const lead = leadingToken(stage);
+    if (!lead || !READ_ONLY_COMMANDS.has(lead)) return false;
+    if (lead === 'find' && FIND_SIDE_EFFECTS.test(raw)) return false;
+  }
+  return true;
+}

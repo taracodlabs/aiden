@@ -39,6 +39,15 @@ import {
 } from '../../../core/v4/dockerSession';
 import { getSandboxConfig } from '../../../core/v4/sandboxConfig';
 
+// v4.14.6 — grep-family tools exit 1 to mean "no matches found" — a successful
+// empty search, not a failure. Reporting it as failure made the model re-issue
+// the search and burn context. Exit >= 2 is a real error and stays a failure.
+// Only applies when the command LEADS with a grep-family tool (direct search).
+const GREP_FAMILY_LEAD = /^\s*(?:[^\s]*[\\/])?(?:rg|ripgrep|grep|egrep|fgrep|ag)(?:\.exe)?(?:\s|$)/i;
+export function isGrepNoMatchExit(command: string, exitCode: number | null | undefined): boolean {
+  return exitCode === 1 && GREP_FAMILY_LEAD.test(command);
+}
+
 export const shellExecTool: ToolHandler = {
   schema: {
     name: 'shell_exec',
@@ -148,7 +157,7 @@ export const shellExecTool: ToolHandler = {
     const errCap = capToolOutput(result.stderr ?? '');
     const omitted = outCap.omittedChars + errCap.omittedChars;
     return {
-      success: result.exitCode === 0,
+      success: result.exitCode === 0 || isGrepNoMatchExit(command, result.exitCode),
       exitCode: result.exitCode,
       stdout: outCap.text,
       stderr: errCap.text,

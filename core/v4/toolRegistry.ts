@@ -46,7 +46,7 @@ import type { ApprovalEngine, ApprovalRequest } from '../../moat/approvalEngine'
 import type { SSRFProtection } from '../../moat/ssrfProtection';
 import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
-import { classifyCommand } from '../../moat/dangerousPatterns';
+import { classifyCommand, isReadOnlyCommand } from '../../moat/dangerousPatterns';
 import { classifyBrowserAction } from './browserState';
 import { pwBrowserStatus, pwDialogPendingTier } from '../playwrightBridge';
 import type { SkillLoader } from './skillLoader';
@@ -381,7 +381,16 @@ export class ToolRegistry {
       }
 
       // ── Phase 9 layer C: approval engine for mutating tools ───
-      if (handler.mutates && context.approvalEngine) {
+      // v4.14.6 — a verified read-only shell command (rg/grep/ls/cat/… with no
+      // redirection, chaining, substitution, or dangerous pattern) is treated as
+      // a read: it skips the approval gate exactly like file_read, so safe
+      // searches never prompt. Writes, deletes, network, and anything the
+      // classifier can't PROVE read-only still gate normally.
+      const readOnlyShell =
+        call.name === 'shell_exec' &&
+        typeof args.command === 'string' &&
+        isReadOnlyCommand(args.command);
+      if (handler.mutates && context.approvalEngine && !readOnlyShell) {
         // Pre-classify shell_exec commands so smart-mode has a tier.
         let riskTier: 'safe' | 'caution' | 'dangerous' | undefined;
         let reason: string | undefined;
