@@ -138,6 +138,7 @@ describe('doctor Setup group — live-vs-saved resolution (resolveSetupInputs)',
   it('SAVED — no live session/engine → config values, labelled saved', async () => {
     const inp = await resolveSetupInputs({
       paths, config: savedCfg, toolRegistry: toolReg, daemonRunning: false,
+      providerDecision: null,   // pin the boot-decision seam — this test asserts live-vs-saved resolution, not the decision trace (which reads real on-disk state)
     });
     expect(inp.model).toEqual({ provider: 'groq', model: 'llama-3.3-70b', source: 'saved' });
     expect(inp.mode).toEqual({ level: 'Observer', source: 'saved' });
@@ -150,6 +151,7 @@ describe('doctor Setup group — live-vs-saved resolution (resolveSetupInputs)',
       paths, config: savedCfg, toolRegistry: toolReg, daemonRunning: true,
       session: { getCurrentProvider: () => 'openai', getCurrentModel: () => 'gpt-x' },
       approvalEngine: { getAutonomyPolicy: () => ({ level: 'Partner' }) },
+      providerDecision: null,   // pin — assert resolution, not the on-disk decision trace
     });
     expect(inp.model).toEqual({ provider: 'openai', model: 'gpt-x', source: 'live' });
     expect(inp.mode).toEqual({ level: 'Partner', source: 'live' });
