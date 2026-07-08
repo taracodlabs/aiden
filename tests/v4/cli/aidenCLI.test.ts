@@ -148,28 +148,28 @@ describe('aiden CLI', () => {
     expect(out.join('')).not.toMatch(/deferred to v4\.1/i);
   });
 
-  it('aiden batch prints the v4.1 deferral', async () => {
+  it('aiden batch prints the not-yet-implemented notice', async () => {
     const { argv, hooks, out } = captureMain(['batch']);
     await main(argv, hooks);
-    expect(out.join('')).toMatch(/deferred to v4\.1/i);
+    expect(out.join('')).toMatch(/not yet implemented/i);
   });
 
-  it('aiden gateway prints the v4.1 deferral', async () => {
+  it('aiden gateway prints the not-yet-implemented notice', async () => {
     const { argv, hooks, out } = captureMain(['gateway']);
     await main(argv, hooks);
-    expect(out.join('')).toMatch(/deferred to v4\.1/i);
+    expect(out.join('')).toMatch(/not yet implemented/i);
   });
 
-  it('aiden pairing prints the v4.1 deferral (registered, just hidden)', async () => {
+  it('aiden pairing prints the not-yet-implemented notice (registered, just hidden)', async () => {
     const { argv, hooks, out } = captureMain(['pairing']);
     await main(argv, hooks);
-    expect(out.join('')).toMatch(/deferred to v4\.1/i);
+    expect(out.join('')).toMatch(/not yet implemented/i);
   });
 
-  it('aiden update prints the v4.1 deferral (registered, just hidden)', async () => {
+  it('aiden update prints the not-yet-implemented notice (registered, just hidden)', async () => {
     const { argv, hooks, out } = captureMain(['update']);
     await main(argv, hooks);
-    expect(out.join('')).toMatch(/deferred to v4\.1/i);
+    expect(out.join('')).toMatch(/not yet implemented/i);
   });
 
   it('--help HIDES the four deferred commands (batch/gateway/pairing/update)', async () => {

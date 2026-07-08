@@ -10,8 +10,8 @@
  * Reads up to 5000 chars from a file. Resolves `~` and `Desktop/`
  * shorthand against the OS home dir. Path-deny rules (.ssh, .aws,
  * credentials, *.pem, *.key, id_rsa*) are enforced inline — the
- * approval engine in Phase 9 will replace this with a structured
- * permission check, but we keep the same minimum guarantees here.
+ * approval engine layers a structured permission check on mutating
+ * tools; these inline read guards stay as the enforced minimum.
  *
  * Status: PHASE 7. Read-only.
  */
