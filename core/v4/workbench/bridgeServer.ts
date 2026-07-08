@@ -48,12 +48,34 @@ export interface SessionLister {
   listSessions(): SessionSummary[];
 }
 
+/** Result of enqueueing a browser-submitted task onto the safe job path. */
+export interface EnqueueResult {
+  accepted:        boolean;
+  triggerEventId?: number;
+  duplicate?:      boolean;
+}
+
+/** Optional WRITE port — enqueues a task onto the daemon's safe job path. The
+ *  bridge NEVER runs the agent itself; it only hands the task to this port,
+ *  which routes it through the same approval/safe-mode-gated dispatcher a CLI
+ *  turn uses. When absent, POST /api/tasks returns 503. */
+export interface TaskEnqueuer {
+  enqueue(task: { message: string; sessionId?: string }): EnqueueResult;
+}
+
 export interface WorkbenchBridgeOptions {
   /** Read port over the shared run-event store (a RunStore satisfies this). */
   reader:      RunEventReader;
   /** Optional read port for the recent-sessions sidebar (a SELECT over the
    *  durable session store). When absent, /api/sessions returns []. */
   sessions?:   SessionLister;
+  /** Optional WRITE port for the chat input. Absent → POST /api/tasks is 503. */
+  enqueue?:    TaskEnqueuer;
+  /** Per-launch local write token. REQUIRED for any write to execute — POST
+   *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
+   *  writes are refused. Injected into the served page so only the local
+   *  dashboard has it. Read-only GET endpoints ignore it. */
+  token?:      string;
   /** Loopback port. Default 4280. Pass 0 for an ephemeral port (tests). */
   port?:       number;
   /** Bind host. Default 127.0.0.1 — this phase never binds off-box. */
@@ -116,6 +138,27 @@ function sendJson(res: http.ServerResponse, code: number, body: unknown): void {
   res.end(s);
 }
 
+/** Read + parse a bounded JSON request body. Rejects on oversize or bad JSON. */
+function readJsonBody(req: http.IncomingMessage, maxBytes: number): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => {
+      size += c.length;
+      if (size > maxBytes) { req.destroy(); reject(new Error('body too large')); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try {
+        const s = Buffer.concat(chunks).toString('utf8').trim();
+        const parsed = s ? JSON.parse(s) : {};
+        resolve(parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {});
+      } catch (e) { reject(e); }
+    });
+    req.on('error', reject);
+  });
+}
+
 /**
  * Start the bridge. Resolves once it is listening; the returned handle exposes
  * the bound port and a `close()` for graceful shutdown.
@@ -128,21 +171,27 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
   const log       = opts.log ?? ((): void => {});
 
   const server = http.createServer((req, res) => {
-    // Read-only bridge: only GET is ever allowed.
-    if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed — read-only bridge' }); return; }
-
     const url = new URL(req.url ?? '/', `http://${host}`);
 
-    // The dashboard page — a single self-contained dark view of the live feed.
+    // The ONE write endpoint — token-gated (see handlePostTask). Every other
+    // non-GET is rejected.
+    if (req.method === 'POST' && url.pathname === '/api/tasks') { handlePostTask(req, res); return; }
+    if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
+
+    // The dashboard page — a single self-contained dark view. The per-launch
+    // write token is injected here so only the locally-served page holds it.
     if (url.pathname === '/' || url.pathname === '/index.html') {
-      const body = Buffer.from(WORKBENCH_DASHBOARD_HTML, 'utf8');
+      const page = WORKBENCH_DASHBOARD_HTML.replace('__WORKBENCH_TOKEN__', () => opts.token ?? '');
+      const body = Buffer.from(page, 'utf8');
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Content-Length': body.length });
       res.end(body);
       return;
     }
 
     if (url.pathname === '/api/health') {
-      sendJson(res, 200, { ok: true, service: 'aiden-workbench-bridge', readOnly: true });
+      // readOnly unless BOTH a write token and an enqueuer are wired.
+      const writeEnabled = Boolean(opts.token && opts.enqueue);
+      sendJson(res, 200, { ok: true, service: 'aiden-workbench-bridge', readOnly: !writeEnabled });
       return;
     }
 
@@ -227,6 +276,49 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     req.on('close', stop);
     req.on('error', stop);
     res.on('error', stop);
+  }
+
+  // ── the one write path: POST /api/tasks (token-gated) ──────────────────────
+  //
+  // Security posture (defense in depth):
+  //   1. A per-launch token MUST match — no token, no write (closes the "any
+  //      local process / any website can command Aiden" hole).
+  //   2. The Origin (when the browser sends one) must be this dashboard's own —
+  //      a cross-site page can't forge a same-origin write.
+  //   3. The task is only ENQUEUED onto the daemon's safe job path; the bridge
+  //      never runs the agent, so approvals/safe-mode are enforced downstream.
+  function handlePostTask(req: http.IncomingMessage, res: http.ServerResponse): void {
+    // (1) token gate.
+    if (!opts.token) { sendJson(res, 503, { error: 'write path not enabled' }); return; }
+    const raw = req.headers['x-workbench-token'];
+    const hdr = Array.isArray(raw) ? raw[0] : raw;
+    const bearer = /^Bearer\s+(\S+)/i.exec(String(req.headers['authorization'] ?? ''));
+    const provided = hdr ?? (bearer ? bearer[1] : '');
+    if (provided !== opts.token) { sendJson(res, 401, { error: 'unauthorized — missing or bad workbench token' }); return; }
+
+    // (2) reject cross-origin / non-loopback (CSRF defense).
+    const origin = String(req.headers['origin'] ?? '');
+    if (origin && !/^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin)) {
+      sendJson(res, 403, { error: 'cross-origin write refused' }); return;
+    }
+    const hostHdr = String(req.headers['host'] ?? '');
+    if (hostHdr && !/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(hostHdr)) {
+      sendJson(res, 403, { error: 'non-loopback host refused' }); return;
+    }
+
+    readJsonBody(req, 64 * 1024).then((body) => {
+      const message = typeof body?.message === 'string' ? body.message.trim() : '';
+      if (!message) { sendJson(res, 400, { error: 'body requires a non-empty "message"' }); return; }
+      if (!opts.enqueue) { sendJson(res, 503, { error: 'task execution unavailable (daemon not wired)' }); return; }
+      const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;
+      try {
+        const result = opts.enqueue.enqueue({ message, sessionId });
+        sendJson(res, 202, { accepted: result.accepted, triggerEventId: result.triggerEventId, duplicate: result.duplicate ?? false });
+      } catch (e) {
+        log(`enqueue failed: ${(e as Error).message}`);
+        sendJson(res, 500, { error: 'enqueue failed' });
+      }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 
   return new Promise<WorkbenchBridge>((resolve, reject) => {

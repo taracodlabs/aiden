@@ -251,3 +251,79 @@ describe('Workbench dashboard shell + feed', () => {
     expect(JSON.parse(body)).toEqual([]);
   });
 });
+
+// ── The write path — token-gated POST /api/tasks ─────────────────────────────
+
+function httpPost(port: number, path: string, body: unknown, headers: Record<string, string> = {}): Promise<{ status: number; body: string }> {
+  return new Promise((resolve) => {
+    const data = JSON.stringify(body);
+    const req = http.request(
+      { host: '127.0.0.1', port, path, method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data), ...headers } },
+      (res) => { let b = ''; res.setEncoding('utf8'); res.on('data', (c) => (b += c)); res.on('end', () => resolve({ status: res.statusCode ?? 0, body: b })); },
+    );
+    req.write(data); req.end();
+  });
+}
+
+describe('Workbench write path — token-gated POST /api/tasks', () => {
+  const TOKEN = 'secret-token-abc123';
+  function withWrite(sent: Array<{ message: string; sessionId?: string }>) {
+    const enqueue = { enqueue: (t: { message: string; sessionId?: string }) => { sent.push(t); return { accepted: true, triggerEventId: 7 }; } };
+    return startWorkbenchBridge({ reader: runStore, enqueue, token: TOKEN, port: 0, pollMs: 30 });
+  }
+
+  it('★ rejects a write with NO token (401); enqueue NOT called', async () => {
+    const sent: Array<{ message: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'do a thing' });
+    expect(r.status).toBe(401);
+    expect(sent).toHaveLength(0);
+    await b.close();
+  });
+
+  it('rejects a write with a WRONG token (401)', async () => {
+    const sent: Array<{ message: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'x' }, { 'x-workbench-token': 'nope' });
+    expect(r.status).toBe(401);
+    expect(sent).toHaveLength(0);
+    await b.close();
+  });
+
+  it('★ WITH the token, enqueues the task onto the job path (202)', async () => {
+    const sent: Array<{ message: string; sessionId?: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'read the readme' }, { 'x-workbench-token': TOKEN });
+    expect(r.status).toBe(202);
+    expect(JSON.parse(r.body)).toMatchObject({ accepted: true, triggerEventId: 7 });
+    expect(sent).toEqual([{ message: 'read the readme', sessionId: undefined }]);
+    await b.close();
+  });
+
+  it('rejects a cross-origin write even WITH the token (403)', async () => {
+    const sent: Array<{ message: string }> = []; const b = await withWrite(sent);
+    const r = await httpPost(b.port, '/api/tasks', { message: 'x' }, { 'x-workbench-token': TOKEN, Origin: 'http://evil.example.com' });
+    expect(r.status).toBe(403);
+    expect(sent).toHaveLength(0);
+    await b.close();
+  });
+
+  it('write is DISABLED when no token is configured (503)', async () => {
+    const r = await httpPost(bridge.port, '/api/tasks', { message: 'x' }, { 'x-workbench-token': 'anything' });
+    expect(r.status).toBe(503);                              // beforeEach bridge has no token
+  });
+
+  it('the token is injected into the served page (placeholder replaced)', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, port: 0 });
+    const { body } = await httpGet(b.port, '/');
+    expect(body).toContain("window.__WB_TOKEN__ = '" + TOKEN + "'");
+    expect(body).not.toContain('__WORKBENCH_TOKEN__');       // placeholder gone
+    await b.close();
+  });
+
+  it('the page has the chat composer, posts to /api/tasks, and surfaces auto-denial', async () => {
+    const { body } = await httpGet(bridge.port, '/');
+    expect(body).toContain('id="composer"');
+    expect(body).toContain("fetch('/api/tasks'");
+    expect(body).toContain('x-workbench-token');
+    expect(body).toContain('auto-denied');                   // clear "needs approval — auto-denied" surfacing
+  });
+});

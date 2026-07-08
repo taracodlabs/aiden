@@ -470,19 +470,39 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { startWorkbenchBridge } = await import('../../core/v4/workbench/bridgeServer');
       const { openBrowser }          = await import('../../core/v4/workbench/openBrowser');
       const { createSessionLister }  = await import('../../core/v4/workbench/sessionList');
+      const { createTriggerBus }     = await import('../../core/v4/daemon/triggerBus');
+      const { randomBytes, randomUUID } = await import('node:crypto');
       const paths    = resolveAidenPaths();
       const dbPath   = daemonDbPath(paths.root);
-      const runStore = createRunStore({ db: openDaemonDb(dbPath) });
+      const db       = openDaemonDb(dbPath);
+      const runStore = createRunStore({ db });
       const sessions = createSessionLister(new SessionStore(paths.sessionsDb));
+      // WRITE path: a per-launch token gates it, and the task is only ENQUEUED
+      // onto the daemon's safe job path (manual trigger → dispatcher runs it
+      // under the default safe-only policy: risky/mutating tools auto-denied).
+      const triggerBus = createTriggerBus({ db });
+      const token = randomBytes(24).toString('hex');
+      const enqueue = {
+        enqueue(task: { message: string; sessionId?: string }): { accepted: boolean; triggerEventId?: number; duplicate?: boolean } {
+          const r = triggerBus.insert({
+            source:         'manual',
+            sourceKey:      'workbench-web',
+            idempotencyKey: randomUUID(),
+            payload:        { body: { prompt: task.message, source: 'workbench-web' }, sessionId: task.sessionId },
+          });
+          return { accepted: true, triggerEventId: r.id, duplicate: !r.inserted };
+        },
+      };
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
-      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, port });
+      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, enqueue, token, port });
       const dashUrl  = `http://${bridge.host}:${bridge.port}/`;
+      const daemonUp = process.env.AIDEN_DAEMON === '1';
       process.stdout.write(
-        `\n  Aiden Workbench — live dashboard (read-only)\n` +
+        `\n  Aiden Workbench — live dashboard\n` +
         `    open:   ${dashUrl}\n` +
-        `    feed:   GET /api/events                     (SSE, all recent activity)\n` +
-        `    scoped: GET /api/sessions/<id>/events  |  /api/runs/<id>/events\n` +
-        `    health: GET /api/health\n` +
+        `    chat:   enabled (local token — only this browser can send tasks)\n` +
+        `    tasks:  run under safe-mode; risky actions are auto-denied from web\n` +
+        (daemonUp ? '' : `    note:   start the daemon (AIDEN_DAEMON=1) for sent tasks to execute\n`) +
         `    store:  ${dbPath}\n` +
         `  Ctrl+C to stop.\n\n`,
       );
