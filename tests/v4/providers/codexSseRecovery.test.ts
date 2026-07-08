@@ -213,3 +213,46 @@ describe('Phase 21 #6d — Codex SSE recovery', () => {
     expect(warnings).toContain('response.unknown.future_event');
   });
 });
+
+// ── Bug B — a stream failure must say WHY, never bare/repeated "failed" ────────
+describe('Codex stream failure surfaces the REAL reason', () => {
+  const callIt = async () => {
+    let msg = '';
+    try {
+      await adapter().call({ messages: [{ role: 'user', content: 'hi' }], tools: [] });
+    } catch (e) { msg = (e as Error).message; }
+    return msg;
+  };
+
+  it('reads response.error.message (the real cause), not the useless status word', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      sse([
+        { type: 'response.created', response: { status: 'in_progress', output: [] } },
+        { type: 'response.failed', response: { status: 'failed', error: { code: 'rate_limit_exceeded', message: 'Rate limit reached for gpt-5' } } },
+      ]),
+    ) as never;
+    const msg = await callIt();
+    expect(msg).toContain('Rate limit reached for gpt-5');
+    expect(msg).toContain('rate_limit_exceeded');      // code included too
+  });
+
+  it('never emits a bare/echoed "failed" when only the status word is present', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      sse([{ type: 'response.failed', response: { status: 'failed' } }]),   // no error object
+    ) as never;
+    const msg = await callIt();
+    expect(msg).toContain('Codex stream reported failure:');
+    expect(msg).not.toMatch(/failure:\s*failed\s*$/i);   // not just the bare status word
+    expect(msg).not.toMatch(/failed:\s*failed/i);        // never the chant
+    expect(msg).toMatch(/status=failed/);                // honest: surfaces the actual shape
+  });
+
+  it('collapses an accidental self-chant to the single real token', async () => {
+    globalThis.fetch = vi.fn(async () =>
+      sse([{ type: 'response.failed', response: { status: 'failed', error: { message: 'timeout: timeout' } } }]),
+    ) as never;
+    const msg = await callIt();
+    expect(msg).toContain('timeout');
+    expect(msg).not.toMatch(/timeout:\s*timeout/i);      // collapsed, not parroted
+  });
+});

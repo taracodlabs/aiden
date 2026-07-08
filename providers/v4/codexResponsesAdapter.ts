@@ -498,11 +498,14 @@ function decodeWireResponse(
 ): ProviderCallOutput {
   const status = wire.status ?? 'completed';
   if (status === 'failed') {
+    // Same honesty as the streaming path — surface the real reason
+    // (wire.error.message/code), not a bare "status=failed". Reason via `raw`
+    // so composeMessage appends it once (no doubling).
     throw new ProviderError(
-      `Provider ${providerName} reported status=failed`,
+      `Provider ${providerName} reported failure`,
       providerName,
       undefined,
-      wire,
+      extractSseFailureReason({ response: wire }),
       false,
     );
   }
@@ -651,8 +654,11 @@ async function aggregateSseEvents(reply: Response): Promise<WireResponseShape> {
   }
 
   if (state.failed) {
+    // The reason is passed as `raw` (not interpolated into the summary too):
+    // composeMessage appends it ONCE → "...failure: <reason>". Passing it in
+    // both places is what produced the doubled "failure: failed: failed".
     throw new ProviderError(
-      `Codex stream reported failure: ${state.failed}`,
+      'Codex stream reported failure',
       'codex_responses',
       undefined,
       state.failed,
@@ -706,6 +712,41 @@ async function aggregateSseEvents(reply: Response): Promise<WireResponseShape> {
   // (empty output → caller sees content='', finishReason='stop' or
   // 'length' depending on status).
   return state.finalResponse ?? { output: [] };
+}
+
+/**
+ * Pull the REAL failure reason from a Codex `response.failed` / error event.
+ * The Responses API carries the cause at `response.error.{message,code}` — a
+ * bare top-level `error` or a `response.status` of "failed" is NOT a reason.
+ * We dig the actual pockets in priority order, collapse an accidental self-chant
+ * ("failed: failed" → "failed"), reject useless non-reasons, and NEVER return a
+ * bare "failed": if no real reason exists we surface the error shape or status,
+ * so the message always says WHY (Phase 6 honesty: an error explains itself).
+ */
+function extractSseFailureReason(event: any): string {
+  const err = (event && (event.response?.error ?? event.error)) || null;
+  const clean = (v: unknown): string | null => {
+    if (typeof v !== 'string') return null;
+    let s = v.trim();
+    const m = s.match(/^(.+?):\s*\1$/i);            // collapse "failed: failed" → "failed"
+    if (m) s = m[1].trim();
+    return s && !/^(failed|error|unknown)$/i.test(s) ? s : null;   // reject useless non-reasons
+  };
+  const message = clean(err?.message) ?? clean(event?.message);
+  const code    = clean(err?.code)    ?? clean(event?.code);
+  if (message) return code && code !== message ? `${message} (${code})` : message;
+  if (code) return code;
+  // No real reason in the usual pockets — never chant "failed"; surface the shape.
+  const status = typeof event?.response?.status === 'string' ? event.response.status : undefined;
+  try {
+    const blob = JSON.stringify(err ?? event.response ?? event);
+    if (blob && blob !== '{}' && blob !== 'null' && blob !== '""') {
+      return `${status ? `status=${status}; ` : ''}${blob.slice(0, 300)}`;
+    }
+  } catch { /* non-serialisable — fall through */ }
+  return status
+    ? `status=${status} (no error detail in the stream event)`
+    : 'unknown stream error (no detail in the event)';
 }
 
 function handleSseEvent(
@@ -764,11 +805,9 @@ function handleSseEvent(
 
     case 'response.failed':
     case 'response.error': {
-      const msg =
-        (event.error && typeof event.error.message === 'string' && event.error.message)
-        || (event.response && typeof event.response.status === 'string' && event.response.status)
-        || 'unknown';
-      state.failed = String(msg);
+      // Read the reason from the RIGHT pocket (response.error.message/code),
+      // never the useless status word — see extractSseFailureReason.
+      state.failed = extractSseFailureReason(event);
       return;
     }
 
