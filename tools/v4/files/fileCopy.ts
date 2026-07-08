@@ -17,7 +17,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { isProtectedPath } from '../utils/paths';
+import { isProtectedPath, protectedPathMessage } from '../utils/paths';
 import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 export const fileCopyTool: ToolHandler = {
@@ -76,7 +76,7 @@ export const fileCopyTool: ToolHandler = {
       return { success: false, error: 'Both from and to required' };
     }
     if (isProtectedPath(fromRaw) || isProtectedPath(toRaw)) {
-      return { success: false, error: 'Access denied: protected path' };
+      return { success: false, error: protectedPathMessage(isProtectedPath(fromRaw) ? fromRaw : toRaw) };
     }
     // v4.4 Phase 2 — sandbox preflight (source = read, dest = write).
     const srcPolicy = isPathAllowed(fromRaw, 'read', ctx.cwd);
