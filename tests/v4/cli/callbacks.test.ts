@@ -3,6 +3,7 @@ import { Writable } from 'node:stream';
 import { CliCallbacks, type PromptApi } from '../../../cli/v4/callbacks';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+import { ApprovalEngine } from '../../../moat/approvalEngine';
 
 function stripAnsi(s: string) {
   // eslint-disable-next-line no-control-regex
@@ -90,7 +91,7 @@ describe('CliCallbacks.promptApproval', () => {
     expect(d).toBe('allow_session');
   });
 
-  it('fail-closes when prompt throws (Ctrl+C)', async () => {
+  it('reports an interrupt (Ctrl+C) as "interrupted", not a fabricated Deny', async () => {
     const { display } = makeDisplay();
     const throwing: PromptApi = {
       async select() {
@@ -109,7 +110,51 @@ describe('CliCallbacks.promptApproval', () => {
       category: 'execute',
       args: {},
     });
-    expect(d).toBe('deny');
+    // Still fail-closed (checkApproval treats 'interrupted' like 'deny' — the
+    // tool does not run), but the outcome is honest: the user chose nothing.
+    expect(d).toBe('interrupted');
+  });
+});
+
+describe('approval reporting distinguishes an interrupt from a user Deny (fix/abandoned-outcome)', () => {
+  const REQ = { toolName: 'shell_exec', category: 'execute' as const, args: { command: 'nmap --script nse-scanner host' } };
+
+  // A prompt that REJECTS mid-question — the turn ended (Ctrl+C) before the user
+  // answered. This is the "interrupted while pending" case, NOT a user Deny.
+  const interrupted: PromptApi = {
+    async select() { throw new Error('SIGINT'); },
+    async confirm() { throw new Error('SIGINT'); },
+    async input()  { throw new Error('SIGINT'); },
+  };
+  // A prompt where the user actually chose Deny.
+  const userDenies: PromptApi = {
+    async select() { return 'deny'; },
+    async confirm() { return false; },
+    async input()  { return ''; },
+  };
+
+  function engineWith(prompt: PromptApi): ApprovalEngine {
+    const { display } = makeDisplay();
+    const cb = new CliCallbacks({ display, promptModule: prompt });
+    return new ApprovalEngine('manual', { promptUser: cb.promptApproval });
+  }
+
+  it('an interrupted-while-pending prompt is fail-closed but does NOT report "you declined"', async () => {
+    const engine = engineWith(interrupted);
+    const allowed = await engine.checkApproval({ ...REQ });
+    expect(allowed).toBe(false);                                   // fail-closed: the tool still does not run
+    const why = engine.explainDenial({ ...REQ });
+    // THE SYMPTOM: pre-fix this reads "you declined it at the approval prompt"
+    // for an interrupt the user never made.
+    expect(why).not.toContain('you declined it at the approval prompt');
+    expect(why).not.toContain('you declined');                    // no fabricated user action at all
+  });
+
+  it('a real user Deny DOES report "you declined" — the two outcomes must differ', async () => {
+    const engine = engineWith(userDenies);
+    const allowed = await engine.checkApproval({ ...REQ });
+    expect(allowed).toBe(false);
+    expect(engine.explainDenial({ ...REQ })).toContain('you declined it at the approval prompt');
   });
 });
 

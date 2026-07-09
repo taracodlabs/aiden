@@ -52,7 +52,11 @@ export type ApprovalDecision =
   | 'allow'
   | 'deny'
   | 'allow_session'
-  | 'allow_always';
+  | 'allow_always'
+  // The prompt was still pending when the turn ended (Ctrl+C / interrupt). This
+  // is NOT a user choice: it is fail-closed like 'deny' (the tool never runs),
+  // but it must never be reported as a decision the user made.
+  | 'interrupted';
 export type RiskTier = 'safe' | 'caution' | 'dangerous';
 export type ToolCategory =
   | 'read'
@@ -299,6 +303,14 @@ export class ApprovalEngine {
    */
   private frozen = false;
   /**
+   * The outcome of the LAST prompt this engine ran, recorded so `explainDenial`
+   * reports what actually happened instead of re-deriving and assuming the user
+   * declined. `null` when the current denial never reached a prompt (hard-block
+   * / autonomy-floor / no-prompter). Reset at the top of every `checkApproval`
+   * so it never reflects a previous request.
+   */
+  private lastPromptDecision: ApprovalDecision | null = null;
+  /**
    * v4.12.1 Pillar 2 — the installed autonomy policy. When set, the
    * mutating-path decision routes through `decideAutonomy`. Opt-in: when
    * undefined, the legacy mode logic (smart/manual/off) is unchanged.
@@ -415,9 +427,27 @@ export class ApprovalEngine {
         `Raise it with \`/mode auto\` to allow, or approve this one action when prompted.`
       );
     }
+    // Past the deterministic gates, report the RECORDED prompt outcome — never
+    // re-derive the user's intent. The interrupt path is not a user action, so
+    // it must not be narrated with "you".
+    if (this.lastPromptDecision === 'interrupted') {
+      return (
+        `the approval prompt was still open when the turn ended, so the tool never ran. ` +
+        `Start the action again when you're ready to approve it, or run \`/mode auto\` ` +
+        `to allow actions like this without a prompt.`
+      );
+    }
+    if (this.lastPromptDecision === 'deny') {
+      return (
+        `you declined it at the approval prompt. It'll ask again next time — approve ` +
+        `it then, or run \`/mode auto\` to stop being asked for actions like this.`
+      );
+    }
+    // No prompt outcome was recorded (e.g. a mode/policy denial that never
+    // prompted). Don't guess — say the reason isn't known.
     return (
-      `you declined it at the approval prompt. It'll ask again next time — approve ` +
-      `it then, or run \`/mode auto\` to stop being asked for actions like this.`
+      `it wasn't approved, so the tool didn't run — the exact reason wasn't recorded. ` +
+      `Try the action again, or run \`/mode auto\` to allow actions like this without a prompt.`
     );
   }
 
@@ -551,6 +581,11 @@ export class ApprovalEngine {
     // Read-category short-circuits below; we still fire so observers
     // see ALL approval requests (not just the ones that prompt).
     this.callbacks.onRequested?.(req);
+
+    // Clear the recorded prompt outcome for THIS request. If the denial below
+    // never reaches a prompt (hard-block / autonomy / no-prompter), it stays
+    // null and explainDenial reports from the deterministic gates instead.
+    this.lastPromptDecision = null;
 
     // ★ v4.12.1 Pillar 2 — HARD-BLOCK FLOOR. Catastrophic, no-recovery ops
     // (wipe root/home, mkfs, dd-to-device, fork bomb, shutdown, kill-all,
@@ -699,9 +734,16 @@ export class ApprovalEngine {
       reason:    req.reason,
     });
     const decision = await this.callbacks.promptUser(req);
+    // Record the ACTUAL prompt outcome so explainDenial reports it verbatim
+    // rather than assuming the user declined.
+    this.lastPromptDecision = decision;
     this.callbacks.onDecision?.(req, decision);
 
     if (decision === 'deny') return false;
+    // An interrupt is fail-closed exactly like a deny (the tool does not run),
+    // but it is NOT a user decision — kept distinct so it is never narrated as
+    // "you declined".
+    if (decision === 'interrupted') return false;
     if (decision === 'allow') return true;
     // v4.14 UX (Bug 2) — a blanket grant (session or always) is recorded ONLY
     // for safe classes. If the user picks Session/Always on a destructive /

@@ -1912,7 +1912,7 @@ export async function buildAgentRuntime(
           kind:      tags.kind,
           name:      'approval_decision',
           sessionId: replParentRunRef.sessionId ?? null,
-          status:    decision === 'deny' ? 'denied' : 'allowed',
+          status:    decision === 'deny' ? 'denied' : decision === 'interrupted' ? 'interrupted' : 'allowed',
           summary:   `${req.toolName} → ${decision} (${req.riskTier ?? 'caution'})`,
           payload: {
             toolName: req.toolName,

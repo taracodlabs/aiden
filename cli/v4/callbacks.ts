@@ -540,8 +540,10 @@ export class CliCallbacks {
         choices: decisionChoicesFor(req),
       });
     } catch {
-      // User hit Ctrl+C or otherwise cancelled — fail closed.
-      return 'deny';
+      // The prompt was interrupted (Ctrl+C / the turn ended) before the user
+      // answered. Fail closed — the tool does NOT run — but report it as an
+      // interrupt, never as a Deny the user never chose.
+      return 'interrupted';
     }
     return choice as ApprovalDecision;
   };
