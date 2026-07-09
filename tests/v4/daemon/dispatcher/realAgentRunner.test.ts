@@ -13,6 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../../core/v4/daemon/runStore';
+import { createTaskStore } from '../../../../core/v4/daemon/taskStore';
 import {
   createRealAgentRunner,
 } from '../../../../core/v4/daemon/dispatcher/realAgentRunner';
@@ -251,5 +252,34 @@ describe('createRealAgentRunner — failure paths', () => {
     expect(result.error).toMatch(/cannot construct agent/);
     const events = runStore.listEvents(result.runId);
     expect(events.some((e) => e.name === 'dispatcher:builder_failed')).toBe(true);
+  });
+
+  it('a zero-iteration turn (turnCount 0) is NOT reported as verified-completed', async () => {
+    // The agent returned finishReason 'stop' but ran ZERO iterations — no
+    // provider call, empty finalContent. Reporting that as a clean, verified
+    // completion confirms the shape of a turn that never happened; it must fail.
+    const builder: AgentBuilder = () =>
+      stubAgent({ finishReason: 'stop', turnCount: 0 } as unknown as AidenAgentResult);
+    const taskStore = createTaskStore({ db });
+    const runner = createRealAgentRunner({
+      db, runStore, agentBuilder: builder, persistedDefault: PERSISTED, taskStore,
+    });
+    const result = await runner.invoke(mkInput());
+
+    // Honest terminal — not a clean stop.
+    expect(result.finishReason).toBe('error');
+    expect(result.error).toMatch(/no_turn/);
+    expect(runStore.get(result.runId)?.status).toBe('failed');
+
+    const events = runStore.listEvents(result.runId);
+    const completed = JSON.parse(events.find((e) => e.name === 'dispatcher:completed')!.payload);
+    expect(completed.finishReason).toBe('error');
+
+    // The verify verdict must NOT pass — never verified-completed for a no-op turn.
+    const verified = events.find((e) => e.name === 'artifact_verified');
+    expect(verified).toBeTruthy();
+    const v = JSON.parse(verified!.payload);
+    expect(v.verified).toBe(false);
+    expect(v.verdict).not.toBe('completed');
   });
 });

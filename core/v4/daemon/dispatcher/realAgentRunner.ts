@@ -425,7 +425,16 @@ export function createRealAgentRunner(
         now:          now(),
       });
 
-      const finishReason = pickFinishReason(result, invocationError, perTurnWatcher.hit());
+      let finishReason = pickFinishReason(result, invocationError, perTurnWatcher.hit());
+      // A turn that ran ZERO iterations never entered the loop — no provider call
+      // was made, finalContent is ''. It must NOT be reported as a clean
+      // finish=stop (which computeTaskFinalization would then verify as
+      // `completed`). Confirming the shape of a turn that never happened is the
+      // exact failure this product exists to prevent, so surface it honestly.
+      if (finishReason === 'stop' && result?.turnCount === 0) {
+        finishReason = 'error';
+        invocationError = invocationError ?? 'no_turn: the agent loop ran zero iterations — no provider call was made';
+      }
       opts.runStore.emitEventRich({
         runId,
         category:  'dispatcher',

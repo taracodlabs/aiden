@@ -588,7 +588,14 @@ export class AidenAgent {
     this.toolExecutor             = opts.toolExecutor;
     this.tools                    = opts.tools;
     this.turnStateFactory         = opts.turnStateFactory;
-    this.maxTurns                 = opts.maxTurns ?? DEFAULT_MAX_TURNS;
+    // Iterations get their own field, one meaning. A maxTurns of 0 (or unset /
+    // negative) must NOT mean "run zero iterations" — it means "use the sane
+    // default" (matches chatSession's `agent.max_turns`). Sentinel-0 is the
+    // UNLIMITED signal for the token cap; it must never silently collapse the
+    // conversation loop to zero turns (no provider call, empty finalContent).
+    this.maxTurns                 = (typeof opts.maxTurns === 'number' && opts.maxTurns > 0)
+      ? opts.maxTurns
+      : DEFAULT_MAX_TURNS;
     this.sessionTokenCap          = opts.sessionTokenCap;
     this.fallback                 = opts.fallback;
     this.onToolCall               = opts.onToolCall;
