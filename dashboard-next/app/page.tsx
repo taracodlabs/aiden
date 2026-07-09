@@ -114,6 +114,7 @@ const PROVIDER_INFO: Record<string, {
   groq:       { label: 'Groq',       color: '#f55036', freeUrl: 'https://console.groq.com',                   defaultModel: 'llama-3.3-70b-versatile',           models: ['llama-3.3-70b-versatile', 'llama-3.1-70b-versatile', 'mixtral-8x7b-32768', 'gemma2-9b-it'] },
   gemini:     { label: 'Gemini',     color: '#4285f4', freeUrl: 'https://aistudio.google.com/app/apikey',     defaultModel: 'gemini-1.5-flash',                  models: ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash-exp'] },
   openrouter: { label: 'OpenRouter', color: '#7c3aed', freeUrl: 'https://openrouter.ai/keys',                 defaultModel: 'meta-llama/llama-3.3-70b-instruct', models: ['meta-llama/llama-3.3-70b-instruct', 'google/gemini-flash-1.5', 'mistralai/mistral-7b-instruct:free'] },
+  requesty:   { label: 'Requesty',   color: '#2dd4bf', freeUrl: 'https://app.requesty.ai/api-keys',           defaultModel: 'openai/gpt-4o-mini',                models: ['openai/gpt-4o-mini', 'openai/gpt-4o', 'anthropic/claude-sonnet-4-5'] },
   cerebras:   { label: 'Cerebras',   color: '#059669', freeUrl: 'https://cloud.cerebras.ai',                  defaultModel: 'llama3.1-8b',                       models: ['llama3.1-8b', 'llama3.3-70b'] },
   nvidia:     { label: 'NVIDIA NIM', color: '#76b900', freeUrl: 'https://build.nvidia.com/explore/discover',  defaultModel: 'meta/llama-3.3-70b-instruct',       models: ['meta/llama-3.3-70b-instruct', 'meta/llama-3.1-405b-instruct'] },
 }

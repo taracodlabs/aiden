@@ -448,6 +448,7 @@ export async function streamGeminiResponse(
 const OPENAI_COMPAT_ENDPOINTS: Record<string, string> = {
   groq:       'https://api.groq.com/openai/v1/chat/completions',
   openrouter: 'https://openrouter.ai/api/v1/chat/completions',
+  requesty:   'https://router.requesty.ai/v1/chat/completions',
   cerebras:   'https://api.cerebras.ai/v1/chat/completions',
   nvidia:     'https://integrate.api.nvidia.com/v1/chat/completions',
   github:     'https://models.inference.ai.azure.com/v1/chat/completions',
@@ -3174,7 +3175,7 @@ export async function callLLM(
       return extractChatMessageContent(d?.choices?.[0]?.message?.content)
 
     } else {
-      // OpenAI-compatible: groq, openrouter, cerebras, nvidia, github
+      // OpenAI-compatible: groq, openrouter, requesty, cerebras, nvidia, github
       const url     = OPENAI_COMPAT_ENDPOINTS[providerName] || OPENAI_COMPAT_ENDPOINTS.groq
       const headers = buildHeaders(providerName, apiKey)
       const r = await fetch(url, {

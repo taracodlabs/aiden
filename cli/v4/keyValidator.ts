@@ -97,6 +97,14 @@ function buildRequest(
         method: 'GET',
         headers: { Authorization: `Bearer ${apiKey}` },
       };
+    case 'requesty':
+      // Requesty has no /auth/key endpoint — validate via the generic
+      // OpenAI-compatible /models GET (like openai/groq above).
+      return {
+        url: 'https://router.requesty.ai/v1/models',
+        method: 'GET',
+        headers: { Authorization: `Bearer ${apiKey}` },
+      };
     case 'together':
       return {
         url: 'https://api.together.xyz/v1/models',
