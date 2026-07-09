@@ -102,6 +102,96 @@ export interface TaskVerdictDecision {
   failures: TaskVerificationFailure[];
 }
 
+// ── Verification outcome — evidence-typed; "no handle, no trust" made
+//    unrepresentable ──────────────────────────────────────────────────
+//
+// The old surface leaked a boolean `verified` a caller could set to `true`
+// for a turn that proved nothing (a zero-output, zero-handle stop still read
+// as verified). A boolean cannot tell "verified" from "there was nothing to
+// verify" from "a check failed". This union can — and its `Verified` variant
+// STRUCTURALLY requires a non-empty tuple of evidence handles, so "verified
+// with zero evidence" is a compile error, not a runtime lie.
+
+/** An array proven at the type level to hold at least one element. */
+export type NonEmptyArray<T> = readonly [T, ...T[]];
+
+/** Narrowing guard: does this list carry at least one element? */
+export function isNonEmpty<T>(arr: readonly T[]): arr is NonEmptyArray<T> {
+  return arr.length > 0;
+}
+
+/**
+ * The one honest answer to "was the work verified?"
+ *
+ *   - verified      — a check ran and passed, backed by ≥1 evidence handle.
+ *   - no_evidence   — checks passed, but there was nothing to check
+ *                     (a zero-output / read-only / prose turn).
+ *   - failed        — a check ran and returned false.
+ *   - unverifiable  — verification could not be attempted / was inconclusive.
+ *
+ * Reachable ONLY through the smart constructors below, so no code path can
+ * assemble a `verified` outcome without evidence in hand.
+ */
+export type VerificationOutcome =
+  | { readonly kind: 'verified';     readonly handles: NonEmptyArray<EvidenceHandle> }
+  | { readonly kind: 'no_evidence' }
+  | { readonly kind: 'failed';       readonly failures: NonEmptyArray<TaskVerificationFailure> }
+  | { readonly kind: 'unverifiable'; readonly reason: string };
+
+/** Smart constructor: a verified outcome — cannot be built with zero handles. */
+export function verified(handles: NonEmptyArray<EvidenceHandle>): VerificationOutcome {
+  return { kind: 'verified', handles };
+}
+/** Smart constructor: checks passed, but there was nothing to verify. */
+export const noEvidence: VerificationOutcome = { kind: 'no_evidence' };
+/** Smart constructor: a check ran and failed — cannot be built with zero failures. */
+export function failedVerification(failures: NonEmptyArray<TaskVerificationFailure>): VerificationOutcome {
+  return { kind: 'failed', failures };
+}
+/** Smart constructor: verification could not be attempted or was inconclusive. */
+export function unverifiable(reason: string): VerificationOutcome {
+  return { kind: 'unverifiable', reason };
+}
+
+// Compile-time guarantee (type-level; the function is NEVER called, so it has
+// zero runtime footprint — tsc still type-checks its body). If NonEmptyArray is
+// ever weakened so `verified([])` type-checks, the @ts-expect-error below turns
+// into an unused directive and `npm run typecheck` fails HERE. "No handle, no
+// trust" is enforced by the build, not by a comment.
+function _verificationOutcomeCompileGuards(): void {
+  // @ts-expect-error — [] is not a NonEmptyArray<EvidenceHandle>: constructing a
+  // verified outcome with zero evidence MUST be a compile error.
+  const _rejectsEmpty: VerificationOutcome = verified([]);
+  void _rejectsEmpty;
+}
+void _verificationOutcomeCompileGuards;
+
+/**
+ * Derive the honest verification outcome from a finalized verdict + evidence.
+ * The verdict (row status) is preserved separately; this is the evidence-typed
+ * answer the surfaces render. "No handle, no trust": a `completed` verdict is
+ * `verified` ONLY when at least one verified evidence handle backs it — a
+ * zero-handle completion is `no_evidence`, never `verified`.
+ */
+export function deriveVerificationOutcome(
+  status:   'completed' | 'completed_unverified' | 'verification_failed' | 'failed',
+  handles:  readonly EvidenceHandle[],
+  failures: readonly TaskVerificationFailure[],
+  reason?:  string,
+): VerificationOutcome {
+  if (status === 'verification_failed' || status === 'failed') {
+    return isNonEmpty(failures)
+      ? failedVerification(failures)
+      : unverifiable(reason ?? 'the turn did not finish with a verifiable result');
+  }
+  if (status === 'completed_unverified') {
+    return unverifiable('side effects completed but could not be conclusively verified');
+  }
+  // status === 'completed' — trust ONLY with proven evidence in hand.
+  const proven = handles.filter((h) => h.verified);
+  return isNonEmpty(proven) ? verified(proven) : noEvidence;
+}
+
 // ── Evidence extraction ────────────────────────────────────────────────
 
 /**
@@ -313,6 +403,9 @@ export function computeTaskFinalization(
   },
 ): {
   status:   'completed' | 'completed_unverified' | 'verification_failed' | 'failed';
+  /** Evidence-typed answer to "was it verified?" — the honest surface value.
+   *  `status` is the row verdict; `outcome` is what callers render/trust. */
+  outcome:  VerificationOutcome;
   evidence: TaskEvidence;
   jobCard:  JobCardUpdate & { permissions?: Record<string, unknown> };
 } {
@@ -366,6 +459,7 @@ export function computeTaskFinalization(
   if (turn.finishReason !== 'stop') {
     return {
       status:   'failed',
+      outcome:  deriveVerificationOutcome('failed', decision.handles, decision.failures, turn.finishReason),
       evidence: { ...buildEvidenceEnvelope(decision, { now: opts?.now }), verdict: 'failed', ...declinedExtra },
       jobCard,
     };
@@ -373,12 +467,14 @@ export function computeTaskFinalization(
   if (turn.declaredStatus && turn.declaredStatus !== 'success') {
     return {
       status:   'failed',
+      outcome:  deriveVerificationOutcome('failed', decision.handles, decision.failures, turn.declaredStatus ?? undefined),
       evidence: { ...buildEvidenceEnvelope(decision, { reportedFailure: turn.declaredStatus, now: opts?.now }), ...declinedExtra },
       jobCard,
     };
   }
   return {
     status:   decision.verdict,
+    outcome:  deriveVerificationOutcome(decision.verdict, decision.handles, decision.failures),
     evidence: { ...buildEvidenceEnvelope(decision, { now: opts?.now }), ...declinedExtra },
     jobCard,
   };

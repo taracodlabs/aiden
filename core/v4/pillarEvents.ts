@@ -20,6 +20,7 @@
  *   cost_updated        — throttled (≤1/sec) live cost/token tick.
  */
 import { categorizeEvent } from './daemon/eventCategories';
+import type { VerificationOutcome } from './taskVerification';
 
 export interface PillarEventSink {
   /** Durable run-event store (optional — absent in tests / headless). */
@@ -57,7 +58,11 @@ export function emitPillarEvent(
 
 export function emitArtifactVerified(
   sink: PillarEventSink,
-  v: { verdict: string; verified: boolean; handles: number; taskId?: string },
+  // `outcome` replaces the old `verified: boolean` — a caller cannot casually
+  // set it to a truthy value; only the smart constructors build a `verified`
+  // outcome, and only with a non-empty evidence tuple. `verdict` (row status)
+  // and `taskId` are preserved; `handles` stays as the total-handle count.
+  v: { verdict: string; outcome: VerificationOutcome; handles: number; taskId?: string },
 ): void {
   emitPillarEvent(sink, 'artifact_verified', v);
 }

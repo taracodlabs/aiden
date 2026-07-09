@@ -180,8 +180,11 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
   function describe(ev){
     var n = ev.name || ev.kind || '';
     if (n === 'artifact_verified'){
-      var v = pget(ev,'verified');
-      return { g:v?'\\u2713':'\\u26a0', c:v?'ok':'warn', label:v?'verified':'unverified',
+      var oc = pget(ev,'outcome') || {};
+      var k = oc.kind || (pget(ev,'verified') ? 'verified' : 'unverifiable');
+      var okv = k === 'verified';
+      var lbl = k==='verified'?'verified':k==='no_evidence'?'no evidence':k==='failed'?'failed':'unverified';
+      return { g:okv?'\\u2713':'\\u26a0', c:okv?'ok':'warn', label:lbl,
                detail:'verdict: ' + (pget(ev,'verdict')||'?') + ' \\u00b7 ' + (pget(ev,'handles')||0) + ' handle(s)' };
     }
     if (n === 'tool_call_started') return { g:'\\u26a1', c:'run', label:(pget(ev,'toolName')||'tool'), detail:'running…' };

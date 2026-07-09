@@ -143,8 +143,19 @@ function routeEvent(ev: V4Event, h: TurnHandlers, state: TurnState): boolean {
       });
       return false;
     case 'artifact_verified': {
-      const ok = !!p.verified;
-      h.onActivity?.({ kind: 'verify', label: ok ? 'Verified' : 'Unverified', detail: p.verdict, status: ok ? 'ok' : 'warn' });
+      // `outcome` is the evidence-typed verdict (verified | no_evidence | failed
+      // | unverifiable). Only 'verified' is a green check — a zero-evidence turn
+      // is 'no_evidence', never verified. (`p.verified` tolerates old rows.)
+      const kind: string =
+        (p.outcome && typeof p.outcome === 'object' && p.outcome.kind) ||
+        (p.verified ? 'verified' : 'unverifiable');
+      const ok = kind === 'verified';
+      const label =
+        kind === 'verified'     ? 'Verified' :
+        kind === 'no_evidence'  ? 'No evidence' :
+        kind === 'failed'       ? 'Failed' :
+                                  'Unverified';
+      h.onActivity?.({ kind: 'verify', label, detail: p.verdict, status: ok ? 'ok' : 'warn' });
       return false;
     }
     case 'cost_updated':

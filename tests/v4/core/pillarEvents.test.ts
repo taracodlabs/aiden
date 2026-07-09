@@ -63,7 +63,7 @@ describe('emitPillarEvent — live subscriber + durable persistence', () => {
 describe('typed convenience emitters', () => {
   it('each Pillar surface emits with its name + payload', () => {
     const { s, live } = sink();
-    emitArtifactVerified(s, { verdict: 'verification_failed', verified: false, handles: 0 });
+    emitArtifactVerified(s, { verdict: 'verification_failed', outcome: { kind: 'failed', failures: [{ tool: 'file_write', reason: 'unconfirmed' }] }, handles: 0 });
     emitAutonomyChanged(s, { level: 'Partner', by: 'user' });
     emitSubagentEscalation(s, { tool: 'file_delete', reason: 'destructive' });
     emitNeedsConfirmation(s, { tool: 'channel_send', target: 'discord:c1' });

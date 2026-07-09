@@ -186,6 +186,60 @@ describe('assertNoUnansweredToolCalls — orphan cases (throws OrphanToolCallErr
   });
 });
 
+// ── order-awareness: a result answers a call ONLY if it appears AFTER it ──
+//
+// The invariant is positional: "answered by a LATER tool message". A result
+// that precedes its call, or a duplicate id whose only result is the earlier
+// one, must NOT count — an id-membership check (the pre-fix bug) accepted both
+// and let a stale result mask an unanswered call, provider-erroring next turn.
+describe('assertNoUnansweredToolCalls — order-awareness (result must follow its call)', () => {
+  it('a tool result placed BEFORE its call does not satisfy the invariant', () => {
+    expect(() => assertNoUnansweredToolCalls([
+      USER,
+      toolResult('call-1'),                              // result appears first…
+      asst('a', [{ id: 'call-1', name: 'file_write' }]), // …the CALL comes after it
+    ])).toThrow(OrphanToolCallError);
+  });
+
+  it('the SAME messages in the correct order (call then result) pass', () => {
+    // Control: proves the throw above is about ORDER, not an absent id.
+    expect(() => assertNoUnansweredToolCalls([
+      USER,
+      asst('a', [{ id: 'call-1', name: 'file_write' }]),
+      toolResult('call-1'),
+    ])).not.toThrow();
+  });
+
+  it('a duplicate tool_call_id does not resolve to a stale earlier result', () => {
+    // call#1 is answered by the result; the DUPLICATE call#2 has no result AFTER
+    // it — the earlier result is stale for it and must not count as an answer.
+    let caught: OrphanToolCallError | null = null;
+    try {
+      assertNoUnansweredToolCalls([
+        USER,
+        asst('a1', [{ id: 'dup', name: 'file_write' }]),
+        toolResult('dup'),                                 // answers the FIRST call
+        asst('a2', [{ id: 'dup', name: 'shell_exec' }]),   // duplicate id, unanswered
+      ]);
+    } catch (e) {
+      caught = e as OrphanToolCallError;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught!.orphans).toEqual([{ toolCallId: 'dup', toolName: 'shell_exec' }]);
+  });
+
+  it('a duplicate id IS satisfied when a fresh result follows the later call', () => {
+    // Both calls have a result after them → the honest, valid shape → no orphan.
+    expect(() => assertNoUnansweredToolCalls([
+      USER,
+      asst('a1', [{ id: 'dup', name: 'file_write' }]),
+      toolResult('dup'),
+      asst('a2', [{ id: 'dup', name: 'shell_exec' }]),
+      toolResult('dup'),
+    ])).not.toThrow();
+  });
+});
+
 // ── synthesizeBlockedToolResult ──────────────────────────────────────
 
 describe('synthesizeBlockedToolResult — shape contract', () => {

@@ -279,7 +279,7 @@ describe('createRealAgentRunner — failure paths', () => {
     const verified = events.find((e) => e.name === 'artifact_verified');
     expect(verified).toBeTruthy();
     const v = JSON.parse(verified!.payload);
-    expect(v.verified).toBe(false);
+    expect(v.outcome.kind).not.toBe('verified');   // evidence-typed: not a verified outcome
     expect(v.verdict).not.toBe('completed');
   });
 });

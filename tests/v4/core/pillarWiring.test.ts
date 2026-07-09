@@ -72,12 +72,17 @@ describe('autonomy_changed — fires through ApprovalEngine.setAutonomyPolicy', 
 
 // ── the emit contract chatSession + realAgentRunner rely on ───────────────
 describe('artifact_verified + cost_updated emit contract', () => {
-  it('artifact_verified carries verdict + handle count to both sinks', () => {
+  it('artifact_verified carries verdict + outcome + handle count to both sinks', () => {
     const { sink, live, durable } = captureSink();
-    emitArtifactVerified(sink, { verdict: 'completed', verified: true, handles: 2, taskId: '5' });
+    emitArtifactVerified(sink, {
+      verdict: 'completed',
+      outcome: { kind: 'verified', handles: [{ tool: 'file_write', kind: 'path', value: '/x', verified: true }] },
+      handles: 2, taskId: '5',
+    });
     for (const bag of [live, durable]) {
       const e = bag.find((x) => x.name === 'artifact_verified');
       expect(e?.payload.verdict).toBe('completed');
+      expect((e?.payload.outcome as { kind?: string })?.kind).toBe('verified');
       expect(e?.payload.handles).toBe(2);
     }
   });
@@ -95,7 +100,7 @@ describe('artifact_verified + cost_updated emit contract', () => {
       runStore: { emitEventRich: () => { throw new Error('DB down'); } },
       onEvent: () => { /* live still works */ },
     };
-    expect(() => emitArtifactVerified(throwing, { verdict: 'completed', verified: true, handles: 0 })).not.toThrow();
+    expect(() => emitArtifactVerified(throwing, { verdict: 'completed', outcome: { kind: 'no_evidence' }, handles: 0 })).not.toThrow();
     expect(() => emitCostUpdated(throwing, { inputTokens: 1, outputTokens: 1, totalTokens: 2 })).not.toThrow();
   });
 });

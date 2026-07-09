@@ -2301,7 +2301,7 @@ export class ChatSession implements ChatSessionLike {
           try {
             emitArtifactVerified(this.pillarSink(replRunId), {
               verdict:  fin.status,
-              verified: fin.status === 'completed' || fin.status === 'completed_unverified',
+              outcome:  fin.outcome,
               handles:  fin.evidence.handles?.length ?? 0,
               taskId:   replTaskId != null ? String(replTaskId) : undefined,
             });

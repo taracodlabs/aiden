@@ -492,7 +492,7 @@ export function createRealAgentRunner(
               { runStore: opts.runStore as unknown as PillarEventSink['runStore'], runId },
               {
                 verdict:  fin.status,
-                verified: fin.status === 'completed' || fin.status === 'completed_unverified',
+                outcome:  fin.outcome,
                 handles:  fin.evidence.handles?.length ?? 0,
                 taskId:   taskId ?? undefined,
               },

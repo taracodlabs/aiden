@@ -109,22 +109,32 @@ export class OrphanToolCallError extends Error {
  * — every provider adapter receives messages[] through that one funnel.
  */
 export function assertNoUnansweredToolCalls(messages: ReadonlyArray<Message>): void {
-  // Collect all tool-result ids first (single pass) so we can resolve
-  // each assistant's tool_calls in O(1) against a Set.
-  const answeredIds = new Set<string>();
-  for (const m of messages) {
-    if (m.role === 'tool') answeredIds.add(m.toolCallId);
-  }
-  // Now walk assistants and collect orphans.
+  // Index every tool RESULT by id → the message positions where it appears.
+  // A result answers a call ONLY when it appears AFTER the call in message
+  // order, so membership in a Set is not enough — we must compare POSITIONS.
+  // A result that precedes its call (or a duplicate id whose only result is the
+  // earlier one) leaves the later call UNANSWERED; the wire format rejects that
+  // on the next request ("No tool output found for function call call_<id>").
+  const resultPositions = new Map<string, number[]>();
+  messages.forEach((m, idx) => {
+    if (m.role !== 'tool') return;
+    const at = resultPositions.get(m.toolCallId);
+    if (at) at.push(idx);
+    else resultPositions.set(m.toolCallId, [idx]);
+  });
+  // Walk assistants in order; a call at index i is answered iff a matching
+  // result exists at some index > i. Orphans accumulate for a single throw.
   const orphans: Array<{ toolCallId: string; toolName: string }> = [];
-  for (const m of messages) {
-    if (m.role !== 'assistant' || !m.toolCalls) continue;
+  messages.forEach((m, idx) => {
+    if (m.role !== 'assistant' || !m.toolCalls) return;
     for (const tc of m.toolCalls) {
-      if (!answeredIds.has(tc.id)) {
+      const at = resultPositions.get(tc.id);
+      const answeredLater = at ? at.some((p) => p > idx) : false;
+      if (!answeredLater) {
         orphans.push({ toolCallId: tc.id, toolName: tc.name });
       }
     }
-  }
+  });
   if (orphans.length > 0) throw new OrphanToolCallError(orphans);
 }
 

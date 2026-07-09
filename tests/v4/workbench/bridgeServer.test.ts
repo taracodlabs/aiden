@@ -152,11 +152,12 @@ describe('Workbench bridge — ordered replay + live tail', () => {
 
   it('★ carries the artifact_verified verdict (verified/unverified proof) to the client', async () => {
     const c = sseClient(bridge.port, `/api/sessions/${SESSION}/events`);
-    const idV = emit('artifact_verified', 'artifact.verified', { verdict: 'completed', verified: true, handles: 2 });
+    const outcome = { kind: 'verified', handles: [{ tool: 'file_write', kind: 'path', value: '/x', verified: true }] };
+    const idV = emit('artifact_verified', 'artifact.verified', { verdict: 'completed', outcome, handles: 2 });
     const ev = await c.waitFor((f) => Number(f.id) === idV);
     expect(ev.event).toBe('artifact_verified');             // SSE event name = emission name
     expect(ev.data.kind).toBe('artifact.verified');
-    expect(ev.data.payload).toEqual({ verdict: 'completed', verified: true, handles: 2 });
+    expect(ev.data.payload).toEqual({ verdict: 'completed', outcome, handles: 2 });
     c.close();
   });
 
@@ -229,11 +230,11 @@ describe('Workbench dashboard shell + feed', () => {
 
   it('★ GET /api/events streams recent events as UNNAMED message frames (name is in data)', async () => {
     const c = sseClient(bridge.port, '/api/events');
-    const idV = emit('artifact_verified', 'artifact.verified', { verdict: 'completed', verified: true, handles: 1 });
+    const idV = emit('artifact_verified', 'artifact.verified', { verdict: 'completed', outcome: { kind: 'verified', handles: [{ tool: 'file_write', kind: 'path', value: '/x', verified: true }] }, handles: 1 });
     const f = await c.waitFor((x) => Number(x.id) === idV);
     expect(f.event).toBeUndefined();                        // no SSE event name → one onmessage handles all
     expect(f.data.name).toBe('artifact_verified');
-    expect(f.data.payload.verified).toBe(true);
+    expect(f.data.payload.outcome.kind).toBe('verified');
     c.close();
   });
 
