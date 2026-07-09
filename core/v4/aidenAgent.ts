@@ -1655,202 +1655,221 @@ export class AidenAgent {
         let finalPolicyDecision: RecoveryActionDecision | null = null;
         let preRecordedRecovery: RecoveryDecision | null = null;
         let attemptNo = 0;
-        for (;;) {
-          attemptNo += 1;
-          const _toolStartedAt = _perfDiag ? Date.now() : 0;
-          if (attemptNo === 1 && _preComputed) {
-            result = _preComputed;
-          } else {
-            try {
-              result = await this.toolExecutor(call);
-            } catch (err) {
-              result = {
-                id:     call.id,
-                name:   call.name,
-                result: null,
-                error:  err instanceof Error ? err.message : String(err),
-              };
+        let afterFired = false;
+        try {
+          for (;;) {
+            attemptNo += 1;
+            const _toolStartedAt = _perfDiag ? Date.now() : 0;
+            if (attemptNo === 1 && _preComputed) {
+              result = _preComputed;
+            } else {
+              try {
+                result = await this.toolExecutor(call);
+              } catch (err) {
+                result = {
+                  id:     call.id,
+                  name:   call.name,
+                  result: null,
+                  error:  err instanceof Error ? err.message : String(err),
+                };
+              }
             }
-          }
-          if (_perfDiag) {
-            const toolMs = Date.now() - _toolStartedAt;
-            const ok = result.error == null;
-            const src = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
-            process.stderr.write(
-              `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok} attempt=${attemptNo}]\n`,
-            );
-          }
-          // v4.11 Slice 1 (verifier→honesty bridge) — compute the
-          // per-tool verification ALWAYS (pure/synchronous) so the
-          // post-loop honesty footer reflects real outcomes independent
-          // of whether TCE/recovery is active.
-          try {
-            verification = verifierRegistry.resolve(call.name)(
-              call.name, call.arguments, result,
-            );
-          } catch {
-            // Defensive — a buggy verifier never breaks the agent loop.
-            verification = undefined;
-          }
-          classification = null;
-          if (turnState.isEnabled() && verification && !verification.ok) {
+            if (_perfDiag) {
+              const toolMs = Date.now() - _toolStartedAt;
+              const ok = result.error == null;
+              const src = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
+              process.stderr.write(
+                `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok} attempt=${attemptNo}]\n`,
+              );
+            }
+            // v4.11 Slice 1 (verifier→honesty bridge) — compute the
+            // per-tool verification ALWAYS (pure/synchronous) so the
+            // post-loop honesty footer reflects real outcomes independent
+            // of whether TCE/recovery is active.
             try {
-              classification = failureClassifier.classify(
-                verification, call.name, call.arguments, result,
+              verification = verifierRegistry.resolve(call.name)(
+                call.name, call.arguments, result,
               );
             } catch {
-              // Defensive — a buggy classifier never breaks the loop.
-              classification = null;
+              // Defensive — a buggy verifier never breaks the agent loop.
+              verification = undefined;
             }
+            classification = null;
+            if (turnState.isEnabled() && verification && !verification.ok) {
+              try {
+                classification = failureClassifier.classify(
+                  verification, call.name, call.arguments, result,
+                );
+              } catch {
+                // Defensive — a buggy classifier never breaks the loop.
+                classification = null;
+              }
+            }
+            // Verifier-ok / unclassified / TCE-off → this attempt is final.
+            if (!classification) break;
+            const decision = decideRecoveryAction(
+              classification.category,
+              call.name,
+              turnState.retryView(),
+              retryPolicyCfg,
+              { toolMutates: this.resolveMutates?.(call.name) ?? false },
+            );
+            finalPolicyDecision = decision;
+            // One-shot flags: repair-once is marked on FIRST sight of the
+            // class (the decision above already consulted the pre-mark
+            // state); clarify-once marks when the directive is issued.
+            if (classification.category === 'invalid_input') {
+              turnState.markRepairAttempted(`${call.name}:invalid_input`);
+            }
+            if (decision.action === 'clarify') turnState.markClarifyAdvised();
+            if (decision.action !== 'retry' && decision.action !== 'retry_with_backoff') break;
+            if (this._currentSignal?.aborted) break;
+            // Breaker feed — the superseded failed attempt counts toward
+            // the ladder's signature counters before we re-attempt.
+            const rec = turnState.recordToolCall(
+              call.name, call.arguments, verification, classification,
+            );
+            if (rec.kind === 'hint') {
+              if (rec.hintMessage) pendingRetryHints.push(rec.hintMessage);
+            } else if (rec.kind !== 'allow') {
+              // Ladder says stop (cooldown/rollback/surface) — the breaker
+              // wins over the policy. This failed attempt is final and has
+              // ALREADY been recorded; reuse the decision below.
+              preRecordedRecovery = rec;
+              break;
+            }
+            turnState.recordPolicyRetry(classification.category);
+            retryNotes.push({
+              attempt:   attemptNo,
+              category:  classification.category,
+              reason:    classification.reason,
+              backoffMs: decision.backoffMs ?? 0,
+            });
+            await sleepWithSignal(decision.backoffMs ?? 0, this._currentSignal);
+            if (this._currentSignal?.aborted) break;
           }
-          // Verifier-ok / unclassified / TCE-off → this attempt is final.
-          if (!classification) break;
-          const decision = decideRecoveryAction(
-            classification.category,
-            call.name,
-            turnState.retryView(),
-            retryPolicyCfg,
-            { toolMutates: this.resolveMutates?.(call.name) ?? false },
-          );
-          finalPolicyDecision = decision;
-          // One-shot flags: repair-once is marked on FIRST sight of the
-          // class (the decision above already consulted the pre-mark
-          // state); clarify-once marks when the directive is issued.
-          if (classification.category === 'invalid_input') {
-            turnState.markRepairAttempted(`${call.name}:invalid_input`);
-          }
-          if (decision.action === 'clarify') turnState.markClarifyAdvised();
-          if (decision.action !== 'retry' && decision.action !== 'retry_with_backoff') break;
-          if (this._currentSignal?.aborted) break;
-          // Breaker feed — the superseded failed attempt counts toward
-          // the ladder's signature counters before we re-attempt.
-          const rec = turnState.recordToolCall(
-            call.name, call.arguments, verification, classification,
-          );
-          if (rec.kind === 'hint') {
-            if (rec.hintMessage) pendingRetryHints.push(rec.hintMessage);
-          } else if (rec.kind !== 'allow') {
-            // Ladder says stop (cooldown/rollback/surface) — the breaker
-            // wins over the policy. This failed attempt is final and has
-            // ALREADY been recorded; reuse the decision below.
-            preRecordedRecovery = rec;
-            break;
-          }
-          turnState.recordPolicyRetry(classification.category);
-          retryNotes.push({
-            attempt:   attemptNo,
-            category:  classification.category,
-            reason:    classification.reason,
-            backoffMs: decision.backoffMs ?? 0,
-          });
-          await sleepWithSignal(decision.backoffMs ?? 0, this._currentSignal);
-          if (this._currentSignal?.aborted) break;
-        }
-        toolCallCount += 1;
-        if (turnState.isEnabled()) {
-          if (verification && !verification.ok && classification) {
-            // v4.6 Phase 3b — write-through to the durable failure
-            // ledger. Best-effort: a null/missing store (test agents
-            // without a daemon DB wired) silently no-ops. The
-            // signature builder is pure + cheap.
-            if (classification) {
+          toolCallCount += 1;
+          if (turnState.isEnabled()) {
+            if (verification && !verification.ok && classification) {
+              // v4.6 Phase 3b — write-through to the durable failure
+              // ledger. Best-effort: a null/missing store (test agents
+              // without a daemon DB wired) silently no-ops. The
+              // signature builder is pure + cheap.
+              if (classification) {
+                try {
+                  const store = getRecoveryStore();
+                  if (store) {
+                    const sig = buildFailureSignature({
+                      toolName: call.name,
+                      category: classification.category,
+                      args:     call.arguments,
+                    });
+                    const signatureId = store.recordFailureOccurrence({
+                      signature: sig.signature,
+                      toolName:  call.name,
+                      category:  classification.category,
+                      argsHash:  sig.argsHash,
+                    });
+                    if (signatureId > 0) {
+                      const existing = turnFailureTracker.get(sig.signature);
+                      turnFailureTracker.set(sig.signature, {
+                        signatureId,
+                        failedAttempts: (existing?.failedAttempts ?? 0) + 1,
+                      });
+                    }
+                  }
+                } catch {
+                  // Defensive — persistence failure must never break the loop.
+                }
+              }
+            } else if (verification && verification.ok) {
+              // v4.6 Phase 3b — failure → success transition detection.
+              // We don't know the failure CATEGORY for this successful
+              // call (the verifier said ok, so classify() wasn't run),
+              // but the per-turn tracker remembers every signature seen
+              // failing this turn. Walk the tracker; if any entry's
+              // signature starts with `<call.name>:`, this tool now
+              // succeeded — record a recovery and drop the entry so
+              // subsequent successes don't double-count.
               try {
                 const store = getRecoveryStore();
                 if (store) {
-                  const sig = buildFailureSignature({
-                    toolName: call.name,
-                    category: classification.category,
-                    args:     call.arguments,
-                  });
-                  const signatureId = store.recordFailureOccurrence({
-                    signature: sig.signature,
-                    toolName:  call.name,
-                    category:  classification.category,
-                    argsHash:  sig.argsHash,
-                  });
-                  if (signatureId > 0) {
-                    const existing = turnFailureTracker.get(sig.signature);
-                    turnFailureTracker.set(sig.signature, {
-                      signatureId,
-                      failedAttempts: (existing?.failedAttempts ?? 0) + 1,
+                  const matching: string[] = [];
+                  for (const sig of turnFailureTracker.keys()) {
+                    if (sig.startsWith(`${call.name}:`)) matching.push(sig);
+                  }
+                  for (const sig of matching) {
+                    const entry = turnFailureTracker.get(sig);
+                    if (!entry) continue;
+                    store.recordRecovery({
+                      signatureId:        entry.signatureId,
+                      sessionId:          (this as { sessionId?: string }).sessionId,
+                      failedAttempts:     entry.failedAttempts,
+                      successfulStrategy: 'in_turn_retry',
+                      notes:              `${call.name} succeeded after ${entry.failedAttempts} prior failure(s) this turn`,
                     });
+                    turnFailureTracker.delete(sig);
                   }
                 }
               } catch {
-                // Defensive — persistence failure must never break the loop.
+                // Defensive — recovery persistence failure must never break the loop.
               }
-            }
-          } else if (verification && verification.ok) {
-            // v4.6 Phase 3b — failure → success transition detection.
-            // We don't know the failure CATEGORY for this successful
-            // call (the verifier said ok, so classify() wasn't run),
-            // but the per-turn tracker remembers every signature seen
-            // failing this turn. Walk the tracker; if any entry's
-            // signature starts with `<call.name>:`, this tool now
-            // succeeded — record a recovery and drop the entry so
-            // subsequent successes don't double-count.
-            try {
-              const store = getRecoveryStore();
-              if (store) {
-                const matching: string[] = [];
-                for (const sig of turnFailureTracker.keys()) {
-                  if (sig.startsWith(`${call.name}:`)) matching.push(sig);
-                }
-                for (const sig of matching) {
-                  const entry = turnFailureTracker.get(sig);
-                  if (!entry) continue;
-                  store.recordRecovery({
-                    signatureId:        entry.signatureId,
-                    sessionId:          (this as { sessionId?: string }).sessionId,
-                    failedAttempts:     entry.failedAttempts,
-                    successfulStrategy: 'in_turn_retry',
-                    notes:              `${call.name} succeeded after ${entry.failedAttempts} prior failure(s) this turn`,
-                  });
-                  turnFailureTracker.delete(sig);
-                }
-              }
-            } catch {
-              // Defensive — recovery persistence failure must never break the loop.
             }
           }
+          toolCallTrace.push({
+            name:     call.name,
+            result:   result.result,
+            error:    result.error,
+            verified: this.resolveVerifiedFlag?.(result),
+            // v4.7.0 Phase 2.3 — stamp the handler's `mutates` flag
+            // at dispatch time so the post-loop honesty verifier can
+            // distinguish mutating vs read-only failures without
+            // needing a registry handle. Defaults to `false` for
+            // unknown tools (the resolver returns undefined) — read-
+            // only tools that error are surfaced via the tool-trail
+            // row already; the verifier deliberately stays quiet
+            // about them.
+            handlerMutates: this.resolveMutates?.(call.name) ?? false,
+            // v4.2 Phase 1 — verification surfaces alongside the trace
+            // entry for downstream callers (chatSession, loopTrace,
+            // future RecoveryReport). Undefined when TCE is off.
+            verification,
+            // v4.2 Phase 2 — classification surfaces alongside verification.
+            // Undefined for verifier-ok calls (classifier skips them) and
+            // when TCE is off.
+            classification: classification ?? undefined,
+            // v4.13 Gap 2 — observable retry ledger: one note per runtime
+            // re-attempt (class, reason, backoff). Undefined when the call
+            // went through on the first attempt.
+            retries: retryNotes.length > 0 ? retryNotes : undefined,
+          });
+          fullTrace.push({ name: call.name, args: call.arguments });
+          // URL ledger ingest — extracts ids from result body for next turn.
+          trackers.url.recordToolResult(call.name, result.result);
+          // skill_view result → arm the enforcement tracker if the skill
+          // declares required_tools.
+          const skillView = extractSkillViewRequiredTools(call.name, result.result);
+          if (skillView) {
+            trackers.skill.recordSkillView(skillView.skillName, skillView.requiredTools);
+          }
+          this.onToolCall?.(call, 'after', result);
+          afterFired = true;
+        } finally {
+          // Guarantee the before/after pairing: every onToolCall('before') gets
+          // exactly one 'after'. If the dispatch threw or exited before emitting
+          // the real 'after', settle the tool with an honest terminal result —
+          // never success — so the trail row stops ticking instead of hanging.
+          if (!afterFired) {
+            afterFired = true;
+            const _aborted = !!this._currentSignal?.aborted;
+            this.onToolCall?.(call, 'after', {
+              id:     call.id,
+              name:   call.name,
+              result: null,
+              error:  _aborted ? 'interrupted' : 'tool dispatch ended before completing',
+            });
+          }
         }
-        toolCallTrace.push({
-          name:     call.name,
-          result:   result.result,
-          error:    result.error,
-          verified: this.resolveVerifiedFlag?.(result),
-          // v4.7.0 Phase 2.3 — stamp the handler's `mutates` flag
-          // at dispatch time so the post-loop honesty verifier can
-          // distinguish mutating vs read-only failures without
-          // needing a registry handle. Defaults to `false` for
-          // unknown tools (the resolver returns undefined) — read-
-          // only tools that error are surfaced via the tool-trail
-          // row already; the verifier deliberately stays quiet
-          // about them.
-          handlerMutates: this.resolveMutates?.(call.name) ?? false,
-          // v4.2 Phase 1 — verification surfaces alongside the trace
-          // entry for downstream callers (chatSession, loopTrace,
-          // future RecoveryReport). Undefined when TCE is off.
-          verification,
-          // v4.2 Phase 2 — classification surfaces alongside verification.
-          // Undefined for verifier-ok calls (classifier skips them) and
-          // when TCE is off.
-          classification: classification ?? undefined,
-          // v4.13 Gap 2 — observable retry ledger: one note per runtime
-          // re-attempt (class, reason, backoff). Undefined when the call
-          // went through on the first attempt.
-          retries: retryNotes.length > 0 ? retryNotes : undefined,
-        });
-        fullTrace.push({ name: call.name, args: call.arguments });
-        // URL ledger ingest — extracts ids from result body for next turn.
-        trackers.url.recordToolResult(call.name, result.result);
-        // skill_view result → arm the enforcement tracker if the skill
-        // declares required_tools.
-        const skillView = extractSkillViewRequiredTools(call.name, result.result);
-        if (skillView) {
-          trackers.skill.recordSkillView(skillView.skillName, skillView.requiredTools);
-        }
-        this.onToolCall?.(call, 'after', result);
         // v4.13 Gap 2 — the model SEES what the runtime did: retry
         // attempts, the failure class, and the chosen recovery action
         // are appended to the tool message (observable, never silent).
