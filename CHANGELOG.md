@@ -1,3 +1,18 @@
+## v4.14.6 — 2026-07-10
+
+- **`aiden web` — a live dashboard from one command.** `aiden web` starts a read-only bridge over the run-event stream and opens a self-contained dashboard page in the browser: a sidebar of recent sessions with readable labels, a live activity feed, and a header. No build step, no framework.
+- **The React dashboard's Chat page runs on the v4 backend.** dashboard-next reads the v4 run-event stream, and the agent's written reply is routed into the chat bubble instead of being dropped.
+- **An interrupted approval prompt is no longer reported as a Deny.** When the turn is interrupted (Ctrl+C) while an approval prompt is still open, the tool does not run — but it is reported honestly: the prompt was open when the turn ended, not "you declined". A decision the user actually made still reads as such.
+- **Read-only shell commands run without a prompt.** A command proven read-only (`rg`, `grep`, `ls`, `cat`, … with no redirection, chaining, substitution, or dangerous pattern) is treated like a file read and skips the approval prompt. A search that matches nothing is a result, not a failure.
+- **Task completion is evidence-typed.** A task reaches "completed" only with verified evidence in hand; a turn that produced no verified evidence is reported as "no evidence", never "verified". Tool results are matched to their calls by message order, so a result cannot be credited to the wrong or a duplicate call id.
+- **Tool-safety defaults fail closed.** A tool that does not explicitly declare itself read-only is treated as mutating and gated by approval, and the approval gate now runs before the network (SSRF) check — an unapproved tool never touches the network first.
+- **Tool-activity rows settle.** Every tool-call start is paired with its completion, so a tool that finishes (or fails) resolves its row instead of leaving it marked running.
+- **Daemon turns run.** The per-turn iteration bound is separated from the token budget, so a daemon-dispatched turn enters the loop and produces output.
+- **Dependency audit recorded.** `docs/audits/` documents the current advisory set (seven advisories triaged, reachability assessed per advisory). No non-breaking fix is available; the blocked major bumps are written down rather than suppressed with an ignore rule.
+- **Governance.** The contributor license agreement was corrected and a relicensing policy was added.
+
+---
+
 ## v4.14.5 — 2026-07-08
 
 A reliability release — every provider call guarded, every channel send sealed, every subagent claim checked. (v4.15 is reserved for the web-dashboard release.)
