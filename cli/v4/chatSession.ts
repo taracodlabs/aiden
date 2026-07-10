@@ -95,6 +95,7 @@ import {
   readExistingDurableFactsBody,
 } from './promotionPrompt';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 import {
   enableBracketedPaste,
   disableBracketedPaste,
@@ -2294,7 +2295,16 @@ export class ChatSession implements ChatSessionLike {
               toolCallTrace:  result.toolCallTrace,
               declaredStatus,
             },
-            { approvalMode: this.opts.approvalEngine.getMode() },
+            {
+              approvalMode: this.opts.approvalEngine.getMode(),
+              // Part b — confirm a claimed written artifact is actually on disk
+              // before the verdict trusts it. Relative paths resolve against the
+              // session cwd, matching how the tool executor resolved them.
+              fileExists: (p) => {
+                try { return existsSync(path.isAbsolute(p) ? p : path.resolve(process.cwd(), p)); }
+                catch { return false; }
+              },
+            },
           );
           // v4.14 Pillar 5 Slice C — artifact_verified: the Pillar-3 verdict +
           // evidence-handle count, onto the live + durable event stream.

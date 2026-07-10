@@ -171,19 +171,40 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
     expect(chunks.join('')).toMatch(/file_write/);
   });
 
-  it('happy path: evidence-backed mutation → completed with handles persisted on the row', async () => {
+  it('happy path: evidence-backed mutation (file present on disk) → completed with handles persisted on the row', async () => {
+    // A genuine evidence-backed mutation lands a REAL file — finalization now
+    // stats it before trusting the verdict (part b), so the test writes it.
+    const outPath = path.join(tmp, 'out.txt');
+    await fs.writeFile(outPath, 'x'.repeat(42));
     const { task } = await runTurn({
       toolCallTrace: [{
         name: 'file_write',
-        result: { success: true, path: 'C:/x/out.txt', bytesWritten: 42 },
+        result: { success: true, path: outPath, bytesWritten: 42 },
         handlerMutates: true,
         verification: V_OK,
       }],
     });
     expect(task!.status).toBe('completed');
     const handles = task!.evidence!.handles;
-    expect(handles.some((h) => h.kind === 'path' && h.value === 'C:/x/out.txt' && h.verified)).toBe(true);
+    expect(handles.some((h) => h.kind === 'path' && h.value === outPath && h.verified)).toBe(true);
     expect(handles.some((h) => h.kind === 'bytes' && h.value === 42)).toBe(true);
+  });
+
+  it('missing artifact: verifier-ok but the claimed file is NOT on disk → verification_failed (part b, through the real seam)', async () => {
+    // No file is written; the trace claims a successful write to a path that
+    // does not exist. The stat catches the lie the verifier stamp missed.
+    const ghost = path.join(tmp, 'never-written.txt');
+    const { task } = await runTurn({
+      toolCallTrace: [{
+        name: 'file_write',
+        result: { success: true, path: ghost, bytesWritten: 128 },
+        handlerMutates: true,
+        verification: V_OK,
+      }],
+    });
+    expect(task!.status).toBe('verification_failed');
+    expect(task!.evidence!.failures[0].tool).toBe('file_write');
+    expect(task!.evidence!.failures[0].reason).toMatch(/no file exists/i);
   });
 
   it('honest downgrade: weak-evidence mutation → completed_unverified, surfaced, never silently completed', async () => {

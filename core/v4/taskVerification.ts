@@ -43,7 +43,7 @@
  * reshape.
  */
 
-import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
+import { sideEffectTargetKey, type HonestyTraceEntry } from '../../moat/honestyEnforcement';
 
 // ── Evidence shapes (persisted on tasks.evidence as JSON) ──────────────
 
@@ -249,7 +249,19 @@ export function extractEvidenceHandles(entry: HonestyTraceEntry): EvidenceHandle
 
 // ── Verdict policy ─────────────────────────────────────────────────────
 
-export function decideTaskVerdict(trace: HonestyTraceEntry[]): TaskVerdictDecision {
+export function decideTaskVerdict(
+  trace: HonestyTraceEntry[],
+  opts?: {
+    /**
+     * INJECTED disk checker (part b). This module does no I/O — the real
+     * `existsSync` check lives in the impure caller and is passed in. When
+     * absent the stat is skipped and the verdict falls back to the per-tool
+     * verifier stamp (the pre-existing behaviour), so no current caller/test
+     * changes until it opts in.
+     */
+    pathExists?: (path: string) => boolean;
+  },
+): TaskVerdictDecision {
   const handles: EvidenceHandle[] = [];
   const failures: TaskVerificationFailure[] = [];
 
@@ -259,15 +271,51 @@ export function decideTaskVerdict(trace: HonestyTraceEntry[]): TaskVerdictDecisi
     if (t.verification || t.error) handles.push(...extractEvidenceHandles(t));
   }
 
+  // Part b — a CLAIMED written artifact must actually exist on disk before it
+  // counts as evidence. Only WRITE results (a byte count present) are checked:
+  // a delete's target is SUPPOSED to be gone, and reads never gate. A missing
+  // artifact turns a verifier-'ok' entry into a failure below.
+  const writtenPath = (m: HonestyTraceEntry): string | null => {
+    const r = (m.result && typeof m.result === 'object') ? m.result as Record<string, unknown> : null;
+    if (!r) return null;
+    const wrote = typeof r.bytesWritten === 'number' || typeof r.bytes === 'number';
+    if (!wrote) return null;
+    if (typeof r.to === 'string'   && r.to.length > 0)   return r.to;
+    if (typeof r.path === 'string' && r.path.length > 0) return r.path;
+    return null;
+  };
+  const pathMissing = (m: HonestyTraceEntry): boolean => {
+    if (!opts?.pathExists) return false;
+    const p = writtenPath(m);
+    return p != null && !opts.pathExists(p);
+  };
+
+  const claimedOk = (m: HonestyTraceEntry): boolean =>
+    m.verification?.ok === true && m.verification.code === 'ok';
+  // Verified-ok AND (no claimed write OR the written file is present).
+  const isOk   = (m: HonestyTraceEntry): boolean => claimedOk(m) && !pathMissing(m);
+  // Errored, verifier-!ok, OR "verifier said ok but the file isn't there".
+  const isFail = (m: HonestyTraceEntry): boolean =>
+    m.error != null || m.verification?.ok === false || (claimedOk(m) && pathMissing(m));
+
+  // Part a — targets the turn actually LANDED (a verified-ok success). A failed
+  // entry whose target is here was superseded by a later same-target success.
+  const landed = new Set<string>();
   for (const m of mutating) {
-    if (m.error) {
-      failures.push({ tool: m.name, reason: m.error });
-    } else if (m.verification && m.verification.ok === false) {
-      failures.push({
-        tool:   m.name,
-        reason: m.verification.reason ?? m.verification.code,
-      });
-    }
+    if (!isOk(m)) continue;
+    const k = sideEffectTargetKey(m);
+    if (k != null) landed.add(k);
+  }
+
+  // Collect only the UNRESOLVED failures — no longer a blind push-on-any-failure.
+  for (const m of mutating) {
+    if (!isFail(m)) continue;
+    const k = sideEffectTargetKey(m);
+    if (k != null && landed.has(k)) continue;   // redeemed by a later success at the same target
+    const reason = (claimedOk(m) && pathMissing(m))
+      ? `claimed ${writtenPath(m)} but no file exists at that path`
+      : (m.error ?? m.verification?.reason ?? m.verification?.code ?? 'unverified');
+    failures.push({ tool: m.name, reason });
   }
 
   if (failures.length > 0) {
@@ -278,13 +326,11 @@ export function decideTaskVerdict(trace: HonestyTraceEntry[]): TaskVerdictDecisi
     // complete on its own terms. (Read evidence still recorded above.)
     return { verdict: 'completed', handles, failures };
   }
-  const allHardVerified = mutating.every(
-    (m) => m.verification?.ok === true && m.verification.code === 'ok',
-  );
-  if (allHardVerified) {
-    return { verdict: 'completed', handles, failures };
-  }
-  return { verdict: 'completed_unverified', handles, failures };
+  // No unresolved failures left. Completed iff every mutating entry is
+  // verified-ok OR a superseded failure; a low_signal/unknown mutation is an
+  // honest downgrade (never silently upgraded).
+  const allResolved = mutating.every((m) => isOk(m) || isFail(m));
+  return { verdict: allResolved ? 'completed' : 'completed_unverified', handles, failures };
 }
 
 // ── v4.13 Gap 3 — job-card material (durable record of what a task DID) ─
@@ -400,6 +446,12 @@ export function computeTaskFinalization(
      * render the ↷ line on /tasks, reusing the batch-staleness skip shape.
      */
     externalSkips?: Array<{ tool: string; target: string; reason: string }>;
+    /**
+     * Part b — injected disk checker forwarded to decideTaskVerdict. Supplied
+     * by the impure callers (REPL/daemon) so a claimed write is confirmed on
+     * disk before it counts as evidence. Absent → the stat is skipped.
+     */
+    fileExists?: (path: string) => boolean;
   },
 ): {
   status:   'completed' | 'completed_unverified' | 'verification_failed' | 'failed';
@@ -414,7 +466,7 @@ export function computeTaskFinalization(
     ...buildJobCardUpdate(trace, { now: opts?.now }),
     ...(opts?.approvalMode ? { permissions: { approvalMode: opts.approvalMode } } : {}),
   };
-  const decision = decideTaskVerdict(trace);
+  const decision = decideTaskVerdict(trace, { pathExists: opts?.fileExists });
   // v4.13 Phase D — user-declined batch ops (plan_approval results) land
   // on the evidence envelope: decisions, not failures.
   const declined: Array<{ tool: string; target: string; reason: string }> = [];

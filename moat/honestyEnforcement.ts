@@ -150,6 +150,45 @@ function describeSuccessClaim(c: UiClaim): string {
 }
 
 /**
+ * The identity of a side effect: the target a mutating call acts on.
+ * Reconciliation keys on THIS, not on the tool name — a failed write to `X` is
+ * redeemed only by a later verified write to the SAME `X`, never by an
+ * unrelated success on the same tool. Priority mirrors extractEvidenceHandles /
+ * buildJobCardUpdate (destination → path → object id). Returns null when no
+ * target is identifiable; a null-target failure is therefore NEVER
+ * auto-redeemed (a check that can't prove supersession says "not superseded").
+ */
+export function sideEffectTargetKey(entry: HonestyTraceEntry): string | null {
+  const r = (entry.result && typeof entry.result === 'object')
+    ? (entry.result as Record<string, unknown>) : null;
+  if (!r) return null;
+  if (typeof r.to === 'string'   && r.to.length > 0)   return `to:${r.to}`;
+  if (typeof r.path === 'string' && r.path.length > 0) return `path:${r.path}`;
+  if (typeof r.id === 'string'   && r.id.length > 0)   return `id:${r.id}`;
+  return null;
+}
+
+/** A verifier-ok (code 'ok') outcome — the only "the side effect landed" signal. */
+function isVerifiedOk(entry: HonestyTraceEntry): boolean {
+  return entry.verification?.ok === true && entry.verification.code === 'ok';
+}
+
+/**
+ * The set of side-effect targets a turn actually LANDED — targets with at least
+ * one verifier-ok mutating entry. A failed entry whose target is in this set was
+ * superseded by a later success (the model retried and it worked).
+ */
+export function succeededTargets(trace: HonestyTraceEntry[]): Set<string> {
+  const out = new Set<string>();
+  for (const t of trace) {
+    if (!isVerifiedOk(t)) continue;
+    const k = sideEffectTargetKey(t);
+    if (k != null) out.add(k);
+  }
+  return out;
+}
+
+/**
  * Memory tools whose results carry the `verified` flag set by
  * MemoryGuard. The list is closed — adding a new memory_* tool
  * means extending this set.
@@ -398,14 +437,22 @@ export class HonestyEnforcement {
     // matching, no prose parsing.
     const successClaim = uiClaims.find(isSuccessClaim);
     if (successClaim) {
-      const failedShell = trace.find(
-        (t) => t.name === 'shell_exec' && !!t.verification && !t.verification.ok,
-      );
-      if (failedShell) {
+      // Reconcile, don't bare-find: a failed shell_exec only contradicts a
+      // success claim when it was NOT superseded by a later verified shell_exec
+      // at the SAME target (a retry that worked). Same-target reconciliation
+      // keeps an unrelated success from masking a real failure — a null-target
+      // failure is never treated as superseded.
+      const landed = succeededTargets(trace);
+      const unresolvedFailShell = trace.find((t) => {
+        if (t.name !== 'shell_exec' || !t.verification || t.verification.ok) return false;
+        const k = sideEffectTargetKey(t);
+        return !(k != null && landed.has(k));
+      });
+      if (unresolvedFailShell) {
         events.push({
           kind:   'claim_contradicted',
           tool:   successClaim.name,
-          reason: `${describeSuccessClaim(successClaim)}, but shell_exec failed this turn (${failedShell.verification?.reason ?? 'non-zero exit'})`,
+          reason: `${describeSuccessClaim(successClaim)}, but shell_exec failed this turn (${unresolvedFailShell.verification?.reason ?? 'non-zero exit'})`,
         });
       }
     }
