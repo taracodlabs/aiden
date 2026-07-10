@@ -39,7 +39,7 @@
  *
  * encryption at all. v4.0's machine-bound encryption is a deliberate
  * step up from prior-art CLIs; v4.1's keychain integration brings it
- * to parity with Claude Code / Codex CLI.
+ * to parity with keychain-backed CLI credential stores.
  */
 
 import { promises as fs } from 'node:fs';

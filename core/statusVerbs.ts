@@ -1,5 +1,5 @@
 // core/statusVerbs.ts — Rotating verb vocabulary for streaming status events.
-// Phase 2: same rotating-verb pattern as Claude Code — keeps Aiden feeling alive.
+// Phase 2: rotating status verbs while a turn streams — keeps Aiden feeling alive.
 
 export const STATUS_VERBS: Record<string, string[]> = {
   thinking: [
