@@ -117,7 +117,9 @@ export const shellExecTool: ToolHandler = {
           : true,
     };
 
-    const cb = ctx.log ? { log: ctx.log } : {};
+    // Thread the turn abort signal so the backend can reap the process tree on
+    // interrupt (shell_exec is the one long-running child today).
+    const cb = { ...(ctx.log ? { log: ctx.log } : {}), signal: ctx.signal };
 
     // v4.4 Phase 3 — effective backend selection.
     const config       = getSandboxConfig();

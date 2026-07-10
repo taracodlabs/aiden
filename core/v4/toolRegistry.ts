@@ -88,6 +88,13 @@ export interface ToolContext {
   /** Aiden user-data paths. Sessions, memory, skills, logs all live here. */
   paths: AidenPaths;
   /**
+   * Turn-scoped abort signal, delivered per call by the dispatch (from the
+   * agent's `_currentSignal`). A long-running tool that spawns a child (today:
+   * shell_exec) reads this to reap its process TREE on interrupt instead of
+   * leaving it running. Absent → no cancellation (short tools ignore it).
+   */
+  signal?: AbortSignal;
+  /**
    * v4.4 Phase 3 — opaque session identifier used by the docker
    * sandbox to cache one long-lived container per session and reuse
    * it across tool calls. When unset, falls back to the literal
@@ -379,8 +386,8 @@ export class ToolRegistry {
    */
   buildExecutor(
     context: ToolContext,
-  ): (call: ToolCallRequest) => Promise<ToolCallResult> {
-    return async (call: ToolCallRequest): Promise<ToolCallResult> => {
+  ): (call: ToolCallRequest, signal?: AbortSignal) => Promise<ToolCallResult> {
+    return async (call: ToolCallRequest, signal?: AbortSignal): Promise<ToolCallResult> => {
       const handler = this.handlers.get(call.name);
       if (!handler) {
         return {
@@ -581,8 +588,11 @@ export class ToolRegistry {
       // `tool.call.pre` + `tool.call.post` hooks via `runToolWithHooks`.
       // Mandatory pre-hook blocks surface as HookBlockedError, caught
       // by the outer try/catch and mapped to a structured error result.
+      // Deliver the per-call turn signal to the tool. Spread a per-call context
+      // only when a signal is present, so a normal call allocates nothing and a
+      // child agent's own signal never leaks into the shared session context.
       const dispatch = async (a: Record<string, unknown>): Promise<unknown> =>
-        handler.execute(a, context);
+        handler.execute(a, signal ? { ...context, signal } : context);
       let result: unknown;
       try {
         const sliced = sliceSpanShim();

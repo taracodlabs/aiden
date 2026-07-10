@@ -151,7 +151,7 @@ import { preArmIntent } from './agent/intentPreArm';
  * The loop catches throws defensively so a buggy executor still keeps
  * the conversation alive.
  */
-export type ToolExecutor = (call: ToolCallRequest) => Promise<ToolCallResult>;
+export type ToolExecutor = (call: ToolCallRequest, signal?: AbortSignal) => Promise<ToolCallResult>;
 
 /**
  * Phase v4.1.2 alive-core: identity / memory files that can flip the
@@ -1554,7 +1554,7 @@ export class AidenAgent {
           if (batch.length > 1) {
             const batchResults = await Promise.all(
               batch.map((c) =>
-                this.toolExecutor(c).catch((err: unknown): ToolCallResult => ({
+                this.toolExecutor(c, this._currentSignal).catch((err: unknown): ToolCallResult => ({
                   id:     c.id,
                   name:   c.name,
                   result: null,
@@ -1671,7 +1671,7 @@ export class AidenAgent {
               result = _preComputed;
             } else {
               try {
-                result = await this.toolExecutor(call);
+                result = await this.toolExecutor(call, this._currentSignal);
               } catch (err) {
                 result = {
                   id:     call.id,
