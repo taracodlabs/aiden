@@ -4,8 +4,8 @@
  * The wizard's `kind: 'pro'` path now runs the real OAuth flow via
  * OAuthProviderRuntime. These tests stub the plugin's buildProvider to
  * return a synthetic OAuthProvider so we never touch network or load
- * the real Claude/ChatGPT plugins (their OAuth fixtures are tested
- * separately in claudeProPlugin.test.ts / chatgptPlusPlugin.test.ts).
+ * the real ChatGPT plugin (its OAuth fixtures are tested separately in
+ * chatgptPlusPlugin.test.ts).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
@@ -124,104 +124,9 @@ function scriptedPrompts(answers: {
   };
 }
 
-const claudeProIdx = PROVIDERS.findIndex((p) => p.id === 'claude-pro') + 1;
 const chatgptPlusIdx = PROVIDERS.findIndex((p) => p.id === 'chatgpt-plus') + 1;
-const ollamaIdx = PROVIDERS.findIndex((p) => p.id === 'ollama') + 1;
 
 describe('setup wizard — OAuth provider integration (kind: pro)', () => {
-  it('44. user picks claude-pro → confirm → login → tokens persisted + config written', async () => {
-    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
-    await ensureAidenDirsExist(paths);
-
-    const restore = stubPluginBuildProvider(
-      'plugins/aiden-plugin-claude-pro/index.js',
-      {
-        id: 'claude-pro',
-        displayName: 'Claude Pro / Max',
-        defaultModels: ['claude-opus-4-7', 'claude-sonnet-4-6'],
-        loginResult: {
-          accessToken: 'fresh-AT',
-          refreshToken: 'fresh-RT',
-          expiresInSeconds: 3600,
-          extras: { account: 'shiva@example.com' },
-        },
-      },
-    );
-
-    try {
-      const display = new Display();
-      const result = await runSetupWizard({
-        paths,
-        display,
-        // Phase 30.2.1: claude-pro moved to index [9] in the reordered list.
-        prompts: fakePrompts({ providerIndex: claudeProIdx, confirm: true }),
-        skipValidation: true,
-      });
-
-      expect(result.status).toBe('configured');
-      expect(result.ran).toBe(true);
-      expect(result.config?.model.provider).toBe('claude-pro');
-      expect(result.config?.providers?.['claude-pro']).toEqual({
-        auth: 'oauth',
-      });
-
-      // tokens.json was written through tokenStore.
-      const tokens = await loadTokens(paths, 'claude-pro');
-      expect(tokens?.accessToken).toBe('fresh-AT');
-      expect(tokens?.refreshToken).toBe('fresh-RT');
-      expect(tokens?.account).toBe('shiva@example.com');
-    } finally {
-      restore();
-    }
-  });
-
-  it('45. user picks claude-pro → declines confirm → wizard loops back to provider pick (Phase 30.2.1)', async () => {
-    // Phase 30.2.1 — the prior `oauth-skipped` skipReason was replaced
-    // with `continue outer`, so a confirm-decline now loops back to the
-    // provider picker. We script a follow-up Ollama pick (probe stubbed
-    // ok) to terminate the loop with status='configured'. The key
-    // assertion is "no tokens persisted for claude-pro".
-    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
-    await ensureAidenDirsExist(paths);
-
-    const restore = stubPluginBuildProvider(
-      'plugins/aiden-plugin-claude-pro/index.js',
-      {
-        id: 'claude-pro',
-        displayName: 'Claude Pro / Max',
-        defaultModels: ['claude-opus-4-7'],
-        loginResult: {
-          accessToken: 'should-never-persist',
-          refreshToken: null,
-          expiresInSeconds: 0,
-        },
-      },
-    );
-
-    try {
-      const fetchImpl = (async () => ({ ok: true } as Response)) as unknown as typeof fetch;
-      const result = await runSetupWizard({
-        paths,
-        display: new Display(),
-        prompts: scriptedPrompts({
-          choose: [claudeProIdx, ollamaIdx],
-          confirm: [false],
-          input: ['llama3.1:8b'],
-        }),
-        fetchImpl,
-        skipValidation: true,
-      });
-      // Loop ended on Ollama which configures successfully.
-      expect(result.status).toBe('configured');
-      expect(result.config?.model.provider).toBe('ollama');
-      // Critical: claude-pro tokens were NOT persisted because the user
-      // declined the OAuth confirm.
-      expect(await loadTokens(paths, 'claude-pro')).toBeNull();
-    } finally {
-      restore();
-    }
-  });
-
   it('46. user picks chatgpt-plus → device-code login → config + tokens persisted', async () => {
     const paths = resolveAidenPaths({ rootOverride: tmpRoot });
     await ensureAidenDirsExist(paths);
@@ -259,58 +164,4 @@ describe('setup wizard — OAuth provider integration (kind: pro)', () => {
     }
   });
 
-  it('47. login throws → wizard loops back to provider pick (Phase 30.2.1)', async () => {
-    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
-    await ensureAidenDirsExist(paths);
-
-    const restore = stubPluginBuildProvider(
-      'plugins/aiden-plugin-claude-pro/index.js',
-      {
-        id: 'claude-pro',
-        displayName: 'Claude Pro / Max',
-        defaultModels: ['claude-opus-4-7'],
-        loginResult: null as any,
-      },
-    );
-    // Replace the buildProvider's login() to throw.
-    require.cache[
-      require.resolve(path.resolve(__dirname, '..', '..', '..', 'plugins/aiden-plugin-claude-pro/index.js'))
-    ]!.exports.buildProvider = () => ({
-      id: 'claude-pro',
-      displayName: 'Claude Pro / Max',
-      defaultModels: ['claude-opus-4-7'],
-      async login() {
-        throw new Error('Token exchange failed: HTTP 400');
-      },
-      async refresh() {
-        throw new Error('not used');
-      },
-      describeRuntime() {
-        return { apiMode: 'anthropic_messages' as const };
-      },
-    });
-
-    try {
-      const fetchImpl = (async () => ({ ok: true } as Response)) as unknown as typeof fetch;
-      const result = await runSetupWizard({
-        paths,
-        display: new Display(),
-        // Phase 30.2.1: login throws → continue outer → second pick is
-        // Ollama which terminates the loop with status='configured'.
-        // claude-pro tokens must remain unpersisted.
-        prompts: scriptedPrompts({
-          choose: [claudeProIdx, ollamaIdx],
-          confirm: [true /* user wants to proceed; login then throws */],
-          input: ['llama3.1:8b'],
-        }),
-        fetchImpl,
-        skipValidation: true,
-      });
-      expect(result.status).toBe('configured');
-      expect(result.config?.model.provider).toBe('ollama');
-      expect(await loadTokens(paths, 'claude-pro')).toBeNull();
-    } finally {
-      restore();
-    }
-  });
 });

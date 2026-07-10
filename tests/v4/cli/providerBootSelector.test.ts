@@ -62,16 +62,13 @@ describe('resolveBootProvider', () => {
   });
 
   it('Case 2b: --model only picks the matching provider', async () => {
-    // claude-opus-4-7 is listed by both claude-pro and anthropic
-    // (they share modelIds — OAuth flow vs API-key flow over the
-    // same Anthropic backend). Registry insertion order puts
-    // claude-pro first, which is the right default: prefer OAuth
-    // over API-key when both reach the same model.
+    // claude-opus-4-7 is served by anthropic (API-key) — the sole provider
+    // for the bare id now that the Claude subscription route is gone.
     const out = await resolveBootProvider(
       { cliModelId: 'claude-opus-4-7' },
       enumerator([]),
     );
-    expect(out?.providerId).toBe('claude-pro');
+    expect(out?.providerId).toBe('anthropic');
     expect(out?.modelId).toBe('claude-opus-4-7');
     expect(out?.source).toBe('cli-flag-partial');
   });
@@ -123,9 +120,8 @@ describe('resolveBootProvider', () => {
       { cfgModelId: 'claude-opus-4-7' },
       enumerator([]),
     );
-    // Same precedence as Case 2b — claude-pro registered before
-    // anthropic so it wins shared model lookups.
-    expect(out?.providerId).toBe('claude-pro');
+    // anthropic is the sole provider for this bare id.
+    expect(out?.providerId).toBe('anthropic');
     expect(out?.modelId).toBe('claude-opus-4-7');
     expect(out?.source).toBe('config-partial');
   });
@@ -153,22 +149,11 @@ describe('resolveBootProvider', () => {
       expect(out?.source).toBe('auto-priority');
     });
 
-    it('falls through to claude-pro when chatgpt-plus is not authed', async () => {
+    it('falls through to anthropic when chatgpt-plus is not authed', async () => {
       const out = await resolveBootProvider(
         {},
         enumerator([
-          cp('chatgpt-plus', false), cp('claude-pro', true),
-          cp('anthropic', true),
-        ]),
-      );
-      expect(out?.providerId).toBe('claude-pro');
-    });
-
-    it('falls through to anthropic when both OAuth flows unauthed', async () => {
-      const out = await resolveBootProvider(
-        {},
-        enumerator([
-          cp('chatgpt-plus', false), cp('claude-pro', false),
+          cp('chatgpt-plus', false),
           cp('anthropic', true), cp('groq', true),
         ]),
       );
@@ -179,7 +164,7 @@ describe('resolveBootProvider', () => {
       const out = await resolveBootProvider(
         {},
         enumerator([
-          cp('chatgpt-plus', false), cp('claude-pro', false),
+          cp('chatgpt-plus', false),
           cp('anthropic', false), cp('openai', false),
           cp('groq', true),
         ]),
@@ -193,7 +178,7 @@ describe('resolveBootProvider', () => {
     const out = await resolveBootProvider(
       {},
       enumerator([
-        cp('chatgpt-plus', false), cp('claude-pro', false),
+        cp('chatgpt-plus', false),
         cp('anthropic', false), cp('openai', false),
         cp('groq', false), cp('ollama', false),
       ]),
@@ -248,7 +233,7 @@ describe('priority-list auto-pick across deepseek (Phase v4.1.2-deepseek)', () =
     const out = await resolveBootProvider(
       {},
       enumerator([
-        cp('chatgpt-plus', false), cp('claude-pro', false),
+        cp('chatgpt-plus', false),
         cp('anthropic', false),    cp('openai', false),
         cp('deepseek', true),      cp('groq', true),
       ]),
@@ -262,7 +247,7 @@ describe('priority-list auto-pick across deepseek (Phase v4.1.2-deepseek)', () =
     const out = await resolveBootProvider(
       {},
       enumerator([
-        cp('chatgpt-plus', false), cp('claude-pro', false),
+        cp('chatgpt-plus', false),
         cp('anthropic', false),    cp('openai', true),
         cp('deepseek', true),
       ]),
@@ -274,7 +259,7 @@ describe('priority-list auto-pick across deepseek (Phase v4.1.2-deepseek)', () =
     const out = await resolveBootProvider(
       {},
       enumerator([
-        cp('chatgpt-plus', false), cp('claude-pro', false),
+        cp('chatgpt-plus', false),
         cp('anthropic', false),    cp('openai', false),
         cp('deepseek', true),      cp('groq', true),
       ]),
@@ -284,12 +269,11 @@ describe('priority-list auto-pick across deepseek (Phase v4.1.2-deepseek)', () =
 });
 
 describe('findProviderForModel', () => {
-  it('finds claude-pro first for shared claude model ids (insertion order)', () => {
-    // claude-pro is listed before anthropic in the registry and they
-    // share modelIds, so findProviderForModel returns claude-pro.
-    // This is correct: prefer OAuth over API-key for boot defaults.
+  it('finds anthropic for a claude model id', () => {
+    // anthropic (API key) is the sole provider for claude-opus-4-7 now that
+    // the Claude subscription route is removed.
     const entry = findProviderForModel('claude-opus-4-7');
-    expect(entry?.id).toBe('claude-pro');
+    expect(entry?.id).toBe('anthropic');
   });
   it('returns null for unknown models', () => {
     expect(findProviderForModel('nope-not-a-model')).toBeNull();

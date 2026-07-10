@@ -120,8 +120,8 @@ describe('SetupWizard', () => {
     expect(await isFreshInstall(paths)).toBe(false);
   });
 
-  it('PROVIDERS has 19 numbered entries', () => {
-    expect(PROVIDERS).toHaveLength(19);
+  it('PROVIDERS has 18 numbered entries', () => {
+    expect(PROVIDERS).toHaveLength(18);
   });
 
   it('wizard pre-selects Groq as the recommended provider default', async () => {
@@ -222,36 +222,6 @@ describe('SetupWizard', () => {
     });
     expect(result.ran).toBe(false);
     expect(result.skipReason).toMatch(/already exists/);
-  });
-
-  it('Pro option Claude Pro prints OAuth explainer + beta note then waits for confirm', async () => {
-    // Phase 18 Task 4 made these real OAuth flows; Phase 18.1 added the
-    // beta note. Phase 30.2.1 reordered providers (Claude Pro → index 9)
-    // and converted OAuth declines from the dead-end `oauth-skipped`
-    // skipReason into a `continue outer` that loops back to provider
-    // pick. Test harness scripts the OAuth decline followed by an
-    // immediate Ollama exit so the loop terminates deterministically.
-    const claudeProIdx = PROVIDERS.findIndex((p) => p.id === 'claude-pro') + 1;
-    const ollamaIdx = PROVIDERS.findIndex((p) => p.id === 'ollama') + 1;
-    const fetchImpl = (async () => ({ ok: true } as Response)) as unknown as typeof fetch;
-    const { display, chunks } = sinkDisplay();
-    const result = await runSetupWizard({
-      paths,
-      display,
-      prompts: scriptedPrompts({
-        choose: [claudeProIdx, ollamaIdx],
-        confirm: [false],
-        input: ['llama3.1:8b'],
-      }),
-      fetchImpl,
-    });
-    // Loop ended on Ollama which configures successfully.
-    expect(result.status).toBe('configured');
-    const text = chunks.join('\n');
-    expect(text).toMatch(/Claude Pro/);
-    expect(text).toMatch(/OAuth flows are beta in v4\.0/);
-    // Confirms the decline path printed the loop-back message.
-    expect(text).toMatch(/pick another provider/i);
   });
 
   it('Pro option ChatGPT Plus prints OAuth explainer + beta note then waits for confirm', async () => {

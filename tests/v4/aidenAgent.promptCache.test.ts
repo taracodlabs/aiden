@@ -185,11 +185,11 @@ describe('AidenAgent · system prompt cache (Phase 16b.4)', () => {
     expect(agent.setActiveModel('anthropic', 'claude-haiku-4-5')).toBe(true);
     const after1 = await agent.getSystemPromptForDebug();
     expect(after1).toContain('Model: claude-haiku-4-5');
-    // Different provider, same model (theoretically possible if two
-    // providers share modelIds — claude-pro / anthropic do today).
-    expect(agent.setActiveModel('claude-pro', 'claude-haiku-4-5')).toBe(true);
+    // Different provider, same model id — proves a provider-only change is
+    // still detected as a change.
+    expect(agent.setActiveModel('openrouter', 'claude-haiku-4-5')).toBe(true);
     const after2 = await agent.getSystemPromptForDebug();
-    expect(after2).toContain('Provider: claude-pro');
+    expect(after2).toContain('Provider: openrouter');
   });
 
   it('invalidateSystemPromptCache forces the next runConversation to rebuild', async () => {

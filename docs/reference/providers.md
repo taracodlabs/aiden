@@ -51,7 +51,7 @@ Arrow + Enter to switch. No restart, no history loss.
 
 | Category | How auth works | Providers |
 |---|---|---|
-| **OAuth subscription routing** | One-click browser flow; reuses your existing subscription. | claude-pro, chatgpt-plus |
+| **OAuth subscription routing** | One-click browser flow; reuses your existing subscription. | chatgpt-plus |
 | **Free-tier API key** | Sign up for a free key; small monthly quota. | groq, gemini, openrouter |
 | **Paid API key** | Pay-as-you-go or subscription; full quota. | anthropic, openai, together, mistral, deepseek, nvidia, kimi, minimax, zai, huggingface, nous_portal |
 | **Local / self-hosted** | No external auth. | ollama |
@@ -61,19 +61,9 @@ Arrow + Enter to switch. No restart, no history loss.
 
 ## OAuth subscription routing
 
-For the two big chat consumer subscriptions, Aiden lets you re-use
-the OAuth account you already have instead of paying again for API
-credits.
-
-### `claude-pro`
-
-| Property | Value |
-|---|---|
-| **Models** | claude-sonnet-4.5, claude-opus-4.5, claude-haiku-4.5, …  |
-| **Setup** | `/auth login claude-pro` opens your browser; sign in to your existing Anthropic account; Aiden stores the token in `~/.aiden/auth.json`. |
-| **Cost** | Counts against your Claude Pro / Max subscription quota. No API spend. |
-| **Notes** | Subscription routing — same auth path Anthropic's official client uses. Refresh happens automatically. |
-| **Env var fallback** | None — OAuth-only. |
+For the ChatGPT Plus subscription, Aiden lets you re-use the OAuth
+account you already have instead of paying again for API credits.
+For Anthropic models, use the API-key `anthropic` provider above.
 
 ### `chatgpt-plus`
 

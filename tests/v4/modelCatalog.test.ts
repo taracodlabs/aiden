@@ -56,14 +56,13 @@ describe('MODEL_CATALOG', () => {
   });
 
   it('findProvidersForModelId surfaces all providers serving a bare model id', () => {
-    // Phase 21 #5: claude-opus-4-7 is offered by both anthropic and the
-    // canonical OAuth provider claude-pro (legacy claude_subscription
-    // removed under the one-name-per-service unification).
-    const opusServers = findProvidersForModelId('claude-opus-4-7');
-    expect(opusServers.length).toBeGreaterThanOrEqual(2);
-    const providers = new Set(opusServers.map((m) => m.providerId));
-    expect(providers.has('anthropic')).toBe(true);
-    expect(providers.has('claude-pro')).toBe(true);
+    // gpt-5.4 is offered by both the chatgpt-plus (OAuth) and openai (API-key)
+    // catalogs, so a bare id surfaces every provider that serves it.
+    const servers = findProvidersForModelId('gpt-5.4');
+    expect(servers.length).toBeGreaterThanOrEqual(2);
+    const providers = new Set(servers.map((m) => m.providerId));
+    expect(providers.has('chatgpt-plus')).toBe(true);
+    expect(providers.has('openai')).toBe(true);
 
     // A unique-to-one-provider model returns exactly one match.
     const uniques = findProvidersForModelId('llama-3.3-70b-versatile');

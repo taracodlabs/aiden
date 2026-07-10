@@ -50,10 +50,9 @@ describe('Phase 21 #5 — OAuth provider routing unification', () => {
     expect(PROVIDER_REGISTRY['chatgpt_subscription']).toBeUndefined();
   });
 
-  it('2. canonical OAuth providers exist with oauth.providerId set', () => {
-    const claude = PROVIDER_REGISTRY['claude-pro'];
+  it('2. the canonical OAuth provider exists with oauth.providerId set (Claude subscription removed)', () => {
+    expect(PROVIDER_REGISTRY['claude-pro']).toBeUndefined();
     const chatgpt = PROVIDER_REGISTRY['chatgpt-plus'];
-    expect(claude?.oauth?.providerId).toBe('claude-pro');
     expect(chatgpt?.oauth?.providerId).toBe('chatgpt-plus');
   });
 
@@ -66,16 +65,8 @@ describe('Phase 21 #5 — OAuth provider routing unification', () => {
     expect(legacyHits).toEqual([]);
   });
 
-  it('4. claude-pro catalog absorbed all four migrated Claude models', () => {
-    const ids = listModelsForProvider('claude-pro').map((m) => m.id);
-    expect(ids).toEqual(
-      expect.arrayContaining([
-        'claude-opus-4-7',
-        'claude-opus-4-6',
-        'claude-sonnet-4-6',
-        'claude-haiku-4-5',
-      ]),
-    );
+  it('4. the removed claude-pro provider serves no catalog models', () => {
+    expect(listModelsForProvider('claude-pro')).toEqual([]);
   });
 
   it('5. chatgpt-plus catalog uses verified Codex slugs (Phase 21 #6)', () => {
@@ -116,23 +107,6 @@ describe('Phase 21 #5 — OAuth provider routing unification', () => {
     });
     expect(r.apiKey).toBe('oai-token-xyz');
     expect(r.source).toBe('auth.json'); // canonical sentinel for "from token storage"
-  });
-
-  it('7. /model switch to claude-pro reads the bearer from tokenStore (cross-provider parity)', async () => {
-    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
-    await ensureAidenDirsExist(paths);
-    await saveTokens(paths, {
-      provider: 'claude-pro',
-      accessToken: 'anth-token-xyz',
-      refreshToken: null,
-      expiresAtMs: Date.now() + 60 * 60_000,
-    });
-    const r = await makeResolver().describe({
-      providerId: 'claude-pro',
-      modelId: 'claude-opus-4-7',
-      paths,
-    });
-    expect(r.apiKey).toBe('anth-token-xyz');
   });
 
   it('8. adding a hypothetical new OAuth provider needs only registry + catalog, no picker/resolver code', () => {

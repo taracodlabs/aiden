@@ -62,7 +62,7 @@ import type { AidenPaths } from '../paths';
  * mismatches (a user copying files between profiles).
  */
 export interface OAuthTokens {
-  /** Provider id (e.g. 'claude-pro', 'chatgpt-plus'). */
+  /** Provider id (e.g. 'chatgpt-plus'). */
   provider: string;
   /** Bearer token sent on each inference request. */
   accessToken: string;

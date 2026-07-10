@@ -56,6 +56,6 @@ Aiden runs entirely on your local machine. By default:
 - The OpenAI-compatible API at `localhost:4200/v1` accepts unauthenticated requests by default (loopback-only); set `AIDEN_API_KEY` to require Bearer-token auth
 - Shell execution and browser automation require explicit user commands — Aiden does not run arbitrary code autonomously without a user prompt
 - A 10-module security moat (`moat/`) gates every tool call: tiered approval engine (safe / caution / dangerous), dangerous-command pattern classifier, SSRF-safe URL fetcher, secret/PII pre-write scanner, honesty enforcement post-loop scan, memory guard, planner-guard tool narrowing
-- OAuth tokens for Claude Pro and ChatGPT Plus subscriptions are stored at `<aiden-home>/auth/<provider>.json` with 0600 file mode; never transmitted to Taracod servers
+- OAuth tokens for the ChatGPT Plus subscription are stored at `<aiden-home>/auth/<provider>.json` with 0600 file mode; never transmitted to Taracod servers
 
 If you configure cloud provider API keys (OpenAI, Anthropic, Groq, etc.), requests to those providers are subject to their respective privacy policies.

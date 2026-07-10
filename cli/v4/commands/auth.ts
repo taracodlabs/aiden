@@ -139,7 +139,7 @@ function buildUserAgent(
 
 export const auth: SlashCommand = {
   name: 'auth',
-  description: 'Manage OAuth subscription auth (Claude Pro, ChatGPT Plus).',
+  description: 'Manage OAuth subscription auth (ChatGPT Plus).',
   category: 'system',
   icon: '🔑',
   handler: async (ctx) => {
@@ -227,8 +227,8 @@ export const auth: SlashCommand = {
         // Phase 18.1: distinguish auth-level failures (bad code, expired)
         // from upstream provider/account-state failures so the hint is
         // honest rather than blanket. Auth-level errors keep the existing
-        // /auth login retry guidance the plugin throws (e.g. claude-pro's
-        // 'run /auth login claude-pro to start over'). The 'beta' fallback
+        // /auth login retry guidance the plugin throws (e.g. chatgpt-plus's
+        // 'run /auth login chatgpt-plus to start over'). The 'beta' fallback
         // hint surfaces for the cloudier cases — 4xx HTTP shape, "client_id"
         // / "workspace" diagnostics from the provider.
         const looksUpstream =

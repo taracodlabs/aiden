@@ -39,7 +39,6 @@ import type { ConfiguredProvider } from './doctorLiveness';
  */
 export const BOOT_PRIORITY: readonly string[] = [
   'chatgpt-plus',  // OAuth — primary onboarding flow
-  'claude-pro',    // OAuth — Anthropic equivalent
   'anthropic',     // API key — power-user tier
   'openai',        // API key — power-user tier
   // Phase v4.1.2-deepseek: paid tier, strong tool-caller, ranked

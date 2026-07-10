@@ -9,9 +9,9 @@
  *
  * THE bug class this prevents: Slice 1 wired curated-skills Step 4
  * only into the API-key wizard branch. Subscription OAuth providers
- * (claude-pro, chatgpt-plus) had their own success-exit at L882 that
- * bypassed Step 4 entirely — user found this in manual smoke when
- * ChatGPT Plus went straight to "All set!" with no curated offer.
+ * (chatgpt-plus) had their own success-exit at L882 that bypassed Step 4
+ * entirely — user found this in manual smoke when ChatGPT Plus went
+ * straight to "All set!" with no curated offer.
  *
  * The unit tests in setupWizard.curated.test.ts cover the helper in
  * isolation; the existing setupWizard.test.ts covers per-provider
@@ -148,7 +148,6 @@ function caseFor(id: string): ProviderCase {
 const PROVIDER_CASES: ProviderCase[] = [
   caseFor('groq'),
   caseFor('anthropic'),
-  caseFor('claude-pro'),
   caseFor('chatgpt-plus'),
 ];
 
@@ -180,11 +179,11 @@ describe('setupWizard — finalizeWithCuratedStep fires across ALL provider bran
     });
   }
 
-  it('verifies all four canonical provider types are covered', () => {
+  it('verifies all canonical provider types are covered', () => {
     // Honesty check: if a future PR drops a provider from PROVIDER_CASES
     // without explanation, this test reminds the next developer that
     // the coverage matrix is the regression layer.
-    expect(PROVIDER_CASES).toHaveLength(4);
+    expect(PROVIDER_CASES).toHaveLength(3);
     const branches = new Set(PROVIDER_CASES.map((c) => c.branch));
     expect(branches.has('oauth')).toBe(true);
     expect(branches.has('apikey')).toBe(true);

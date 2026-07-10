@@ -24,6 +24,7 @@
  */
 
 import { ApiMode } from './types';
+import type { BillingTier, PaidFallbackConsent } from '../../core/v4/billingGuard';
 
 export interface ProviderRegistryEntry {
   /** Stable identifier, e.g. 'anthropic', 'groq', 'together'. */
@@ -40,6 +41,19 @@ export interface ProviderRegistryEntry {
   description: string;
   /** Tier classification for menu ordering. */
   tier: 'pro' | 'free' | 'paid' | 'local' | 'subscription';
+  /**
+   * Billing model consumed by the paid-fallback guard (core/v4/billingGuard).
+   * `paid` = per-token API charges; `subscription` = flat-fee; `free`/`local`
+   * = no per-token cost. Boot never auto-escalates onto a `paid` provider
+   * without explicit consent.
+   */
+  billingTier: BillingTier;
+  /**
+   * Whether this provider may be auto-selected as a paid fallback when a
+   * cheaper provider fails. Omitted ⇒ `absent` (no silent escalation); a user
+   * opts in per-provider via config `providers.<id>.paidFallbackConsent`.
+   */
+  paidFallbackConsent?: PaidFallbackConsent;
   /** Free tier offered? */
   hasFreeTier: boolean;
   /** Optional: provider-specific extra headers (e.g. OpenRouter HTTP-Referer). */
@@ -60,9 +74,9 @@ export interface ProviderRegistryEntry {
    * as the `apiKey` to the underlying adapter. The adapter never knows
    * the difference between an API key and an OAuth bearer.
    *
-   * Set on `claude-pro` and `chatgpt-plus`. Legacy `claude_subscription`
-   * and `chatgpt_subscription` entries (Phase 5 stubs, no OAuth wiring)
-   * stay as-is and remain unusable until removed in a future cleanup.
+   * Set on `chatgpt-plus` (the sole bundled OAuth provider). Legacy
+   * `claude_subscription` / `chatgpt_subscription` entries were removed in
+   * Phase 21 #5.
    */
   oauth?: { providerId: string };
 }
@@ -85,20 +99,6 @@ export interface ProviderRegistryEntry {
  */
 export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
   // ─── Subscription / OAuth (Phase 18 tokenStore-wired) ────────────────────
-  'claude-pro': {
-    id: 'claude-pro',
-    displayName: 'Claude Pro / Max (OAuth)',
-    apiMode: 'anthropic_messages',
-    baseUrl: 'https://api.anthropic.com',
-    apiKeyEnvVar: null,
-    oauth: { providerId: 'claude-pro' },
-    description: 'Sign in with your Claude Pro/Max subscription. No API key needed.',
-    tier: 'subscription',
-    hasFreeTier: false,
-    docsUrl: 'https://docs.anthropic.com/',
-    supportsToolCalling: true,
-    modelIds: ['claude-opus-4-7', 'claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-  },
   'chatgpt-plus': {
     id: 'chatgpt-plus',
     displayName: 'ChatGPT Plus (OAuth)',
@@ -110,6 +110,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     oauth: { providerId: 'chatgpt-plus' },
     description: 'Sign in with your ChatGPT Plus subscription. No API key needed.',
     tier: 'subscription',
+    billingTier: 'subscription',
     hasFreeTier: false,
     docsUrl: 'https://platform.openai.com/docs/',
     supportsToolCalling: true,
@@ -140,6 +141,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'NOUS_PORTAL_API_KEY',
     description: 'Nous Research portal-managed inference (subscription).',
     tier: 'subscription',
+    billingTier: 'subscription',
     hasFreeTier: false,
     docsUrl: 'https://nousresearch.com/',
     supportsToolCalling: true,
@@ -155,6 +157,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'ANTHROPIC_API_KEY',
     description: 'Direct Anthropic API access — flagship Claude models.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://docs.anthropic.com/',
     supportsToolCalling: true,
@@ -168,6 +171,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'OPENAI_API_KEY',
     description: 'Direct OpenAI API access — GPT-5 family via /v1/responses.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://platform.openai.com/docs/',
     supportsToolCalling: true,
@@ -183,6 +187,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'GROQ_API_KEY',
     description: 'Ultra-fast inference on open-weight models — generous free tier.',
     tier: 'free',
+    billingTier: 'free',
     hasFreeTier: true,
     docsUrl: 'https://console.groq.com/docs/',
     supportsToolCalling: true,
@@ -196,6 +201,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'GEMINI_API_KEY',
     description: 'Google Gemini via the OpenAI-compatible endpoint.',
     tier: 'free',
+    billingTier: 'free',
     hasFreeTier: true,
     docsUrl: 'https://ai.google.dev/',
     supportsToolCalling: true,
@@ -209,6 +215,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'NVIDIA_API_KEY',
     description: 'NVIDIA NIM hosted inference — free credits with developer account.',
     tier: 'free',
+    billingTier: 'free',
     hasFreeTier: true,
     docsUrl: 'https://build.nvidia.com/',
     supportsToolCalling: true,
@@ -222,6 +229,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'HF_TOKEN',
     description: 'Hugging Face Inference API — free tier on most open-weight models.',
     tier: 'free',
+    billingTier: 'free',
     hasFreeTier: true,
     docsUrl: 'https://huggingface.co/docs/api-inference/',
     supportsToolCalling: true,
@@ -237,6 +245,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'OPENROUTER_API_KEY',
     description: 'OpenRouter — 200+ models routed through one API.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: true,
     extraHeaders: {
       'HTTP-Referer': 'https://aiden.ai',
@@ -262,6 +271,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'TOGETHER_API_KEY',
     description: 'Together AI — fast hosted inference for Llama, DeepSeek, Mixtral.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://docs.together.ai/',
     supportsToolCalling: true,
@@ -280,6 +290,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'DEEPSEEK_API_KEY',
     description: 'DeepSeek direct API — V4 Pro reasoning flagship + legacy aliases.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://api-docs.deepseek.com/',
     supportsToolCalling: true,
@@ -300,6 +311,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'MISTRAL_API_KEY',
     description: 'Mistral AI direct API — Large, Codestral, and Ministral.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://docs.mistral.ai/',
     supportsToolCalling: true,
@@ -313,6 +325,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'ZAI_API_KEY',
     description: 'Zhipu AI / GLM — flagship Chinese frontier models.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://docs.z.ai/',
     supportsToolCalling: true,
@@ -326,6 +339,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'KIMI_API_KEY',
     description: 'Moonshot AI / Kimi — long-context flagship models.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://platform.moonshot.ai/docs/',
     supportsToolCalling: true,
@@ -339,6 +353,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'MINIMAX_API_KEY',
     description: 'MiniMax — agentic flagship M2 family.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://www.minimax.io/platform_overview',
     supportsToolCalling: true,
@@ -352,6 +367,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'VERCEL_AI_GATEWAY_KEY',
     description: 'Vercel AI Gateway — unified gateway with usage analytics.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://vercel.com/docs/ai-gateway/',
     supportsToolCalling: true,
@@ -365,6 +381,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: 'CUSTOM_OPENAI_API_KEY',
     description: 'Any OpenAI-compatible endpoint — supply your own base URL.',
     tier: 'paid',
+    billingTier: 'paid',
     hasFreeTier: false,
     supportsToolCalling: true,
     modelIds: ['custom-default'],
@@ -379,6 +396,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiKeyEnvVar: null,
     description: 'Local Ollama with prompt-injected tool calling — no API key needed.',
     tier: 'local',
+    billingTier: 'local',
     hasFreeTier: true,
     docsUrl: 'https://github.com/ollama/ollama/',
     supportsToolCalling: true,

@@ -59,11 +59,10 @@ describe('runModelPicker', () => {
   });
 
   it('returns null on ambiguous bare model', async () => {
-    // claude-opus-4-7 is served by both anthropic and claude-pro
-    // (Phase 21 #5: canonical OAuth ID — legacy claude_subscription removed).
+    // gpt-5.4 is served by both chatgpt-plus (OAuth) and openai (API key).
     const result = await runModelPicker({
       resolver: realResolver(),
-      spec: 'claude-opus-4-7',
+      spec: 'gpt-5.4',
     });
     expect(result).toBeNull();
   });
@@ -76,11 +75,11 @@ describe('runModelPicker', () => {
     expect(result).toBeNull();
   });
 
-  it('interactive picker shows all 19 providers + Cancel row', async () => {
+  it('interactive picker shows all 18 providers + Cancel row', async () => {
     const select = vi.fn(async (opts: any) => {
       if (isStage1(opts.message)) {
-        // Phase 22 Task 3: 19 providers + a Cancel row = 20 stage-1 rows.
-        expect(opts.choices.length).toBe(20);
+        // 18 providers + a Cancel row = 19 stage-1 rows.
+        expect(opts.choices.length).toBe(19);
         return 'groq';
       }
       return 'llama-3.3-70b-versatile';

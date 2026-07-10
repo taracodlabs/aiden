@@ -76,7 +76,7 @@ function stubPluginBuildProvider(
   const stubbed = {
     ...original,
     buildProvider: () => ({
-      id: pluginRelPath.includes('claude-pro') ? 'claude-pro' : 'chatgpt-plus',
+      id: pluginRelPath.includes('chatgpt-plus') ? 'chatgpt-plus' : 'chatgpt-plus',
       displayName: 'Stub',
       defaultModels: ['stub-model-a', 'stub-model-b'],
       async login() {
@@ -102,16 +102,16 @@ describe('/auth status', () => {
     ctx.args = ['status'];
     await auth.handler(ctx);
     const text = display.out.join('\n');
-    expect(text).toContain('claude-pro');
+    expect(text).toContain('chatgpt-plus');
     expect(text).toContain('not authenticated');
-    expect(text).toContain('/auth login claude-pro');
+    expect(text).toContain('/auth login chatgpt-plus');
     expect(text).toContain('chatgpt-plus');
   });
 
   it('49. status renders authed providers with relative expiry + account', async () => {
     const { ctx, display } = await buildCtx();
     await saveTokens(ctx.paths!, {
-      provider: 'claude-pro',
+      provider: 'chatgpt-plus',
       accessToken: 'AT',
       refreshToken: 'RT',
       expiresAtMs: Date.now() + 3600_000,
@@ -134,15 +134,15 @@ describe('/auth status', () => {
   it('50. status flags tokens within the 5-min preflight window as "expiring soon"', async () => {
     const { ctx, display } = await buildCtx();
     await saveTokens(ctx.paths!, {
-      provider: 'claude-pro',
+      provider: 'chatgpt-plus',
       accessToken: 'AT',
       expiresAtMs: Date.now() + 60_000, // 1 min
     });
-    ctx.args = ['status', 'claude-pro'];
+    ctx.args = ['status', 'chatgpt-plus'];
     await auth.handler(ctx);
     const text = display.out.join('\n');
     expect(text).toContain('expiring soon');
-    expect(text).toContain('/auth refresh claude-pro');
+    expect(text).toContain('/auth refresh chatgpt-plus');
   });
 
   it('51. status footer shows encryption note + multi-provider hint', async () => {
@@ -168,7 +168,7 @@ describe('/auth login', () => {
       prompt: async () => 'AUTHCODE#STATE',
     });
     const restore = stubPluginBuildProvider(
-      'plugins/aiden-plugin-claude-pro/index.js',
+      'plugins/aiden-plugin-chatgpt-plus/index.js',
       {
         accessToken: 'login-AT',
         refreshToken: 'login-RT',
@@ -177,13 +177,13 @@ describe('/auth login', () => {
       },
     );
     try {
-      ctx.args = ['login', 'claude-pro'];
+      ctx.args = ['login', 'chatgpt-plus'];
       await auth.handler(ctx);
-      const tokens = await loadTokens(ctx.paths!, 'claude-pro');
+      const tokens = await loadTokens(ctx.paths!, 'chatgpt-plus');
       expect(tokens?.accessToken).toBe('login-AT');
       expect(tokens?.account).toBe('shiva@example.com');
       const text = display.out.join('\n');
-      expect(text).toContain('claude-pro authed');
+      expect(text).toContain('chatgpt-plus authed');
       expect(text).toContain('shiva@example.com');
     } finally {
       restore();
@@ -209,20 +209,20 @@ describe('/auth logout', () => {
   it('56. logout deletes the token file', async () => {
     const { ctx, display } = await buildCtx();
     await saveTokens(ctx.paths!, {
-      provider: 'claude-pro',
+      provider: 'chatgpt-plus',
       accessToken: 'AT',
       expiresAtMs: Date.now() + 3600_000,
     });
-    expect(await hasTokens(ctx.paths!, 'claude-pro')).toBe(true);
-    ctx.args = ['logout', 'claude-pro'];
+    expect(await hasTokens(ctx.paths!, 'chatgpt-plus')).toBe(true);
+    ctx.args = ['logout', 'chatgpt-plus'];
     await auth.handler(ctx);
-    expect(await hasTokens(ctx.paths!, 'claude-pro')).toBe(false);
+    expect(await hasTokens(ctx.paths!, 'chatgpt-plus')).toBe(false);
     expect(display.out.join('\n')).toContain('signed out');
   });
 
   it('57. logout when no tokens present is a no-op with friendly message', async () => {
     const { ctx, display } = await buildCtx();
-    ctx.args = ['logout', 'claude-pro'];
+    ctx.args = ['logout', 'chatgpt-plus'];
     await auth.handler(ctx);
     expect(display.out.join('\n')).toContain('nothing to log out');
   });
@@ -232,13 +232,13 @@ describe('/auth refresh', () => {
   it('58. refresh re-issues tokens via OAuthProviderRuntime', async () => {
     const { ctx, display } = await buildCtx();
     await saveTokens(ctx.paths!, {
-      provider: 'claude-pro',
+      provider: 'chatgpt-plus',
       accessToken: 'OLD',
       refreshToken: 'OLD-RT',
       expiresAtMs: Date.now() - 1000, // expired
     });
     const restore = stubPluginBuildProvider(
-      'plugins/aiden-plugin-claude-pro/index.js',
+      'plugins/aiden-plugin-chatgpt-plus/index.js',
       {
         accessToken: 'NEW',
         refreshToken: 'NEW-RT',
@@ -246,12 +246,12 @@ describe('/auth refresh', () => {
       },
     );
     try {
-      ctx.args = ['refresh', 'claude-pro'];
+      ctx.args = ['refresh', 'chatgpt-plus'];
       await auth.handler(ctx);
-      const tokens = await loadTokens(ctx.paths!, 'claude-pro');
+      const tokens = await loadTokens(ctx.paths!, 'chatgpt-plus');
       expect(tokens?.accessToken).toBe('NEW');
       expect(display.out.join('\n')).toMatch(
-        /claude-pro refreshed.*expires in/,
+        /chatgpt-plus refreshed.*expires in/,
       );
     } finally {
       restore();
@@ -261,14 +261,14 @@ describe('/auth refresh', () => {
   it('59. refresh without prior login surfaces clear error pointing at login', async () => {
     const { ctx, display } = await buildCtx();
     const restore = stubPluginBuildProvider(
-      'plugins/aiden-plugin-claude-pro/index.js',
+      'plugins/aiden-plugin-chatgpt-plus/index.js',
       { accessToken: 'X', refreshToken: null, expiresInSeconds: 0 },
     );
     try {
-      ctx.args = ['refresh', 'claude-pro'];
+      ctx.args = ['refresh', 'chatgpt-plus'];
       await auth.handler(ctx);
       expect(display.errs.join('\n')).toMatch(/refresh failed/);
-      expect(display.errs.join('\n')).toMatch(/\/auth login claude-pro/);
+      expect(display.errs.join('\n')).toMatch(/\/auth login chatgpt-plus/);
     } finally {
       restore();
     }

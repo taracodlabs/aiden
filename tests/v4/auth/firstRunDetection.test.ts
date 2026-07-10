@@ -96,10 +96,10 @@ describe('isFreshInstall', () => {
       paths.configYaml,
       [
         'model:',
-        '  provider: claude-pro',
+        '  provider: chatgpt-plus',
         '  modelId: claude-opus-4-7',
         'providers:',
-        '  claude-pro:',
+        '  chatgpt-plus:',
         '    auth: oauth',
       ].join('\n') + '\n',
       'utf8',

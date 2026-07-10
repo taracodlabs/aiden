@@ -197,7 +197,7 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
         break;
       default:
         // Every other provider — together, nvidia, deepseek, mistral, custom,
-        // claude-pro, chatgpt-plus, etc. — uses the curated catalog.
+        // chatgpt-plus, etc. — uses the curated catalog.
         return fallbackFor(opts.providerId);
     }
     const models = normalise(opts.providerId, raws);

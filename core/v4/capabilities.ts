@@ -34,7 +34,7 @@ export interface RuntimeManifest {
   skillCount:    number;
   /** User-facing channel/surface names (gateway adapters + interaction surfaces). */
   channels:      ReadonlyArray<string>;
-  /** Current provider id (chatgpt-plus / claude-pro / groq / ...). */
+  /** Current provider id (chatgpt-plus / anthropic / groq / ...). */
   providerId?:   string;
   /** Current model id within the provider. */
   modelId?:      string;

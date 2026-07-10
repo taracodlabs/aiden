@@ -131,6 +131,12 @@ import { SkillOutcomeTracker } from '../../core/v4/skillOutcomeTracker';
 import { resolveBootProvider } from './providerBootSelector';
 import { enumerateConfiguredProviders, pickProbeModel } from './doctorLiveness';
 import { PROVIDER_REGISTRY } from '../../providers/v4/registry';
+import {
+  fallbackAllowed,
+  billingTierRank,
+  type BillingTier,
+  type PaidFallbackConsent,
+} from '../../core/v4/billingGuard';
 import { isMcpServeMode } from './uiBuild';
 import { MemoryGuard } from '../../moat/memoryGuard';
 import { SSRFProtection } from '../../moat/ssrfProtection';
@@ -1014,9 +1020,42 @@ async function resolveFirstWorkingProvider(
     }
   }
 
-  // 3. resolve() is the authority — first that builds an adapter wins.
+  // Paid-fallback invariant (core/v4/billingGuard): a provider failure must
+  // never silently move the user onto a per-token PAID provider they didn't
+  // choose. The tier we're falling FROM decides whether a paid landing is an
+  // escalation — an unknown/removed provider (e.g. a retired subscription) is
+  // treated as `subscription`, so a paid key still requires explicit consent.
+  const fromTier: BillingTier =
+    PROVIDER_REGISTRY[excludeProviderId]?.billingTier ?? 'subscription';
+  const tierOf = (id: string): BillingTier =>
+    PROVIDER_REGISTRY[id]?.billingTier ?? 'paid'; // unknown ⇒ treat as paid (conservative)
+
+  // Try cheapest tiers first so a free/local provider is preferred over a paid
+  // one even when both are configured.
+  candidates.sort((a, b) => billingTierRank(tierOf(a.id)) - billingTierRank(tierOf(b.id)));
+
+  // 3. resolve() is the authority — first that builds an adapter wins, subject
+  //    to the billing guard.
   for (const cand of candidates) {
     if (!cand.model) continue;
+    const candTier = tierOf(cand.id);
+    const consent: PaidFallbackConsent =
+      config.get(`providers.${cand.id}.paidFallbackConsent`) === 'explicit'
+        ? 'explicit'
+        : PROVIDER_REGISTRY[cand.id]?.paidFallbackConsent ?? 'absent';
+    if (!fallbackAllowed(fromTier, candTier, consent)) {
+      // Blocked: refuse to auto-escalate onto a paid key. Recorded (not
+      // swallowed) so the boot decision trace shows exactly what was skipped.
+      attempts.push({
+        providerId: cand.id,
+        ok: false,
+        reason:
+          `blocked: auto-selecting ${cand.id} would escalate billing ` +
+          `${fromTier} → ${candTier} without consent. Pick it with /model, or set ` +
+          `providers.${cand.id}.paidFallbackConsent=explicit to allow silent fallback.`,
+      });
+      continue;
+    }
     try {
       const adapter = await resolver.resolve({
         providerId: cand.id,
@@ -1626,8 +1665,8 @@ export async function buildAgentRuntime(
   // restoreBundledPluginsIfNeeded remains available for future
   // dep-free bundled plugins but is intentionally not invoked at boot.
   const bundledDir = await resolveBundledPluginsDir().catch(() => null);
-  // Phase 18: OAuth provider registry. The bundled claude-pro and
-  // chatgpt-plus plugins call ctx.registerOAuthProvider() during their
+  // Phase 18: OAuth provider registry. The bundled chatgpt-plus plugin
+  // calls ctx.registerOAuthProvider() during its
   // register() — without a registry wired in, that throws. /auth login,
   // /auth refresh, and the inference resolver all read tokens via
   // tokenStore directly so this registry is mostly a side-effect home;

@@ -176,8 +176,6 @@ function buildRequest(
       return { skip: true, skipReason: 'auth method varies; will be verified on first call' };
     case 'nous':
       return { skip: true, skipReason: 'subscription auth method TBD' };
-    case 'claude-pro':
-      return { skip: true, skipReason: 'OAuth-only, lands v4.1' };
     case 'chatgpt-plus':
       return { skip: true, skipReason: 'OAuth-only, lands v4.1' };
     default:

@@ -31,10 +31,7 @@ interface CachedSystemMessage {
 export class PromptCaching {
   /** True when this provider supports prefix caching markers (Anthropic only for v4.0.0). */
   isSupported(providerId: string, _modelId: string): boolean {
-    // Phase 21 #5: legacy `claude_subscription` removed; canonical OAuth
-    // ID is `claude-pro` (the only Claude OAuth route through the Phase 18
-    // tokenStore).
-    return providerId === 'anthropic' || providerId === 'claude-pro';
+    return providerId === 'anthropic';
   }
 
   /**

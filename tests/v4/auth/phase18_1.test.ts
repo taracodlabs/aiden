@@ -4,8 +4,7 @@
  *   1. runCopyPasteFlow login body is JSON.
  *   2. runCopyPasteFlow login Content-Type is application/json.
  *   3. refreshTokens stays form-encoded.
- *   4. Claude Pro plugin login token URL ordering: console first.
- *   5. runDeviceCodeFlow includes Accept: application/json on every POST.
+ *   4. runDeviceCodeFlow includes Accept: application/json on every POST.
  */
 import { describe, it, expect, vi } from 'vitest';
 
@@ -15,9 +14,6 @@ import {
   refreshTokens,
   type FetchImpl,
 } from '../../../core/v4/auth/oauthFlow';
-
-// eslint-disable-next-line @typescript-eslint/no-var-requires
-const claudePro = require('../../../plugins/aiden-plugin-claude-pro/index.js');
 
 // ── Test helpers ────────────────────────────────────────────────────
 
@@ -116,49 +112,7 @@ describe('Phase 18.1: refreshTokens stays form-encoded', () => {
   });
 });
 
-// ── 4. Claude Pro login URL ordering ───────────────────────────────
-
-describe('Phase 18.1: Claude Pro login token URL — console first', () => {
-  it('72. plugin constants split into login vs refresh URL pairs', () => {
-    expect(claudePro.CLAUDE_PRO.loginTokenUrl).toBe(
-      'https://console.anthropic.com/v1/oauth/token',
-    );
-    expect(claudePro.CLAUDE_PRO.loginFallbackTokenUrls).toContain(
-      'https://platform.claude.com/v1/oauth/token',
-    );
-    expect(claudePro.CLAUDE_PRO.refreshTokenUrl).toBe(
-      'https://platform.claude.com/v1/oauth/token',
-    );
-    expect(claudePro.CLAUDE_PRO.refreshFallbackTokenUrls).toContain(
-      'https://console.anthropic.com/v1/oauth/token',
-    );
-  });
-
-  it('73. provider.login passes the login pair to runCopyPasteFlow', async () => {
-    const auth = {
-      runCopyPasteFlow: vi.fn(async () => ({
-        accessToken: 'A',
-        refreshToken: 'R',
-        expiresInSeconds: 3600,
-        extras: {},
-      })),
-      runDeviceCodeFlow: vi.fn(),
-      refreshTokens: vi.fn(),
-      generatePkce: vi.fn(),
-    };
-    const provider = claudePro.buildProvider(auth);
-    await provider.login(fakeUa() as any);
-    const cfg = auth.runCopyPasteFlow.mock.calls[0][0];
-    expect(cfg.tokenUrl).toBe(
-      'https://console.anthropic.com/v1/oauth/token',
-    );
-    expect(cfg.fallbackTokenUrls).toContain(
-      'https://platform.claude.com/v1/oauth/token',
-    );
-  });
-});
-
-// ── 5. runDeviceCodeFlow Accept header ─────────────────────────────
+// ── 4. runDeviceCodeFlow Accept header ─────────────────────────────
 
 describe('Phase 18.1: runDeviceCodeFlow sets Accept: application/json', () => {
   it('74. all three POSTs (usercode, poll, exchange) carry Accept: application/json', async () => {

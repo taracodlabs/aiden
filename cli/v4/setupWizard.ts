@@ -188,12 +188,6 @@ export const PROVIDERS: ProviderOption[] = [
   },
   // ── Subscription sign-ins ──
   {
-    id: 'claude-pro',
-    shortLabel: 'Claude Pro',
-    label: 'Claude Pro — use your existing Claude subscription',
-    kind: 'pro',
-  },
-  {
     id: 'chatgpt-plus',
     shortLabel: 'ChatGPT Plus',
     label: 'ChatGPT Plus — use your existing ChatGPT subscription',
@@ -375,8 +369,8 @@ export interface SetupResult {
 }
 
 // ─── v4.9.5 Slice 1.5: finalizeWithCuratedStep ─────────────────────
-// Shared helper called from BOTH the OAuth branch (claude-pro,
-// chatgpt-plus) and the API-key/custom branch (groq, anthropic,
+// Shared helper called from BOTH the OAuth branch (chatgpt-plus)
+// and the API-key/custom branch (groq, anthropic,
 // openai, gemini, together, custom, ollama) so the curated-skills
 // Step 4 fires regardless of which provider path the user took.
 // Slice 1 wired this only into the API-key branch — OAuth users
@@ -506,8 +500,6 @@ const AIDEN_VERSION: string = (() => {
 // loadOAuthProvider + openOAuthBrowserUrl live in cli/v4/auth/loadProvider.ts
 // so /auth login (Task 5) and the wizard share one implementation.
 const PRO_EXPLAINERS: Record<string, string> = {
-  'claude-pro':
-    'This connects your Claude Pro / Max subscription. No API charges, no API key needed.',
   'chatgpt-plus':
     'This connects your ChatGPT Plus subscription. No API charges, no API key needed.',
 };
@@ -894,8 +886,8 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   const provider = PROVIDERS[providerIndex - 1];
   if (!provider) throw new Error(`invalid provider selection: ${providerIndex}`);
 
-  // Phase 18: real OAuth flow for kind: 'pro' providers (claude-pro,
-  // chatgpt-plus). The flow is the same one /auth login uses (Task 5);
+  // Phase 18: real OAuth flow for kind: 'pro' providers (chatgpt-plus).
+  // The flow is the same one /auth login uses (Task 5);
   // single entry point.
   if (provider.kind === 'pro') {
     // 1-line explainer up-front so the user knows what they're agreeing to.
@@ -1017,7 +1009,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     );
     // v4.9.5 Slice 1.5: curated-skills Step 4 — MUST fire on OAuth
     // path too. Slice 1 only wired this into the API-key branch
-    // below; subscription users (claude-pro, chatgpt-plus) silently
+    // below; subscription users (chatgpt-plus) silently
     // bypassed the offer. Helper handles its own TTY / opts gates.
     await _finalizeImpl({ paths, display, prompts, opts, stepHeader });
     // ONB1 slice 8: success screen replaces the prior "Try: aiden" tail.

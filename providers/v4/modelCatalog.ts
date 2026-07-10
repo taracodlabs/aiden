@@ -23,11 +23,10 @@
  *   - Where pricing is uncertain or rapidly changing (e.g. preview models,
  *     subscription-only access, custom endpoints) we leave `pricing`
  *     undefined rather than fabricate. The picker handles both cases.
- *   - Subscription-tier rows (claude-pro, chatgpt-plus) never carry
- *     pricing — the user pays Anthropic / OpenAI a flat fee. Legacy
- *     `claude_subscription` / `chatgpt_subscription` rows were removed
- *     in Phase 21 #5; their
- *     models migrated under canonical IDs below.
+ *   - Subscription-tier rows (chatgpt-plus) never carry pricing — the user
+ *     pays a flat fee. Legacy `claude_subscription` / `chatgpt_subscription`
+ *     rows were removed in Phase 21 #5; their models migrated under canonical
+ *     IDs below.
  */
 
 export interface ModelEntry {
@@ -55,57 +54,6 @@ export interface ModelEntry {
 }
 
 export const MODEL_CATALOG: ModelEntry[] = [
-  // ─── claude-pro (Phase 18 OAuth, canonical) ──────────────────────────────
-  {
-    id: 'claude-opus-4-7',
-    displayName: 'Claude Opus 4.7',
-    providerId: 'claude-pro',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: true,
-    isDefault: true,
-    tier: 'flagship',
-    notes: 'Routed through Claude Pro/Max OAuth — no per-token charges.',
-  },
-  {
-    id: 'claude-opus-4-6',
-    displayName: 'Claude Opus 4.6',
-    providerId: 'claude-pro',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: true,
-    isDefault: false,
-    tier: 'flagship',
-  },
-  {
-    id: 'claude-sonnet-4-6',
-    displayName: 'Claude Sonnet 4.6',
-    providerId: 'claude-pro',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: true,
-    isDefault: false,
-    tier: 'standard',
-  },
-  {
-    id: 'claude-haiku-4-5',
-    displayName: 'Claude Haiku 4.5',
-    providerId: 'claude-pro',
-    contextLength: 200_000,
-    maxOutputTokens: 32_000,
-    supportsToolCalling: true,
-    supportsVision: true,
-    supportsReasoning: false,
-    isDefault: false,
-    tier: 'small',
-  },
-
   // ─── chatgpt-plus (Phase 18 OAuth) ───────────────────────────────────────
   // Phase 21 #6: model IDs sourced from a live probe of
   // chatgpt.com/backend-api/codex/models (Apr 2026). The Codex OAuth

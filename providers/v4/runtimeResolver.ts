@@ -159,7 +159,6 @@ export class RuntimeResolver {
         return withMessagePreflight(new AnthropicAdapter({
           baseUrl,
           apiKey: credentials.apiKey,
-          authMode: credentials.source === 'auth.json' ? 'oauth' : 'api_key',
           model: model.id,
           providerName: entry.id,
           extraHeaders: entry.extraHeaders,
@@ -327,8 +326,8 @@ export class RuntimeResolver {
         // No usable auth.json entry — surface a clearer error for OAuth-only
         // providers and fall through for paid providers that still might
         // succeed via a missing env var (handled by the missingKeyError
-        // below). Phase 21 #5: canonical OAuth providers (claude-pro,
-        // chatgpt-plus) hit the entry.oauth fast-path above, so this
+        // below). Phase 21 #5: the canonical OAuth provider (chatgpt-plus)
+        // hits the entry.oauth fast-path above, so this
         // legacy branch only fires for raw anthropic_messages/codex_responses
         // entries that lack oauth.providerId — i.e. nothing in the live
         // registry today, kept as a safety net for custom-config providers.
