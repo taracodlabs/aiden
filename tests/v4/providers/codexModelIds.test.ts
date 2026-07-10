@@ -22,6 +22,11 @@ const VERIFIED_CODEX_SLUGS = [
   'gpt-5.3-codex',
   'gpt-5.2-codex',
   'gpt-5.5',
+  // GPT-5.6 variants — confirmed via live /codex/responses probe (each streams;
+  // bare `gpt-5.6` is rejected 400). Tool-calling live-verified before shipping.
+  'gpt-5.6-sol',
+  'gpt-5.6-terra',
+  'gpt-5.6-luna',
   'gpt-5.4',
   'gpt-5.4-mini',
   'gpt-5.2',

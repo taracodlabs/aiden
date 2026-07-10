@@ -176,6 +176,54 @@ export const MODEL_CATALOG: ModelEntry[] = [
     tier: 'flagship',
     notes: 'Codex caps context at 272K; direct OpenAI API serves 1.05M for the same slug.',
   },
+  // GPT-5.6 variants (Sol / Terra / Luna). Slugs confirmed against a live
+  // /codex/responses probe of the ChatGPT Plus entitlement — each variant
+  // streams; the bare `gpt-5.6` slug is rejected 400 ("not supported when
+  // using Codex with a ChatGPT account"), so only the variant slugs are valid.
+  // Caps mirror the gpt-5.5 entry's Codex shape (272K context / 32K output):
+  // no 5.6-specific limits are published, and the same Codex backend serves
+  // them. isDefault stays FALSE (DeepSeek-V4 precedent — no default flip until
+  // proven); supportsToolCalling is live-verified in this slice, not merely
+  // provider-declared.
+  {
+    id: 'gpt-5.6-sol',
+    displayName: 'GPT-5.6 Sol',
+    providerId: 'chatgpt-plus',
+    contextLength: 272_000,          // Codex-backend cap (mirrors gpt-5.5)
+    maxOutputTokens: 32_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    isDefault: false,
+    tier: 'flagship',
+    notes: 'Routed through ChatGPT Plus OAuth (chatgpt.com/backend-api/codex). Caps mirror gpt-5.5.',
+  },
+  {
+    id: 'gpt-5.6-terra',
+    displayName: 'GPT-5.6 Terra',
+    providerId: 'chatgpt-plus',
+    contextLength: 272_000,          // Codex-backend cap (mirrors gpt-5.5)
+    maxOutputTokens: 32_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    isDefault: false,
+    tier: 'flagship',
+    notes: 'Routed through ChatGPT Plus OAuth (chatgpt.com/backend-api/codex). Caps mirror gpt-5.5.',
+  },
+  {
+    id: 'gpt-5.6-luna',
+    displayName: 'GPT-5.6 Luna',
+    providerId: 'chatgpt-plus',
+    contextLength: 272_000,          // Codex-backend cap (mirrors gpt-5.5)
+    maxOutputTokens: 32_000,
+    supportsToolCalling: true,
+    supportsVision: true,
+    supportsReasoning: true,
+    isDefault: false,
+    tier: 'flagship',
+    notes: 'Routed through ChatGPT Plus OAuth (chatgpt.com/backend-api/codex). Caps mirror gpt-5.5.',
+  },
   {
     id: 'gpt-5.4',
     displayName: 'GPT-5.4',

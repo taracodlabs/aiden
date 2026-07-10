@@ -96,6 +96,30 @@ interface ResolvedCredentials {
   oauthRefreshable?: boolean;
 }
 
+/**
+ * Models with an announced end-of-life, keyed `${providerId}:${modelId}`.
+ * DeepSeek retires its legacy `deepseek-chat` / `deepseek-reasoner` aliases
+ * on 2026-07-24 in favour of the V4 line — surface a one-line heads-up at
+ * resolve time so a session on a dying model sees the date and the migration
+ * target before it's pulled.
+ */
+const DEPRECATED_MODELS: Readonly<Record<string, { date: string; replacement: string }>> =
+  Object.freeze({
+    'deepseek:deepseek-chat':     { date: '2026-07-24', replacement: 'deepseek-v4-pro' },
+    'deepseek:deepseek-reasoner': { date: '2026-07-24', replacement: 'deepseek-v4-pro' },
+  });
+
+/**
+ * One-line deprecation notice for a resolved (provider, model), or null when
+ * the model has no announced end-of-life. Pure — `resolve()` emits it via
+ * `console.warn`; callers/tests can also consume the string directly.
+ */
+export function deprecationNotice(providerId: string, modelId: string): string | null {
+  const d = DEPRECATED_MODELS[`${providerId}:${modelId}`];
+  if (!d) return null;
+  return `${providerId}:${modelId} is deprecated and stops working on ${d.date} — switch to ${d.replacement}.`;
+}
+
 export class RuntimeResolver {
   constructor(private readonly credentialResolver: CredentialResolver) {}
 
@@ -105,6 +129,10 @@ export class RuntimeResolver {
    */
   async resolve(options: ResolveOptions): Promise<ProviderAdapter> {
     const { entry, model, baseUrl, credentials } = await this.describeInternal(options);
+
+    // One-line heads-up when a session resolves a model with an announced EOL.
+    const eol = deprecationNotice(entry.id, model.id);
+    if (eol) console.warn(`⚠️  ${eol}`);
 
     switch (entry.apiMode) {
       case 'chat_completions':
