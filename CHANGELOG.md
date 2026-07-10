@@ -1,3 +1,12 @@
+## v4.14.7 — 2026-07-10
+
+- **`shell_exec` reaps the whole process tree when a turn is interrupted or times out.** On Ctrl+C or timeout, the child's entire process tree is killed, not just the direct child. A command that spawned its own grandchildren (`powershell → ping`, `bash → nmap`) no longer leaves them running after the turn ends. Windows uses `taskkill /t`; POSIX spawns the child as a process-group leader and kills the group.
+- **An empty web search is a non-success, not a hollow success.** `web_search` that runs but returns nothing now reports failure with a "no results" message instead of a success carrying an empty body, so the search isn't silently re-issued.
+- **Mis-shaped tool arguments are rejected before the tool runs.** A tool argument whose value contradicts its declared shape — prose where an array (a list of items) is required, a non-object where an object is required, or a value outside a declared enum — is rejected with a message naming the argument and the expected shape, instead of being passed through to mis-execute.
+- **Pasted text is stripped of bracketed-paste markers.** Terminal bracketed-paste control sequences (`200~` / `201~`) that leak in when text is pasted into the workbench input are removed at ingest, so they don't end up embedded in the message.
+
+---
+
 ## v4.14.6 — 2026-07-10
 
 - **`aiden web` — a live dashboard from one command.** `aiden web` starts a read-only bridge over the run-event stream and opens a self-contained dashboard page in the browser: a sidebar of recent sessions with readable labels, a live activity feed, and a header. No build step, no framework.
