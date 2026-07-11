@@ -2,11 +2,6 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AnthropicAdapter } from '../../providers/v4/anthropicAdapter';
 import { ProviderError, ProviderRateLimitError } from '../../providers/v4/errors';
 import type { Message, ToolSchema } from '../../providers/v4/types';
-import {
-  __setRunnerForTests as setUaRunner,
-  __resetForTests as resetUa,
-  FALLBACK_VERSION,
-} from '../../providers/v4/anthropic/userAgent';
 
 function makeResponse(
   body: unknown,
@@ -22,18 +17,9 @@ function makeResponse(
 
 const apiKeyOptions = {
   apiKey: 'sk-ant-test',
-  authMode: 'api_key' as const,
   model: 'claude-haiku-4-5-20251001',
   providerName: 'anthropic',
   maxRetries: 1,
-};
-
-const oauthOptions = {
-  apiKey: 'oauth-token-xyz',
-  authMode: 'oauth' as const,
-  model: 'claude-opus-4-7',
-  providerName: 'anthropic-oauth',
-  maxRetries: 0,
 };
 
 const userMsg = (content: string): Message => ({ role: 'user', content });
@@ -43,16 +29,12 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
-  // Pin the User-Agent detection so tests don't depend on whether `claude`
-  // is on the host PATH. Individual tests override as needed.
-  setUaRunner(async () => '2.1.74');
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.restoreAllMocks();
-  resetUa();
 });
 
 describe('AnthropicAdapter', () => {
@@ -100,7 +82,7 @@ describe('AnthropicAdapter', () => {
     expect(body.tool_choice).toEqual({ type: 'auto' });
   });
 
-  it('2. API key mode sends x-api-key header (no Authorization)', async () => {
+  it('2. API key mode sends x-api-key header + honest Aiden identity (no impersonation fingerprint)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
@@ -109,35 +91,13 @@ describe('AnthropicAdapter', () => {
     expect(headers['x-api-key']).toBe('sk-ant-test');
     expect(headers['Authorization']).toBeUndefined();
     expect(headers['anthropic-version']).toBe('2023-06-01');
-    // Phase 25.1.5d billing-routing fingerprint — present on EVERY request,
-    // not gated on auth mode.
-    expect(headers['x-app']).toBe('cli');
-    expect(headers['user-agent']).toBe('claude-cli/2.1.74 (external, cli)');
+    // The API-key path must carry an honest Aiden identity — no billing
+    // fingerprint (`x-app: cli`) and an honest aiden/<version> user-agent.
+    expect(headers['x-app']).toBeUndefined();
+    expect(headers['user-agent']).toMatch(/^aiden\//);
   });
 
-  it('3. OAuth mode sends Authorization Bearer + 4-flag anthropic-beta header', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
-    );
-    await new AnthropicAdapter(oauthOptions).call({ messages: [userMsg('hi')], tools: [] });
-    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
-    expect(headers['Authorization']).toBe('Bearer oauth-token-xyz');
-    // Phase 25.1.5g: 4-flag set. context-1m-2025-08-07 is account-gated
-    // and 400s subscriptions that lack the entitlement, so it's omitted.
-    const beta = headers['anthropic-beta'];
-    expect(beta).toContain('claude-code-20250219');
-    expect(beta).toContain('oauth-2025-04-20');
-    expect(beta).toContain('interleaved-thinking-2025-05-14');
-    expect(beta).toContain('fine-grained-tool-streaming-2025-05-14');
-    expect(beta).not.toContain('context-1m');
-    expect(beta!.split(',')).toHaveLength(4);
-    expect(headers['x-api-key']).toBeUndefined();
-    // 25.1.5d: billing fingerprint also flows on the OAuth path.
-    expect(headers['x-app']).toBe('cli');
-    expect(headers['user-agent']).toMatch(/^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/);
-  });
-
-  it('3c. API-key mode sends NO anthropic-beta header (regression)', async () => {
+  it('3. sends NO anthropic-beta header', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
@@ -146,74 +106,7 @@ describe('AnthropicAdapter', () => {
     expect(headers['anthropic-beta']).toBeUndefined();
   });
 
-  it('3b. User-Agent falls back to claude-cli/<FALLBACK> when claude binary missing', async () => {
-    setUaRunner(async () => null);
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
-    );
-    await new AnthropicAdapter(oauthOptions).call({ messages: [userMsg('hi')], tools: [] });
-    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
-    expect(headers['user-agent']).toBe(`claude-cli/${FALLBACK_VERSION} (external, cli)`);
-  });
-
-  it('4. OAuth mode emits system as a 2-element block array (Claude Code identity at index 0)', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
-    );
-    await new AnthropicAdapter(oauthOptions).call({
-      messages: [{ role: 'system', content: 'be brief' }, userMsg('hi')],
-      tools: [],
-    });
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(Array.isArray(body.system)).toBe(true);
-    expect(body.system).toHaveLength(2);
-    expect(body.system[0]).toEqual({
-      type: 'text',
-      text: "You are Claude Code, Anthropic's official CLI for Claude.",
-    });
-    expect(body.system[1]).toEqual({ type: 'text', text: 'be brief' });
-  });
-
-  it('4b. OAuth with no caller system prompt → single-block identity array', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
-    );
-    await new AnthropicAdapter(oauthOptions).call({
-      messages: [userMsg('hi')],
-      tools: [],
-    });
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(Array.isArray(body.system)).toBe(true);
-    expect(body.system).toHaveLength(1);
-    expect(body.system[0].text).toBe(
-      "You are Claude Code, Anthropic's official CLI for Claude.",
-    );
-  });
-
-  it('4c. OAuth with caller system that already includes the prefix → no duplication', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
-    );
-    // Use a payload with no Aiden/Taracod tokens so this test stays
-    // focused on dedup behaviour. Identity sanitization is exercised
-    // separately in test 4e.
-    const baked =
-      "You are Claude Code, Anthropic's official CLI for Claude.\n\n" +
-      'Use British spelling.';
-    await new AnthropicAdapter(oauthOptions).call({
-      messages: [{ role: 'system', content: baked }, userMsg('hi')],
-      tools: [],
-    });
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.system).toHaveLength(2);
-    // Block 0 is exactly the prefix, not the caller's whole pre-baked string.
-    expect(body.system[0].text).toBe(
-      "You are Claude Code, Anthropic's official CLI for Claude.",
-    );
-    expect(body.system[1].text).toBe('Use British spelling.');
-  });
-
-  it('4d. API-key mode keeps system as a flat string (no block array)', async () => {
+  it('4. keeps system as a flat string (no identity block array)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
@@ -226,64 +119,20 @@ describe('AnthropicAdapter', () => {
     expect(body.system).toBe('be brief');
   });
 
-  it('4e. OAuth mode rewrites Aiden/Taracod identity in system block 1', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
-    );
-    await new AnthropicAdapter(oauthOptions).call({
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are Aiden, a local-first AI agent built by Taracod. AIDEN never lies.',
-        },
-        userMsg('hi'),
-      ],
-      tools: [],
-    });
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    const block1 = body.system[1].text;
-    expect(block1).toContain('Claude Code');
-    expect(block1).toContain('Anthropic');
-    expect(block1).toContain('CLAUDE CODE');
-    expect(block1).not.toMatch(/\bAiden\b/);
-    expect(block1).not.toMatch(/\bTaracod\b/);
-  });
-
-  it('4f. API-key mode does NOT rewrite identity (regression)', async () => {
+  it('4b. does NOT rewrite Aiden/Taracod identity in the system prompt', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
     await new AnthropicAdapter(apiKeyOptions).call({
-      messages: [{ role: 'system', content: 'You are Aiden.' }, userMsg('hi')],
+      messages: [{ role: 'system', content: 'You are Aiden, built by Taracod.' }, userMsg('hi')],
       tools: [],
     });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.system).toBe('You are Aiden.');
+    // Equality to the caller's exact prompt proves no identity rewrite ran.
+    expect(body.system).toBe('You are Aiden, built by Taracod.');
   });
 
-  it('5a. OAuth mode prefixes outgoing tool names with mcp_', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
-    );
-    const tools: ToolSchema[] = [
-      {
-        name: 'web_search',
-        description: 'searches',
-        inputSchema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
-      },
-      {
-        name: 'read_file',
-        description: 'reads',
-        inputSchema: { type: 'object', properties: { p: { type: 'string' } }, required: ['p'] },
-      },
-    ];
-    await new AnthropicAdapter(oauthOptions).call({ messages: [userMsg('hi')], tools });
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.tools.map((t: any) => t.name)).toEqual(['mcp_web_search', 'mcp_read_file']);
-  });
-
-  it('5b. API-key mode keeps tool names raw (regression)', async () => {
+  it('5. keeps tool names raw (no mcp_ prefix on the wire)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
@@ -299,47 +148,7 @@ describe('AnthropicAdapter', () => {
     expect(body.tools[0].name).toBe('web_search');
   });
 
-  it('5c. OAuth strips mcp_ from incoming tool_use names (decoded back to internal name)', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({
-        content: [
-          { type: 'tool_use', id: 'toolu_2', name: 'mcp_web_search', input: { q: 'cats' } },
-        ],
-        stop_reason: 'tool_use',
-      }),
-    );
-    const result = await new AnthropicAdapter(oauthOptions).call({
-      messages: [userMsg('search')],
-      tools: [],
-    });
-    expect(result.toolCalls).toEqual([
-      { id: 'toolu_2', name: 'web_search', arguments: { q: 'cats' } },
-    ]);
-  });
-
-  it('5d. OAuth prefixes tool_use blocks in assistant message history', async () => {
-    fetchMock.mockResolvedValueOnce(
-      makeResponse({ content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }),
-    );
-    await new AnthropicAdapter(oauthOptions).call({
-      messages: [
-        userMsg('search'),
-        {
-          role: 'assistant',
-          content: '',
-          toolCalls: [{ id: 'tc1', name: 'web_search', arguments: { q: 'x' } }],
-        },
-        { role: 'tool', toolCallId: 'tc1', content: 'result' },
-      ],
-      tools: [],
-    });
-    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    const assistantMsg = body.messages.find((m: any) => m.role === 'assistant');
-    const toolUseBlock = assistantMsg.content.find((b: any) => b.type === 'tool_use');
-    expect(toolUseBlock.name).toBe('mcp_web_search');
-  });
-
-  it('5. parses simple text response', async () => {
+  it('6. parses simple text response', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({
         content: [{ type: 'text', text: 'hello world' }],
@@ -357,7 +166,7 @@ describe('AnthropicAdapter', () => {
     expect(result.usage).toEqual({ inputTokens: 7, outputTokens: 2 });
   });
 
-  it('6. parses tool_use response', async () => {
+  it('7. parses tool_use response', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({
         content: [
@@ -377,7 +186,7 @@ describe('AnthropicAdapter', () => {
     expect(result.finishReason).toBe('tool_use');
   });
 
-  it('7. parses mixed text + tool_use blocks', async () => {
+  it('8. parses mixed text + tool_use blocks', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({
         content: [
@@ -397,7 +206,7 @@ describe('AnthropicAdapter', () => {
     expect(result.finishReason).toBe('tool_use');
   });
 
-  it('8. empty content[] with stop_reason=end_turn returns content="" and stop (does NOT throw)', async () => {
+  it('9. empty content[] with stop_reason=end_turn returns content="" and stop (does NOT throw)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 0 } }),
     );
@@ -410,7 +219,7 @@ describe('AnthropicAdapter', () => {
     expect(result.finishReason).toBe('stop');
   });
 
-  it('9. maps stop_reason: end_turn → stop, max_tokens → length, stop_sequence → stop', async () => {
+  it('10. maps stop_reason: end_turn → stop, max_tokens → length, stop_sequence → stop', async () => {
     fetchMock
       .mockResolvedValueOnce(
         makeResponse({ content: [{ type: 'text', text: 'a' }], stop_reason: 'max_tokens' }),
@@ -425,7 +234,7 @@ describe('AnthropicAdapter', () => {
     expect(r2.finishReason).toBe('stop');
   });
 
-  it('10. captures cache_creation_input_tokens / cache_read_input_tokens', async () => {
+  it('11. captures cache_creation_input_tokens / cache_read_input_tokens', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({
         content: [{ type: 'text', text: 'ok' }],
@@ -450,7 +259,7 @@ describe('AnthropicAdapter', () => {
     });
   });
 
-  it('11. translates tool reply messages into tool_result content blocks', async () => {
+  it('12. translates tool reply messages into tool_result content blocks', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }),
     );
@@ -474,7 +283,29 @@ describe('AnthropicAdapter', () => {
     });
   });
 
-  it('12. retries on 429 with backoff then succeeds', async () => {
+  it('13. echoes assistant tool_use history with raw (unprefixed) tool names', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(apiKeyOptions).call({
+      messages: [
+        userMsg('search'),
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'tc1', name: 'web_search', arguments: { q: 'x' } }],
+        },
+        { role: 'tool', toolCallId: 'tc1', content: 'result' },
+      ],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const assistantMsg = body.messages.find((m: any) => m.role === 'assistant');
+    const toolUseBlock = assistantMsg.content.find((b: any) => b.type === 'tool_use');
+    expect(toolUseBlock.name).toBe('web_search');
+  });
+
+  it('14. retries on 429 with backoff then succeeds', async () => {
     vi.useFakeTimers();
     fetchMock
       .mockResolvedValueOnce(makeResponse({ error: 'rate' }, { status: 429 }))
@@ -489,7 +320,7 @@ describe('AnthropicAdapter', () => {
     expect(result.content).toBe('finally');
   });
 
-  it('13. exhausted retries on 429 throws ProviderRateLimitError', async () => {
+  it('15. exhausted retries on 429 throws ProviderRateLimitError', async () => {
     vi.useFakeTimers();
     fetchMock.mockResolvedValue(makeResponse({ error: 'rate' }, { status: 429 }));
     const adapter = new AnthropicAdapter({ ...apiKeyOptions, maxRetries: 1 });
@@ -500,7 +331,7 @@ describe('AnthropicAdapter', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it('14. 401 fails fast, no retry', async () => {
+  it('16. 401 fails fast, no retry', async () => {
     fetchMock.mockResolvedValueOnce(makeResponse('unauthorized', { status: 401 }));
     const adapter = new AnthropicAdapter({ ...apiKeyOptions, maxRetries: 2 });
     await expect(adapter.call({ messages: [userMsg('hi')], tools: [] })).rejects.toBeInstanceOf(

@@ -144,9 +144,9 @@ describe('keyValidator', () => {
     expect(r.reason ?? '').not.toContain(FAKE_KEY);
   });
 
-  it('claude-pro → skipped with OAuth reason', async () => {
+  it('chatgpt-plus → skipped with OAuth reason', async () => {
     const { fetch: f } = fakeFetch(() => ({ status: 200 }));
-    const r = await validateProviderKey('claude-pro', FAKE_KEY, undefined, f);
+    const r = await validateProviderKey('chatgpt-plus', FAKE_KEY, undefined, f);
     expect(r.valid).toBe(true);
     expect(r.skipped).toBe(true);
     expect(r.skipReason).toMatch(/OAuth/i);

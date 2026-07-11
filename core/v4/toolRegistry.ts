@@ -43,6 +43,13 @@ import type { SessionManager } from './sessionManager';
 import type { MemoryManager } from './memoryManager';
 import type { ProcessRegistry } from './processRegistry';
 import type { ApprovalEngine, ApprovalRequest } from '../../moat/approvalEngine';
+import {
+  fileSnapshot,
+  snapshotTargetsForTool,
+  resourceIdForPath,
+  type SnapshotSink,
+} from './fsSnapshot';
+import type { SnapshotObservation } from './temporalEvidence';
 import type { SSRFProtection } from '../../moat/ssrfProtection';
 import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
@@ -143,6 +150,16 @@ export interface ToolContext {
    * proceed" instead of hanging.
    */
   clarify?: (question: string, options?: string[]) => Promise<string | null>;
+  /**
+   * P1B-2B shadow filesystem capture. When present, the execution gate takes a
+   * FAIL-SAFE pre/post snapshot around exact-target file tools and hands the
+   * finished pair here. Absent ⇒ zero capture, zero I/O. NON-AUTHORITATIVE: a
+   * snapshot never affects the command whether it succeeds or fails.
+   */
+  snapshotSink?: SnapshotSink;
+  /** Per-attempt discriminator for the snapshot pair (runtime retries reuse the
+   *  same call.id). Defaults to 1. */
+  attempt?: number;
 }
 
 /**
@@ -593,6 +610,24 @@ export class ToolRegistry {
       // child agent's own signal never leaks into the shared session context.
       const dispatch = async (a: Record<string, unknown>): Promise<unknown> =>
         handler.execute(a, signal ? { ...context, signal } : context);
+
+      // ── P1B-2B — FAIL-SAFE pre-state snapshot (shadow, non-authoritative) ──
+      // Post-approval, pre-spawn. In its OWN try/catch, independent of the
+      // handler try/catch below, so a capture fault can never reach the
+      // command's error path. The budget inside fileSnapshot is a fail-safe
+      // TIMEOUT: on any throw / hang / timeout / permission error it yields a
+      // `SnapshotObservation.unknown` and the command spawns unchanged.
+      const _snapTargets = context.snapshotSink ? snapshotTargetsForTool(call.name, args) : [];
+      let _snapPre: Map<string, SnapshotObservation> | undefined;
+      if (context.snapshotSink && _snapTargets.length > 0) {
+        try {
+          const obs = await Promise.all(_snapTargets.map((p) => fileSnapshot(p)));
+          _snapPre = new Map(_snapTargets.map((p, i) => [p, obs[i]]));
+        } catch {
+          _snapPre = undefined; // capture fault → no pair; the command still runs
+        }
+      }
+
       let result: unknown;
       try {
         const sliced = sliceSpanShim();
@@ -646,6 +681,31 @@ export class ToolRegistry {
               : JSON.stringify(out.result);
             responseCache.set(call.name, args, serialised);
           } catch { /* serialisation failure: skip cache, never break the call */ }
+        }
+        // ── P1B-2B — FAIL-SAFE post-state snapshot (shadow, DEFERRED) ──────
+        // Fire-and-forget AFTER the command's result already exists, so it adds
+        // ZERO latency to the command path. Builds the pair and hands it to the
+        // sink. Any fault is swallowed; nothing here can touch `out`.
+        if (context.snapshotSink && _snapPre) {
+          // Wrapped so even a SYNCHRONOUS throw from fileSnapshot (building the
+          // array) is swallowed here and can never reach the handler catch below
+          // — `out` is already computed; capture must not flip it to an error.
+          try {
+            const sink = context.snapshotSink;
+            const pre = _snapPre;
+            const attempt = context.attempt ?? 1;
+            const targets = _snapTargets;
+            void Promise.all(targets.map((p) => fileSnapshot(p).then((post) => ({ p, post }))))
+              .then((posts) => {
+                for (const { p, post } of posts) {
+                  const preObs = pre.get(p);
+                  if (!preObs) continue;
+                  try { sink({ resource: resourceIdForPath(p), attempt, pre: preObs, post }); }
+                  catch { /* a sink fault never matters */ }
+                }
+              })
+              .catch(() => { /* post-capture fault → no pair */ });
+          } catch { /* synchronous capture fault → no pair; `out` is untouched */ }
         }
         return out;
       } catch (err) {

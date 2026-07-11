@@ -147,37 +147,4 @@ describe('Phase 21 #5 — /model switch OAuth call-chain integration', () => {
     }
   });
 
-  it('3. /model switch to claude-pro with token in tokenStore → cross-provider parity (same fast-path)', async () => {
-    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
-    await ensureAidenDirsExist(paths);
-    await saveTokens(paths, {
-      provider: 'claude-pro',
-      accessToken: 'anth-real-bearer',
-      refreshToken: 'ref-1',
-      expiresAtMs: Date.now() + 60 * 60_000,
-    });
-
-    const captured: { call?: any } = {};
-    const realResolver = new RuntimeResolver(
-      new CredentialResolver(path.join(tmpRoot, 'auth.json')),
-    );
-    const wrappingResolver = {
-      async resolve(o: any) {
-        captured.call = o;
-        return realResolver.describe(o);
-      },
-    };
-
-    const session = makeChatSession({ paths, resolverImpl: wrappingResolver });
-    await session.setProvider('claude-pro', 'claude-opus-4-7');
-
-    expect(captured.call?.paths).toBeDefined();
-    const description = await realResolver.describe({
-      providerId: 'claude-pro',
-      modelId: 'claude-opus-4-7',
-      paths,
-    });
-    expect(description.apiKey).toBe('anth-real-bearer');
-    expect(description.source).toBe('auth.json'); // canonical sentinel
-  });
 });

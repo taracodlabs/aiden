@@ -217,8 +217,8 @@ describe('RuntimeResolver.resolve', () => {
     expect(resolution.source).toBe('env');
   });
 
-  it('14. listProviders returns at least 19 entries', () => {
-    expect(makeResolver().listProviders().length).toBeGreaterThanOrEqual(19);
+  it('14. listProviders returns at least 18 entries', () => {
+    expect(makeResolver().listProviders().length).toBeGreaterThanOrEqual(18);
   });
 
   it('15. listModels(providerId) returns provider-specific models, empty for unknown', () => {

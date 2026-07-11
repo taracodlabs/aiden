@@ -49,29 +49,22 @@ import { formatPluginBootCard } from '../../../core/v4/plugins/pluginBootCard';
 
 let tmpRoot: string;
 
-// Phase 18: bundled-dir discovery now also surfaces aiden-plugin-claude-pro
-// (and any future bundled plugin). The smoke focuses on the cdp-browser
-// flow, so we pre-grant claude-pro and then assert on the cdp-browser
-// state specifically. cleanGrants() wipes both grant files between runs
-// to keep the initial state genuinely "no grant for cdp".
+// Phase 18: bundled-dir discovery surfaces every bundled plugin. The smoke
+// focuses on the cdp-browser flow, so we wipe its grant file between runs to
+// keep the initial state genuinely "no grant for cdp".
 const REPO_PLUGINS_ROOT = path.resolve(__dirname, '..', '..', '..', 'plugins');
 const CDP_GRANT_FILE = path.join(
   REPO_PLUGINS_ROOT, 'aiden-plugin-cdp-browser', '.granted-permissions.json',
-);
-const CLAUDE_PRO_GRANT_FILE = path.join(
-  REPO_PLUGINS_ROOT, 'aiden-plugin-claude-pro', '.granted-permissions.json',
 );
 
 beforeEach(async () => {
   tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-phase17-smoke-'));
   await fs.rm(CDP_GRANT_FILE, { force: true });
-  await fs.rm(CLAUDE_PRO_GRANT_FILE, { force: true });
 });
 
 afterEach(async () => {
   await fs.rm(tmpRoot, { recursive: true, force: true });
   await fs.rm(CDP_GRANT_FILE, { force: true });
-  await fs.rm(CLAUDE_PRO_GRANT_FILE, { force: true });
 });
 
 function noopDisplay(): any {
@@ -109,8 +102,8 @@ describe('Phase 17 — play-song architectural loop', () => {
       evaluatePermissions: evaluatePermissionState,
     });
     await loader.discoverAndLoad();
-    // Phase 18: focus on cdp-browser state; other bundled plugins (e.g.
-    // claude-pro) are also pending-grant pre-test, that's fine.
+    // Phase 18: focus on cdp-browser state; other bundled plugins are
+    // also pending-grant pre-test, that's fine.
     const initial = loader.getRegistry().get('aiden-plugin-cdp-browser');
     expect(initial?.status).toBe('pending-grant');
     expect(initial?.missingPermissions).toEqual(

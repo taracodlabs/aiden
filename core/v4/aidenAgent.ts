@@ -75,6 +75,11 @@ import type { PromptCaching } from './promptCaching';
 import { TurnState, type RecoveryDecision } from './turnState';
 import { handlerMutatesForCall } from './handlerMutates';
 import {
+  buildCommandRecord,
+  type CommandId,
+  type CommandRecord,
+} from './executionContract';
+import {
   decideRecoveryAction,
   resolveRetryPolicyConfig,
   buildRetryAnnotation,
@@ -426,6 +431,15 @@ export interface RunConversationOptions {
    * by the dispatch branch so a bad listener cannot break the turn.
    */
   onUiEvent?:        (name: string, args: Record<string, unknown>) => void;
+  /**
+   * P1A shadow-collect (NON-AUTHORITATIVE). When present, the dispatch seam
+   * builds a CommandRecord per tool call and stores it here, keyed by an
+   * Aiden-minted CommandId. Turn-local; no production path consumes it yet,
+   * no I/O, no persistence. Absent in production ⇒ a single truthy check per
+   * call, zero allocation. Tests inspect the map directly to prove the shared
+   * execution model matches reality.
+   */
+  shadowCommands?:   Map<CommandId, CommandRecord>;
   /**
    * v4.12.1 Pillar 4 Slice 2b — mid-turn STEER pull. Called by the loop at the
    * safe boundary (end of the loop body, after the tool batch, before the next
@@ -1852,6 +1866,25 @@ export class AidenAgent {
             retries: retryNotes.length > 0 ? retryNotes : undefined,
           });
           fullTrace.push({ name: call.name, args: call.arguments });
+          // P1A shadow-collect (non-authoritative) — build a CommandRecord from
+          // the signals already in hand and store it in the turn-local ledger
+          // when one was injected. No consumer, no I/O; a fault here must never
+          // break dispatch.
+          if (runOptions.shadowCommands) {
+            try {
+              const shadowRecord = buildCommandRecord({
+                providerCallId: call.id,
+                tool:           call.name,
+                args:           call.arguments,
+                mutates:        handlerMutatesForCall(call, this.resolveMutates),
+                result:         result.result,
+                error:          result.error,
+                verification,
+                aborted:        !!this._currentSignal?.aborted,
+              });
+              runOptions.shadowCommands.set(shadowRecord.proposal.id, shadowRecord);
+            } catch { /* shadow-collect must never break dispatch */ }
+          }
           // URL ledger ingest — extracts ids from result body for next turn.
           trackers.url.recordToolResult(call.name, result.result);
           // skill_view result → arm the enforcement tracker if the skill

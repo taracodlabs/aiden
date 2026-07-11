@@ -167,6 +167,11 @@ npm run typecheck  # tsc --noEmit
 npm run build      # esbuild bundle
 ```
 
+> **Historical (pre-4.14.8)** — the `claude-pro` entries below were removed
+> with the Claude subscription path; kept as a record, not current state. The
+> live pre-existing failures are environmental (real-Ollama daemon, PTY/frame
+> harnesses).
+
 Pre-existing baseline failures (~10 documented files: plugins, claude-pro
 registration, moatBoot parallel-flake, ollama-real env probe). New tests
 must not regress passing files.

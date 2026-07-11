@@ -7,14 +7,13 @@ describe('PromptCaching', () => {
 
   it('1. isSupported returns true for anthropic', () => {
     expect(pc.isSupported('anthropic', 'claude-opus-4-7')).toBe(true);
-    // Phase 21 #5: canonical OAuth ID is claude-pro (legacy
-    // claude_subscription removed in the routing unification).
-    expect(pc.isSupported('claude-pro', 'claude-opus-4-7')).toBe(true);
   });
 
   it('2. isSupported returns false for non-anthropic', () => {
     expect(pc.isSupported('groq', 'llama-3.1-8b-instant')).toBe(false);
     expect(pc.isSupported('openai', 'gpt-5.4')).toBe(false);
+    // The removed Claude subscription provider is no longer cache-eligible.
+    expect(pc.isSupported('claude-pro', 'claude-opus-4-7')).toBe(false);
   });
 
   it('3. applyMarkers adds cache_control to system message (anthropic)', () => {

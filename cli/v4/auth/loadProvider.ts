@@ -31,7 +31,6 @@ import { resolveBundledPluginsDir } from '../../../core/v4/plugins/pluginBundled
 /** Map provider id → bundled plugin dir name. Source of truth for the wizard
  *  picker and `/auth login`'s argument validation. */
 export const PRO_PLUGIN_DIRS: Record<string, string> = {
-  'claude-pro': 'aiden-plugin-claude-pro',
   'chatgpt-plus': 'aiden-plugin-chatgpt-plus',
 };
 

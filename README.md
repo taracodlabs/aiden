@@ -271,7 +271,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 
 | Category | What Aiden does |
 |---|---|
-| **Inference & providers** | 19 providers: Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama (fully offline), Nous Portal, custom OpenAI-compatible endpoints. OAuth subscription routing for Claude Pro and ChatGPT Plus. |
+| **Inference & providers** | 18 providers: Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama (fully offline), Nous Portal, custom OpenAI-compatible endpoints. OAuth subscription routing for ChatGPT Plus. |
 | **60 built-in tools** | Web search & fetch, deep research, YouTube search, Playwright browser automation (10 tools), file ops, process control, shell exec, code execution, system info, screenshot, clipboard, app launch, media keys, MCP bridge, memory ops, session list/search/summary/recall, skill view/list/manage, `aiden_self_update`. |
 | **74 bundled skills** | Composable workflows each with a `SKILL.md` prompt, optional helper scripts, and tool requirements. GitHub PR/issue workflows, NSE / Upstox / Zerodha trading, Censys / Shodan / VirusTotal lookups, Windows Defender / Task Scheduler, Docker management, YouTube content tools, and more. |
 | **Self-promoting memory** | `USER.md` + `SOUL.md` identity, plus `MEMORY.md` split between durable facts (compression-protected) and recent-session distillations. Each session ends with a structured summary that graduates durable facts into the protected section. Semantic recall over past sessions via `recall_session`. |
@@ -280,7 +280,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 | **Computer use** | Screenshot capture, screen-state vision loop, state-aware browser automation, accessibility-tree snapshots, stable element handles, act-by-reference click/type/fill, and partial mouse/keyboard automation. |
 | **v4.5 daemon mode (opt-in)** | File watcher / webhook / email IMAP / scheduled triggers route through a durable trigger bus consumed by the Phase 5a dispatcher. Triggers fire → real agent runs → tool calls execute → `run_events` captures the chain. **Off by default.** |
 | **v4.13 durable autonomy** | Job-cards, restart-safe task continuation, duplicate-action prevention, smart retries, evidence-required subagents, trust dial, and live operator dashboard. |
-| **Plugins** | Three bundled plugins: Chrome DevTools Protocol bridge, Claude Pro OAuth, ChatGPT Plus OAuth. Permission-state machine (pending-grant / loaded / suspended). |
+| **Plugins** | Two bundled plugins: Chrome DevTools Protocol bridge, ChatGPT Plus OAuth. Permission-state machine (pending-grant / loaded / suspended). |
 | **MCP** | Model Context Protocol bridge and client — stdio + Streamable HTTP transports, schema discovery, OAuth 2.0 flow, approval-gated external tools, and tool dispatch. |
 | **Security moat** | Tiered approval engine (`safe` / `caution` / `dangerous`), dangerous-command pattern classifier, outcome verification, artifact provenance, trust dial, memory guard, planner-guard tool narrowing, SSRF-safe URL fetcher, secret/PII pre-write scanner, exfiltration-aware browser guardrails, and skill-teacher. |
 
@@ -432,7 +432,7 @@ export AIDEN_DEFAULT_MODEL=llama-3.3-70b-versatile
 
 > 💡 **Quality scales with model capability.** Aiden's output quality depends heavily on the model you pick. For real work, prefer the highest-capability model your budget allows — GPT-5.5 via ChatGPT OAuth, GPT-5, Claude Sonnet 4.6, Opus, or Gemini 2.5 Pro. Smaller models work for simple tasks, but agentic loops benefit from stronger reasoning.
 
-> 💡 **ChatGPT Plus / Claude Pro subscribers**: use the OAuth flow instead of an API key. Pick `chatgpt-plus` or `claude-pro` as your provider during `/model` setup, then sign in via browser. For ChatGPT OAuth, Aiden can route to GPT-5.5, GPT-5.4, GPT-5.3 Instant, GPT-5, and other GPT models available on your plan. No separate API costs — uses your existing subscription's model allowances.
+> 💡 **ChatGPT Plus subscribers**: use the OAuth flow instead of an API key. Pick `chatgpt-plus` as your provider during `/model` setup, then sign in via browser. Aiden can route to GPT-5.5, GPT-5.4, GPT-5.3 Instant, GPT-5, and other GPT models available on your plan. No separate API costs — uses your existing subscription's model allowances. **Anthropic users**: set `ANTHROPIC_API_KEY` and pick `anthropic`.
 
 <br>
 

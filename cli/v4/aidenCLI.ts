@@ -28,7 +28,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { Command } from 'commander';
-import { promises as fs, watch as fsWatch } from 'node:fs';
+import { promises as fs, watch as fsWatch, existsSync } from 'node:fs';
 import path from 'node:path';
 
 import { ChatSession } from './chatSession';
@@ -57,6 +57,7 @@ import {
   ensureAidenDirsExist,
   type AidenPaths,
 } from '../../core/v4/paths';
+import { recordTurnDivergence } from '../../core/v4/verificationAudit';
 import { ensureSoulMdSeeded } from '../../core/v4/soulSeed';
 import { setVisionProvider } from '../../core/v4/visionClient';
 import { ConfigManager, resolveConfiguredAutonomyLevel } from '../../core/v4/config';
@@ -116,6 +117,7 @@ import {
 import {
   HonestyEnforcement,
   type HonestyMode,
+  type HonestyTraceEntry,
 } from '../../moat/honestyEnforcement';
 import {
   SkillTeacher,
@@ -131,6 +133,18 @@ import { SkillOutcomeTracker } from '../../core/v4/skillOutcomeTracker';
 import { resolveBootProvider } from './providerBootSelector';
 import { enumerateConfiguredProviders, pickProbeModel } from './doctorLiveness';
 import { PROVIDER_REGISTRY } from '../../providers/v4/registry';
+import {
+  fallbackAllowed,
+  billingTierRank,
+  type BillingTier,
+  type PaidFallbackConsent,
+} from '../../core/v4/billingGuard';
+import {
+  REMOVED_OAUTH_PROVIDERS,
+  cleanupRemovedProviderToken,
+  announceRemovedProviderOrphans,
+} from '../../core/v4/auth/removedProviders';
+import { BoundedSnapshotLedger } from '../../core/v4/fsSnapshot';
 import { isMcpServeMode } from './uiBuild';
 import { MemoryGuard } from '../../moat/memoryGuard';
 import { SSRFProtection } from '../../moat/ssrfProtection';
@@ -592,6 +606,33 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     });
 
   program
+    .command('auth <action> [provider]')
+    .description(
+      "Manage OAuth auth. Action 'cleanup <provider>' purges a removed provider's leftover credential.",
+    )
+    .action(async (action: string, provider: string | undefined) => {
+      const paths = resolveAidenPaths();
+      await ensureAidenDirsExist(paths);
+      if (action === 'cleanup') {
+        if (!provider) {
+          process.stderr.write(
+            `Usage: aiden auth cleanup <provider>\n` +
+              `Removed providers: ${REMOVED_OAUTH_PROVIDERS.join(', ')}\n`,
+          );
+          process.exit(1);
+        }
+        const r = await cleanupRemovedProviderToken(paths, provider);
+        (r.ok ? process.stdout : process.stderr).write(r.message + '\n');
+        process.exit(r.ok ? 0 : 1);
+      }
+      process.stderr.write(
+        `Unknown 'aiden auth' action '${action}'. Supported: cleanup <provider>.\n` +
+          `For login / logout / refresh / status, use /auth inside the interactive REPL.\n`,
+      );
+      process.exit(1);
+    });
+
+  program
     .command('sessions <action> [arg]')
     .description('Manage persisted sessions. Actions: list, search <query>.')
     .action(async (action: string, arg?: string) => {
@@ -1014,9 +1055,42 @@ async function resolveFirstWorkingProvider(
     }
   }
 
-  // 3. resolve() is the authority — first that builds an adapter wins.
+  // Paid-fallback invariant (core/v4/billingGuard): a provider failure must
+  // never silently move the user onto a per-token PAID provider they didn't
+  // choose. The tier we're falling FROM decides whether a paid landing is an
+  // escalation — an unknown/removed provider (e.g. a retired subscription) is
+  // treated as `subscription`, so a paid key still requires explicit consent.
+  const fromTier: BillingTier =
+    PROVIDER_REGISTRY[excludeProviderId]?.billingTier ?? 'subscription';
+  const tierOf = (id: string): BillingTier =>
+    PROVIDER_REGISTRY[id]?.billingTier ?? 'paid'; // unknown ⇒ treat as paid (conservative)
+
+  // Try cheapest tiers first so a free/local provider is preferred over a paid
+  // one even when both are configured.
+  candidates.sort((a, b) => billingTierRank(tierOf(a.id)) - billingTierRank(tierOf(b.id)));
+
+  // 3. resolve() is the authority — first that builds an adapter wins, subject
+  //    to the billing guard.
   for (const cand of candidates) {
     if (!cand.model) continue;
+    const candTier = tierOf(cand.id);
+    const consent: PaidFallbackConsent =
+      config.get(`providers.${cand.id}.paidFallbackConsent`) === 'explicit'
+        ? 'explicit'
+        : PROVIDER_REGISTRY[cand.id]?.paidFallbackConsent ?? 'absent';
+    if (!fallbackAllowed(fromTier, candTier, consent)) {
+      // Blocked: refuse to auto-escalate onto a paid key. Recorded (not
+      // swallowed) so the boot decision trace shows exactly what was skipped.
+      attempts.push({
+        providerId: cand.id,
+        ok: false,
+        reason:
+          `blocked: auto-selecting ${cand.id} would escalate billing ` +
+          `${fromTier} → ${candTier} without consent. Pick it with /model, or set ` +
+          `providers.${cand.id}.paidFallbackConsent=explicit to allow silent fallback.`,
+      });
+      continue;
+    }
     try {
       const adapter = await resolver.resolve({
         providerId: cand.id,
@@ -1061,6 +1135,30 @@ export async function buildAgentRuntime(
   // clean pipeable answer, and approvals default to auto-DENY (no TUI to
   // prompt). See runQuery / executeOneShotTurn below.
   const headless = !!cliOpts?.headless;
+
+  // Slice 2 — surface (and, interactively, offer to purge) any orphaned
+  // credential left by a removed OAuth provider. hasTokens gates the work, so
+  // a clean install pays only one fs.access per removed provider. Headless /
+  // non-TTY: a stderr diagnostic naming the file + the cleanup command, never
+  // a prompt and never a delete — silence is not consent.
+  try {
+    const orphanInteractive = !headless && !!process.stdin.isTTY;
+    await announceRemovedProviderOrphans({
+      paths,
+      interactive: orphanInteractive,
+      write: (l) =>
+        (orphanInteractive ? process.stdout : process.stderr).write(l + '\n'),
+      confirm: orphanInteractive
+        ? async (q: string) => {
+            // eslint-disable-next-line @typescript-eslint/no-var-requires
+            const { confirm } = require('@inquirer/prompts');
+            return confirm({ message: q, default: false });
+          }
+        : undefined,
+    });
+  } catch {
+    // A startup notice must never block boot.
+  }
 
   // ── v4.6 Phase 1 — always-on runStore for spawn_sub_agent ──────────────
   //
@@ -1626,8 +1724,8 @@ export async function buildAgentRuntime(
   // restoreBundledPluginsIfNeeded remains available for future
   // dep-free bundled plugins but is intentionally not invoked at boot.
   const bundledDir = await resolveBundledPluginsDir().catch(() => null);
-  // Phase 18: OAuth provider registry. The bundled claude-pro and
-  // chatgpt-plus plugins call ctx.registerOAuthProvider() during their
+  // Phase 18: OAuth provider registry. The bundled chatgpt-plus plugin
+  // calls ctx.registerOAuthProvider() during its
   // register() — without a registry wired in, that throws. /auth login,
   // /auth refresh, and the inference resolver all read tokens via
   // tokenStore directly so this registry is mostly a side-effect home;
@@ -2140,6 +2238,13 @@ export async function buildAgentRuntime(
   // ctx.processes is now defined, so process_spawn/list/kill/wait/log_read work
   // in a real session. Reaped on shutdown via cleanup() (wired below).
   const processRegistry = new ProcessRegistry();
+  // P1B-2B shadow filesystem capture (NON-AUTHORITATIVE). A bounded, in-memory
+  // ledger of recent pre/post snapshot pairs; the execution gate fills it around
+  // exact-target file tools, fail-safe. Read by no authoritative path — it
+  // exercises the capture path on real commands and stands ready for the P1B
+  // flip. A snapshot fault never affects a command (proven by the fail-safe
+  // teeth); absent-safe by construction.
+  const snapshotLedger = new BoundedSnapshotLedger();
 
   const toolExecutorContext = {
     cwd: process.cwd(),
@@ -2157,6 +2262,8 @@ export async function buildAgentRuntime(
     // (REPL only; reuses the approval prompt path). Absent from the daemon
     // executor, so headless agents get the tool's "unavailable" degrade.
     clarify: callbacks.promptClarify,
+    // P1B-2B — shadow snapshot sink (non-authoritative; fail-safe capture only).
+    snapshotSink: snapshotLedger.sink,
   };
   const toolExecutor = toolRegistry.buildExecutor(toolExecutorContext);
 
@@ -3611,12 +3718,14 @@ export interface AgentRuntime {
 // agent.runConversation([userTurn]) — without booting the REPL/TUI, the
 // greeter, the paste interceptor, watchers, or channel polling.
 
-/** Loose structural shape of the one turn we need — lets tests pass a mock. */
+/** Loose structural shape of the one turn we need — lets tests pass a mock.
+ *  `toolCallTrace` carries the REAL HonestyTraceEntry[] (previously under-typed
+ *  to `{ error? }[]`) so the divergence audit can finalize + compare over it. */
 interface OneShotAgent {
   runConversation(history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<{
     finalContent?:  string;
     finishReason?:  string;
-    toolCallTrace?: Array<{ error?: string }>;
+    toolCallTrace?: HonestyTraceEntry[];
   }>;
 }
 
@@ -3629,6 +3738,11 @@ export interface OneShotDeps {
   writeErr?: (s: string) => void;
   /** Best-effort resource cleanup, always awaited (finally). */
   teardown?: () => Promise<void>;
+  /** When set, the shadow verdict-divergence audit runs after the turn (same
+   *  local JSONL as the interactive seam). Absent ⇒ no audit, no I/O. */
+  paths?:    AidenPaths;
+  /** Working dir for path minimization + the on-disk artifact check. */
+  cwd?:      string;
 }
 
 /**
@@ -3647,6 +3761,28 @@ export async function executeOneShotTurn(deps: OneShotDeps): Promise<number> {
     const answer = result.finalContent ?? '';
     // stdout carries ONLY the answer (newline-terminated for pipe hygiene).
     out(answer.endsWith('\n') ? answer : `${answer}\n`);
+
+    // Dual-run Slice 1 — the headless one-shot runs the SAME shadow verdict-
+    // divergence audit the interactive seam does, via the ONE shared helper.
+    // Headless surfaces no task verdict, so the legacy verdict is computed fresh
+    // from the trace (never a phantom). Fault-isolated — never affects the turn.
+    if (deps.paths) {
+      const cwd = deps.cwd ?? process.cwd();
+      recordTurnDivergence({
+        paths:  deps.paths,
+        cwd,
+        now:    Date.now(),
+        turnId: 'oneshot',
+        trace:  result.toolCallTrace ?? [],
+        finalize: {
+          finishReason: result.finishReason ?? 'stop',
+          fileExists: (p) => {
+            try { return existsSync(path.isAbsolute(p) ? p : path.resolve(cwd, p)); }
+            catch { return false; }
+          },
+        },
+      });
+    }
 
     // Surface tools denied by the auto-deny policy so the output isn't
     // silently incomplete. Matches the executor's denial marker
@@ -3703,6 +3839,10 @@ export async function runQuery(
   return executeOneShotTurn({
     agent:  runtime.agent as unknown as OneShotAgent,
     prompt,
+    // Dual-run Slice 1 — enable the shadow divergence audit on the headless
+    // seam (the interactive REPL wires it via ChatSession). Same local JSONL.
+    paths:  runtime.paths,
+    cwd:    process.cwd(),
     teardown: async () => {
       // Same discipline as runInteractiveChat's shutdown, plus process.exit
       // in the caller guarantees no lingering-handle hang (memory #29).

@@ -10,8 +10,8 @@ const ALL_API_MODES: ApiMode[] = [
 ];
 
 describe('PROVIDER_REGISTRY', () => {
-  it('has at least 19 providers registered', () => {
-    expect(listProviderIds().length).toBeGreaterThanOrEqual(19);
+  it('has at least 18 providers registered', () => {
+    expect(listProviderIds().length).toBeGreaterThanOrEqual(18);
   });
 
   it('every entry has all required fields populated', () => {
@@ -21,6 +21,7 @@ describe('PROVIDER_REGISTRY', () => {
       expect(entry.baseUrl).toMatch(/^https?:\/\//);
       expect(entry.description).toBeTruthy();
       expect(['pro', 'free', 'paid', 'local', 'subscription']).toContain(entry.tier);
+      expect(['local', 'free', 'subscription', 'paid']).toContain(entry.billingTier);
       expect(typeof entry.hasFreeTier).toBe('boolean');
       expect(typeof entry.supportsToolCalling).toBe('boolean');
       expect(Array.isArray(entry.modelIds)).toBe(true);

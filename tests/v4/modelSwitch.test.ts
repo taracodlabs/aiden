@@ -47,8 +47,9 @@ describe('ModelSwitcher.parse', () => {
   });
 
   it('3. throws on ambiguous bare model with options listed', () => {
-    expect(() => makeSwitcher().parse('claude-opus-4-7')).toThrow(
-      /ambiguous.*Did you mean.*anthropic:claude-opus-4-7/,
+    // gpt-5.4 is served by both chatgpt-plus (OAuth) and openai (API key).
+    expect(() => makeSwitcher().parse('gpt-5.4')).toThrow(
+      /ambiguous.*Did you mean.*chatgpt-plus:gpt-5\.4/,
     );
   });
 

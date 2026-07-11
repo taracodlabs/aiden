@@ -264,9 +264,9 @@ a soft signal in the prompt ("[older entries truncated]").
 - **Per-provider routing.** Some providers (OpenAI Codex, Anthropic
   Workspace) offer zero-retention modes. Aiden routes through whatever
   policy your provider enforces; it doesn't override it.
-- **OAuth subscription routing** (`claude-pro`, `chatgpt-plus`) uses
-  the same retention policy your consumer subscription has — typically
-  more restrictive than API tier.
+- **OAuth subscription routing** (`chatgpt-plus`) uses the same
+  retention policy your consumer subscription has — typically more
+  restrictive than API tier.
 - **Local-only mode.** Use the `ollama` provider for prompts that
   must never leave your machine.
 

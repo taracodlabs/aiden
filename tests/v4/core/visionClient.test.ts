@@ -27,7 +27,7 @@ function fakeAdapter() {
 describe('visionClient — routing', () => {
   it('vision-capable active model → image reaches adapter.call, returns text', async () => {
     const { adapter, calls } = fakeAdapter();
-    setVisionProvider({ adapter, providerId: 'claude-pro', modelId: 'claude-opus-4-7' });
+    setVisionProvider({ adapter, providerId: 'anthropic', modelId: 'claude-opus-4-7' });
     expect(visionAvailable().ok).toBe(true);
 
     const r = await askVision({ imageDataUrl: 'data:image/png;base64,AAA', question: 'what is this?' });

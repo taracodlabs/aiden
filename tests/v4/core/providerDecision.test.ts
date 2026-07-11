@@ -45,11 +45,11 @@ describe('providerDecision — durable round-trip (readable out-of-process)', ()
       provider: 'groq',
       model:    'llama-3.3-70b-versatile',
       source:   'persisted-config',
-      requestedProvider: 'claude-pro',
+      requestedProvider: 'chatgpt-plus',
       requestedExplicit: false,
-      fallbackReason: 'OAuth token for claude-pro is expired. Run `/auth refresh claude-pro`.',
+      fallbackReason: 'OAuth token for chatgpt-plus is expired. Run `/auth refresh chatgpt-plus`.',
       attempts: [
-        { providerId: 'claude-pro', ok: false, reason: 'expired' },
+        { providerId: 'chatgpt-plus', ok: false, reason: 'expired' },
         { providerId: 'groq', ok: true },
       ],
     };
@@ -57,7 +57,7 @@ describe('providerDecision — durable round-trip (readable out-of-process)', ()
     const read = readProviderDecision(paths);
     expect(read).toEqual(decision);
     // The fix command survives to disk — a later `aiden doctor` can show it.
-    expect(read?.fallbackReason).toContain('/auth refresh claude-pro');
+    expect(read?.fallbackReason).toContain('/auth refresh chatgpt-plus');
   });
 
   it('absent decision file → null', () => {
@@ -89,10 +89,10 @@ describe('providerDecision — describeOrigin (honest wording)', () => {
   it('a non-explicit (config/auto) failure reads "X unavailable", not "you asked for"', () => {
     const s = describeOrigin({
       provider: 'groq', model: 'llama-3.3-70b-versatile', source: 'persisted-config',
-      requestedProvider: 'claude-pro', requestedExplicit: false,
+      requestedProvider: 'chatgpt-plus', requestedExplicit: false,
       fallbackReason: 'expired', attempts: [],
     });
-    expect(s).toContain('claude-pro unavailable');
+    expect(s).toContain('chatgpt-plus unavailable');
     expect(s).not.toContain('you asked for');
   });
 });

@@ -9,7 +9,7 @@
  *
  * Provider-agnostic interface for OAuth providers contributed by plugins.
  *
- * Each OAuth provider plugin (claude-pro, chatgpt-plus, ...) constructs an
+ * Each OAuth provider plugin (chatgpt-plus, ...) constructs an
  * `OAuthProvider` and registers it with the runtime via the new
  * `auth-providers` plugin permission. The /auth slash command, the setup
  * wizard, and the token-refresh middleware all consume providers through

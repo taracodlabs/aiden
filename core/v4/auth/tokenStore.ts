@@ -62,7 +62,7 @@ import type { AidenPaths } from '../paths';
  * mismatches (a user copying files between profiles).
  */
 export interface OAuthTokens {
-  /** Provider id (e.g. 'claude-pro', 'chatgpt-plus'). */
+  /** Provider id (e.g. 'chatgpt-plus'). */
   provider: string;
   /** Bearer token sent on each inference request. */
   accessToken: string;
@@ -124,6 +124,12 @@ function tokenFile(paths: AidenPaths, provider: string): string {
   // Sanitise provider id so a malicious manifest can't escape the auth dir.
   const safe = provider.replace(/[^a-z0-9-_]/gi, '_');
   return path.join(authDir(paths), `${safe}.json`);
+}
+
+/** Public accessor for a provider's on-disk token path — for diagnostics and
+ *  cleanup messaging. Does not read or create the file. */
+export function tokenFilePath(paths: AidenPaths, provider: string): string {
+  return tokenFile(paths, provider);
 }
 
 /** Produce the encrypted on-disk record for a token bundle. */

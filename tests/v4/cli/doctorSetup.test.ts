@@ -82,17 +82,17 @@ describe('doctor Setup — Phase 6 provider decision row', () => {
       paths,
       providerDecision: {
         provider: 'groq', model: 'llama-3.3-70b-versatile', source: 'persisted-config',
-        requestedProvider: 'claude-pro', requestedExplicit: false,
-        fallbackReason: 'OAuth token for claude-pro is expired. Run `/auth refresh claude-pro`.',
+        requestedProvider: 'chatgpt-plus', requestedExplicit: false,
+        fallbackReason: 'OAuth token for chatgpt-plus is expired. Run `/auth refresh chatgpt-plus`.',
         attempts: [
-          { providerId: 'claude-pro', ok: false, reason: 'expired' },
+          { providerId: 'chatgpt-plus', ok: false, reason: 'expired' },
           { providerId: 'groq', ok: true },
         ],
       },
     });
     const row = setupResults(setup).find((r) => r.name === 'model source');
-    expect(row?.message).toContain('claude-pro unavailable');
-    expect(row?.message).toContain('/auth refresh claude-pro');   // fix command reaches doctor
+    expect(row?.message).toContain('chatgpt-plus unavailable');
+    expect(row?.message).toContain('/auth refresh chatgpt-plus');   // fix command reaches doctor
     expect(row?.message).toContain('fell back to groq');
   });
 

@@ -39,8 +39,8 @@ describe('ProviderError message composition', () => {
 
   it('includes Anthropic-style error.message in the surfaced message', () => {
     const err = new ProviderError(
-      'Provider claude-pro request failed (401)',
-      'claude-pro',
+      'Provider anthropic request failed (401)',
+      'anthropic',
       401,
       { error: { type: 'authentication_error', message: 'invalid x-api-key' } },
     );

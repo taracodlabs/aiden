@@ -1,3 +1,13 @@
+## v4.14.8 — 2026-07-11
+
+- **Removed the subscription-OAuth impersonation path.** Aiden previously routed a Claude Pro/Max subscription through Anthropic's billing by impersonating a different vendor's CLI — a spoofed client identity in the system prompt, a foreign `user-agent`, an `x-app: cli` header, and OAuth beta-flag headers. That path is gone end to end. The Anthropic **API-key** provider is unchanged.
+- **Honest client identity.** Every Anthropic request now sends `user-agent: aiden/<version>` — Aiden's real, dynamically-read version, no disguise. A deterministic header-capture test asserts the exact wire headers.
+- **Claude subscription login removed.** The `claude-pro` provider, its four models, its setup-wizard entry, and its bundled plugin are gone. For Claude models use an Anthropic API key (`ANTHROPIC_API_KEY`, provider `anthropic`); `chatgpt-plus` remains for subscription OAuth.
+- **No silent paid fallback.** When a selected provider fails to resolve at boot, Aiden no longer silently moves you onto a per-token **paid** API key. It prefers a free/local provider, otherwise drops to recovery mode — unless you record explicit consent (`providers.<id>.paidFallbackConsent=explicit`).
+- **Migration for a leftover login.** If you had signed in with the Claude subscription, its encrypted token file is now inert. On an interactive start Aiden explains this and offers to **delete or keep** it; a headless/non-TTY start prints a one-line diagnostic naming the file and never deletes it. Purge it anytime with `aiden auth cleanup claude-pro` (or `/auth cleanup claude-pro` in the REPL). Nothing is ever deleted without your explicit choice.
+
+---
+
 ## v4.14.7 — 2026-07-10
 
 - **`shell_exec` reaps the whole process tree when a turn is interrupted or times out.** On Ctrl+C or timeout, the child's entire process tree is killed, not just the direct child. A command that spawned its own grandchildren (`powershell → ping`, `bash → nmap`) no longer leaves them running after the turn ends. Windows uses `taskkill /t`; POSIX spawns the child as a process-group leader and kills the group.

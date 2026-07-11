@@ -19,7 +19,7 @@ aiden
 
 That's it. You should hear music in your browser within 90 seconds of step 1.
 
-For OAuth providers (ChatGPT Plus, Claude Pro), see [OAuth Setup](#oauth-setup) below. For advanced configuration, see [Advanced Setup](#advanced-setup) below.
+For OAuth providers (ChatGPT Plus), see [OAuth Setup](#oauth-setup) below. For advanced configuration, see [Advanced Setup](#advanced-setup) below.
 
 ---
 
@@ -139,7 +139,7 @@ aiden
 | `aiden: command not found` after `npm install -g` | `npm bin` dir not on PATH | Print `npm config get prefix` and add to PATH. |
 | `cannot find module 'chrome-remote-interface'` | npm install was incomplete | Re-run `npm install -g aiden`. |
 | `[plugins] aiden-plugin-cdp-browser: pending grant` on boot | First-run state — expected | Run `/plugins grant aiden-plugin-cdp-browser` once. |
-| OAuth login (Claude Pro / ChatGPT Plus) fails with "Missing client_id" or "Workspaces not found" | Upstream / account-state issue (see Phase 18.1 diagnostic) | OAuth providers are **beta in v4.0**. Use API-key auth via `aiden setup`, or pick a different provider with `/model`. |
+| OAuth login (ChatGPT Plus) fails with "Missing client_id" or "Workspaces not found" | Upstream / account-state issue (see Phase 18.1 diagnostic) | OAuth providers are **beta in v4.0**. Use API-key auth via `aiden setup`, or pick a different provider with `/model`. |
 | `Error: EACCES` on Linux during `npm install -g` | System Node's global prefix is root-owned | See the user-prefix snippet in the Linux section. |
 | Aiden boots but `[skills] 0 loaded` | Bundled skills missing from install | Re-run `npm install -g aiden`. The package ships ~72 skills under `skills/`; confirm with `ls $(npm root -g)/aiden/skills`. |
 

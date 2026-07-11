@@ -295,10 +295,9 @@ See [`providers.md`](./providers.md) for per-provider setup walkthroughs.
 
 ### OAuth state
 
-The two OAuth-controlled providers (claude-pro, chatgpt-plus) write
-their token state to `~/.aiden/auth.json` after a successful browser
-flow. No env vars are involved in their happy path; use
-`/auth status` to inspect.
+The OAuth-controlled provider (chatgpt-plus) writes its token state
+to `~/.aiden/auth.json` after a successful browser flow. No env vars
+are involved in its happy path; use `/auth status` to inspect.
 
 If `auth.json` gets corrupted, you can delete it and re-run
 `/auth login <provider>` to refresh.

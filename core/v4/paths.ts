@@ -95,6 +95,15 @@ export interface AidenPaths {
    * SKILL.md updates never reached existing installs.
    */
   skillsBundleVersion: string;
+  /**
+   * Dual-run Slice 1 — root/verification-audit/ holds the SHADOW, non-
+   * authoritative verdict-divergence audit trail. Local-only; no network.
+   */
+  verificationAuditDir: string;
+  /** root/verification-audit/divergence.jsonl — append-only comparison records. */
+  verificationDivergenceLog: string;
+  /** root/verification-audit/.digest-key — installation-local resource-digest key. */
+  verificationDigestKey: string;
 }
 
 export interface ResolveAidenPathsOptions {
@@ -224,6 +233,9 @@ export function resolveAidenPaths(opts: ResolveAidenPathsOptions = {}): AidenPat
     logsDir: path.join(root, 'logs'),
     bundledManifest: path.join(root, '.bundled_manifest'),
     skillsBundleVersion: path.join(root, '.skills-bundle-version'),
+    verificationAuditDir: path.join(root, 'verification-audit'),
+    verificationDivergenceLog: path.join(root, 'verification-audit', 'divergence.jsonl'),
+    verificationDigestKey: path.join(root, 'verification-audit', '.digest-key'),
   };
 }
 
