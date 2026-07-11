@@ -107,3 +107,20 @@ jobs:
             exit 1
           fi
           echo "✓ No API keys detected"
+
+  # Aggregator — a stable, matrix-independent status the branch ruleset can
+  # require. The `test` job's per-cell check names are dynamic (os · node), so
+  # none of them can serve as the fixed required context. This job passes iff
+  # the ENTIRE `test` matrix passed. It depends ONLY on `test`, never on
+  # `security`: vulnerability findings must stay visible but non-blocking.
+  build-type-check:
+    name: Build & Type Check
+    needs: [test]
+    # Run even when `test` failed so a red matrix yields a RED required check —
+    # not a skipped one that would leave the PR stuck awaiting the context.
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Confirm CI matrix passed
+        shell: bash
+        run: test "${{ needs.test.result }}" = "success"
