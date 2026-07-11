@@ -333,14 +333,32 @@ function foldVerdict(
     : { verdict: 'unverified', reason: 'observed work verified; request coverage incomplete' };
 }
 
-/** Fold the records + contract into an honest task verdict. Pure. */
-export function evaluateTask(records: CommandRecord[], contract: TaskContract): TaskEvaluation {
+/** The evaluation PLUS the exact ledger it was folded from. A consumer that must
+ *  independently re-check the fold (the dual-run comparator) reads THIS ledger —
+ *  never a rebuilt one — so its recheck sees identical inputs, not a copy that
+ *  could drift. */
+export interface TaskEvaluationDetail {
+  readonly evaluation: TaskEvaluation;
+  readonly ledger: EvidenceLedger;
+}
+
+/** Fold the records + contract into a verdict AND surface the ledger used. Pure. */
+export function evaluateTaskDetailed(records: CommandRecord[], contract: TaskContract): TaskEvaluationDetail {
   const ledger = buildEvidenceLedger(records);
   const required = contract.requiredClaims.map((d) => evaluateClaim(d, ledger));
   const observed = deriveObservedClaims(records, ledger);
   const forbiddenConfirmed = contract.forbiddenConditions.filter((fc) => isForbiddenConfirmed(fc, ledger));
   const { verdict, reason } = foldVerdict(required, forbiddenConfirmed, contract.coverage);
-  return { verdict, reason, required, observed, coverage: contract.coverage, forbiddenConfirmed };
+  return {
+    evaluation: { verdict, reason, required, observed, coverage: contract.coverage, forbiddenConfirmed },
+    ledger,
+  };
+}
+
+/** Fold the records + contract into an honest task verdict. Pure. Thin wrapper
+ *  over `evaluateTaskDetailed` — behaviour-identical, ledger discarded. */
+export function evaluateTask(records: CommandRecord[], contract: TaskContract): TaskEvaluation {
+  return evaluateTaskDetailed(records, contract).evaluation;
 }
 
 // ── Production shadow entry (headless, non-authoritative) ────────────────────
@@ -362,13 +380,31 @@ export function recordsFromTrace(trace: HonestyTraceEntry[]): CommandRecord[] {
   );
 }
 
+/** The shadow fold plus every input it consumed — evaluation, the frozen
+ *  contract, the command records, and the exact ledger. The dual-run comparator
+ *  takes THIS so its independent recheck reads the same inputs the fold used. */
+export interface ShadowClaimDetail {
+  readonly evaluation: TaskEvaluation;
+  readonly contract: TaskContract;
+  readonly records: CommandRecord[];
+  readonly ledger: EvidenceLedger;
+}
+
 /**
- * The production shadow: fold a turn's trace through a tool-derived contract.
- * Called alongside the legacy verdict; the result is inspected by tests and
- * discarded in production. Never throws on well-formed input; callers still
- * wrap it so a bug can never break finalize.
+ * The production shadow, DETAILED: fold a turn's trace through a tool-derived
+ * contract and return the evaluation alongside the exact records/ledger/contract
+ * it was folded from. Called alongside the legacy verdict; the result is
+ * inspected by tests + the comparator and discarded in production. Never throws
+ * on well-formed input; callers still wrap it so a bug can never break finalize.
  */
-export function runShadowClaimVerifier(trace: HonestyTraceEntry[]): TaskEvaluation {
+export function runShadowClaimVerifierDetailed(trace: HonestyTraceEntry[]): ShadowClaimDetail {
   const records = recordsFromTrace(trace);
-  return evaluateTask(records, buildToolDerivedContract(records));
+  const contract = buildToolDerivedContract(records);
+  const { evaluation, ledger } = evaluateTaskDetailed(records, contract);
+  return { evaluation, contract, records, ledger };
+}
+
+/** Compatibility wrapper — the evaluation only. Behaviour-identical to before. */
+export function runShadowClaimVerifier(trace: HonestyTraceEntry[]): TaskEvaluation {
+  return runShadowClaimVerifierDetailed(trace).evaluation;
 }

@@ -22,7 +22,8 @@
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
-import { runShadowClaimVerifier, type TaskEvaluation } from '../../core/v4/claimVerifier';
+import { runShadowClaimVerifierDetailed, type TaskEvaluation } from '../../core/v4/claimVerifier';
+import { recordVerifierDivergence } from '../../core/v4/verificationAudit';
 import {
   emitArtifactVerified, emitCostUpdated, emitAutonomyChanged, type PillarEventSink,
 } from '../../core/v4/pillarEvents';
@@ -2335,13 +2336,30 @@ export class ChatSession implements ChatSessionLike {
             replTaskStore.setStatus(replTaskId, 'pending_verification');
           }
           replTaskStore.finalizeVerification(replTaskId, fin.status, fin.evidence, fin.jobCard);
-          // P1B-1 shadow (non-authoritative, tool-derived) — run the claim
-          // verifier alongside the legacy verdict so the pipeline is exercised
-          // on real turns. Consumed by nobody; not persisted, not rendered. A
-          // fault here must never break finalize.
+          // P1B-1 shadow + Dual-run Slice 1 — run the claim verifier alongside
+          // the legacy verdict and CLASSIFY the divergence into a local audit
+          // record. NON-AUTHORITATIVE: legacy stays user-authoritative; the
+          // record is appended to a local JSONL, read by nobody, no network.
+          // Fault-isolated end-to-end — never breaks finalize.
           try {
-            this._shadowClaimEval = runShadowClaimVerifier(result.toolCallTrace ?? []);
-          } catch { /* shadow claim verifier must never break the turn */ }
+            const shadow = runShadowClaimVerifierDetailed(result.toolCallTrace ?? []);
+            this._shadowClaimEval = shadow.evaluation;
+            if (this.opts.paths) {
+              recordVerifierDivergence({
+                paths:  this.opts.paths,
+                cwd:    process.cwd(),
+                now:    Date.now(),
+                turnId: String(replRunId ?? replTaskId ?? 'turn'),
+                taskId: replTaskId != null ? String(replTaskId) : undefined,
+                legacy: {
+                  status:      fin.status,
+                  failures:    fin.evidence.failures,
+                  handleCodes: fin.evidence.handles.map((h) => h.code).filter((c): c is string => !!c),
+                },
+                detail: shadow,
+              });
+            }
+          } catch { /* shadow comparison must never break the turn */ }
           if (result.finishReason === 'stop' && !(declaredStatus && declaredStatus !== 'success')) {
             if (fin.status === 'verification_failed') {
               const what = fin.evidence.failures
