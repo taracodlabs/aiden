@@ -142,6 +142,7 @@ import {
   cleanupRemovedProviderToken,
   announceRemovedProviderOrphans,
 } from '../../core/v4/auth/removedProviders';
+import { BoundedSnapshotLedger } from '../../core/v4/fsSnapshot';
 import { isMcpServeMode } from './uiBuild';
 import { MemoryGuard } from '../../moat/memoryGuard';
 import { SSRFProtection } from '../../moat/ssrfProtection';
@@ -2235,6 +2236,13 @@ export async function buildAgentRuntime(
   // ctx.processes is now defined, so process_spawn/list/kill/wait/log_read work
   // in a real session. Reaped on shutdown via cleanup() (wired below).
   const processRegistry = new ProcessRegistry();
+  // P1B-2B shadow filesystem capture (NON-AUTHORITATIVE). A bounded, in-memory
+  // ledger of recent pre/post snapshot pairs; the execution gate fills it around
+  // exact-target file tools, fail-safe. Read by no authoritative path — it
+  // exercises the capture path on real commands and stands ready for the P1B
+  // flip. A snapshot fault never affects a command (proven by the fail-safe
+  // teeth); absent-safe by construction.
+  const snapshotLedger = new BoundedSnapshotLedger();
 
   const toolExecutorContext = {
     cwd: process.cwd(),
@@ -2252,6 +2260,8 @@ export async function buildAgentRuntime(
     // (REPL only; reuses the approval prompt path). Absent from the daemon
     // executor, so headless agents get the tool's "unavailable" degrade.
     clarify: callbacks.promptClarify,
+    // P1B-2B — shadow snapshot sink (non-authoritative; fail-safe capture only).
+    snapshotSink: snapshotLedger.sink,
   };
   const toolExecutor = toolRegistry.buildExecutor(toolExecutorContext);
 
