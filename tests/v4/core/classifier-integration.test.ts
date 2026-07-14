@@ -52,8 +52,16 @@ function alternatingOkFailExecutor(): (call: ToolCallRequest) => Promise<ToolCal
 }
 
 describe('v4.2 Phase 2 — classifier integration', () => {
-  beforeEach(() => { delete process.env.AIDEN_TCE; });
-  afterEach(()  => { delete process.env.AIDEN_TCE; });
+  beforeEach(() => {
+    delete process.env.AIDEN_TCE;
+    // Classification is the subject of this suite. Runtime retry/backoff is
+    // covered separately and would make transient-failure cases wait seconds.
+    process.env.AIDEN_RETRY_OFF = '1';
+  });
+  afterEach(()  => {
+    delete process.env.AIDEN_TCE;
+    delete process.env.AIDEN_RETRY_OFF;
+  });
 
   it('AIDEN_TCE=0 opt-out: zero classification surface on trace', async () => {
     // v4.2 Phase 6 — TCE is ON by default; explicit `=0` opts out.

@@ -58,7 +58,7 @@ describe('RuntimeResolver.resolve', () => {
     expect(adapter.apiMode).toBe('chat_completions');
   });
 
-  it('2. resolves anthropic + claude-opus → AnthropicAdapter', async () => {
+  it('2. resolves message-API mode to MessageApiAdapter', async () => {
     process.env.ANTHROPIC_API_KEY = 'sk-ant-test';
     const adapter = await makeResolver().resolve({
       providerId: 'anthropic',
@@ -68,7 +68,7 @@ describe('RuntimeResolver.resolve', () => {
     expect(adapter.apiMode).toBe('anthropic_messages');
   });
 
-  it('3. resolves openai → CodexResponsesAdapter', async () => {
+  it('3. resolves response-stream mode to the streaming adapter', async () => {
     process.env.OPENAI_API_KEY = 'sk-openai-test';
     const adapter = await makeResolver().resolve({
       providerId: 'openai',
@@ -78,7 +78,7 @@ describe('RuntimeResolver.resolve', () => {
     expect(adapter.apiMode).toBe('codex_responses');
   });
 
-  it('4. resolves ollama → OllamaPromptToolsAdapter (no creds needed)', async () => {
+  it('4. resolves local prompt-tools mode to LocalPromptToolsAdapter (no creds needed)', async () => {
     const adapter = await makeResolver().resolve({
       providerId: 'ollama',
       modelId: 'llama3.2',

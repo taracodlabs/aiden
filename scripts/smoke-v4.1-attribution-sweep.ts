@@ -83,7 +83,7 @@ const ALLOWLIST: Allowlist[] = [
     reason: 'Literal NousResearch model IDs and display names',
   },
   {
-    path:   'providers/v4/ollamaPromptToolsAdapter.ts',
+    path:   'providers/v4/localPromptToolsAdapter.ts',
     reason: 'Hermes-2-Pro is the standard VLLM/Llama tool-call format name',
   },
   {

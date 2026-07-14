@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { OAuthUserAgent } from '../../../core/v4/auth/providerAuth';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const chatgptPlus = require('../../../plugins/aiden-plugin-chatgpt-plus/index.js');
+const subscriptionPlugin = require('../../../plugins/aiden-plugin-chatgpt-plus/index.js');
 
 function fakeUa(): OAuthUserAgent & {
   log: ReturnType<typeof vi.fn>;
@@ -39,7 +39,7 @@ function fakeAuth(overrides: Partial<any> = {}) {
 
 describe('aiden-plugin-chatgpt-plus: provider shape', () => {
   it('33. provider exposes the right id, displayName, runtime descriptor', () => {
-    const provider = chatgptPlus.buildProvider(fakeAuth());
+    const provider = subscriptionPlugin.buildProvider(fakeAuth());
     expect(provider.id).toBe('chatgpt-plus');
     expect(provider.displayName).toBe('ChatGPT Plus');
     const desc = provider.describeRuntime!();
@@ -49,20 +49,20 @@ describe('aiden-plugin-chatgpt-plus: provider shape', () => {
   });
 
   it('34. constants match the verified upstream values', () => {
-    expect(chatgptPlus.CHATGPT_PLUS.clientId).toBe(
+    expect(subscriptionPlugin.SUBSCRIPTION_AUTH.clientId).toBe(
       'app_EMoamEEZ73f0CkXaXp7hrann',
     );
-    expect(chatgptPlus.CHATGPT_PLUS.issuer).toBe('https://auth.openai.com');
-    expect(chatgptPlus.CHATGPT_PLUS.baseUrl).toBe(
+    expect(subscriptionPlugin.SUBSCRIPTION_AUTH.issuer).toBe('https://auth.openai.com');
+    expect(subscriptionPlugin.SUBSCRIPTION_AUTH.baseUrl).toBe(
       'https://chatgpt.com/backend-api/codex',
     );
-    expect(chatgptPlus.CHATGPT_PLUS.apiMode).toBe('codex_responses');
+    expect(subscriptionPlugin.SUBSCRIPTION_AUTH.apiMode).toBe('codex_responses');
   });
 });
 
 describe('aiden-plugin-chatgpt-plus: UX helpers', () => {
   it('35. renderUserCodeBox produces a 3-line ASCII box around the code', () => {
-    const lines = chatgptPlus.renderUserCodeBox('ABCD-1234');
+    const lines = subscriptionPlugin.renderUserCodeBox('ABCD-1234');
     expect(lines).toHaveLength(3);
     expect(lines[0].startsWith('┌')).toBe(true);
     expect(lines[0].endsWith('┐')).toBe(true);
@@ -76,15 +76,15 @@ describe('aiden-plugin-chatgpt-plus: UX helpers', () => {
   });
 
   it('36. formatRemaining produces "Mm Ss"', () => {
-    expect(chatgptPlus.formatRemaining(0)).toBe('0m 0s');
-    expect(chatgptPlus.formatRemaining(330_000)).toBe('5m 30s');
-    expect(chatgptPlus.formatRemaining(60_000)).toBe('1m 0s');
+    expect(subscriptionPlugin.formatRemaining(0)).toBe('0m 0s');
+    expect(subscriptionPlugin.formatRemaining(330_000)).toBe('5m 30s');
+    expect(subscriptionPlugin.formatRemaining(60_000)).toBe('1m 0s');
   });
 
   it('37. buildPollingUa fires the "still waiting" reminder once after 5 min', async () => {
     const outer = fakeUa();
     let now = 0;
-    const wrapped = chatgptPlus.buildPollingUa(
+    const wrapped = subscriptionPlugin.buildPollingUa(
       outer,
       15 * 60 * 1000,
       () => now,
@@ -110,7 +110,7 @@ describe('aiden-plugin-chatgpt-plus: UX helpers', () => {
 describe('aiden-plugin-chatgpt-plus: login() flow', () => {
   it('38. delegates to runDeviceCodeFlow with the right config', async () => {
     const auth = fakeAuth();
-    const provider = chatgptPlus.buildProvider(auth);
+    const provider = subscriptionPlugin.buildProvider(auth);
     const ua = fakeUa();
     const r = await provider.login(ua);
     expect(r.accessToken).toBe('AT');
@@ -131,7 +131,7 @@ describe('aiden-plugin-chatgpt-plus: login() flow', () => {
         return { accessToken: 'AT', refreshToken: null, expiresInSeconds: 0 };
       }),
     });
-    const provider = chatgptPlus.buildProvider(auth);
+    const provider = subscriptionPlugin.buildProvider(auth);
     const ua = fakeUa();
     await provider.login(ua);
     const text = ua.log.mock.calls.map((c) => c[0] as string).join('\n');
@@ -148,7 +148,7 @@ describe('aiden-plugin-chatgpt-plus: login() flow', () => {
         throw new Error('Device-code login timed out (15 minutes)');
       }),
     });
-    const provider = chatgptPlus.buildProvider(auth);
+    const provider = subscriptionPlugin.buildProvider(auth);
     const ua = fakeUa();
     await expect(provider.login(ua)).rejects.toThrow(
       /Code expired.*\/auth login chatgpt-plus/,
@@ -161,7 +161,7 @@ describe('aiden-plugin-chatgpt-plus: login() flow', () => {
         throw new Error('Device-code request failed: HTTP 503');
       }),
     });
-    const provider = chatgptPlus.buildProvider(auth);
+    const provider = subscriptionPlugin.buildProvider(auth);
     const ua = fakeUa();
     await expect(provider.login(ua)).rejects.toThrow(
       /HTTP 503.*\/auth login chatgpt-plus/,
@@ -177,7 +177,7 @@ describe('aiden-plugin-chatgpt-plus: login() flow', () => {
         extras: { email: 'shiva@example.com' },
       })),
     });
-    const provider = chatgptPlus.buildProvider(auth);
+    const provider = subscriptionPlugin.buildProvider(auth);
     const ua = fakeUa();
     await provider.login(ua);
     const text = ua.log.mock.calls.map((c) => c[0] as string).join('\n');
@@ -186,7 +186,7 @@ describe('aiden-plugin-chatgpt-plus: login() flow', () => {
 
   it('43. refresh() POSTs to /oauth/token with form-encoded body', async () => {
     const auth = fakeAuth();
-    const provider = chatgptPlus.buildProvider(auth);
+    const provider = subscriptionPlugin.buildProvider(auth);
     await provider.refresh('OLD-RT');
     const cfg = auth.refreshTokens.mock.calls[0][1];
     expect(cfg.tokenUrl).toBe('https://auth.openai.com/oauth/token');

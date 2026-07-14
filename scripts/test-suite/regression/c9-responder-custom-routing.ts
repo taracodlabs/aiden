@@ -5,7 +5,7 @@
 // Proves C9 fix: respondWithResults now has an explicit
 // `providerName === 'custom'` branch that resolves baseUrl
 // from config instead of falling through to
-// OPENAI_COMPAT_ENDPOINTS (which has no 'custom' entry,
+// COMPATIBLE_API_ENDPOINTS (which has no 'custom' entry,
 // causing Together API key to be sent to Groq URL → 401).
 //
 // Zero I/O — pure source-text inspection (no server, no LLM).
@@ -59,18 +59,18 @@ export async function groupU(): Promise<GroupSummary> {
       })()
     : ''
 
-  // ── U-02: custom branch uses customBaseUrl (not OPENAI_COMPAT_ENDPOINTS) ─
+  // ── U-02: custom branch uses customBaseUrl (not COMPATIBLE_API_ENDPOINTS) ─
   results.push(await runTest('U-02', 'U',
     'custom branch resolves customBaseUrl from config', () => {
       if (!src) return 'Could not read core/agentLoop.ts'
       if (!customBlock) return 'skipped — custom branch not found'
       if (!customBlock.includes('customBaseUrl'))
-        return 'custom branch does not use customBaseUrl — may still be using OPENAI_COMPAT_ENDPOINTS'
-      // Check that OPENAI_COMPAT_ENDPOINTS only appears in comments (lines starting with //), not code
+        return 'custom branch does not use customBaseUrl — may still be using COMPATIBLE_API_ENDPOINTS'
+      // Check that COMPATIBLE_API_ENDPOINTS only appears in comments (lines starting with //), not code
       const codeLines = customBlock.split('\n').filter(l => !l.trim().startsWith('//'))
       const codeOnly  = codeLines.join('\n')
-      if (codeOnly.includes('OPENAI_COMPAT_ENDPOINTS'))
-        return 'custom branch code (non-comment) references OPENAI_COMPAT_ENDPOINTS — should use customBaseUrl'
+      if (codeOnly.includes('COMPATIBLE_API_ENDPOINTS'))
+        return 'custom branch code (non-comment) references COMPATIBLE_API_ENDPOINTS — should use customBaseUrl'
     }
   ))
 
@@ -92,25 +92,25 @@ export async function groupU(): Promise<GroupSummary> {
       if (!src) return 'Could not read core/agentLoop.ts'
       if (customBranchStart === -1) return 'skipped — custom branch not found'
       const afterCustom = responderSection.slice(customBranchStart)
-      const genericElseIdx = afterCustom.indexOf('OPENAI_COMPAT_ENDPOINTS[providerName]')
+      const genericElseIdx = afterCustom.indexOf('COMPATIBLE_API_ENDPOINTS[providerName]')
       if (genericElseIdx === -1)
-        return 'Could not find generic OPENAI_COMPAT_ENDPOINTS fallback after custom branch'
+        return 'Could not find generic COMPATIBLE_API_ENDPOINTS fallback after custom branch'
       if (genericElseIdx < 50)
-        return 'OPENAI_COMPAT_ENDPOINTS fallback is too close to custom branch — custom may not be a separate block'
+        return 'COMPATIBLE_API_ENDPOINTS fallback is too close to custom branch — custom may not be a separate block'
       const between = afterCustom.slice(0, genericElseIdx)
       if (!between.includes('} else {'))
-        return 'No } else { between custom branch and OPENAI_COMPAT_ENDPOINTS — custom not properly separated'
+        return 'No } else { between custom branch and COMPATIBLE_API_ENDPOINTS — custom not properly separated'
     }
   ))
 
   // ── U-05: generic else fallback to groq still preserved ───────────────
   results.push(await runTest('U-05', 'U',
-    'generic else fallback to OPENAI_COMPAT_ENDPOINTS.groq preserved', () => {
+    'generic else fallback to COMPATIBLE_API_ENDPOINTS.groq preserved', () => {
       if (!src) return 'Could not read core/agentLoop.ts'
       if (customBranchStart === -1) return 'skipped — custom branch not found'
       const afterCustom = responderSection.slice(customBranchStart)
-      if (!afterCustom.includes('OPENAI_COMPAT_ENDPOINTS[providerName] || OPENAI_COMPAT_ENDPOINTS.groq'))
-        return 'generic else no longer has OPENAI_COMPAT_ENDPOINTS[providerName] || OPENAI_COMPAT_ENDPOINTS.groq fallback'
+      if (!afterCustom.includes('COMPATIBLE_API_ENDPOINTS[providerName] || COMPATIBLE_API_ENDPOINTS.groq'))
+        return 'generic else no longer has COMPATIBLE_API_ENDPOINTS[providerName] || COMPATIBLE_API_ENDPOINTS.groq fallback'
     }
   ))
 

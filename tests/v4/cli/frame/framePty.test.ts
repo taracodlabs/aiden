@@ -22,7 +22,7 @@
  *       'idle' and the heartbeat row does NOT render. The string
  *       "thinking…" must be absent until submit.
  *   T3: busy-at-submit          — pressing Enter flips status.phase
- *       to 'busy' and paints "thinking… 0s" BEFORE the legacy
+ *       to 'busy' and paints "thinking 0s" BEFORE the legacy
  *       stream handoff. With AIDEN_FRAME_BUSY_TICK_MS=300 the busy
  *       row is reliably observable in the captured byte stream.
  *   T4: Ctrl+C clean exit       — composer's onCancel rejects with
@@ -176,7 +176,7 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('frame mode — PTY gate tests (v4.11 Slic
     await term.waitForExit({ timeoutMs: 15_000 });
   }, 60_000);
 
-  it('T3: pressing Enter paints "thinking… 0s" BEFORE the legacy stream handoff', async () => {
+  it('T3: pressing Enter paints "thinking 0s" BEFORE the legacy stream handoff', async () => {
     // 600ms busy tick — comfortably wider than the 50ms harness poll
     // interval so the heartbeat lands in the buffer before unmount.
     term = await spawnFrameAiden(600);
@@ -187,10 +187,10 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('frame mode — PTY gate tests (v4.11 Slic
     term.typeLine('');
     // After submit the legacy turn picks up. We expect the busy
     // row painted by the composer BEFORE that handoff — i.e. the
-    // string "thinking…" must appear quickly.
+    // current status-bar text "thinking 0s" must appear quickly.
     await term.waitFor(
-      (plain) => plain.includes('thinking…'),
-      { timeoutMs: 8_000, label: 'busy heartbeat "thinking…"' },
+      (plain) => plain.includes('thinking 0s'),
+      { timeoutMs: 8_000, label: 'busy heartbeat "thinking 0s"' },
     );
     // Cleanup — the legacy turn will fail (fake API key); we don't
     // care about exit code but we DO need to wait for the child to

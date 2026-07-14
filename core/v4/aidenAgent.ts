@@ -501,6 +501,7 @@ const EMPTY_RETRY_NOTE =
 
 export class AidenAgent {
   private provider: ProviderAdapter;
+  private pendingRequiredClarification: { question: string } | null = null;
 
   private readonly toolExecutor:                ToolExecutor;
   private readonly tools:                       ToolSchema[];
@@ -818,6 +819,12 @@ export class AidenAgent {
       this.plannerGuard.resetActivation();
     }
     const lastUserContent = lastUserMessageContent(history);
+    if (
+      this.pendingRequiredClarification &&
+      resolvesPendingClarification(lastUserContent)
+    ) {
+      this.pendingRequiredClarification = null;
+    }
     const narrowedTools   = await this.narrowTools(lastUserContent, history);
 
     // 4. Build per-call trackers, then Stage-0 intent pre-arm.
@@ -1274,6 +1281,12 @@ export class AidenAgent {
         break;
       }
       turnCount += 1;
+      p2aDiag('agent.iteration.start', {
+        iteration: turnCount,
+        aborted: runOptions.signal?.aborted === true,
+        messageCount: messages.length,
+        lastRole: messages.length > 0 ? messages[messages.length - 1].role : null,
+      });
 
       // Budget warnings — at the threshold turn, exactly once each.
       const cautionAt = Math.ceil(this.maxTurns * CAUTION_FRACTION);
@@ -1351,6 +1364,14 @@ export class AidenAgent {
 
       let output: ProviderCallOutput;
       const _llmStartedAt = _perfDiag ? Date.now() : 0;
+      p2aDiag('provider.continuation.start', {
+        iteration: turnCount,
+        continuation: turnCount > 1,
+        messageCount: messages.length,
+        lastRole: messages.length > 0 ? messages[messages.length - 1].role : null,
+        aborted: runOptions.signal?.aborted === true,
+        pendingPromise: 'callProvider',
+      });
       try {
         // v4.9.0 Slice 6 — wrap the provider call in an LLM span when
         // the daemon foundation is up AND a runWithContext frame is
@@ -1377,6 +1398,13 @@ export class AidenAgent {
         } else {
           output = await this.callProvider(messages, effectiveTools, runOptions);
         }
+        p2aDiag('provider.continuation.complete', {
+          iteration: turnCount,
+          continuation: turnCount > 1,
+          toolCalls: output.toolCalls?.map((call) => ({ id: call.id, name: call.name })) ?? [],
+          finishReason: output.finishReason,
+          aborted: runOptions.signal?.aborted === true,
+        });
         if (_perfDiag) {
           const llmMs = Date.now() - _llmStartedAt;
           const tokIn = output.usage?.inputTokens ?? 0;
@@ -1556,12 +1584,18 @@ export class AidenAgent {
         const isReadOnly = (name: string): boolean =>
           this.resolveMutates?.(name) !== true &&
           this.resolveUiOnly?.(name) !== true;
+        // These read-only tools can open an exclusive terminal prompt. Keep
+        // them on the ordered live-dispatch path instead of Promise.all.
+        const isInteractive = (name: string): boolean =>
+          name === 'clarify' || name === 'plan_approval';
+        const isParallelRead = (name: string): boolean =>
+          isReadOnly(name) && !isInteractive(name);
         let i = 0;
         while (i < toolCalls.length) {
-          if (!isReadOnly(toolCalls[i].name)) { i += 1; continue; }
+          if (!isParallelRead(toolCalls[i].name)) { i += 1; continue; }
           // Find the maximal consecutive read-only batch starting at i.
           let j = i;
-          while (j < toolCalls.length && isReadOnly(toolCalls[j].name)) j += 1;
+          while (j < toolCalls.length && isParallelRead(toolCalls[j].name)) j += 1;
           const batch = toolCalls.slice(i, j);
           // Skip the parallel path for solo batches — no benefit, and
           // keeps the live-execution path on the sequential loop where
@@ -1635,6 +1669,9 @@ export class AidenAgent {
           uiClaims.push({ name: call.name, args: call.arguments });
           continue;
         }
+        const blockedByRequiredClarification =
+          this.pendingRequiredClarification !== null &&
+          this.resolveMutates?.(call.name) === true;
         this.onToolCall?.(call, 'before');
         // v4.2 Phase 4 — mark any active checkpoints as containing a
         // mutating call BEFORE dispatch. Done pre-dispatch (not post)
@@ -1646,7 +1683,11 @@ export class AidenAgent {
         // which we treat as non-mutating (leave the flag alone).
         // Plugin authors should declare `mutates` honestly on their
         // tool handlers — this is the structural enforcement point.
-        if (turnState.isEnabled() && this.resolveMutates?.(call.name) === true) {
+        if (
+          !blockedByRequiredClarification &&
+          turnState.isEnabled() &&
+          this.resolveMutates?.(call.name) === true
+        ) {
           turnState.markMutationOnLiveCheckpoint(call.name);
         }
         let result: ToolCallResult;
@@ -1682,11 +1723,31 @@ export class AidenAgent {
           for (;;) {
             attemptNo += 1;
             const _toolStartedAt = _perfDiag ? Date.now() : 0;
-            if (attemptNo === 1 && _preComputed) {
+            if (blockedByRequiredClarification) {
+              const question = this.pendingRequiredClarification?.question ?? 'required information';
+              result = {
+                id: call.id,
+                name: call.name,
+                result: null,
+                error:
+                  `Blocked: required clarification was cancelled (${question}). ` +
+                  'Do not invent the missing value. Ask again or wait for an explicit answer/override.',
+              };
+            } else if (attemptNo === 1 && _preComputed) {
               result = _preComputed;
             } else {
               try {
+                p2aDiag('tool.executor.start', {
+                  iteration: turnCount, callId: call.id, tool: call.name,
+                  attempt: attemptNo, aborted: this._currentSignal?.aborted === true,
+                  pendingPromise: 'toolExecutor',
+                });
                 result = await this.toolExecutor(call, this._currentSignal);
+                p2aDiag('tool.executor.complete', {
+                  iteration: turnCount, callId: call.id, tool: call.name,
+                  attempt: attemptNo, hasError: result.error != null,
+                  aborted: this._currentSignal?.aborted === true,
+                });
               } catch (err) {
                 result = {
                   id:     call.id,
@@ -1838,6 +1899,22 @@ export class AidenAgent {
               }
             }
           }
+          if (call.name === 'clarify') {
+            const payload = result.result;
+            const status = payload && typeof payload === 'object'
+              ? (payload as { status?: unknown }).status
+              : undefined;
+            if (status === 'cancelled') {
+              const question = typeof call.arguments.question === 'string'
+                ? call.arguments.question.trim()
+                : '';
+              this.pendingRequiredClarification = {
+                question: question || 'required information',
+              };
+            } else if (status === 'answered') {
+              this.pendingRequiredClarification = null;
+            }
+          }
           toolCallTrace.push({
             name:     call.name,
             result:   result.result,
@@ -1895,6 +1972,10 @@ export class AidenAgent {
           }
           this.onToolCall?.(call, 'after', result);
           afterFired = true;
+          p2aDiag('tool.callback.after.complete', {
+            iteration: turnCount, callId: call.id, tool: call.name,
+            hasError: result.error != null,
+          });
         } finally {
           // Guarantee the before/after pairing: every onToolCall('before') gets
           // exactly one 'after'. If the dispatch threw or exited before emitting
@@ -2110,13 +2191,28 @@ export class AidenAgent {
       }
 
       messages.push(...turnToolMessages);
+      p2aDiag('agent.tool_results.appended', {
+        iteration: turnCount,
+        appended: turnToolMessages.length,
+        messageCount: messages.length,
+        aborted: runOptions.signal?.aborted === true,
+      });
 
       // ── v4.14 — PAUSE gate at the SAME safe boundary ─────────────────
       // If the user paused mid-turn, freeze HERE (history balanced, before the
       // next provider call fires). Resumes on /resume; an abort during a pause
       // unblocks the waiter so the top-of-loop signal check stops the turn.
       if (runOptions.waitForResumeIfPaused) {
+        p2aDiag('agent.pause_gate.start', {
+          iteration: turnCount,
+          aborted: runOptions.signal?.aborted === true,
+          pendingPromise: 'waitForResumeIfPaused',
+        });
         await runOptions.waitForResumeIfPaused(runOptions.signal);
+        p2aDiag('agent.pause_gate.complete', {
+          iteration: turnCount,
+          aborted: runOptions.signal?.aborted === true,
+        });
       }
       // Loop continues — provider gets the tool results next iteration.
     }
@@ -2333,6 +2429,28 @@ function lastUserMessageContent(history: Message[]): string {
     if (m.role === 'user') return m.content;
   }
   return '';
+}
+
+function p2aDiag(event: string, data: Record<string, unknown>): void {
+  if (process.env.AIDEN_P2A_DIAG !== '1') return;
+  try {
+    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
+    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
+  } catch { /* diagnostics must never affect the agent loop */ }
+}
+
+function resolvesPendingClarification(content: string): boolean {
+  const text = content.trim();
+  if (!text) return false;
+  if (
+    /\b(?:use|choose|pick)\b.*\b(?:default|anything|any topic|for me|your choice)\b/i.test(text) ||
+    /\b(?:skip|proceed without|no need for)\b.*\b(?:clarification|answer|asking)\b/i.test(text)
+  ) {
+    return true;
+  }
+  // A bare continuation command does not supply the value that was missing.
+  // Any other substantive reply is treated as the user's direct answer.
+  return !/^(?:please\s+)?(?:create|make|do|write|generate|build|continue|finish|proceed|go\s+ahead)(?:\s+(?:it|this|that|the\s+report|the\s+file))?(?:\s+now)?[.!]?$/i.test(text);
 }
 
 function stringifyToolResult(result: unknown): string {

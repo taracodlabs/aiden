@@ -107,15 +107,15 @@ async function main(): Promise<void> {
       /NEVER emit `<function=/.test(llamaPrompt),
   );
 
-  const claudePrompt = await pb.build({
+  const providerPrompt = await pb.build({
     paths,
     modelId: 'claude-sonnet-4-7',
     skipFilesystem: true,
   });
   step(
     'PromptBuilder leaves Claude prompt untouched',
-    !/OpenAI tool_calls/.test(claudePrompt) &&
-      !/<function=/.test(claudePrompt),
+    !/OpenAI tool_calls/.test(providerPrompt) &&
+      !/<function=/.test(providerPrompt),
   );
 
   // ── 4. Legacy <function=...> recovery parse ─────────────────────────

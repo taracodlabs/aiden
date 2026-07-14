@@ -128,12 +128,12 @@ async function ensureBase64(
   }
 }
 
-// ── Provider 1: Gemini ────────────────────────────────────────────────────────
+// ── Provider 1: generative-content API ────────────────────────────────────────
 
-const GEMINI_MODEL    = 'gemini-2.5-flash'
-const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`
+const GENERATIVE_VISION_MODEL    = 'gemini-2.5-flash'
+const GENERATIVE_VISION_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${GENERATIVE_VISION_MODEL}:generateContent`
 
-async function tryGemini(
+async function tryGenerativeVisionApi(
   img: ResolvedImage, prompt: string, log: Logger, http: VisionHttpClient,
 ): Promise<VisionResult | null> {
   const key = process.env.GEMINI_API_KEY
@@ -151,24 +151,24 @@ async function tryGemini(
       }],
       generationConfig: { maxOutputTokens: 1024 },
     }
-    const res = await http.post(`${GEMINI_ENDPOINT}?key=${key}`, body, {
+    const res = await http.post(`${GENERATIVE_VISION_ENDPOINT}?key=${key}`, body, {
       headers: { 'content-type': 'application/json' },
       timeout: 30_000,
     })
     const description = (res.data?.candidates?.[0]?.content?.parts?.[0]?.text ?? '').trim()
     if (!description) return null
-    const result: VisionResult = { description, provider: 'gemini', modelUsed: GEMINI_MODEL, durationMs: Date.now() - t0 }
-    log.info('image analyzed', { provider: 'gemini', modelUsed: GEMINI_MODEL, durationMs: result.durationMs, descChars: description.length })
+    const result: VisionResult = { description, provider: 'gemini', modelUsed: GENERATIVE_VISION_MODEL, durationMs: Date.now() - t0 }
+    log.info('image analyzed', { provider: 'gemini', modelUsed: GENERATIVE_VISION_MODEL, durationMs: result.durationMs, descChars: description.length })
     return result
   } catch (e: any) {
-    log.warn('gemini vision failed', { error: e?.message ?? String(e) })
+    log.warn('generative vision request failed', { error: e?.message ?? String(e) })
     return null
   }
 }
 
-// ── Provider 2-4: OpenAI-compatible (Groq, OpenRouter, Together) ──────────────
+// ── Providers 2-4: compatible chat APIs ───────────────────────────────────────
 
-interface OpenAICompatTarget {
+interface CompatibleVisionTarget {
   /** Display name on the result. */
   provider:  string
   /** Base URL (without trailing slash). */
@@ -179,29 +179,29 @@ interface OpenAICompatTarget {
   envKey:    string
 }
 
-const GROQ_TARGET: OpenAICompatTarget = {
+const LOW_LATENCY_TARGET: CompatibleVisionTarget = {
   provider: 'groq',
   baseUrl:  'https://api.groq.com/openai/v1',
   model:    'meta-llama/llama-4-maverick-17b-128e-instruct',
   envKey:   'GROQ_API_KEY',
 }
 
-const OPENROUTER_TARGET: OpenAICompatTarget = {
+const ROUTED_TARGET: CompatibleVisionTarget = {
   provider: 'openrouter',
   baseUrl:  'https://openrouter.ai/api/v1',
   model:    'meta-llama/llama-3.2-11b-vision-instruct:free',
   envKey:   'OPENROUTER_API_KEY',
 }
 
-const TOGETHER_TARGET: OpenAICompatTarget = {
+const HOSTED_TARGET: CompatibleVisionTarget = {
   provider: 'together',
   baseUrl:  'https://api.together.xyz/v1',
   model:    'meta-llama/Llama-Vision-Free',
   envKey:   'TOGETHER_API_KEY',
 }
 
-async function tryOpenAICompat(
-  target: OpenAICompatTarget,
+async function tryCompatibleVisionApi(
+  target: CompatibleVisionTarget,
   img:    ResolvedImage,
   prompt: string,
   log:    Logger,
@@ -251,11 +251,11 @@ async function tryOpenAICompat(
   }
 }
 
-// ── Provider 5: Anthropic ─────────────────────────────────────────────────────
+// ── Provider 5: message API ───────────────────────────────────────────────────
 
-const ANTHROPIC_MODEL = 'claude-3-5-sonnet-20241022'
+const MESSAGE_VISION_MODEL = 'claude-3-5-sonnet-20241022'
 
-async function tryAnthropic(
+async function tryMessageVisionApi(
   img: ResolvedImage, prompt: string, log: Logger, http: VisionHttpClient,
 ): Promise<VisionResult | null> {
   const key = process.env.ANTHROPIC_API_KEY
@@ -266,7 +266,7 @@ async function tryAnthropic(
       ? { type: 'image', source: { type: 'url',    url: img.sourceUrl } }
       : { type: 'image', source: { type: 'base64', media_type: img.mediaType, data: img.base64 } }
     const body = {
-      model:      ANTHROPIC_MODEL,
+      model:      MESSAGE_VISION_MODEL,
       max_tokens: 1024,
       messages:   [{ role: 'user', content: [imageBlock, { type: 'text', text: prompt }] }],
     }
@@ -280,20 +280,20 @@ async function tryAnthropic(
     })
     const description = (res.data?.content?.[0]?.text ?? '').trim()
     if (!description) return null
-    const result: VisionResult = { description, provider: 'anthropic', modelUsed: ANTHROPIC_MODEL, durationMs: Date.now() - t0 }
-    log.info('image analyzed', { provider: 'anthropic', modelUsed: ANTHROPIC_MODEL, durationMs: result.durationMs, descChars: description.length })
+    const result: VisionResult = { description, provider: 'anthropic', modelUsed: MESSAGE_VISION_MODEL, durationMs: Date.now() - t0 }
+    log.info('image analyzed', { provider: 'anthropic', modelUsed: MESSAGE_VISION_MODEL, durationMs: result.durationMs, descChars: description.length })
     return result
   } catch (e: any) {
-    log.warn('anthropic vision failed', { error: e?.message ?? String(e) })
+    log.warn('message vision request failed', { error: e?.message ?? String(e) })
     return null
   }
 }
 
-// ── Provider 6: OpenAI ────────────────────────────────────────────────────────
+// ── Provider 6: response API ──────────────────────────────────────────────────
 
-const OPENAI_MODEL = 'gpt-4o'
+const RESPONSE_VISION_MODEL = 'gpt-4o'
 
-async function tryOpenAI(
+async function tryResponseVisionApi(
   img: ResolvedImage, prompt: string, log: Logger, http: VisionHttpClient,
 ): Promise<VisionResult | null> {
   const key = process.env.OPENAI_API_KEY
@@ -301,7 +301,7 @@ async function tryOpenAI(
   const t0 = Date.now()
   try {
     const body = {
-      model:      OPENAI_MODEL,
+      model:      RESPONSE_VISION_MODEL,
       max_tokens: 1024,
       messages:   [{
         role:    'user',
@@ -317,18 +317,18 @@ async function tryOpenAI(
     })
     const description = (res.data?.choices?.[0]?.message?.content ?? '').trim()
     if (!description) return null
-    const result: VisionResult = { description, provider: 'openai', modelUsed: OPENAI_MODEL, durationMs: Date.now() - t0 }
-    log.info('image analyzed', { provider: 'openai', modelUsed: OPENAI_MODEL, durationMs: result.durationMs, descChars: description.length })
+    const result: VisionResult = { description, provider: 'openai', modelUsed: RESPONSE_VISION_MODEL, durationMs: Date.now() - t0 }
+    log.info('image analyzed', { provider: 'openai', modelUsed: RESPONSE_VISION_MODEL, durationMs: result.durationMs, descChars: description.length })
     return result
   } catch (e: any) {
-    log.warn('openai vision failed', { error: e?.message ?? String(e) })
+    log.warn('response vision request failed', { error: e?.message ?? String(e) })
     return null
   }
 }
 
-// ── Provider 7: Ollama llava ──────────────────────────────────────────────────
+// ── Provider 7: local vision runtime ──────────────────────────────────────────
 
-async function tryOllama(
+async function tryLocalVisionRuntime(
   img: ResolvedImage, prompt: string, log: Logger, http: VisionHttpClient,
 ): Promise<VisionResult | null> {
   const ollamaBase = (process.env.OLLAMA_BASE_URL ?? 'http://127.0.0.1:11434').replace(/\/$/, '')
@@ -347,7 +347,7 @@ async function tryOllama(
     log.info('image analyzed', { provider: 'ollama', modelUsed: 'llava', durationMs: result.durationMs, descChars: description.length })
     return result
   } catch (e: any) {
-    log.warn('ollama vision failed', { error: e?.message ?? String(e) })
+    log.warn('local vision request failed', { error: e?.message ?? String(e) })
     return null
   }
 }
@@ -379,13 +379,13 @@ export async function analyzeImage(
   // we fall through to the next; the first one that produces a
   // non-empty description wins.
   const providers: Array<(img: ResolvedImage, prompt: string, log: Logger, http: VisionHttpClient) => Promise<VisionResult | null>> = [
-    tryGemini,
-    (i, p, l, h) => tryOpenAICompat(GROQ_TARGET,       i, p, l, h),
-    (i, p, l, h) => tryOpenAICompat(OPENROUTER_TARGET, i, p, l, h),
-    (i, p, l, h) => tryOpenAICompat(TOGETHER_TARGET,   i, p, l, h),
-    tryAnthropic,
-    tryOpenAI,
-    tryOllama,
+    tryGenerativeVisionApi,
+    (i, p, l, h) => tryCompatibleVisionApi(LOW_LATENCY_TARGET, i, p, l, h),
+    (i, p, l, h) => tryCompatibleVisionApi(ROUTED_TARGET,      i, p, l, h),
+    (i, p, l, h) => tryCompatibleVisionApi(HOSTED_TARGET,      i, p, l, h),
+    tryMessageVisionApi,
+    tryResponseVisionApi,
+    tryLocalVisionRuntime,
   ]
 
   for (const tryProvider of providers) {

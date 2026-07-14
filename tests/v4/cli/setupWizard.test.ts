@@ -225,7 +225,7 @@ describe('SetupWizard', () => {
   });
 
   it('Pro option ChatGPT Plus prints OAuth explainer + beta note then waits for confirm', async () => {
-    const chatgptPlusIdx = PROVIDERS.findIndex((p) => p.id === 'chatgpt-plus') + 1;
+    const subscriptionProviderIndex = PROVIDERS.findIndex((p) => p.id === 'chatgpt-plus') + 1;
     const ollamaIdx = PROVIDERS.findIndex((p) => p.id === 'ollama') + 1;
     const fetchImpl = (async () => ({ ok: true } as Response)) as unknown as typeof fetch;
     const { display, chunks } = sinkDisplay();
@@ -233,7 +233,7 @@ describe('SetupWizard', () => {
       paths,
       display,
       prompts: scriptedPrompts({
-        choose: [chatgptPlusIdx, ollamaIdx],
+        choose: [subscriptionProviderIndex, ollamaIdx],
         confirm: [false],
         input: ['llama3.1:8b'],
       }),

@@ -250,6 +250,42 @@ describe('AidenAgent — parallel pure-read tool dispatch (v4.11 perf)', () => {
     await agent.runConversation([userMsg('one')]);
     expect(events).toHaveLength(1);
   });
+
+  it.each(['clarify', 'plan_approval'])('%s calls execute sequentially in provider order', async (interactiveName) => {
+    const adapter = new ScriptedAdapter([{
+      content: '',
+      toolCalls: [tc('first', interactiveName), tc('second', interactiveName)],
+      usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
+    }]);
+    let active = 0;
+    let peak = 0;
+    const order: string[] = [];
+    const exec: ToolExecutor = async (call) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      order.push(call.id);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      active -= 1;
+      return { id: call.id, name: call.name, result: 'ok' };
+    };
+    const agent = new AidenAgent({ provider: adapter, tools: NO_TOOLS, toolExecutor: exec });
+    await agent.runConversation([userMsg('ask twice')]);
+    expect(peak).toBe(1);
+    expect(order).toEqual(['first', 'second']);
+  });
+
+  it('clarify does not overlap an adjacent normal read-only call', async () => {
+    const adapter = new ScriptedAdapter([{
+      content: '',
+      toolCalls: [tc('search', 'web_search'), tc('ask', 'clarify')],
+      usage: { inputTokens: 1, outputTokens: 1 }, finishReason: 'tool_calls',
+    }]);
+    const { exec, events } = makeTimedExecutor(30);
+    const agent = new AidenAgent({ provider: adapter, tools: NO_TOOLS, toolExecutor: exec });
+    await agent.runConversation([userMsg('search then ask')]);
+    expect(maxOverlap(events)).toBe(1);
+    expect(events.map((event) => event.id)).toEqual(['search', 'ask']);
+  });
 });
 
 describe('AidenAgent — AIDEN_PERF_DIAG instrumentation (v4.11 perf)', () => {

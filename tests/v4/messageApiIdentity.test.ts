@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { AnthropicAdapter } from '../../providers/v4/anthropicAdapter';
+import { MessageApiAdapter } from '../../providers/v4/messageApiAdapter';
 import { VERSION } from '../../core/version';
 import { getProviderEntry } from '../../providers/v4/registry';
 import { findModel } from '../../providers/v4/modelCatalog';
@@ -28,7 +28,7 @@ const apiKeyOpts = {
   model: 'claude-haiku-4-5-20251001',
   providerName: 'anthropic',
   maxRetries: 1,
-} as unknown as ConstructorParameters<typeof AnthropicAdapter>[0];
+} as unknown as ConstructorParameters<typeof MessageApiAdapter>[0];
 
 const userMsg = (content: string): { role: 'user'; content: string } => ({ role: 'user', content });
 
@@ -49,7 +49,7 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] });
+    await new MessageApiAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] });
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
     expect(headers['user-agent']).toBe(`aiden/${VERSION}`);
     expect(headers['user-agent']).toMatch(/^aiden\/\d+\.\d+\.\d+/);
@@ -59,7 +59,7 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] });
+    await new MessageApiAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] });
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
     expect(headers['x-app']).toBeUndefined();
   });
@@ -70,7 +70,7 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] });
+    await new MessageApiAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] });
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
     expect(headers['user-agent']).toBe(`aiden/${VERSION}`);   // dynamic, from core/version
     expect(headers['x-app']).toBeUndefined();                  // no billing fingerprint
@@ -86,7 +86,7 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOpts).call({
+    await new MessageApiAdapter(apiKeyOpts).call({
       messages: [{ role: 'system', content: 'be brief' }, userMsg('hi')],
       tools: [],
     });
@@ -104,7 +104,7 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
         stop_reason: 'tool_use',
       }),
     );
-    const result = await new AnthropicAdapter(apiKeyOpts).call({
+    const result = await new MessageApiAdapter(apiKeyOpts).call({
       messages: [userMsg('go')],
       tools: [{ name: 'web_search', description: 's', inputSchema: { type: 'object', properties: {} } }],
     });
@@ -122,7 +122,7 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
       new Response(sse, { status: 200, headers: { 'Content-Type': 'text/event-stream' } }),
     );
     const evts: Array<{ type: string }> = [];
-    for await (const e of new AnthropicAdapter(apiKeyOpts).callStream({ messages: [userMsg('hi')], tools: [] })) {
+    for await (const e of new MessageApiAdapter(apiKeyOpts).callStream({ messages: [userMsg('hi')], tools: [] })) {
       evts.push(e);
     }
     expect(evts.some((e) => e.type === 'delta')).toBe(true);
@@ -132,7 +132,7 @@ describe('Anthropic API-key requests carry an honest Aiden identity (no CLI impe
   it('regression: still reports a 401 as a fail-fast error', async () => {
     fetchMock.mockResolvedValueOnce(makeResponse('unauthorized', { status: 401 }));
     await expect(
-      new AnthropicAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] }),
+      new MessageApiAdapter(apiKeyOpts).call({ messages: [userMsg('hi')], tools: [] }),
     ).rejects.toThrow();
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });

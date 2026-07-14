@@ -61,13 +61,14 @@ describe('clarify tool — degrade paths (never hang)', () => {
     expect(r.note).toMatch(/reasonable default/i);
   });
 
-  it('user cancels (callback returns null) → cancelled, proceed', async () => {
+  it('user cancellation forbids inventing the required value', async () => {
     const clarify = vi.fn(async () => null);
     const r = await tool.execute({ question: 'Which env?' }, ctx({ clarify })) as any;
     expect(r.ok).toBe(false);
     expect(r.status).toBe('cancelled');
     expect(r.answer).toBeNull();
-    expect(r.note).toMatch(/reasonable default/i);
+    expect(r.note).toMatch(/do not invent/i);
+    expect(r.note).toMatch(/explicitly authorizes/i);
   });
 
   it('empty answer is treated as cancelled', async () => {

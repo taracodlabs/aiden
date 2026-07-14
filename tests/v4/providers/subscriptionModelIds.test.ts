@@ -4,25 +4,23 @@ import { PROVIDER_REGISTRY } from '../../../providers/v4/registry';
 import { listModelsForProvider } from '../../../providers/v4/modelCatalog';
 
 /**
- * Phase 21 #6 — Codex model ID parity with the canonical Codex backend list.
+ * Phase 21 #6 — subscription model ID parity with the canonical backend list.
  *
- * The bug: ChatGPT Plus inference returned 400 "model is not supported
- * when using Codex with a ChatGPT account" because Aiden's catalog
- * listed direct-OpenAI-API names (`gpt-5-mini`, `gpt-5-codex`) that
- * the Codex OAuth backend doesn't accept. The canonical list below was
- * verified Apr 2026 via live /codex/models probe.
+ * The bug: subscription inference returned 400 because the catalog listed
+ * direct-API names that the subscription backend does not accept. The
+ * canonical list below was verified Apr 2026 through the live model endpoint.
  *
  * These tests pin the Aiden catalog to the verified verbatim list so a
  * future "improvement" doesn't re-introduce invalid slugs.
  */
 
-const VERIFIED_CODEX_SLUGS = [
+const VERIFIED_SUBSCRIPTION_SLUGS = [
   'gpt-5.1-codex-max',
   'gpt-5.1-codex-mini',
   'gpt-5.3-codex',
   'gpt-5.2-codex',
   'gpt-5.5',
-  // GPT-5.6 variants — confirmed via live /codex/responses probe (each streams;
+  // GPT-5.6 variants — confirmed via the live response endpoint (each streams;
   // bare `gpt-5.6` is rejected 400). Tool-calling live-verified before shipping.
   'gpt-5.6-sol',
   'gpt-5.6-terra',
@@ -33,17 +31,17 @@ const VERIFIED_CODEX_SLUGS = [
   'gpt-5',
 ] as const;
 
-describe('Phase 21 #6 — Codex OAuth model IDs', () => {
+describe('Phase 21 #6 — subscription model IDs', () => {
   it('1. modelCatalog chatgpt-plus entries match verified slug list verbatim', () => {
     const ids = listModelsForProvider('chatgpt-plus').map((m) => m.id);
     // Same set (order may differ in catalog ordering).
-    expect(new Set(ids)).toEqual(new Set(VERIFIED_CODEX_SLUGS));
+    expect(new Set(ids)).toEqual(new Set(VERIFIED_SUBSCRIPTION_SLUGS));
   });
 
   it('2. modelCatalog chatgpt-plus excludes the historically-invalid direct-API slugs', () => {
     const ids = listModelsForProvider('chatgpt-plus').map((m) => m.id);
-    // These names appear in the OpenAI Python SDK's typed list but the
-    // Codex backend rejects them for ChatGPT-account auth.
+    // These names appear in the public SDK's typed list but the subscription
+    // backend rejects them for account-based authentication.
     expect(ids).not.toContain('gpt-5-mini');
     expect(ids).not.toContain('gpt-5-codex');
   });

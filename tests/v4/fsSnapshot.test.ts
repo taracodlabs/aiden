@@ -17,7 +17,7 @@ import type { ToolCallRequest, ToolSchema } from '../../providers/v4/types';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(os.tmpdir(), 'aiden-snap-')); });
-afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
 const p = (name: string): string => path.join(dir, name);
 
 // ── the capture layer ────────────────────────────────────────────────────

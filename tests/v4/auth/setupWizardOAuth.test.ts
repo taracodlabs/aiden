@@ -5,7 +5,7 @@
  * OAuthProviderRuntime. These tests stub the plugin's buildProvider to
  * return a synthetic OAuthProvider so we never touch network or load
  * the real ChatGPT plugin (its OAuth fixtures are tested separately in
- * chatgptPlusPlugin.test.ts).
+ * subscriptionPlugin.test.ts).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
@@ -124,7 +124,7 @@ function scriptedPrompts(answers: {
   };
 }
 
-const chatgptPlusIdx = PROVIDERS.findIndex((p) => p.id === 'chatgpt-plus') + 1;
+const subscriptionProviderIndex = PROVIDERS.findIndex((p) => p.id === 'chatgpt-plus') + 1;
 
 describe('setup wizard — OAuth provider integration (kind: pro)', () => {
   it('46. user picks chatgpt-plus → device-code login → config + tokens persisted', async () => {
@@ -151,7 +151,7 @@ describe('setup wizard — OAuth provider integration (kind: pro)', () => {
         paths,
         display: new Display(),
         // Phase 30.2.1: chatgpt-plus moved to index [10] in the reordered list.
-        prompts: fakePrompts({ providerIndex: chatgptPlusIdx, confirm: true }),
+        prompts: fakePrompts({ providerIndex: subscriptionProviderIndex, confirm: true }),
         skipValidation: true,
       });
       expect(result.status).toBe('configured');

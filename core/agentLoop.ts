@@ -387,7 +387,7 @@ export function resolveTemplates(input: string, stepOutputs: string[]): string {
 
 // ── SSE stream helpers ─────────────────────────────────────────
 
-export async function streamOpenAIResponse(
+export async function streamProviderResponse(
   res:     any,
   onToken: (token: string) => void,
 ): Promise<void> {
@@ -445,7 +445,7 @@ export async function streamGeminiResponse(
 
 // ── Provider endpoint map ──────────────────────────────────────
 
-const OPENAI_COMPAT_ENDPOINTS: Record<string, string> = {
+const COMPATIBLE_API_ENDPOINTS: Record<string, string> = {
   groq:       'https://api.groq.com/openai/v1/chat/completions',
   openrouter: 'https://openrouter.ai/api/v1/chat/completions',
   cerebras:   'https://api.cerebras.ai/v1/chat/completions',
@@ -487,7 +487,7 @@ function extractChatMessageContent(content: unknown): string {
  * C9b: Resolve streaming URL for any provider — custom or known.
  *
  * Custom providers look up baseUrl from config; known providers
- * use OPENAI_COMPAT_ENDPOINTS; unknown falls back to groq.
+ * use COMPATIBLE_API_ENDPOINTS; unknown falls back to the default route.
  *
  * Note: when multiple custom providers share the same API key
  * (e.g. together-1 and together-deepseek both using
@@ -496,7 +496,7 @@ function extractChatMessageContent(content: unknown): string {
  * if keys overlap.
  */
 export function resolveStreamingUrl(providerName: string, apiKey: string): string {
-  if (OPENAI_COMPAT_ENDPOINTS[providerName]) return OPENAI_COMPAT_ENDPOINTS[providerName]
+  if (COMPATIBLE_API_ENDPOINTS[providerName]) return COMPATIBLE_API_ENDPOINTS[providerName]
   if (providerName === 'custom') {
     const cfg = loadConfig()
     const fromCustom = cfg.customProviders?.find((c: any) => c.enabled && c.apiKey === apiKey)?.baseUrl
@@ -510,7 +510,7 @@ export function resolveStreamingUrl(providerName: string, apiKey: string): strin
     })
     if (apiEntry?.baseUrl) return apiEntry.baseUrl
   }
-  return OPENAI_COMPAT_ENDPOINTS.groq  // last resort
+  return COMPATIBLE_API_ENDPOINTS.groq  // last resort
 }
 
 // ── Phase inference from tool steps ───────────────────────────
@@ -707,8 +707,8 @@ async function racePlannerAPIs(
       candidates.push({ provider: 'custom', model: a.model, key: k, url: a.baseUrl, tier: (a as any).tier ?? 50 })
       continue
     }
-    if (!OPENAI_COMPAT_ENDPOINTS[a.provider]) continue
-    candidates.push({ provider: a.provider, model: a.model, key: k, url: OPENAI_COMPAT_ENDPOINTS[a.provider], tier: (a as any).tier ?? 50 })
+    if (!COMPATIBLE_API_ENDPOINTS[a.provider]) continue
+    candidates.push({ provider: a.provider, model: a.model, key: k, url: COMPATIBLE_API_ENDPOINTS[a.provider], tier: (a as any).tier ?? 50 })
   }
 
   const pool = candidates.sort((a, b) => a.tier - b.tier).slice(0, topN)
@@ -2891,7 +2891,7 @@ CRITICAL RULES FOR YOUR RESPONSE:
         const capacityHint = errText.toLowerCase().includes('capacity') || errText.toLowerCase().includes('overloaded') ? ' capacity' : ''
         throw new Error(`Responder ${r.status}${capacityHint}: ${errText.slice(0, 200)}`)
       }
-      await streamOpenAIResponse(r, onToken)
+      await streamProviderResponse(r, onToken)
     }
   } catch (e: any) {
     if (e.name === 'AbortError') return
@@ -2925,7 +2925,7 @@ CRITICAL RULES FOR YOUR RESPONSE:
             body:    JSON.stringify({ model: nextCloud.model, messages, stream: true }),
             signal:  AbortSignal.timeout(30000),
           })
-          if (r.ok) { await streamOpenAIResponse(r, onToken); return }
+          if (r.ok) { await streamProviderResponse(r, onToken); return }
           if (r.status === 429 || r.status === 503) {
             try { markRateLimited(nextCloud.apiName) } catch {}
           }
@@ -2950,7 +2950,7 @@ CRITICAL RULES FOR YOUR RESPONSE:
             body:    JSON.stringify({ model: cloudFallback.model, messages, stream: true }),
             signal:  AbortSignal.timeout(15000),
           })
-          if (r.ok) { await streamOpenAIResponse(r, onToken); return }
+          if (r.ok) { await streamProviderResponse(r, onToken); return }
         } catch (fbErr: any) {
           console.error(`[Router] Cloud fallback also failed: ${fbErr.message}`)
         }
@@ -3175,7 +3175,7 @@ export async function callLLM(
 
     } else {
       // OpenAI-compatible: groq, openrouter, cerebras, nvidia, github
-      const url     = OPENAI_COMPAT_ENDPOINTS[providerName] || OPENAI_COMPAT_ENDPOINTS.groq
+      const url     = COMPATIBLE_API_ENDPOINTS[providerName] || COMPATIBLE_API_ENDPOINTS.groq
       const headers = buildHeaders(providerName, apiKey)
       const r = await fetch(url, {
         method:  'POST',

@@ -32,7 +32,7 @@ export interface ImportResult {
 //     content: { parts: string[] }
 //   }}> }>
 
-export async function importChatGPT(filePath: string): Promise<ImportResult> {
+export async function importConversationArchive(filePath: string): Promise<ImportResult> {
   const result: ImportResult = {
     source:                'chatgpt',
     conversationsImported: 0,
@@ -73,7 +73,7 @@ export async function importChatGPT(filePath: string): Promise<ImportResult> {
 
         const content  = messages.join('\n\n').substring(0, 50000)
         const title    = String(convo.title || 'ChatGPT Import').replace(/[^a-zA-Z0-9._\- ]/g, '_').slice(0, 80)
-        const filename = `chatgpt_${title}.txt`
+        const filename = `conversation_${title}.txt`
 
         const ingestResult = knowledgeBase.ingestText(
           content,

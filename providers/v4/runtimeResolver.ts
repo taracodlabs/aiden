@@ -44,9 +44,9 @@ import {
 } from './modelCatalog';
 import { CredentialResolver } from './credentialResolver';
 import { ChatCompletionsAdapter } from './chatCompletionsAdapter';
-import { AnthropicAdapter } from './anthropicAdapter';
-import { CodexResponsesAdapter } from './codexResponsesAdapter';
-import { OllamaPromptToolsAdapter } from './ollamaPromptToolsAdapter';
+import { MessageApiAdapter } from './messageApiAdapter';
+import { ResponseStreamAdapter } from './responseStreamAdapter';
+import { LocalPromptToolsAdapter } from './localPromptToolsAdapter';
 import { getModelDefaults } from './modelDefaults';
 // v4.14.x — every adapter the factory hands out is wrapped so a shared message
 // preflight runs before ANY provider call. The single seam; no caller can skip it.
@@ -156,7 +156,7 @@ export class RuntimeResolver {
         if (!credentials.apiKey) {
           throw missingKeyError(entry);
         }
-        return withMessagePreflight(new AnthropicAdapter({
+        return withMessagePreflight(new MessageApiAdapter({
           baseUrl,
           apiKey: credentials.apiKey,
           model: model.id,
@@ -168,7 +168,7 @@ export class RuntimeResolver {
         if (!credentials.apiKey) {
           throw missingKeyError(entry);
         }
-        return withMessagePreflight(new CodexResponsesAdapter({
+        return withMessagePreflight(new ResponseStreamAdapter({
           baseUrl,
           apiKey: credentials.apiKey,
           model: model.id,
@@ -177,7 +177,7 @@ export class RuntimeResolver {
         }));
 
       case 'ollama_prompt_tools':
-        return withMessagePreflight(new OllamaPromptToolsAdapter({
+        return withMessagePreflight(new LocalPromptToolsAdapter({
           baseUrl,
           model: model.id,
           providerName: entry.id,
@@ -326,9 +326,9 @@ export class RuntimeResolver {
         // No usable auth.json entry — surface a clearer error for OAuth-only
         // providers and fall through for paid providers that still might
         // succeed via a missing env var (handled by the missingKeyError
-        // below). Phase 21 #5: the canonical OAuth provider (chatgpt-plus)
+        // below). Phase 21 #5: the canonical subscription OAuth provider
         // hits the entry.oauth fast-path above, so this
-        // legacy branch only fires for raw anthropic_messages/codex_responses
+        // legacy branch only fires for raw protocol apiMode values
         // entries that lack oauth.providerId — i.e. nothing in the live
         // registry today, kept as a safety net for custom-config providers.
         if (entry.apiKeyEnvVar === null) {

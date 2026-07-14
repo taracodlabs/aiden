@@ -37,10 +37,10 @@ export async function run(): Promise<GroupSummary> {
     const reply = await callAiden(`Search for "Anthropic Claude" and summarize the top 3 results.`)
     const lower = reply.toLowerCase()
     const hasAnthropic = lower.includes('anthropic')
-    const hasClaude    = lower.includes('claude')
+    const hasCompatibleProvider = lower.includes('claude')
     const hasNumbers   = /\b[123]\b|first|second|third|one|two|three/.test(lower)
 
-    if (!hasAnthropic && !hasClaude) return `response doesn't mention Anthropic or Claude: ${reply.slice(0, 150)}`
+    if (!hasAnthropic && !hasCompatibleProvider) return `response doesn't mention Anthropic or Claude: ${reply.slice(0, 150)}`
     if (reply.trim().split('\n').length < 2 && reply.length < 100) return `response too thin — not a summary: ${reply.slice(0, 150)}`
   }))
 

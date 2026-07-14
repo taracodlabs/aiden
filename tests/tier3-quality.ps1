@@ -35,12 +35,12 @@ if (-not $ANTHROPIC_KEY) {
 }
 
 if (-not $ANTHROPIC_KEY) {
-    $claudeConfig = "$env:USERPROFILE\.claude\config.json"
-    if (Test-Path $claudeConfig) {
+    $externalToolConfig = "$env:USERPROFILE\.claude\config.json"
+    if (Test-Path $externalToolConfig) {
         try {
-            $cfg = Get-Content $claudeConfig -Raw | ConvertFrom-Json
+            $cfg = Get-Content $externalToolConfig -Raw | ConvertFrom-Json
             $ANTHROPIC_KEY = $cfg.anthropic_api_key
-            if ($ANTHROPIC_KEY) { Write-Host "  Found key in $claudeConfig" -ForegroundColor DarkGray }
+            if ($ANTHROPIC_KEY) { Write-Host "  Found key in $externalToolConfig" -ForegroundColor DarkGray }
         } catch { }
     }
 }

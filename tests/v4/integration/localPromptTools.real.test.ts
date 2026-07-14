@@ -1,5 +1,5 @@
 /**
- * Real-network integration test for OllamaPromptToolsAdapter.
+ * Real-network integration test for LocalPromptToolsAdapter.
  *
  * Skips automatically when Ollama is not reachable on http://localhost:11434.
  * Skipping is decided ONCE at module load using a 2s reachability probe so we
@@ -13,7 +13,7 @@
  * always; the tool-calling test is gated on a slightly larger default model.
  */
 import { describe, it, expect } from 'vitest';
-import { OllamaPromptToolsAdapter } from '../../../providers/v4/ollamaPromptToolsAdapter';
+import { LocalPromptToolsAdapter } from '../../../providers/v4/localPromptToolsAdapter';
 import { AidenAgent } from '../../../core/v4/aidenAgent';
 import type { ToolSchema } from '../../../providers/v4/types';
 
@@ -33,9 +33,9 @@ async function probeOllama(): Promise<boolean> {
 
 const ollamaUp = await probeOllama();
 
-describe.skipIf(!ollamaUp)('OllamaPromptToolsAdapter — real Ollama integration', () => {
+describe.skipIf(!ollamaUp)('LocalPromptToolsAdapter — real local-runtime integration', () => {
   it('completes a simple conversation (no tools)', async () => {
-    const adapter = new OllamaPromptToolsAdapter({
+    const adapter = new LocalPromptToolsAdapter({
       baseUrl: OLLAMA_BASE,
       model: OLLAMA_MODEL,
       providerName: 'ollama',
@@ -52,7 +52,7 @@ describe.skipIf(!ollamaUp)('OllamaPromptToolsAdapter — real Ollama integration
   }, 60_000);
 
   it('completes a tool-calling conversation end-to-end (best-effort)', async () => {
-    const adapter = new OllamaPromptToolsAdapter({
+    const adapter = new LocalPromptToolsAdapter({
       baseUrl: OLLAMA_BASE,
       model: OLLAMA_MODEL,
       providerName: 'ollama',

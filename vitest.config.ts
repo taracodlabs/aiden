@@ -3,17 +3,16 @@
 // legacy v3 regression scripts, which are stale dev artifacts.
 import { defineConfig } from 'vitest/config';
 
-// CI runners — especially GitHub's Windows leg — run the full ~5,300-test
-// suite on only a few cores. Under that load the Node event loop backs up
-// enough that the 5s/10s vitest defaults fire before otherwise-trivial work
-// resolves (a two-mkdir hook, an in-process CLI call), producing
-// nondeterministic timeout flakes whose victims rotate run-to-run and differ
-// by Node version on the same commit. Give the starved loop headroom on CI
-// without slowing local dev, where the tight defaults still surface real
-// slowness fast. Per-test/per-hook timeouts always override these globals, so
-// genuinely long tests keep their explicit budgets and a real hang still
-// eventually times out.
-const isCI = !!process.env.CI;
+// Full-suite workers contend for the same event loop, filesystem, and terminal
+// resources even on a local workstation. Under that load the 5s/10s defaults
+// produce rotating timeout victims in otherwise-fast tests. Keep one realistic
+// budget everywhere so a focused run and a full run use the same contract.
+// Per-test/per-hook timeouts still override these globals.
+//
+// Windows pseudo-terminal helpers also share console infrastructure outside the
+// worker process. Capping file workers prevents unrelated suites from starving
+// input delivery without serializing the entire repository.
+const windowsWorkerLimit = process.platform === 'win32' ? 4 : undefined;
 
 export default defineConfig({
   test: {
@@ -28,7 +27,8 @@ export default defineConfig({
       '.next/**',
       'dashboard-next/**',
     ],
-    testTimeout: isCI ? 20_000 : 5_000,
-    hookTimeout: isCI ? 30_000 : 10_000,
+    testTimeout: 20_000,
+    hookTimeout: 30_000,
+    maxWorkers: windowsWorkerLimit,
   },
 });

@@ -5,7 +5,7 @@
 // Proves C9b fix: resolveStreamingUrl() helper centralises
 // URL resolution for all providers. All 3 fetch sites in
 // respondWithResults now use the helper — no raw
-// OPENAI_COMPAT_ENDPOINTS lookups remain.
+// COMPATIBLE_API_ENDPOINTS lookups remain.
 //
 // Zero I/O — pure logic + source-text inspection.
 // ============================================================
@@ -51,7 +51,7 @@ export async function groupT(): Promise<GroupSummary> {
     bail('T-04', "providerName='custom' resolves baseUrl from config")
     bail('T-05', "providerName='custom' falls back to providers.apis")
     bail('T-06', 'unknown provider returns groq fallback')
-    bail('T-07', 'respondWithResults has zero raw OPENAI_COMPAT_ENDPOINTS[providerName] lookups')
+    bail('T-07', 'respondWithResults has zero raw COMPATIBLE_API_ENDPOINTS[providerName] lookups')
     results.forEach(printResult)
     return summarize('T', 'C9b streaming URL helper', results)
   }
@@ -108,9 +108,9 @@ export async function groupT(): Promise<GroupSummary> {
     }
   ))
 
-  // ── T-07: source-text — no raw OPENAI_COMPAT_ENDPOINTS[providerName] in respondWithResults ─
+  // ── T-07: source-text — no raw COMPATIBLE_API_ENDPOINTS[providerName] in respondWithResults ─
   results.push(await runTest('T-07', 'T',
-    'respondWithResults has zero raw OPENAI_COMPAT_ENDPOINTS[providerName] lookups', () => {
+    'respondWithResults has zero raw COMPATIBLE_API_ENDPOINTS[providerName] lookups', () => {
       const src = (() => {
         try { return fs.readFileSync(path.join(CWD, 'core', 'agentLoop.ts'), 'utf-8') } catch { return null }
       })()
@@ -123,18 +123,18 @@ export async function groupT(): Promise<GroupSummary> {
       // Grab a generous window covering the entire function (~800 lines)
       const fnBody = src.slice(Math.max(0, anchor - 500), anchor + 8000)
 
-      // Check for raw OPENAI_COMPAT_ENDPOINTS[providerName] or
-      // OPENAI_COMPAT_ENDPOINTS[nextCloud.providerName] or
-      // OPENAI_COMPAT_ENDPOINTS[cloudFallback.providerName]
+      // Check for raw COMPATIBLE_API_ENDPOINTS[providerName] or
+      // COMPATIBLE_API_ENDPOINTS[nextCloud.providerName] or
+      // COMPATIBLE_API_ENDPOINTS[cloudFallback.providerName]
       // These should all be replaced by resolveStreamingUrl calls.
       // Exclude comment lines (starting with //)
       const codeLines = fnBody.split('\n').filter(l => !l.trim().startsWith('//'))
       const codeOnly  = codeLines.join('\n')
 
-      const rawLookups = codeOnly.match(/OPENAI_COMPAT_ENDPOINTS\[\w+\.\w+\]/g) ||
-                         codeOnly.match(/OPENAI_COMPAT_ENDPOINTS\[providerName\]/g)
+      const rawLookups = codeOnly.match(/COMPATIBLE_API_ENDPOINTS\[\w+\.\w+\]/g) ||
+                         codeOnly.match(/COMPATIBLE_API_ENDPOINTS\[providerName\]/g)
       if (rawLookups && rawLookups.length > 0)
-        return `Found ${rawLookups.length} raw OPENAI_COMPAT_ENDPOINTS lookup(s) in respondWithResults: ${rawLookups.join(', ')}`
+        return `Found ${rawLookups.length} raw COMPATIBLE_API_ENDPOINTS lookup(s) in respondWithResults: ${rawLookups.join(', ')}`
     }
   ))
 

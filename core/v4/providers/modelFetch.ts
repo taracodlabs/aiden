@@ -120,7 +120,7 @@ function normalise(providerId: string, raws: RawModel[]): FetchedModel[] {
     .sort((a, b) => Number(b.recommended) - Number(a.recommended) || a.displayName.localeCompare(b.displayName));
 }
 
-async function fetchAnthropic(o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
+async function fetchMessageApiModels(o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
   const res = await withTimeout(o.fetchImpl('https://api.anthropic.com/v1/models', {
     headers: { 'x-api-key': o.apiKey, 'anthropic-version': '2023-06-01' },
   }), o.timeoutMs);
@@ -129,7 +129,7 @@ async function fetchAnthropic(o: Required<Pick<FetchOptions, 'apiKey' | 'timeout
   return body.data ?? [];
 }
 
-async function fetchOpenAICompat(url: string, o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
+async function fetchCompatibleModels(url: string, o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
   const res = await withTimeout(o.fetchImpl(url, {
     headers: { Authorization: `Bearer ${o.apiKey}` },
   }), o.timeoutMs);
@@ -138,7 +138,7 @@ async function fetchOpenAICompat(url: string, o: Required<Pick<FetchOptions, 'ap
   return body.data ?? [];
 }
 
-async function fetchGemini(o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
+async function fetchGenerativeApiModels(o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(o.apiKey)}`;
   const res = await withTimeout(o.fetchImpl(url), o.timeoutMs);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -151,7 +151,7 @@ async function fetchGemini(o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs'
   }));
 }
 
-async function fetchOllama(baseUrl: string, o: Required<Pick<FetchOptions, 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
+async function fetchLocalRuntimeModels(baseUrl: string, o: Required<Pick<FetchOptions, 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
   const res = await withTimeout(o.fetchImpl(`${baseUrl.replace(/\/+$/, '')}/api/tags`), o.timeoutMs);
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const body = await res.json() as { models?: Array<{ name: string; size?: number }> };
@@ -173,27 +173,27 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
     switch (opts.providerId) {
       case 'anthropic':
         if (!apiKey) return fallbackFor('anthropic', 'no API key');
-        raws = await fetchAnthropic({ apiKey, timeoutMs, fetchImpl });
+        raws = await fetchMessageApiModels({ apiKey, timeoutMs, fetchImpl });
         break;
       case 'openai':
         if (!apiKey) return fallbackFor('openai', 'no API key');
-        raws = await fetchOpenAICompat('https://api.openai.com/v1/models', { apiKey, timeoutMs, fetchImpl });
+        raws = await fetchCompatibleModels('https://api.openai.com/v1/models', { apiKey, timeoutMs, fetchImpl });
         break;
       case 'groq':
         if (!apiKey) return fallbackFor('groq', 'no API key');
-        raws = await fetchOpenAICompat('https://api.groq.com/openai/v1/models', { apiKey, timeoutMs, fetchImpl });
+        raws = await fetchCompatibleModels('https://api.groq.com/openai/v1/models', { apiKey, timeoutMs, fetchImpl });
         break;
       case 'openrouter':
         // OpenRouter exposes /models without auth, but auth gives the user's
         // available subset — we use the public list to populate the picker.
-        raws = await fetchOpenAICompat('https://openrouter.ai/api/v1/models', { apiKey: apiKey || 'anon', timeoutMs, fetchImpl });
+        raws = await fetchCompatibleModels('https://openrouter.ai/api/v1/models', { apiKey: apiKey || 'anon', timeoutMs, fetchImpl });
         break;
       case 'gemini':
         if (!apiKey) return fallbackFor('gemini', 'no API key');
-        raws = await fetchGemini({ apiKey, timeoutMs, fetchImpl });
+        raws = await fetchGenerativeApiModels({ apiKey, timeoutMs, fetchImpl });
         break;
       case 'ollama':
-        raws = await fetchOllama(opts.baseUrl ?? 'http://localhost:11434', { timeoutMs, fetchImpl });
+        raws = await fetchLocalRuntimeModels(opts.baseUrl ?? 'http://localhost:11434', { timeoutMs, fetchImpl });
         break;
       default:
         // Every other provider — together, nvidia, deepseek, mistral, custom,

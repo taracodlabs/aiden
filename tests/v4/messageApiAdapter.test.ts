@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { AnthropicAdapter } from '../../providers/v4/anthropicAdapter';
+import { MessageApiAdapter } from '../../providers/v4/messageApiAdapter';
 import { ProviderError, ProviderRateLimitError } from '../../providers/v4/errors';
 import type { Message, ToolSchema } from '../../providers/v4/types';
 
@@ -37,7 +37,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('AnthropicAdapter', () => {
+describe('MessageApiAdapter', () => {
   it('1. builds correct request body (system separated, tools as input_schema)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({
@@ -46,7 +46,7 @@ describe('AnthropicAdapter', () => {
         usage: { input_tokens: 5, output_tokens: 1 },
       }),
     );
-    const adapter = new AnthropicAdapter(apiKeyOptions);
+    const adapter = new MessageApiAdapter(apiKeyOptions);
     const tools: ToolSchema[] = [
       {
         name: 'echo',
@@ -86,7 +86,7 @@ describe('AnthropicAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools: [] });
+    await new MessageApiAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools: [] });
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
     expect(headers['x-api-key']).toBe('sk-ant-test');
     expect(headers['Authorization']).toBeUndefined();
@@ -101,7 +101,7 @@ describe('AnthropicAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools: [] });
+    await new MessageApiAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools: [] });
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
     expect(headers['anthropic-beta']).toBeUndefined();
   });
@@ -110,7 +110,7 @@ describe('AnthropicAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({
+    await new MessageApiAdapter(apiKeyOptions).call({
       messages: [{ role: 'system', content: 'be brief' }, userMsg('hi')],
       tools: [],
     });
@@ -123,7 +123,7 @@ describe('AnthropicAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({
+    await new MessageApiAdapter(apiKeyOptions).call({
       messages: [{ role: 'system', content: 'You are Aiden, built by Taracod.' }, userMsg('hi')],
       tools: [],
     });
@@ -143,7 +143,7 @@ describe('AnthropicAdapter', () => {
         inputSchema: { type: 'object', properties: {} },
       },
     ];
-    await new AnthropicAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools });
+    await new MessageApiAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.tools[0].name).toBe('web_search');
   });
@@ -156,7 +156,7 @@ describe('AnthropicAdapter', () => {
         usage: { input_tokens: 7, output_tokens: 2 },
       }),
     );
-    const result = await new AnthropicAdapter(apiKeyOptions).call({
+    const result = await new MessageApiAdapter(apiKeyOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -175,7 +175,7 @@ describe('AnthropicAdapter', () => {
         stop_reason: 'tool_use',
       }),
     );
-    const result = await new AnthropicAdapter(apiKeyOptions).call({
+    const result = await new MessageApiAdapter(apiKeyOptions).call({
       messages: [userMsg('echo hi')],
       tools: [],
     });
@@ -197,7 +197,7 @@ describe('AnthropicAdapter', () => {
         stop_reason: 'tool_use',
       }),
     );
-    const result = await new AnthropicAdapter(apiKeyOptions).call({
+    const result = await new MessageApiAdapter(apiKeyOptions).call({
       messages: [userMsg('q')],
       tools: [],
     });
@@ -210,7 +210,7 @@ describe('AnthropicAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [], stop_reason: 'end_turn', usage: { input_tokens: 1, output_tokens: 0 } }),
     );
-    const result = await new AnthropicAdapter(apiKeyOptions).call({
+    const result = await new MessageApiAdapter(apiKeyOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -227,7 +227,7 @@ describe('AnthropicAdapter', () => {
       .mockResolvedValueOnce(
         makeResponse({ content: [{ type: 'text', text: 'b' }], stop_reason: 'stop_sequence' }),
       );
-    const adapter = new AnthropicAdapter({ ...apiKeyOptions, maxRetries: 0 });
+    const adapter = new MessageApiAdapter({ ...apiKeyOptions, maxRetries: 0 });
     const r1 = await adapter.call({ messages: [userMsg('1')], tools: [] });
     const r2 = await adapter.call({ messages: [userMsg('2')], tools: [] });
     expect(r1.finishReason).toBe('length');
@@ -247,7 +247,7 @@ describe('AnthropicAdapter', () => {
         },
       }),
     );
-    const result = await new AnthropicAdapter(apiKeyOptions).call({
+    const result = await new MessageApiAdapter(apiKeyOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -263,7 +263,7 @@ describe('AnthropicAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({
+    await new MessageApiAdapter(apiKeyOptions).call({
       messages: [
         userMsg('echo hi'),
         { role: 'assistant', content: '', toolCalls: [{ id: 'tc1', name: 'echo', arguments: { text: 'hi' } }] },
@@ -287,7 +287,7 @@ describe('AnthropicAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({
+    await new MessageApiAdapter(apiKeyOptions).call({
       messages: [
         userMsg('search'),
         {
@@ -312,7 +312,7 @@ describe('AnthropicAdapter', () => {
       .mockResolvedValueOnce(
         makeResponse({ content: [{ type: 'text', text: 'finally' }], stop_reason: 'end_turn' }),
       );
-    const adapter = new AnthropicAdapter({ ...apiKeyOptions, maxRetries: 1 });
+    const adapter = new MessageApiAdapter({ ...apiKeyOptions, maxRetries: 1 });
     const promise = adapter.call({ messages: [userMsg('hi')], tools: [] });
     await vi.advanceTimersByTimeAsync(1500);
     const result = await promise;
@@ -323,7 +323,7 @@ describe('AnthropicAdapter', () => {
   it('15. exhausted retries on 429 throws ProviderRateLimitError', async () => {
     vi.useFakeTimers();
     fetchMock.mockResolvedValue(makeResponse({ error: 'rate' }, { status: 429 }));
-    const adapter = new AnthropicAdapter({ ...apiKeyOptions, maxRetries: 1 });
+    const adapter = new MessageApiAdapter({ ...apiKeyOptions, maxRetries: 1 });
     const promise = adapter.call({ messages: [userMsg('hi')], tools: [] });
     promise.catch(() => undefined); // suppress unhandled
     await vi.advanceTimersByTimeAsync(2500);
@@ -333,7 +333,7 @@ describe('AnthropicAdapter', () => {
 
   it('16. 401 fails fast, no retry', async () => {
     fetchMock.mockResolvedValueOnce(makeResponse('unauthorized', { status: 401 }));
-    const adapter = new AnthropicAdapter({ ...apiKeyOptions, maxRetries: 2 });
+    const adapter = new MessageApiAdapter({ ...apiKeyOptions, maxRetries: 2 });
     await expect(adapter.call({ messages: [userMsg('hi')], tools: [] })).rejects.toBeInstanceOf(
       ProviderError,
     );
@@ -341,12 +341,12 @@ describe('AnthropicAdapter', () => {
   });
 });
 
-describe('AnthropicAdapter — image content (B2.2a)', () => {
+describe('MessageApiAdapter — image content (B2.2a)', () => {
   it('maps user images to base64 image blocks alongside the text block', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'a red square' }], stop_reason: 'end_turn', usage: { input_tokens: 9, output_tokens: 3 } }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({
+    await new MessageApiAdapter(apiKeyOptions).call({
       messages: [{ role: 'user', content: 'what is in this image?', images: ['data:image/png;base64,iVBORabc'] }],
       tools: [],
     });
@@ -364,7 +364,7 @@ describe('AnthropicAdapter — image content (B2.2a)', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
-    await new AnthropicAdapter(apiKeyOptions).call({ messages: [userMsg('plain text')], tools: [] });
+    await new MessageApiAdapter(apiKeyOptions).call({ messages: [userMsg('plain text')], tools: [] });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.messages).toEqual([{ role: 'user', content: 'plain text' }]);
   });

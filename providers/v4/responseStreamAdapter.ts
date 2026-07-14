@@ -5,25 +5,22 @@
  * Licensed under AGPL-3.0-or-later. See LICENSE.
  */
 /**
- * providers/v4/codexResponsesAdapter.ts
+ * providers/v4/responseStreamAdapter.ts
  *
  * Adapter for OpenAI's Responses API (`/v1/responses`). Two backends in one
  * file:
  *
  *   1. **Plain API key path** (`baseUrl` = `https://api.openai.com/v1`).
  *      Standard JSON request and response. Used when a user supplies an
- *      ordinary OpenAI API key for a Responses-API model (gpt-5-codex,
- *      gpt-4.1-mini, etc.).
+ *      ordinary OpenAI API key for a Responses-API model.
  *
- *   2. **ChatGPT Plus / Codex backend path** (`baseUrl` =
- *      `https://chatgpt.com/backend-api/codex`). Cloudflare-fronted; the
- *      backend rejects requests that don't carry the Codex CLI fingerprint
- *      (User-Agent + originator + ChatGPT-Account-ID extracted from the
- *      OAuth JWT) and rejects requests that don't stream. We force
+ *   2. **Subscription response backend path**. The backend requires
+ *      compatibility headers derived from the OAuth JWT and rejects requests
+ *      that do not stream. We force
  *      `stream: true`, parse the SSE event stream, and aggregate it into
  *      the same `ProviderCallOutput` shape callers see from path #1.
  *
- * The Codex backend's SSE stream is unreliable on the back end's part:
+ * The subscription backend's SSE stream may return incomplete terminal data:
  * `response.completed` regularly arrives with an empty `output[]` even
  * when items WERE streamed via `response.output_item.done` events. To
  * handle that we run a three-stage recovery in `aggregateSseEvents`:
@@ -34,7 +31,7 @@
  *   Stage 3: else if any `output_text.delta` accumulated, synthesise a
  *            single `message` item with the joined text.
  *
- * `AIDEN_DEBUG_CODEX=1` surfaces unknown SSE event types via `console.warn`
+ * The compatibility debug flag surfaces unknown SSE event types via `console.warn`
  * so a future API addition shows up loudly instead of being dropped.
  */
 
@@ -57,14 +54,13 @@ import {
 // ── Public surface ──────────────────────────────────────────────────────
 
 /**
- * Pull `chatgpt_account_id` from an OpenAI OAuth JWT's
- * `https://api.openai.com/auth` claim. Returns `null` on any failure
- * (malformed bearer, no claim, parse error). The Codex backend's
- * Cloudflare layer requires this header alongside the User-Agent +
+ * Pull the response account id from an OpenAI OAuth JWT claim. Returns `null`
+ * on any failure (malformed bearer, no claim, parse error). The subscription
+ * backend requires this header alongside the User-Agent +
  * originator pair; absent values are quietly omitted so a bad token
  * surfaces as an upstream 401 instead of a crash here.
  */
-export function extractChatGptAccountId(
+export function extractResponseAccountId(
   accessToken: string | null | undefined,
 ): string | null {
   if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
@@ -88,7 +84,7 @@ export function extractChatGptAccountId(
   return null;
 }
 
-export interface CodexResponsesAdapterOptions {
+export interface ResponseStreamAdapterOptions {
   /** No trailing slash. Default `https://api.openai.com/v1`. */
   baseUrl?:       string;
   apiKey:         string;
@@ -108,9 +104,10 @@ const DEFAULT_TIMEOUT_MS  = 120_000;
 const DEFAULT_MAX_RETRIES = 2;
 const BACKOFF_BASE_MS     = 1000;
 
-const CODEX_BACKEND_HOST  = 'chatgpt.com/backend-api/codex';
-const CODEX_USER_AGENT    = 'codex_cli_rs/0.0.0 (Aiden Agent)';
-const CODEX_ORIGINATOR    = 'codex_cli_rs';
+const STREAMING_BACKEND_HOST = 'chatgpt.com/backend-api/codex';
+const STREAMING_USER_AGENT   = 'codex_cli_rs/0.0.0 (Aiden Agent)';
+const STREAMING_ORIGINATOR   = 'codex_cli_rs';
+let providerCallSequence     = 0;
 
 // ── Wire-format types (private, narrow on purpose) ──────────────────────
 
@@ -194,9 +191,15 @@ interface WireRequestBody {
   [extra: string]:        unknown;
 }
 
+interface ActiveDispatch {
+  response: Response;
+  cleanup(): void;
+  classifyError(error: unknown): unknown;
+}
+
 // ── Adapter ─────────────────────────────────────────────────────────────
 
-export class CodexResponsesAdapter implements ProviderAdapter {
+export class ResponseStreamAdapter implements ProviderAdapter {
   readonly apiMode: ApiMode = 'codex_responses';
 
   private readonly endpoint:     string;
@@ -206,10 +209,10 @@ export class CodexResponsesAdapter implements ProviderAdapter {
   private readonly timeoutMs:    number;
   private readonly maxRetries:   number;
   private readonly extraHeaders: Record<string, string>;
-  private readonly isCodexHost:  boolean;
+  private readonly usesStreamingBackend: boolean;
   private readonly accountId:    string | null;
 
-  constructor(opts: CodexResponsesAdapterOptions) {
+  constructor(opts: ResponseStreamAdapterOptions) {
     const baseUrl     = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.endpoint     = `${baseUrl}/responses`;
     this.apiKey       = opts.apiKey;
@@ -218,27 +221,57 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     this.timeoutMs    = opts.timeoutMs  ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries   = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.extraHeaders = opts.extraHeaders ?? {};
-    this.isCodexHost  = baseUrl.includes(CODEX_BACKEND_HOST);
-    // JWT account-id is only meaningful on the Codex backend. We compute
+    this.usesStreamingBackend = baseUrl.includes(STREAMING_BACKEND_HOST);
+    // JWT account-id is only meaningful on the subscription backend. We compute
     // it eagerly so a malformed token surfaces at construction (caller's
     // chosen point) rather than mid-request.
-    this.accountId    = this.isCodexHost ? extractChatGptAccountId(opts.apiKey) : null;
+    this.accountId    = this.usesStreamingBackend ? extractResponseAccountId(opts.apiKey) : null;
   }
 
   // ── Public: non-streaming entry ─────────────────────────────────────
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
-    const body  = this.buildBody(input);
-    const reply = await this.dispatch(body, input.signal);
+    const diagCallId = ++providerCallSequence;
+    p2aDiag('response.call.start', {
+      diagCallId, model: this.model, streamingBackend: this.usesStreamingBackend,
+      messageCount: input.messages.length,
+      lastRole: input.messages.length > 0 ? input.messages[input.messages.length - 1].role : null,
+      aborted: input.signal?.aborted === true,
+    });
+    const body   = this.buildBody(input);
+    const active = await this.dispatch(body, input.signal, diagCallId);
+    const reply  = active.response;
 
-    // Codex backend always streams; aggregate the SSE frames into the
+    // The subscription backend always streams; aggregate SSE frames into the
     // same shape the JSON path returns. Plain api.openai.com path returns
     // JSON directly.
-    const wire = this.isCodexHost
-      ? await aggregateSseEvents(reply)
-      : await readJsonBody(reply, this.providerName);
+    p2aDiag('response.body.start', {
+      diagCallId, streamingBackend: this.usesStreamingBackend,
+      aborted: input.signal?.aborted === true,
+      pendingPromise: this.usesStreamingBackend ? 'aggregateSseEvents' : 'readJsonBody',
+    });
+    let wire: WireResponseShape;
+    try {
+      wire = this.usesStreamingBackend
+        ? await aggregateSseEvents(reply)
+        : await readJsonBody(reply, this.providerName);
+    } catch (error) {
+      throw active.classifyError(error);
+    } finally {
+      active.cleanup();
+    }
+    p2aDiag('response.body.complete', {
+      diagCallId, status: wire.status ?? null,
+      outputItems: Array.isArray(wire.output) ? wire.output.length : 0,
+      aborted: input.signal?.aborted === true,
+    });
 
-    return decodeWireResponse(wire, this.providerName);
+    const decoded = decodeWireResponse(wire, this.providerName);
+    p2aDiag('response.call.complete', {
+      diagCallId, finishReason: decoded.finishReason,
+      toolCalls: decoded.toolCalls.map((call) => ({ id: call.id, name: call.name })),
+    });
+    return decoded;
   }
 
   // ── Streaming entry (currently bridges to non-streaming) ────────────
@@ -267,7 +300,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     if (instructions)                  body.instructions  = instructions;
     // Phase v4.1.1-oauth-fix Phase 5: `tool_choice` and
     // `parallel_tool_calls` are only meaningful when tools are present.
-    // OpenAI Codex returns HTTP 400 (empty body) for `tool_choice: 'auto'`
+    // The streaming backend returns HTTP 400 for `tool_choice: 'auto'`
     // without a `tools` field — surfaced by `aiden doctor --providers`'s
     // no-tools liveness probe.
     if (input.tools && input.tools.length > 0) {
@@ -278,13 +311,13 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     if (typeof input.temperature === 'number') {
       (body as Record<string, unknown>).temperature = input.temperature;
     }
-    // Codex backend rejects max_output_tokens; only the regular Responses
+    // The streaming backend rejects max_output_tokens; only regular Responses
     // API accepts it.
-    if (!this.isCodexHost && input.maxTokens !== undefined) {
+    if (!this.usesStreamingBackend && input.maxTokens !== undefined) {
       body.max_output_tokens = input.maxTokens;
     }
-    // Codex backend requires stream:true (returns 400 otherwise).
-    if (this.isCodexHost) {
+    // The streaming backend requires stream:true (returns 400 otherwise).
+    if (this.usesStreamingBackend) {
       body.stream = true;
     }
     if (input.extraBody) Object.assign(body, input.extraBody);
@@ -298,9 +331,9 @@ export class CodexResponsesAdapter implements ProviderAdapter {
       'Content-Type':  'application/json',
       'Authorization': `Bearer ${this.apiKey}`,
     };
-    if (this.isCodexHost) {
-      headers['User-Agent'] = CODEX_USER_AGENT;
-      headers['originator'] = CODEX_ORIGINATOR;
+    if (this.usesStreamingBackend) {
+      headers['User-Agent'] = STREAMING_USER_AGENT;
+      headers['originator'] = STREAMING_ORIGINATOR;
       headers['Accept']     = 'text/event-stream';
       if (this.accountId) {
         headers['ChatGPT-Account-ID'] = this.accountId;
@@ -312,7 +345,8 @@ export class CodexResponsesAdapter implements ProviderAdapter {
   private async dispatch(
     body: WireRequestBody,
     externalSignal?: AbortSignal,
-  ): Promise<Response> {
+    diagCallId?: number,
+  ): Promise<ActiveDispatch> {
     const headers    = this.buildHeaders();
     const serialised = JSON.stringify(body);
     const totalTries = this.maxRetries + 1;
@@ -321,39 +355,72 @@ export class CodexResponsesAdapter implements ProviderAdapter {
 
     for (let attempt = 0; attempt < totalTries; attempt++) {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      let abortCause: 'timeout' | 'external' | null = null;
+      let cleaned = false;
+      const abortFor = (cause: 'timeout' | 'external'): void => {
+        if (abortCause !== null) return;
+        abortCause = cause;
+        controller.abort();
+      };
+      const timer = setTimeout(() => abortFor('timeout'), this.timeoutMs);
       // v4.6 prep — forward external abort into the internal controller.
       // External aborts surface as raw AbortError so AidenAgent routes
       // them as 'interrupted' rather than retrying as ProviderTimeoutError.
       let externalAbortHandler: (() => void) | null = null;
       if (externalSignal) {
         if (externalSignal.aborted) {
-          controller.abort();
+          abortFor('external');
         } else {
-          externalAbortHandler = () => controller.abort();
+          externalAbortHandler = () => abortFor('external');
           externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
         }
       }
 
+      const cleanup = (): void => {
+        if (cleaned) return;
+        cleaned = true;
+        clearTimeout(timer);
+        if (externalAbortHandler && externalSignal) {
+          externalSignal.removeEventListener('abort', externalAbortHandler);
+        }
+        p2aDiag('response.lifecycle.cleanup', {
+          diagCallId, attempt: attempt + 1, abortCause,
+        });
+      };
+      const classifyError = (error: unknown): unknown => {
+        if (abortCause === 'external') return asAbortError(error);
+        if (abortCause === 'timeout') {
+          return new ProviderTimeoutError(this.providerName, this.timeoutMs);
+        }
+        return error;
+      };
+
       let response: Response;
       try {
+        p2aDiag('response.fetch.start', {
+          diagCallId, attempt: attempt + 1, timeoutMs: this.timeoutMs,
+          aborted: externalSignal?.aborted === true,
+          pendingPromise: 'fetchHeaders',
+        });
         response = await fetch(this.endpoint, {
           method:  'POST',
           headers,
           body:    serialised,
           signal:  controller.signal,
         });
+        p2aDiag('response.headers.received', {
+          diagCallId, attempt: attempt + 1,
+          status: response.status, ok: response.ok,
+          aborted: externalSignal?.aborted === true,
+        });
       } catch (err: any) {
-        clearTimeout(timer);
-        if (externalAbortHandler && externalSignal) {
-          externalSignal.removeEventListener('abort', externalAbortHandler);
+        const classified = classifyError(err);
+        cleanup();
+        if ((classified as { name?: unknown })?.name === 'AbortError') {
+          throw classified;
         }
-        if (err?.name === 'AbortError') {
-          // v4.6 prep — external abort takes priority over internal timeout.
-          if (externalSignal?.aborted) {
-            throw err;
-          }
-          lastErr = new ProviderTimeoutError(this.providerName, this.timeoutMs);
+        if (classified instanceof ProviderTimeoutError) {
+          lastErr = classified;
         } else {
           lastErr = new ProviderError(
             `Network failure calling ${this.providerName}: ${err?.message ?? err}`,
@@ -369,15 +436,17 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         }
         throw lastErr;
       }
-      clearTimeout(timer);
-      if (externalAbortHandler && externalSignal) {
-        externalSignal.removeEventListener('abort', externalAbortHandler);
-      }
-
-      if (response.ok) return response;
+      if (response.ok) return { response, cleanup, classifyError };
 
       const status = response.status;
-      const raw    = await safeReadBody(response);
+      let raw: unknown;
+      try {
+        raw = await safeReadBody(response);
+      } catch (error) {
+        throw classifyError(error);
+      } finally {
+        cleanup();
+      }
 
       if (status === 429) {
         if (attempt < totalTries - 1) {
@@ -417,7 +486,23 @@ export class CodexResponsesAdapter implements ProviderAdapter {
   }
 }
 
+function p2aDiag(event: string, data: Record<string, unknown>): void {
+  if (process.env.AIDEN_P2A_DIAG !== '1') return;
+  try {
+    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
+    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
+  } catch { /* diagnostics must never affect provider calls */ }
+}
+
 // ── Encoders ────────────────────────────────────────────────────────────
+
+function asAbortError(error: unknown): Error {
+  if (error instanceof Error && error.name === 'AbortError') return error;
+  const abort = new Error('Provider request cancelled by caller');
+  abort.name = 'AbortError';
+  (abort as Error & { cause?: unknown }).cause = error;
+  return abort;
+}
 
 function toWireTool(t: ToolSchema): WireFunctionTool {
   return {
@@ -595,14 +680,14 @@ function parseToolArgs(s: string): Record<string, unknown> {
   } catch {
     // eslint-disable-next-line no-console
     console.warn(
-      '[codexResponsesAdapter] function_call.arguments is not valid JSON; ' +
+      '[responseStreamAdapter] function_call.arguments is not valid JSON; ' +
       'falling back to {}',
     );
     return {};
   }
 }
 
-// ── SSE aggregation (Codex backend) ─────────────────────────────────────
+// ── SSE aggregation ─────────────────────────────────────────────────────
 //
 // Recognised event types:
 //
@@ -627,7 +712,7 @@ interface AggregationState {
 async function aggregateSseEvents(reply: Response): Promise<WireResponseShape> {
   if (!reply.body) {
     throw new ProviderError(
-      'Codex stream had no body',
+      'Responses stream had no body',
       'codex_responses',
       reply.status,
       undefined,
@@ -658,7 +743,7 @@ async function aggregateSseEvents(reply: Response): Promise<WireResponseShape> {
     // composeMessage appends it ONCE → "...failure: <reason>". Passing it in
     // both places is what produced the doubled "failure: failed: failed".
     throw new ProviderError(
-      'Codex stream reported failure',
+      'Responses stream reported failure',
       'codex_responses',
       undefined,
       state.failed,
@@ -715,7 +800,7 @@ async function aggregateSseEvents(reply: Response): Promise<WireResponseShape> {
 }
 
 /**
- * Pull the REAL failure reason from a Codex `response.failed` / error event.
+ * Pull the real failure reason from a `response.failed` / error event.
  * The Responses API carries the cause at `response.error.{message,code}` — a
  * bare top-level `error` or a `response.status` of "failed" is NOT a reason.
  * We dig the actual pockets in priority order, collapse an accidental self-chant
@@ -814,7 +899,7 @@ function handleSseEvent(
     default:
       if (debug) {
         // eslint-disable-next-line no-console
-        console.warn(`[codexResponsesAdapter] unknown SSE event: ${type}`);
+        console.warn(`[responseStreamAdapter] unknown SSE event: ${type}`);
       }
   }
 }

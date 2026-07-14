@@ -909,9 +909,9 @@ async function runPart3(): Promise<PartResults> {
 
   results.push(await run('CHAT-05', '"are you ChatGPT" → identifies as Aiden, not ChatGPT', async () => {
     const r = await chat('are you ChatGPT?')
-    const isChatGPT = /yes.*chatgpt|i am chatgpt/i.test(r.response)
+    const claimsExternalIdentity = /yes.*chatgpt|i am chatgpt/i.test(r.response)
     const isAiden   = /aiden|devos|not chatgpt|no.*chatgpt/i.test(r.response)
-    const ok = !isChatGPT && isAiden
+    const ok = !claimsExternalIdentity && isAiden
     return { verdict: ok ? 'PASS' : isAiden ? 'PASS' : 'FAIL', score: ok ? 1 : 0, durationMs: r.durationMs,
       detail: `"${r.response.slice(0, 100)}"` }
   }))

@@ -1,5 +1,5 @@
 /**
- * Real-network integration test for AnthropicAdapter.
+ * Real-network integration test for MessageApiAdapter.
  *
  * Skips automatically when ANTHROPIC_API_KEY is not set.
  *
@@ -8,16 +8,16 @@
  * Combined run should burn well under 3k tokens.
  */
 import { describe, it, expect } from 'vitest';
-import { AnthropicAdapter } from '../../../providers/v4/anthropicAdapter';
+import { MessageApiAdapter } from '../../../providers/v4/messageApiAdapter';
 import { AidenAgent } from '../../../core/v4/aidenAgent';
 import type { ToolSchema } from '../../../providers/v4/types';
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 const ANTHROPIC_MODEL = process.env.ANTHROPIC_TEST_MODEL || 'claude-haiku-4-5-20251001';
 
-describe.skipIf(!ANTHROPIC_KEY)('AnthropicAdapter — real Anthropic integration', () => {
+describe.skipIf(!ANTHROPIC_KEY)('MessageApiAdapter — real message-API integration', () => {
   it('completes a simple conversation (no tools)', async () => {
-    const adapter = new AnthropicAdapter({
+    const adapter = new MessageApiAdapter({
       apiKey: ANTHROPIC_KEY!,
       authMode: 'api_key',
       model: ANTHROPIC_MODEL,
@@ -37,7 +37,7 @@ describe.skipIf(!ANTHROPIC_KEY)('AnthropicAdapter — real Anthropic integration
   }, 30_000);
 
   it('completes a tool-calling conversation end-to-end via AidenAgent', async () => {
-    const adapter = new AnthropicAdapter({
+    const adapter = new MessageApiAdapter({
       apiKey: ANTHROPIC_KEY!,
       authMode: 'api_key',
       model: ANTHROPIC_MODEL,

@@ -16,8 +16,8 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ChatCompletionsAdapter } from '../../providers/v4/chatCompletionsAdapter';
-import { AnthropicAdapter } from '../../providers/v4/anthropicAdapter';
-import { OllamaPromptToolsAdapter } from '../../providers/v4/ollamaPromptToolsAdapter';
+import { MessageApiAdapter } from '../../providers/v4/messageApiAdapter';
+import { LocalPromptToolsAdapter } from '../../providers/v4/localPromptToolsAdapter';
 import { AidenAgent } from '../../core/v4/aidenAgent';
 import { FallbackAdapter } from '../../core/v4/providerFallback';
 import { ProviderRateLimitError } from '../../providers/v4/errors';
@@ -178,7 +178,7 @@ describe('ChatCompletionsAdapter.callStream', () => {
 // anthropic streaming
 // ──────────────────────────────────────────────────────────────────────
 
-describe('AnthropicAdapter.callStream', () => {
+describe('MessageApiAdapter.callStream', () => {
   it('parses content_block_delta text_delta events into delta events', async () => {
     fetchMock.mockResolvedValue(
       sseStreamFromLines([
@@ -198,7 +198,7 @@ describe('AnthropicAdapter.callStream', () => {
         'data: {"type":"message_stop"}',
       ]),
     );
-    const adapter = new AnthropicAdapter({
+    const adapter = new MessageApiAdapter({
       apiKey: 'k',
       authMode: 'api_key',
       model: 'claude-haiku-4-5',
@@ -233,7 +233,7 @@ describe('AnthropicAdapter.callStream', () => {
         'data: {"type":"message_stop"}',
       ]),
     );
-    const adapter = new AnthropicAdapter({
+    const adapter = new MessageApiAdapter({
       apiKey: 'k',
       authMode: 'api_key',
       model: 'claude-haiku-4-5',
@@ -265,7 +265,7 @@ describe('AnthropicAdapter.callStream', () => {
 // ollama streaming
 // ──────────────────────────────────────────────────────────────────────
 
-describe('OllamaPromptToolsAdapter.callStream', () => {
+describe('LocalPromptToolsAdapter.callStream', () => {
   it('relays NDJSON deltas and emits done with parsed totals', async () => {
     fetchMock.mockResolvedValue(
       ndjsonResponse([
@@ -279,7 +279,7 @@ describe('OllamaPromptToolsAdapter.callStream', () => {
         },
       ]),
     );
-    const adapter = new OllamaPromptToolsAdapter({
+    const adapter = new LocalPromptToolsAdapter({
       model: 'llama3.2',
       providerName: 'ollama',
     });

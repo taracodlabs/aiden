@@ -5,7 +5,7 @@
  * Licensed under AGPL-3.0-or-later. See LICENSE.
  */
 /**
- * providers/v4/anthropicAdapter.ts
+ * providers/v4/messageApiAdapter.ts
  *
  * Speaks Anthropic's native /v1/messages wire format on behalf of Aiden's
  * provider abstraction. Used for:
@@ -44,7 +44,7 @@ import { VERSION } from '../../core/version';
 
 // ── Public options ──────────────────────────────────────────────────────────
 
-export interface AnthropicAdapterOptions {
+export interface MessageApiAdapterOptions {
   /** Defaults to 'https://api.anthropic.com'. No trailing slash. */
   baseUrl?: string;
   /** Anthropic API key, sent as `x-api-key`. */
@@ -100,12 +100,12 @@ const DEFAULT_BASE_URL    = 'https://api.anthropic.com';
 const DEFAULT_TIMEOUT_MS  = 120_000;
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_MAX_TOKENS  = 4096;
-const ANTHROPIC_VERSION   = '2023-06-01';
+const MESSAGE_API_VERSION = '2023-06-01';
 const BACKOFF_BASE_MS     = 1000;
 
 // ── Adapter ────────────────────────────────────────────────────────────────
 
-export class AnthropicAdapter implements ProviderAdapter {
+export class MessageApiAdapter implements ProviderAdapter {
   readonly apiMode: ApiMode = 'anthropic_messages';
 
   private readonly endpoint:     string;
@@ -116,7 +116,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   private readonly maxRetries:   number;
   private readonly extraHeaders: Record<string, string>;
 
-  constructor(opts: AnthropicAdapterOptions) {
+  constructor(opts: MessageApiAdapterOptions) {
     const baseUrl     = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.endpoint     = `${baseUrl}/v1/messages`;
     this.apiKey       = opts.apiKey;
@@ -183,7 +183,7 @@ export class AnthropicAdapter implements ProviderAdapter {
   private buildHeaders(streaming: boolean): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type':      'application/json',
-      'anthropic-version': ANTHROPIC_VERSION,
+      'anthropic-version': MESSAGE_API_VERSION,
       // Honest client identity — Aiden never masquerades as another CLI.
       'user-agent':        `aiden/${VERSION}`,
       'x-api-key':         this.apiKey,

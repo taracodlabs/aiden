@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { CodexResponsesAdapter } from '../../providers/v4/codexResponsesAdapter';
+import { ResponseStreamAdapter } from '../../providers/v4/responseStreamAdapter';
 import { ProviderError, ProviderRateLimitError } from '../../providers/v4/errors';
 import type { Message } from '../../providers/v4/types';
 
@@ -14,9 +14,9 @@ function makeResponse(
 }
 
 const baseOptions = {
-  apiKey: 'sk-codex-test',
-  model: 'gpt-5-codex',
-  providerName: 'codex',
+  apiKey: 'sk-test',
+  model: 'gpt-test',
+  providerName: 'openai-responses',
   maxRetries: 1,
 };
 
@@ -34,7 +34,7 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe('CodexResponsesAdapter', () => {
+describe('ResponseStreamAdapter', () => {
   it('1. builds correct request body for /v1/responses (instructions, input items, flat tools)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({
@@ -50,10 +50,10 @@ describe('CodexResponsesAdapter', () => {
         usage: { input_tokens: 5, output_tokens: 1 },
       }),
     );
-    const adapter = new CodexResponsesAdapter(baseOptions);
+    const adapter = new ResponseStreamAdapter(baseOptions);
     await adapter.call({
       messages: [
-        { role: 'system', content: 'you are codex' },
+        { role: 'system', content: 'you are helpful' },
         userMsg('hi'),
       ],
       tools: [
@@ -69,8 +69,8 @@ describe('CodexResponsesAdapter', () => {
     const [url, init] = fetchMock.mock.calls[0];
     expect(url).toBe('https://api.openai.com/v1/responses');
     const body = JSON.parse(init.body);
-    expect(body.model).toBe('gpt-5-codex');
-    expect(body.instructions).toBe('you are codex');
+    expect(body.model).toBe('gpt-test');
+    expect(body.instructions).toBe('you are helpful');
     expect(body.tool_choice).toBe('auto');
     expect(body.parallel_tool_calls).toBe(true);
     expect(body.store).toBe(false);
@@ -104,7 +104,7 @@ describe('CodexResponsesAdapter', () => {
         usage: { input_tokens: 4, output_tokens: 2 },
       }),
     );
-    const result = await new CodexResponsesAdapter(baseOptions).call({
+    const result = await new ResponseStreamAdapter(baseOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -130,7 +130,7 @@ describe('CodexResponsesAdapter', () => {
         status: 'completed',
       }),
     );
-    const result = await new CodexResponsesAdapter(baseOptions).call({
+    const result = await new ResponseStreamAdapter(baseOptions).call({
       messages: [userMsg('echo hi')],
       tools: [],
     });
@@ -156,7 +156,7 @@ describe('CodexResponsesAdapter', () => {
         status: 'completed',
       }),
     );
-    const result = await new CodexResponsesAdapter(baseOptions).call({
+    const result = await new ResponseStreamAdapter(baseOptions).call({
       messages: [userMsg('q')],
       tools: [],
     });
@@ -174,7 +174,7 @@ describe('CodexResponsesAdapter', () => {
         usage: { input_tokens: 3, output_tokens: 2 },
       }),
     );
-    const result = await new CodexResponsesAdapter(baseOptions).call({
+    const result = await new ResponseStreamAdapter(baseOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -197,7 +197,7 @@ describe('CodexResponsesAdapter', () => {
         incomplete_details: { reason: 'max_output_tokens' },
       }),
     );
-    const result = await new CodexResponsesAdapter(baseOptions).call({
+    const result = await new ResponseStreamAdapter(baseOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -207,7 +207,7 @@ describe('CodexResponsesAdapter', () => {
   it('7. status=failed throws ProviderError', async () => {
     fetchMock.mockResolvedValueOnce(makeResponse({ output: [], status: 'failed' }));
     await expect(
-      new CodexResponsesAdapter(baseOptions).call({ messages: [userMsg('hi')], tools: [] }),
+      new ResponseStreamAdapter(baseOptions).call({ messages: [userMsg('hi')], tools: [] }),
     ).rejects.toBeInstanceOf(ProviderError);
   });
 
@@ -228,7 +228,7 @@ describe('CodexResponsesAdapter', () => {
           status: 'completed',
         }),
       );
-    const adapter = new CodexResponsesAdapter({ ...baseOptions, maxRetries: 1 });
+    const adapter = new ResponseStreamAdapter({ ...baseOptions, maxRetries: 1 });
     const promise = adapter.call({ messages: [userMsg('hi')], tools: [] });
     await vi.advanceTimersByTimeAsync(1500);
     const result = await promise;
@@ -239,7 +239,7 @@ describe('CodexResponsesAdapter', () => {
   it('9. exhausted 429 throws ProviderRateLimitError', async () => {
     vi.useFakeTimers();
     fetchMock.mockResolvedValue(makeResponse({ error: 'rate' }, { status: 429 }));
-    const adapter = new CodexResponsesAdapter({ ...baseOptions, maxRetries: 1 });
+    const adapter = new ResponseStreamAdapter({ ...baseOptions, maxRetries: 1 });
     const promise = adapter.call({ messages: [userMsg('hi')], tools: [] });
     promise.catch(() => undefined);
     await vi.advanceTimersByTimeAsync(2500);
@@ -249,7 +249,7 @@ describe('CodexResponsesAdapter', () => {
   it('10. 401 fails fast', async () => {
     fetchMock.mockResolvedValueOnce(makeResponse('unauthorized', { status: 401 }));
     await expect(
-      new CodexResponsesAdapter(baseOptions).call({ messages: [userMsg('hi')], tools: [] }),
+      new ResponseStreamAdapter(baseOptions).call({ messages: [userMsg('hi')], tools: [] }),
     ).rejects.toBeInstanceOf(ProviderError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
@@ -268,7 +268,7 @@ describe('CodexResponsesAdapter', () => {
         status: 'completed',
       }),
     );
-    await new CodexResponsesAdapter(baseOptions).call({
+    await new ResponseStreamAdapter(baseOptions).call({
       messages: [
         userMsg('q'),
         {
@@ -311,7 +311,7 @@ describe('CodexResponsesAdapter', () => {
         usage: { input_tokens: 100, output_tokens: 5, cached_tokens: 80 },
       }),
     );
-    const result = await new CodexResponsesAdapter(baseOptions).call({
+    const result = await new ResponseStreamAdapter(baseOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });

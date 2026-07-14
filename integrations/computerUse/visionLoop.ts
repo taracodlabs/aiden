@@ -43,7 +43,7 @@ interface VisionLoopOptions {
 /**
  * Call llava (or any vision-capable Ollama model) with a base64 image.
  */
-async function callOllamaVision(prompt: string, imageB64: string): Promise<string> {
+async function callLocalVisionModel(prompt: string, imageB64: string): Promise<string> {
   const res = await axios.post(
     `${OLLAMA_BASE}/api/chat`,
     {
@@ -67,7 +67,7 @@ async function callOllamaVision(prompt: string, imageB64: string): Promise<strin
  * Call Claude via Anthropic Messages API with a base64 PNG image.
  * Requires ANTHROPIC_API_KEY env var.
  */
-async function callClaudeVision(prompt: string, imageB64: string): Promise<string> {
+async function invokeVisionProvider(prompt: string, imageB64: string): Promise<string> {
   const apiKey = process.env.ANTHROPIC_API_KEY
   if (!apiKey) throw new Error('[VisionLoop] ANTHROPIC_API_KEY not set — use visionModel: "local"')
 
@@ -293,8 +293,8 @@ Respond ONLY with valid JSON:
 
     try {
       const raw = useLocal
-        ? await callOllamaVision(prompt, screenshotB64)
-        : await callClaudeVision(prompt, screenshotB64)
+        ? await callLocalVisionModel(prompt, screenshotB64)
+        : await invokeVisionProvider(prompt, screenshotB64)
       return this.parseAction(raw)
     } catch (err: any) {
       console.warn(`[VisionLoop] LLM call failed (${useLocal ? 'local' : 'claude'}): ${err?.message}`)
@@ -315,8 +315,8 @@ Respond ONLY with valid JSON:
 
     try {
       const raw = useLocal
-        ? await callOllamaVision(prompt, screenshotB64)
-        : await callClaudeVision(prompt, screenshotB64)
+        ? await callLocalVisionModel(prompt, screenshotB64)
+        : await invokeVisionProvider(prompt, screenshotB64)
       const cleaned = raw.replace(/```json|```/g, '').trim()
       return JSON.parse(cleaned).complete === true
     } catch {

@@ -5,7 +5,7 @@
  * Aiden — local-first agent.
  */
 /**
- * providers/v4/ollamaPromptToolsAdapter.ts — Aiden v4.0.0
+ * providers/v4/localPromptToolsAdapter.ts — Aiden v4.0.0
  *
  * Local Ollama adapter with prompt-based fake tool calling.
  *
@@ -45,7 +45,7 @@ import {
 } from './types';
 import { ProviderError, ProviderTimeoutError } from './errors';
 
-export interface OllamaPromptToolsAdapterOptions {
+export interface LocalPromptToolsAdapterOptions {
   /** Default 'http://localhost:11434'. No trailing slash. */
   baseUrl?: string;
   /** e.g. 'llama3.2', 'qwen2.5:7b', 'gemma2:2b'. */
@@ -98,7 +98,7 @@ const DEFAULT_MAX_RETRIES = 0;
  */
 const TOOL_CALL_PATTERN = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>|<tool_call>\s*([\s\S]*)/g;
 
-export class OllamaPromptToolsAdapter implements ProviderAdapter {
+export class LocalPromptToolsAdapter implements ProviderAdapter {
   apiMode: ApiMode = 'ollama_prompt_tools';
   private readonly baseUrl: string;
   private readonly model: string;
@@ -106,7 +106,7 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
 
-  constructor(options: OllamaPromptToolsAdapterOptions) {
+  constructor(options: LocalPromptToolsAdapterOptions) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
     this.model = options.model;
     this.providerName = options.providerName;

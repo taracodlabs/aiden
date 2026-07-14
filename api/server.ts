@@ -71,7 +71,7 @@ import { entityGraph }                                  from '../core/entityGrap
 import { learningMemory }                               from '../core/learningMemory'
 import { knowledgeBase }                               from '../core/knowledgeBase'
 import { extractYouTubeTranscript }                    from '../core/youtubeTranscript'
-import { importChatGPT, importOpenClaw }               from '../core/importers'
+import { importConversationArchive, importOpenClaw }  from '../core/importers'
 import { logBuffer }                                   from '../core/logBuffer'
 import { deepKB }                                      from '../core/deepKB'
 import multer                                           from 'multer'
@@ -5008,7 +5008,7 @@ export function createApiServer(): Express {
     if (!filePath) { res.status(400).json({ error: 'filePath required' }); return }
     if (!fs.existsSync(filePath)) { res.status(400).json({ error: 'File not found' }); return }
     try {
-      const result = await importChatGPT(filePath)
+      const result = await importConversationArchive(filePath)
       res.json(result)
     } catch (e: any) { res.status(500).json({ error: e.message }) }
   })

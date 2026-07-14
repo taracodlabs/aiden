@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { CodexResponsesAdapter } from '../../../providers/v4/codexResponsesAdapter';
+import { ResponseStreamAdapter } from '../../../providers/v4/responseStreamAdapter';
 
 /**
- * Phase 21 #6d — Codex SSE three-stage recovery. The Codex backend regularly emits
+ * Phase 21 #6d — Responses SSE three-stage recovery. The streaming backend may emit
  * `response.completed` with an empty output[] even when items were
  * streamed. Aiden must backfill from output_item.done events OR
  * synthesize from output_text.delta accumulation, not trust the empty
@@ -32,7 +32,7 @@ function sse(events: object[]): Response {
 }
 
 function adapter() {
-  return new CodexResponsesAdapter({
+  return new ResponseStreamAdapter({
     baseUrl: 'https://chatgpt.com/backend-api/codex',
     apiKey: 'sk-test',
     model: 'gpt-5.3-codex',
@@ -41,7 +41,7 @@ function adapter() {
   });
 }
 
-describe('Phase 21 #6d — Codex SSE recovery', () => {
+describe('Phase 21 #6d — Responses SSE recovery', () => {
   it('1. text-only response with output_item.added + output_item.done parses cleanly', async () => {
     globalThis.fetch = vi.fn(async () =>
       sse([
@@ -100,7 +100,7 @@ describe('Phase 21 #6d — Codex SSE recovery', () => {
         },
         {
           type: 'response.completed',
-          // ← Codex bug shape: completed event but output[] is empty.
+          // Upstream bug shape: completed event but output[] is empty.
           response: {
             status: 'completed',
             output: [],
@@ -215,7 +215,7 @@ describe('Phase 21 #6d — Codex SSE recovery', () => {
 });
 
 // ── Bug B — a stream failure must say WHY, never bare/repeated "failed" ────────
-describe('Codex stream failure surfaces the REAL reason', () => {
+describe('Responses stream failure surfaces the REAL reason', () => {
   const callIt = async () => {
     let msg = '';
     try {
@@ -241,7 +241,7 @@ describe('Codex stream failure surfaces the REAL reason', () => {
       sse([{ type: 'response.failed', response: { status: 'failed' } }]),   // no error object
     ) as never;
     const msg = await callIt();
-    expect(msg).toContain('Codex stream reported failure:');
+    expect(msg).toContain('Responses stream reported failure:');
     expect(msg).not.toMatch(/failure:\s*failed\s*$/i);   // not just the bare status word
     expect(msg).not.toMatch(/failed:\s*failed/i);        // never the chant
     expect(msg).toMatch(/status=failed/);                // honest: surfaces the actual shape

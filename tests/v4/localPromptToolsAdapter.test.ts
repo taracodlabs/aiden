@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OllamaPromptToolsAdapter } from '../../providers/v4/ollamaPromptToolsAdapter';
+import { LocalPromptToolsAdapter } from '../../providers/v4/localPromptToolsAdapter';
 import { ProviderError } from '../../providers/v4/errors';
 import type { Message, ToolSchema } from '../../providers/v4/types';
 
@@ -38,7 +38,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('OllamaPromptToolsAdapter', () => {
+describe('LocalPromptToolsAdapter', () => {
   it('1. builds correct request body (no tools field, /api/chat, stream:false)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({
@@ -48,7 +48,7 @@ describe('OllamaPromptToolsAdapter', () => {
         done: true,
       }),
     );
-    await new OllamaPromptToolsAdapter(baseOptions).call({
+    await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -65,7 +65,7 @@ describe('OllamaPromptToolsAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ message: { role: 'assistant', content: 'ok' }, done: true }),
     );
-    await new OllamaPromptToolsAdapter(baseOptions).call({
+    await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [sysMsg('be brief'), userMsg('hi')],
       tools,
     });
@@ -80,7 +80,7 @@ describe('OllamaPromptToolsAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ message: { role: 'assistant', content: 'ok' }, done: true }),
     );
-    await new OllamaPromptToolsAdapter(baseOptions).call({
+    await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [userMsg('hi')],
       tools,
     });
@@ -102,7 +102,7 @@ describe('OllamaPromptToolsAdapter', () => {
         done: true,
       }),
     );
-    const result = await new OllamaPromptToolsAdapter(baseOptions).call({
+    const result = await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [userMsg('what time?')],
       tools,
     });
@@ -126,7 +126,7 @@ describe('OllamaPromptToolsAdapter', () => {
         done: true,
       }),
     );
-    const result = await new OllamaPromptToolsAdapter(baseOptions).call({
+    const result = await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [userMsg('q')],
       tools,
     });
@@ -150,7 +150,7 @@ describe('OllamaPromptToolsAdapter', () => {
         done: true,
       }),
     );
-    const result = await new OllamaPromptToolsAdapter(baseOptions).call({
+    const result = await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [userMsg('q')],
       tools,
     });
@@ -167,7 +167,7 @@ describe('OllamaPromptToolsAdapter', () => {
         done: true,
       }),
     );
-    const result = await new OllamaPromptToolsAdapter(baseOptions).call({
+    const result = await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [userMsg('hi')],
       tools: [],
     });
@@ -185,7 +185,7 @@ describe('OllamaPromptToolsAdapter', () => {
         done: true,
       }),
     );
-    const result = await new OllamaPromptToolsAdapter(baseOptions).call({
+    const result = await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [userMsg('q')],
       tools: [],
     });
@@ -194,7 +194,7 @@ describe('OllamaPromptToolsAdapter', () => {
 
   it('9. connection error → ProviderError with "Ollama not reachable"', async () => {
     fetchMock.mockRejectedValueOnce(Object.assign(new Error('ECONNREFUSED'), { code: 'ECONNREFUSED' }));
-    const adapter = new OllamaPromptToolsAdapter({ ...baseOptions, maxRetries: 0 });
+    const adapter = new LocalPromptToolsAdapter({ ...baseOptions, maxRetries: 0 });
     await expect(adapter.call({ messages: [userMsg('hi')], tools: [] })).rejects.toThrow(
       /Ollama not reachable/,
     );
@@ -204,7 +204,7 @@ describe('OllamaPromptToolsAdapter', () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ message: { role: 'assistant', content: 'done' }, done: true }),
     );
-    await new OllamaPromptToolsAdapter(baseOptions).call({
+    await new LocalPromptToolsAdapter(baseOptions).call({
       messages: [
         userMsg('what time?'),
         {
@@ -239,7 +239,7 @@ describe('OllamaPromptToolsAdapter', () => {
           });
         }),
     );
-    const adapter = new OllamaPromptToolsAdapter({
+    const adapter = new LocalPromptToolsAdapter({
       ...baseOptions,
       timeoutMs: 10,
       maxRetries: 0,

@@ -32,7 +32,7 @@
 
 'use strict';
 
-const CHATGPT_PLUS = {
+const SUBSCRIPTION_AUTH = {
   id: 'chatgpt-plus',
   displayName: 'ChatGPT Plus',
   description:
@@ -117,7 +117,7 @@ function buildPollingUa(outer, deadlineAt, now = Date.now) {
       const elapsed = now() - started;
       if (
         !reminderShown &&
-        elapsed >= CHATGPT_PLUS.REMINDER_AT_MS &&
+        elapsed >= SUBSCRIPTION_AUTH.REMINDER_AT_MS &&
         deadlineAt - now() > 0
       ) {
         reminderShown = true;
@@ -132,10 +132,10 @@ function buildPollingUa(outer, deadlineAt, now = Date.now) {
 
 function buildProvider(authHelpers) {
   return {
-    id: CHATGPT_PLUS.id,
-    displayName: CHATGPT_PLUS.displayName,
-    defaultModels: CHATGPT_PLUS.defaultModels,
-    description: CHATGPT_PLUS.description,
+    id: SUBSCRIPTION_AUTH.id,
+    displayName: SUBSCRIPTION_AUTH.displayName,
+    defaultModels: SUBSCRIPTION_AUTH.defaultModels,
+    description: SUBSCRIPTION_AUTH.description,
 
     async login(ua) {
       ua.log('');
@@ -184,8 +184,8 @@ function buildProvider(authHelpers) {
       try {
         result = await authHelpers.runDeviceCodeFlow(
           {
-            issuer: CHATGPT_PLUS.issuer,
-            clientId: CHATGPT_PLUS.clientId,
+            issuer: SUBSCRIPTION_AUTH.issuer,
+            clientId: SUBSCRIPTION_AUTH.clientId,
             extraHeaders: userAgentHeader(),
           },
           innerUa,
@@ -221,8 +221,8 @@ function buildProvider(authHelpers) {
     async refresh(refreshToken) {
       return authHelpers.refreshTokens(refreshToken, {
         // OpenAI's refresh endpoint is the same as the token-exchange one.
-        tokenUrl: `${CHATGPT_PLUS.issuer}/oauth/token`,
-        clientId: CHATGPT_PLUS.clientId,
+        tokenUrl: `${SUBSCRIPTION_AUTH.issuer}/oauth/token`,
+        clientId: SUBSCRIPTION_AUTH.clientId,
         formEncoded: true,
         extraHeaders: userAgentHeader(),
       });
@@ -230,10 +230,10 @@ function buildProvider(authHelpers) {
 
     describeRuntime() {
       return {
-        apiMode: CHATGPT_PLUS.apiMode,
-        baseUrl: CHATGPT_PLUS.baseUrl,
-        headerName: CHATGPT_PLUS.headerName,
-        headerPrefix: CHATGPT_PLUS.headerPrefix,
+        apiMode: SUBSCRIPTION_AUTH.apiMode,
+        baseUrl: SUBSCRIPTION_AUTH.baseUrl,
+        headerName: SUBSCRIPTION_AUTH.headerName,
+        headerPrefix: SUBSCRIPTION_AUTH.headerPrefix,
       };
     },
   };
@@ -251,5 +251,5 @@ module.exports = {
   buildPollingUa,
   renderUserCodeBox,
   formatRemaining,
-  CHATGPT_PLUS,
+  SUBSCRIPTION_AUTH,
 };

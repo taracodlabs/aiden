@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { CodexResponsesAdapter } from '../../../providers/v4/codexResponsesAdapter';
+import { ResponseStreamAdapter } from '../../../providers/v4/responseStreamAdapter';
 
 /**
- * Phase 21 #6c — chatgpt.com/backend-api/codex requires `stream: true`.
+ * Phase 21 #6c — the subscription response endpoint requires `stream: true`.
  * Sending stream:false (or omitting it) returns HTTP 400
- * "Stream must be set to true." Aiden always streams the Codex backend
+ * "Stream must be set to true." Aiden always streams this backend
  * and aggregates SSE frames internally so callers see the same JSON
  * shape they get from non-streaming providers.
  */
@@ -42,7 +42,7 @@ function jsonResponse(obj: object): Response {
 }
 
 function adapter(baseUrl: string) {
-  return new CodexResponsesAdapter({
+  return new ResponseStreamAdapter({
     baseUrl,
     apiKey: 'sk-test',
     model: 'gpt-5.3-codex',
@@ -51,8 +51,8 @@ function adapter(baseUrl: string) {
   });
 }
 
-describe('Phase 21 #6c — Codex backend always streams', () => {
-  it('1. request body sets stream:true when baseUrl is the Codex backend', async () => {
+describe('Phase 21 #6c — subscription response backend always streams', () => {
+  it('1. request body sets stream:true for the subscription response backend', async () => {
     globalThis.fetch = vi.fn(async (url, init) => {
       captured.url = String(url);
       captured.body = JSON.parse(String(init?.body ?? '{}'));
@@ -84,10 +84,10 @@ describe('Phase 21 #6c — Codex backend always streams', () => {
     expect(r.finishReason).toBe('stop');
   });
 
-  it('2. non-Codex baseUrl does NOT set stream:true (regular Responses API path uses JSON)', async () => {
+  it('2. regular baseUrl does NOT set stream:true (standard Responses API path uses JSON)', async () => {
     globalThis.fetch = vi.fn(async (url, init) => {
       captured.body = JSON.parse(String(init?.body ?? '{}'));
-      // Non-Codex path expects JSON response — adapter calls response.json().
+      // Standard path expects JSON response — adapter calls response.json().
       return jsonResponse({
         status: 'completed',
         output: [

@@ -1,22 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import {
-  CodexResponsesAdapter,
-  extractChatGptAccountId,
-} from '../../../providers/v4/codexResponsesAdapter';
+  ResponseStreamAdapter,
+  extractResponseAccountId,
+} from '../../../providers/v4/responseStreamAdapter';
 
 /**
- * Phase 21 #6 reopen — Cloudflare-bypass headers required by
- * chatgpt.com/backend-api/codex. verbatim from
- * agent/auxiliary_client.py:_codex_cloudflare_headers.
+ * Phase 21 #6 reopen — compatibility headers required by the
+ * subscription response endpoint.
  *
- * Without these headers the Codex backend returns
- *   400 "model not supported when using Codex with a ChatGPT account"
- * regardless of slug or account entitlement. These tests pin the
- * adapter to the Codex-CLI header shape so a future "cleanup" doesn't strip them.
+ * Without these headers the backend rejects otherwise entitled models.
+ * These tests pin the required wire contract so a future cleanup does not
+ * strip compatibility fields.
  */
 
-// Build a minimal JWT (header.payload.signature) with a chatgpt_account_id
+// Build a minimal JWT (header.payload.signature) with the account-id
 // claim. We never verify signatures — adapter just decodes the payload.
 function makeJwt(payload: object): string {
   const b64 = (s: string) =>
@@ -24,24 +22,24 @@ function makeJwt(payload: object): string {
   return `${b64('{"alg":"HS256"}')}.${b64(JSON.stringify(payload))}.sig`;
 }
 
-describe('extractChatGptAccountId', () => {
-  it('1. extracts chatgpt_account_id from the auth claim', () => {
+describe('extractResponseAccountId', () => {
+  it('1. extracts the account id from the auth claim', () => {
     const token = makeJwt({
       'https://api.openai.com/auth': { chatgpt_account_id: 'acct_abc123' },
     });
-    expect(extractChatGptAccountId(token)).toBe('acct_abc123');
+    expect(extractResponseAccountId(token)).toBe('acct_abc123');
   });
 
   it('2. returns null on malformed JWT (no crash)', () => {
-    expect(extractChatGptAccountId('')).toBeNull();
-    expect(extractChatGptAccountId(null)).toBeNull();
-    expect(extractChatGptAccountId('not-a-jwt')).toBeNull();
-    expect(extractChatGptAccountId('a.b.c')).toBeNull(); // valid shape, garbage payload
-    expect(extractChatGptAccountId(makeJwt({ unrelated: 'claim' }))).toBeNull();
+    expect(extractResponseAccountId('')).toBeNull();
+    expect(extractResponseAccountId(null)).toBeNull();
+    expect(extractResponseAccountId('not-a-jwt')).toBeNull();
+    expect(extractResponseAccountId('a.b.c')).toBeNull(); // valid shape, garbage payload
+    expect(extractResponseAccountId(makeJwt({ unrelated: 'claim' }))).toBeNull();
   });
 });
 
-describe('CodexResponsesAdapter — Codex backend headers (Phase 21 #6)', () => {
+describe('ResponseStreamAdapter — subscription backend headers (Phase 21 #6)', () => {
   let originalFetch: typeof globalThis.fetch;
   let captured: { url?: string; headers?: any; body?: any };
 
@@ -52,10 +50,10 @@ describe('CodexResponsesAdapter — Codex backend headers (Phase 21 #6)', () => 
       captured.url = String(url);
       captured.headers = init?.headers ?? {};
       captured.body = JSON.parse(String(init?.body ?? '{}'));
-      // Minimal response. Codex backend → SSE (Phase 21 #6c always-stream
-      // contract). Non-Codex baseUrl → plain JSON. Tests below pass the
+      // Minimal response. Subscription backend → SSE (Phase 21 #6c
+      // always-stream contract). Standard baseUrl → plain JSON. Tests pass the
       // baseUrl through callWith() so we route on captured.url.
-      const isCodex = String(url).includes('chatgpt.com/backend-api/codex');
+      const isStreamingEndpoint = String(url).includes('chatgpt.com/backend-api/codex');
       const finalShape = {
         id: 'resp_1',
         status: 'completed',
@@ -68,7 +66,7 @@ describe('CodexResponsesAdapter — Codex backend headers (Phase 21 #6)', () => 
         ],
         usage: { input_tokens: 1, output_tokens: 1 },
       };
-      if (isCodex) {
+      if (isStreamingEndpoint) {
         const evt = { type: 'response.completed', response: finalShape };
         return new Response(
           `data: ${JSON.stringify(evt)}\n\ndata: [DONE]\n\n`,
@@ -88,7 +86,7 @@ describe('CodexResponsesAdapter — Codex backend headers (Phase 21 #6)', () => 
   });
 
   function callWith(baseUrl: string, token: string) {
-    const adapter = new CodexResponsesAdapter({
+    const adapter = new ResponseStreamAdapter({
       baseUrl,
       apiKey: token,
       model: 'gpt-5.3-codex',
@@ -102,7 +100,7 @@ describe('CodexResponsesAdapter — Codex backend headers (Phase 21 #6)', () => 
     });
   }
 
-  it('3. sends User-Agent + originator + ChatGPT-Account-ID when baseUrl is the Codex backend', async () => {
+  it('3. sends required compatibility headers for the subscription backend', async () => {
     const token = makeJwt({
       'https://api.openai.com/auth': { chatgpt_account_id: 'acct_xyz' },
     });
@@ -112,7 +110,7 @@ describe('CodexResponsesAdapter — Codex backend headers (Phase 21 #6)', () => 
     expect(captured.headers['ChatGPT-Account-ID']).toBe('acct_xyz');
   });
 
-  it('4. omits max_output_tokens when talking to the Codex backend', async () => {
+  it('4. omits max_output_tokens for the subscription backend', async () => {
     const token = makeJwt({
       'https://api.openai.com/auth': { chatgpt_account_id: 'acct_xyz' },
     });
@@ -120,15 +118,15 @@ describe('CodexResponsesAdapter — Codex backend headers (Phase 21 #6)', () => 
     expect(captured.body.max_output_tokens).toBeUndefined();
   });
 
-  it('5. does NOT send Cloudflare headers for non-Codex backends (api.openai.com/v1)', async () => {
+  it('5. does not send compatibility headers to the standard API backend', async () => {
     await callWith('https://api.openai.com/v1', 'sk-test-not-a-jwt');
-    // No special UA/originator/account-id when not the Codex backend —
+    // No special UA/originator/account-id on the standard backend —
     // a regular OpenAI API call uses the standard SDK contract.
     expect(captured.headers['originator']).toBeUndefined();
     expect(captured.headers['ChatGPT-Account-ID']).toBeUndefined();
     // Default User-Agent is fine here (whatever fetch sends, we don't override).
     expect(captured.headers['User-Agent']).toBeUndefined();
-    // max_output_tokens is sent for non-Codex backends.
+    // max_output_tokens is sent for standard backends.
     expect(captured.body.max_output_tokens).toBe(1024);
   });
 });

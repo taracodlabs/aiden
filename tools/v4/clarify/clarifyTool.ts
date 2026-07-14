@@ -97,18 +97,32 @@ export function makeClarifyTool(): ToolHandler {
         };
       }
 
+      p2aDiag('clarify.tool.await_callback', { question, hasOptions: !!options?.length });
       const answer = await ctx.clarify(question, options);
+      p2aDiag('clarify.tool.callback_resolved', { answer });
       if (answer === null || answer.trim().length === 0) {
         return {
           ok:     false,
           status: 'cancelled',
           answer: null,
           note:
-            'The user did not answer. Proceed with a reasonable default and ' +
-            'label the assumption explicitly.',
+            'The required clarification was cancelled. Do not invent the ' +
+            'missing value or execute the constrained task. Ask again, wait ' +
+            'for the user to provide it, or proceed only after the user ' +
+            'explicitly authorizes an assumption.',
         };
       }
-      return { ok: true, status: 'answered', answer };
+      const result = { ok: true, status: 'answered', answer };
+      p2aDiag('clarify.tool.return', { status: result.status, answer });
+      return result;
     },
   };
+}
+
+function p2aDiag(event: string, data: Record<string, unknown>): void {
+  if (process.env.AIDEN_P2A_DIAG !== '1') return;
+  try {
+    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
+    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
+  } catch { /* diagnostics must never affect clarify */ }
 }

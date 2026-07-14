@@ -31,7 +31,7 @@ import type { ToolCallRequest, ToolSchema } from '../../providers/v4/types';
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(os.tmpdir(), 'aiden-snapfail-')); state.calls = 0; });
-afterEach(() => { rmSync(dir, { recursive: true, force: true }); });
+afterEach(() => { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }); });
 
 const schema = (name: string): ToolSchema => ({ name, description: name, inputSchema: { type: 'object', properties: {} } });
 const call = (name: string, args: Record<string, unknown>): ToolCallRequest => ({ id: `call-${name}`, name, arguments: args });

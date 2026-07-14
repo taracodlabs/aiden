@@ -48,6 +48,7 @@ import { renderCitationFooter } from './citationFooter';
 import { buildToolPreview } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
 import { ComposerLane, composerLaneEnabled, type LaneSink } from './composerLane';
+import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
 // `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
 // through frame helpers so the visible left edge / right margin / wrap
@@ -1501,9 +1502,16 @@ export class Display {
       const liveSuffix = elapsed >= 1000
         ? `  ${sk.applyColors(`running ${formatToolDuration(elapsed)}…`, 'muted')}`
         : '';
-      return `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
-             `${sk.applyColors(padVerb(verb), 'tool')} ` +
-             `${sk.applyColors(detail, 'muted')}${liveSuffix}${this.composerSuffix()}\n`;
+      const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
+        `${sk.applyColors(padVerb(verb), 'tool')} `;
+      const suffix = `${liveSuffix}${this.composerSuffix()}`;
+      const detailText = sk.applyColors(detail, 'muted');
+      if (terminalRowWidth === null) return `${prefix}${detailText}${suffix}\n`;
+      const availableDetail = Math.max(
+        0,
+        terminalRowWidth - visibleLength(prefix) - visibleLength(suffix),
+      );
+      return `${prefix}${truncateVisible(detailText, availableDetail)}${suffix}\n`;
     };
 
     // Outcome row — entire line colored by outcome kind.
@@ -1517,7 +1525,17 @@ export class Display {
     // Capture stream reference so closures don't need `this`.
     const out = this.out;
     const isTty = !!out.isTTY;
+    // Keep a two-cell safety margin. Windows ConPTY can report the cursor
+    // width one cell beyond the last safe printable column; filling that cell
+    // sets the terminal's pending-wrap flag and makes the next repaint walk
+    // down the screen instead of replacing the existing activity row.
+    const terminalRowWidth = isTty && typeof out.columns === 'number'
+      ? Math.max(1, out.columns - 2)
+      : null;
     let printed = false;
+    let pausedRow = false;
+    let settled = false;
+    let repaintRunning: (() => void) | null = null;
 
     // v4.1.3-essentials: tick handle for the live-elapsed update. Set
     // when we start the interval; cleared by every terminal method
@@ -1541,16 +1559,44 @@ export class Display {
       }
     };
 
+    const fitTerminalRow = (row: string): string => {
+      if (terminalRowWidth === null) return row;
+      const body = row.endsWith('\n') ? row.slice(0, -1) : row;
+      return `${truncateVisible(body, terminalRowWidth)}\n`;
+    };
+
+    const replaceLast = (row: string): void => {
+      const fitted = fitTerminalRow(row);
+      if (isTty && printed) out.write(`\x1b[1A\x1b[2K\r${fitted}`);
+      else out.write(fitted);
+      printed = true;
+    };
+
     // Erase the last printed line (TTY only).
     const eraseLast = (): void => {
-      if (isTty && printed) out.write('\x1b[1A\x1b[2K\r');
+      if (isTty && printed) {
+        out.write('\x1b[1A\x1b[2K\r');
+        printed = false;
+      }
     };
 
     const writeFinal = (suffix: string, kind: ColorKindForBracket): void => {
       stopTick();
-      eraseLast();
-      out.write(outcomeRow(suffix, kind));
-      printed = true;
+      turnIdleDiagnostic('activity.row.final', { name });
+      replaceLast(outcomeRow(suffix, kind));
+    };
+
+    const startRunningTick = (): void => {
+      if (!isTty || settled || pausedRow || repaintRunning === null || tickTimer !== null) return;
+      tickTimer = setInterval(repaintRunning, 1000);
+      restoreComposerRepaint = this.setComposerRepaint(repaintRunning);
+    };
+
+    const beginSettle = (): boolean => {
+      if (settled) return false;
+      settled = true;
+      pausedRow = false;
+      return true;
     };
 
     if (isTty) {
@@ -1560,7 +1606,7 @@ export class Display {
       // its own newline-fencing + in-place rerender of the just-streamed
       // chunk so this row lands cleanly on its own line below.
       this.commitStreamChunk();
-      out.write(runningRow());
+      out.write(fitTerminalRow(runningRow()));
       printed = true;
       // v4.1.3-essentials: start the live-elapsed ticker. Fires every
       // 1s; first tick at +1s, when `runningRow()` starts emitting the
@@ -1576,15 +1622,17 @@ export class Display {
       // the WRONG line and repaint its runningRow() — hint suffix included —
       // into another tool's activity region. Gating on ownership keeps the
       // busy hint in its lane: composer content never bleeds into tool rows.
-      const repaintRunning = (): void => {
-        if (printed && this.composerRepaintIs(repaintRunning)) { eraseLast(); out.write(runningRow()); }
+      repaintRunning = (): void => {
+        if (printed && !pausedRow && this.composerRepaintIs(repaintRunning!)) {
+          turnIdleDiagnostic('activity.row.timer', { name });
+          replaceLast(runningRow());
+        }
       };
-      tickTimer = setInterval(repaintRunning, 1000);
       // v4.12.1 Slice 2c — while the tool row owns the bottom, a keystroke
       // repaints IT (so the composer stays live during a long tool call, when
       // the activity indicator is paused). `stopTick` restores the prior
       // repaint (the indicator's) when the tool settles.
-      restoreComposerRepaint = this.setComposerRepaint(repaintRunning);
+      startRunningTick();
     }
     // Non-TTY: hold off until completion (log lines carry final state).
     // No tick — non-TTY sinks (pipes, CI logs) get one line per call
@@ -1592,6 +1640,7 @@ export class Display {
 
     return {
       ok(durationMs: number, retries = 0) {
+        if (!beginSettle()) return;
         stopTick();
         if (retries > 0) {
           // Showed retries — surface the eventual success in warn so the
@@ -1629,6 +1678,7 @@ export class Display {
         }
       },
       fail(durationMs: number, retries = 0) {
+        if (!beginSettle()) return;
         const suffix =
           retries > 0
             ? `fail ${formatToolDuration(durationMs)} after ${retries} ${retries === 1 ? 'retry' : 'retries'}`
@@ -1636,12 +1686,14 @@ export class Display {
         writeFinal(suffix, 'error');
       },
       degraded(durationMs: number, reason?: string) {
+        if (!beginSettle()) return;
         const suffix = reason
           ? `partial ${formatToolDuration(durationMs)} — ${reason}`
           : `partial ${formatToolDuration(durationMs)}`;
         writeFinal(suffix, 'degraded');
       },
       retry(n: number, m: number) {
+        if (settled) return;
         // v4.1.3-essentials: retry is a state-change announcement —
         // freeze the row at the retry counter until next state change.
         // Stopping the ticker prevents the next 1s tick from racing
@@ -1650,21 +1702,46 @@ export class Display {
         // Update the running row with retry count.
         // v4.8.0 Slice 11c — double-space between glyph and verb (see
         // runningRow comment above for the emoji-width rationale).
-        eraseLast();
         const content =
           `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detail}  retry ${n}/${m} …`;
-        out.write(sk.applyColors(content, 'warn') + '\n');
-        printed = true;
+        replaceLast(sk.applyColors(content, 'warn') + '\n');
       },
       blocked() {
+        if (!beginSettle()) return;
         writeFinal('blocked', 'warn');
       },
       emptyRetry() {
+        if (!beginSettle()) return;
         writeFinal('empty retry', 'warn');
       },
       emptyFail() {
+        if (!beginSettle()) return;
         writeFinal('empty fail', 'error');
       },
+      cancel(durationMs: number) {
+        if (!beginSettle()) return;
+        writeFinal(`cancelled ${formatToolDuration(durationMs)}`, 'muted');
+      },
+      dismiss() {
+        if (!beginSettle()) return;
+        stopTick();
+        eraseLast();
+      },
+      pause() {
+        if (settled || pausedRow) return;
+        pausedRow = true;
+        stopTick();
+        eraseLast();
+      },
+      resume() {
+        if (settled || !pausedRow) return;
+        pausedRow = false;
+        if (!isTty) return;
+        out.write(fitTerminalRow(runningRow()));
+        printed = true;
+        startRunningTick();
+      },
+      isActive() { return !settled; },
     };
   }
 
@@ -2763,6 +2840,11 @@ export function makeNoOpToolRowHandle(): ToolRowHandle {
     blocked:    () => { /* no-op: hidden from trail */ },
     emptyRetry: () => { /* no-op: hidden from trail */ },
     emptyFail:  () => { /* no-op: hidden from trail */ },
+    cancel:     () => { /* no-op: hidden from trail */ },
+    dismiss:    () => { /* no-op: hidden from trail */ },
+    pause:      () => { /* no-op: hidden from trail */ },
+    resume:     () => { /* no-op: hidden from trail */ },
+    isActive:   () => false,
   };
 }
 
@@ -2791,6 +2873,11 @@ export interface ToolRowHandle {
   blocked(): void;
   emptyRetry(): void;
   emptyFail(): void;
+  cancel(durationMs: number): void;
+  dismiss(): void;
+  pause(): void;
+  resume(): void;
+  isActive(): boolean;
 }
 
 /**

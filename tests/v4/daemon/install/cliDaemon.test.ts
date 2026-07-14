@@ -31,17 +31,24 @@ import {
 } from '../../../../cli/v4/commands/daemon';
 
 let homeOverride: string;
-let prevHome: string | undefined;
+let previousPaths: Record<'AIDEN_HOME' | 'HOME' | 'USERPROFILE', string | undefined>;
 
 beforeEach(() => {
   homeOverride = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-cli-d-'));
-  prevHome = process.env.HOME;
+  previousPaths = {
+    AIDEN_HOME: process.env.AIDEN_HOME,
+    HOME: process.env.HOME,
+    USERPROFILE: process.env.USERPROFILE,
+  };
+  process.env.AIDEN_HOME = homeOverride;
   process.env.HOME = homeOverride;
   process.env.USERPROFILE = homeOverride;
 });
 afterEach(() => {
-  if (prevHome === undefined) delete process.env.HOME;
-  else process.env.HOME = prevHome;
+  for (const [key, value] of Object.entries(previousPaths)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
   try { fs.rmSync(homeOverride, { recursive: true, force: true }); }
   catch { /* noop */ }
 });
@@ -70,7 +77,7 @@ describe('runDaemonSubcommand — stop with no daemon', () => {
 
   it('handles stale lock file (dead PID) gracefully', async () => {
     // Pre-create a stale lock file pointing at a definitely-dead PID.
-    const lockPath = path.join(homeOverride, '.config', 'aiden', 'daemon', 'runtime.lock');
+    const lockPath = path.join(homeOverride, 'daemon', 'runtime.lock');
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     fs.writeFileSync(lockPath, 'stale-instance\n999999\n12345\n');
     const o = out(); const e = out();

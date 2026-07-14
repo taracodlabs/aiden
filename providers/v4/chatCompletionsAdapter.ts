@@ -118,9 +118,9 @@ const BACKOFF_BASE_MS     = 1000;
  * Per-call `input.maxTokens` still wins over this map — callers
  * stay in control when they need a different bound.
  */
-const GROQ_MAX_OUTPUT_TOKENS = 2048;
+const RESTRICTED_MAX_OUTPUT_TOKENS = 2048;
 const MAX_TOKENS_BY_PROVIDER: Readonly<Record<string, number>> = {
-  groq: GROQ_MAX_OUTPUT_TOKENS,
+  groq: RESTRICTED_MAX_OUTPUT_TOKENS,
 };
 
 /**
