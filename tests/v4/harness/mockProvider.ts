@@ -43,6 +43,13 @@ export interface MockProviderOptions {
   chunkDelayMs?: number;
   /** Model id served + accepted. Default: "mock-model". */
   modelId?: string;
+  /** Optional deterministic response per provider call. */
+  script?: MockProviderTurn[];
+}
+
+export interface MockProviderTurn {
+  content?: string;
+  toolCalls?: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
 }
 
 export interface MockProvider {
@@ -67,6 +74,7 @@ export async function startMockProvider(
   const chunkCount   = Math.max(1, opts.chunkCount ?? 4);
   const chunkDelay   = opts.chunkDelayMs ?? 10;
   const modelId      = opts.modelId ?? 'mock-model';
+  const script       = opts.script;
 
   let callCount = 0;
   let lastRequest: unknown | null = null;
@@ -94,6 +102,7 @@ export async function startMockProvider(
     } catch {
       lastRequest = body;
     }
+    const scriptedTurn = script?.[callCount];
     callCount += 1;
 
     res.writeHead(200, {
@@ -101,13 +110,6 @@ export async function startMockProvider(
       'Cache-Control': 'no-cache',
       'Connection':    'keep-alive',
     });
-
-    // Split responseText into N approximately-equal chunks.
-    const chunks: string[] = [];
-    const chunkSize = Math.ceil(responseText.length / chunkCount);
-    for (let i = 0; i < responseText.length; i += chunkSize) {
-      chunks.push(responseText.slice(i, i + chunkSize));
-    }
 
     // Opening frame: role announcement.
     res.write(`data: ${JSON.stringify({
@@ -117,15 +119,41 @@ export async function startMockProvider(
       choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
     })}\n\n`);
 
-    // Content frames.
-    for (const c of chunks) {
+    if (scriptedTurn?.toolCalls?.length) {
       await sleep(chunkDelay);
       res.write(`data: ${JSON.stringify({
-        id: 'mock-completion-1',
+        id: `mock-completion-${callCount}`,
         object: 'chat.completion.chunk',
         model: modelId,
-        choices: [{ index: 0, delta: { content: c }, finish_reason: null }],
+        choices: [{
+          index: 0,
+          delta: {
+            tool_calls: scriptedTurn.toolCalls.map((call, index) => ({
+              index,
+              id: call.id,
+              type: 'function',
+              function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+            })),
+          },
+          finish_reason: null,
+        }],
       })}\n\n`);
+    } else {
+      const scriptedText = scriptedTurn?.content ?? responseText;
+      const scriptedChunks: string[] = [];
+      const scriptedChunkSize = Math.max(1, Math.ceil(scriptedText.length / chunkCount));
+      for (let i = 0; i < scriptedText.length; i += scriptedChunkSize) {
+        scriptedChunks.push(scriptedText.slice(i, i + scriptedChunkSize));
+      }
+      for (const c of scriptedChunks) {
+        await sleep(chunkDelay);
+        res.write(`data: ${JSON.stringify({
+          id: `mock-completion-${callCount}`,
+          object: 'chat.completion.chunk',
+          model: modelId,
+          choices: [{ index: 0, delta: { content: c }, finish_reason: null }],
+        })}\n\n`);
+      }
     }
 
     // Finish frame.
@@ -134,7 +162,11 @@ export async function startMockProvider(
       id: 'mock-completion-1',
       object: 'chat.completion.chunk',
       model: modelId,
-      choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+      choices: [{
+        index: 0,
+        delta: {},
+        finish_reason: scriptedTurn?.toolCalls?.length ? 'tool_calls' : 'stop',
+      }],
     })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();

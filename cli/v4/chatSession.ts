@@ -119,6 +119,7 @@ import { captureArtifactFromTrace } from '../../core/v4/daemon/artifactStore';
 import { DuringTurnInput, resolveConfiguredBusyMode, type BusyEnterMode } from './duringTurnInput';
 import { modeStatusLine } from './commands/mode';
 import { attachTurnInputListener } from './turnInputListener';
+import { InputAuthority } from './inputAuthority';
 import { requestTurnCancel } from './frame/interruptControls';
 
 /**
@@ -636,6 +637,8 @@ export class ChatSession implements ChatSessionLike {
    * listener attached for the duration of each turn.
    */
   private readonly duringTurnInput = new DuringTurnInput();
+  /** P2A transitional lease for prompts that overlap during-turn input. */
+  private readonly inputAuthority = new InputAuthority();
 
   // ── Slice 2a public surface for /busy + /queue commands ──────────────────
   setBusyMode(mode: BusyEnterMode): void { this.duringTurnInput.setMode(mode); }
@@ -654,6 +657,7 @@ export class ChatSession implements ChatSessionLike {
   private static readonly FORCE_EXIT_WINDOW_MS = 2000;
 
   constructor(private opts: ChatSessionOptions) {
+    this.opts.callbacks.setExclusiveInputRunner?.((owner, run) => this.inputAuthority.runExclusive(owner, run));
     this.currentProviderId = opts.initialProviderId;
     this.currentModelId = opts.initialModelId;
     this.modelMetadata = opts.modelMetadata ?? new ModelMetadata();
@@ -1655,6 +1659,9 @@ export class ChatSession implements ChatSessionLike {
     // a non-TTY. Detached in the finally below (all paths) so raw mode is
     // always restored.
     const detachTurnInput = attachTurnInputListener({
+      // P2A — mount as the `during_turn` raw owner so an exclusive prompt can suspend this source
+      // for its duration. No-op path unchanged on non-TTY.
+      authority: this.inputAuthority,
       cb: {
         onLine: (text) => {
           // v4.14 — during-turn control words act IMMEDIATELY (never queued).
@@ -2068,7 +2075,40 @@ export class ChatSession implements ChatSessionLike {
       this.opts.display.streamPartial(batch);
     };
 
+    const p2aDiagEnabled = process.env.AIDEN_P2A_DIAG === '1';
+    const emitP2aDiag = (event: string, data: Record<string, unknown>): void => {
+      if (!p2aDiagEnabled) return;
+      try {
+        const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
+        process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, turnId, ...data })}\n`);
+      } catch { /* diagnostics must never affect the turn */ }
+    };
+    let lastHeartbeatAt = Number(process.hrtime.bigint() / 1_000_000n);
+    const p2aHeartbeat = p2aDiagEnabled
+      ? setInterval(() => {
+          const now = Number(process.hrtime.bigint() / 1_000_000n);
+          emitP2aDiag('turn.heartbeat', {
+            eventLoopDelayMs: Math.max(0, now - lastHeartbeatAt - 1_000),
+            pendingPromises: ['agent.runConversation'],
+            aborted: turnAbort.signal.aborted,
+            duringTurnPaused: this.duringTurnInput.isPaused(),
+            activityCount: this.opts.callbacks.activeActivityCount?.() ?? 0,
+            activityTimers: this.opts.callbacks.activityTimerCount?.() ?? 0,
+            activityModalDepth: this.opts.callbacks.activityModalPauseDepth?.() ?? 0,
+            inputOwner: this.inputAuthority.currentOwner(),
+            inputLeaseId: this.inputAuthority.currentLeaseId(),
+            inputEpoch: this.inputAuthority.currentEpoch(),
+          });
+          lastHeartbeatAt = now;
+        }, 1_000)
+      : null;
+    p2aHeartbeat?.unref?.();
+
     try {
+      emitP2aDiag('turn.agent_run.start', {
+        aborted: turnAbort.signal.aborted,
+        pendingPromises: ['agent.runConversation'],
+      });
       const result = await this.opts.agent.runConversation(baseHistory, {
         stream: streamingEnabled,
         // v4.12 BE.1 — seed the per-session token cap with tokens already spent
@@ -2211,6 +2251,12 @@ export class ChatSession implements ChatSessionLike {
               progressBar.update(outputTokens, maxTokens);
             })
           : undefined,
+      });
+      emitP2aDiag('turn.agent_run.complete', {
+        aborted: turnAbort.signal.aborted,
+        finishReason: result.finishReason,
+        turnCount: result.turnCount,
+        toolCallCount: result.toolCallCount,
       });
       stopIndicatorOnce();
       // Hide the progress bar before any post-stream content
@@ -2490,9 +2536,12 @@ export class ChatSession implements ChatSessionLike {
       // memory-confirmation chrome.
       if (result.skillProposal && this.opts.callbacks?.handleSkillProposal) {
         try {
-          const saveResult = await this.opts.callbacks.handleSkillProposal(
-            result.skillProposal,
-          );
+          const handle = this.opts.callbacks.handleSkillProposal;
+          const proposal = result.skillProposal;
+          const runPrompt = () => handle(proposal);
+          const saveResult = typeof this.opts.callbacks.withModalActivity === 'function'
+            ? await this.opts.callbacks.withModalActivity(runPrompt)
+            : await runPrompt();
           if (saveResult?.created && saveResult.skillName) {
             this.opts.display.dim(
               `  ✓ Saved as skill: ${saveResult.skillName}`,
@@ -2694,6 +2743,15 @@ export class ChatSession implements ChatSessionLike {
         }
       } catch { /* defensive */ }
     } finally {
+      if (p2aHeartbeat) clearInterval(p2aHeartbeat);
+      emitP2aDiag('turn.finally.start', {
+        aborted: turnAbort.signal.aborted,
+        activityCount: this.opts.callbacks.activeActivityCount?.() ?? 0,
+        activityModalDepth: this.opts.callbacks.activityModalPauseDepth?.() ?? 0,
+      });
+      // Tool/activity rows are turn-scoped. Terminal callbacks normally settle
+      // them earlier; this sweep catches cancellation and missing callbacks.
+      try { this.opts.callbacks.completeActivityTurn(); } catch { /* defensive */ }
       // v4.11 Slice 3 — release the per-turn cancel handles. ORDER
       // MATTERS:
       //   1. Drop activeTurnId FIRST so any late callbacks already

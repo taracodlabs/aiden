@@ -105,6 +105,11 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenTerm harness — PTY smoke (Slice 10
       ].join('\n') + '\n',
       'utf8',
     );
+    await fs.writeFile(
+      path.join(aidenHome, '.onboarding-shown'),
+      new Date().toISOString() + '\n',
+      'utf8',
+    );
 
     term = await spawnAidenTerm({
       cwd,

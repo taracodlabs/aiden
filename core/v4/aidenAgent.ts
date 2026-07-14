@@ -1556,12 +1556,18 @@ export class AidenAgent {
         const isReadOnly = (name: string): boolean =>
           this.resolveMutates?.(name) !== true &&
           this.resolveUiOnly?.(name) !== true;
+        // These read-only tools can open an exclusive terminal prompt. Keep
+        // them on the ordered live-dispatch path instead of Promise.all.
+        const isInteractive = (name: string): boolean =>
+          name === 'clarify' || name === 'plan_approval';
+        const isParallelRead = (name: string): boolean =>
+          isReadOnly(name) && !isInteractive(name);
         let i = 0;
         while (i < toolCalls.length) {
-          if (!isReadOnly(toolCalls[i].name)) { i += 1; continue; }
+          if (!isParallelRead(toolCalls[i].name)) { i += 1; continue; }
           // Find the maximal consecutive read-only batch starting at i.
           let j = i;
-          while (j < toolCalls.length && isReadOnly(toolCalls[j].name)) j += 1;
+          while (j < toolCalls.length && isParallelRead(toolCalls[j].name)) j += 1;
           const batch = toolCalls.slice(i, j);
           // Skip the parallel path for solo batches — no benefit, and
           // keeps the live-execution path on the sequential loop where

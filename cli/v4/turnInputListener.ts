@@ -121,6 +121,15 @@ export interface AttachOptions {
   emitKeypressEvents?: (stdin: RawStdinLike) => void;
   onProcessExit?:      (fn: () => void) => void;
   offProcessExit?:     (fn: () => void) => void;
+  /**
+   * P2A — when supplied, the during-turn listener mounts as the
+   * `during_turn` RAW owner of the single {@link InputAuthority} instead of
+   * grabbing `process.stdin` directly. The authority owns the one subscription +
+   * raw-mode, and serializes this source against exclusive prompts (so a prompt
+   * that acquires input fully suspends this listener — no double-consume). Absent
+   * ⇒ the legacy direct-attach path (unchanged), used by tests + non-REPL callers.
+   */
+  authority?: import('./inputAuthority').InputAuthority;
 }
 
 /**
@@ -131,6 +140,20 @@ export interface AttachOptions {
  * raw mode even if `detach()` never runs (crash safety).
  */
 export function attachTurnInputListener(opts: AttachOptions): () => void {
+  // P2A — route through the exclusive-input lease when one is supplied.
+  // The authority owns the raw subscription + raw-mode and can suspend this
+  // source while an exclusive prompt reads, closing the double-consume race. The
+  // pure `makeKeypressHandler` is reused verbatim as the routed handler.
+  if (opts.authority) {
+    const handler = makeKeypressHandler(opts.cb);
+    const unmount = opts.authority.mountRawOwner('during_turn', handler);
+    let detached = false;
+    return () => {
+      if (detached) return;
+      detached = true;
+      unmount(); // authority restores raw-mode + removes the subscription
+    };
+  }
   const stdin = (opts.stdin ?? (process.stdin as unknown as RawStdinLike));
   if (!stdin || !stdin.isTTY || typeof stdin.setRawMode !== 'function') {
     return () => { /* no-op: not an interactive TTY */ };

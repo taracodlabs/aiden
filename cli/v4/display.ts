@@ -1518,6 +1518,9 @@ export class Display {
     const out = this.out;
     const isTty = !!out.isTTY;
     let printed = false;
+    let pausedRow = false;
+    let settled = false;
+    let repaintRunning: (() => void) | null = null;
 
     // v4.1.3-essentials: tick handle for the live-elapsed update. Set
     // when we start the interval; cleared by every terminal method
@@ -1543,7 +1546,10 @@ export class Display {
 
     // Erase the last printed line (TTY only).
     const eraseLast = (): void => {
-      if (isTty && printed) out.write('\x1b[1A\x1b[2K\r');
+      if (isTty && printed) {
+        out.write('\x1b[1A\x1b[2K\r');
+        printed = false;
+      }
     };
 
     const writeFinal = (suffix: string, kind: ColorKindForBracket): void => {
@@ -1551,6 +1557,19 @@ export class Display {
       eraseLast();
       out.write(outcomeRow(suffix, kind));
       printed = true;
+    };
+
+    const startRunningTick = (): void => {
+      if (!isTty || settled || pausedRow || repaintRunning === null || tickTimer !== null) return;
+      tickTimer = setInterval(repaintRunning, 1000);
+      restoreComposerRepaint = this.setComposerRepaint(repaintRunning);
+    };
+
+    const beginSettle = (): boolean => {
+      if (settled) return false;
+      settled = true;
+      pausedRow = false;
+      return true;
     };
 
     if (isTty) {
@@ -1576,15 +1595,18 @@ export class Display {
       // the WRONG line and repaint its runningRow() — hint suffix included —
       // into another tool's activity region. Gating on ownership keeps the
       // busy hint in its lane: composer content never bleeds into tool rows.
-      const repaintRunning = (): void => {
-        if (printed && this.composerRepaintIs(repaintRunning)) { eraseLast(); out.write(runningRow()); }
+      repaintRunning = (): void => {
+        if (printed && !pausedRow && this.composerRepaintIs(repaintRunning!)) {
+          eraseLast();
+          out.write(runningRow());
+          printed = true;
+        }
       };
-      tickTimer = setInterval(repaintRunning, 1000);
       // v4.12.1 Slice 2c — while the tool row owns the bottom, a keystroke
       // repaints IT (so the composer stays live during a long tool call, when
       // the activity indicator is paused). `stopTick` restores the prior
       // repaint (the indicator's) when the tool settles.
-      restoreComposerRepaint = this.setComposerRepaint(repaintRunning);
+      startRunningTick();
     }
     // Non-TTY: hold off until completion (log lines carry final state).
     // No tick — non-TTY sinks (pipes, CI logs) get one line per call
@@ -1592,6 +1614,7 @@ export class Display {
 
     return {
       ok(durationMs: number, retries = 0) {
+        if (!beginSettle()) return;
         stopTick();
         if (retries > 0) {
           // Showed retries — surface the eventual success in warn so the
@@ -1629,6 +1652,7 @@ export class Display {
         }
       },
       fail(durationMs: number, retries = 0) {
+        if (!beginSettle()) return;
         const suffix =
           retries > 0
             ? `fail ${formatToolDuration(durationMs)} after ${retries} ${retries === 1 ? 'retry' : 'retries'}`
@@ -1636,12 +1660,14 @@ export class Display {
         writeFinal(suffix, 'error');
       },
       degraded(durationMs: number, reason?: string) {
+        if (!beginSettle()) return;
         const suffix = reason
           ? `partial ${formatToolDuration(durationMs)} — ${reason}`
           : `partial ${formatToolDuration(durationMs)}`;
         writeFinal(suffix, 'degraded');
       },
       retry(n: number, m: number) {
+        if (settled) return;
         // v4.1.3-essentials: retry is a state-change announcement —
         // freeze the row at the retry counter until next state change.
         // Stopping the ticker prevents the next 1s tick from racing
@@ -1657,14 +1683,41 @@ export class Display {
         printed = true;
       },
       blocked() {
+        if (!beginSettle()) return;
         writeFinal('blocked', 'warn');
       },
       emptyRetry() {
+        if (!beginSettle()) return;
         writeFinal('empty retry', 'warn');
       },
       emptyFail() {
+        if (!beginSettle()) return;
         writeFinal('empty fail', 'error');
       },
+      cancel(durationMs: number) {
+        if (!beginSettle()) return;
+        writeFinal(`cancelled ${formatToolDuration(durationMs)}`, 'muted');
+      },
+      dismiss() {
+        if (!beginSettle()) return;
+        stopTick();
+        eraseLast();
+      },
+      pause() {
+        if (settled || pausedRow) return;
+        pausedRow = true;
+        stopTick();
+        eraseLast();
+      },
+      resume() {
+        if (settled || !pausedRow) return;
+        pausedRow = false;
+        if (!isTty) return;
+        out.write(runningRow());
+        printed = true;
+        startRunningTick();
+      },
+      isActive() { return !settled; },
     };
   }
 
@@ -2763,6 +2816,11 @@ export function makeNoOpToolRowHandle(): ToolRowHandle {
     blocked:    () => { /* no-op: hidden from trail */ },
     emptyRetry: () => { /* no-op: hidden from trail */ },
     emptyFail:  () => { /* no-op: hidden from trail */ },
+    cancel:     () => { /* no-op: hidden from trail */ },
+    dismiss:    () => { /* no-op: hidden from trail */ },
+    pause:      () => { /* no-op: hidden from trail */ },
+    resume:     () => { /* no-op: hidden from trail */ },
+    isActive:   () => false,
   };
 }
 
@@ -2791,6 +2849,11 @@ export interface ToolRowHandle {
   blocked(): void;
   emptyRetry(): void;
   emptyFail(): void;
+  cancel(durationMs: number): void;
+  dismiss(): void;
+  pause(): void;
+  resume(): void;
+  isActive(): boolean;
 }
 
 /**

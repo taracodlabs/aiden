@@ -17,7 +17,8 @@
  * v4.1 alongside the multi-pane TUI.
  */
 
-import type { Display, ToolRowHandle } from './display';
+import type { Display } from './display';
+import { ActivityRegistry } from './activityRegistry';
 import { boxBottom, boxLine, boxTopTitled } from './box';
 import type {
   ApprovalRequest,
@@ -37,6 +38,7 @@ import type { BlockerKind, BlockerSurface } from '../../tools/v4/browser/browser
 // v4.8.0 Slice 5 — verbose-mode gate for internal-telemetry dim lines.
 import { isVerbose, glyphs } from './design/tokens';
 import type { ColorKind } from './skinEngine';
+import type { InputOwner, ModalStdin } from './inputAuthority';
 /* Phase 23.6 rollback — Ink controller bridge stashed to
  * docs/sprint/_internal/v4.1-ink-stash/.  Re-introduce when v4.1 picks
  * up the Ink rebuild. */
@@ -66,24 +68,24 @@ export interface PromptApi {
   select(opts: {
     message: string;
     choices: { name: string; value: string }[];
-  }): Promise<string>;
-  confirm(opts: { message: string; default?: boolean }): Promise<boolean>;
+  }, context?: { input?: ModalStdin }): Promise<string>;
+  confirm(opts: { message: string; default?: boolean }, context?: { input?: ModalStdin }): Promise<boolean>;
   /** v4.11 — free-text line input (for the clarify tool's open answers). */
-  input(opts: { message: string; default?: string }): Promise<string>;
+  input(opts: { message: string; default?: string }, context?: { input?: ModalStdin }): Promise<string>;
 }
 
 async function defaultPrompts(): Promise<PromptApi> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const inq = require('@inquirer/prompts');
   return {
-    async select(opts) {
-      return inq.select(opts);
+    async select(opts, context) {
+      return inq.select(opts, context);
     },
-    async confirm(opts) {
-      return inq.confirm(opts);
+    async confirm(opts, context) {
+      return inq.confirm(opts, context);
     },
-    async input(opts) {
-      return inq.input(opts);
+    async input(opts, context) {
+      return inq.input(opts, context);
     },
   };
 }
@@ -229,8 +231,7 @@ export class CliCallbacks {
   // sequential before/after pairs find each other. Cleared per-call.
   // `beforeFirstToolHook` lets chatSession stop the "thinking…" spinner
   // the moment the first row prints — registered fresh each turn.
-  private toolRows = new Map<string, ToolRowHandle>();
-  private toolStartTimes = new Map<string, number>();
+  private readonly activities: ActivityRegistry;
   private beforeFirstToolHook?: () => void;
   private firstToolFiredThisTurn = false;
 
@@ -269,6 +270,7 @@ export class CliCallbacks {
   // `setSkillTeacher(...)` because the teacher is built AFTER the
   // CliCallbacks instance during boot.
   private skillTeacher?: import('../../moat/skillTeacher').SkillTeacher;
+  private exclusiveInput?: <T>(owner: Exclude<InputOwner, 'during_turn'>, run: (stdin: ModalStdin) => Promise<T>) => Promise<T>;
 
   constructor(opts: CliCallbacksOptions) {
     this.display = opts.display;
@@ -278,6 +280,7 @@ export class CliCallbacks {
       ? Promise.resolve(opts.promptModule)
       : defaultPrompts();
     this.skillTeacher = opts.skillTeacher;
+    this.activities = new ActivityRegistry((name, args) => this.display.toolRow(name, args));
   }
 
   /**
@@ -291,6 +294,30 @@ export class CliCallbacks {
   setSkillTeacher(teacher: import('../../moat/skillTeacher').SkillTeacher): void {
     this.skillTeacher = teacher;
   }
+
+  setExclusiveInputRunner(
+    runner: <T>(owner: Exclude<InputOwner, 'during_turn'>, run: (stdin: ModalStdin) => Promise<T>) => Promise<T>,
+  ): void {
+    this.exclusiveInput = runner;
+  }
+
+  async withModalActivity<T>(run: () => Promise<T>): Promise<T> {
+    return this.activities.runModal(run);
+  }
+
+  completeActivityTurn(): void {
+    this.activities.sweep();
+    this.beforeFirstToolHook = undefined;
+    this.beforeToolHook = undefined;
+    this.afterEachToolHook = undefined;
+    this.phaseVerbHook = undefined;
+    this.toolTraceBeforeHook = undefined;
+    this.toolTraceAfterHook = undefined;
+  }
+
+  activeActivityCount(): number { return this.activities.activeCount(); }
+  activityTimerCount(): number { return this.activities.timerCount(); }
+  activityModalPauseDepth(): number { return this.activities.modalPauseDepth(); }
 
   /** Update verbose mode at runtime (wired to /verbose). */
   setVerboseMode(mode: VerboseMode): void {
@@ -386,6 +413,7 @@ export class CliCallbacks {
     result?: ToolCallResult,
   ): void => {
     if (phase === 'before') {
+      if (!this.activities.start(call.id, call.name, call.arguments)) return;
       if (!this.firstToolFiredThisTurn) {
         this.firstToolFiredThisTurn = true;
         try {
@@ -406,53 +434,9 @@ export class CliCallbacks {
       // suppressed from the visible trail) so the trace covers the
       // full agent loop, not just user-visible work.
       try { this.toolTraceBeforeHook?.(call.id, call.name); } catch { /* defensive */ }
-      const handle = this.display.toolRow(call.name, call.arguments);
-      this.toolRows.set(call.id, handle);
-      this.toolStartTimes.set(call.id, Date.now());
       return;
     }
-    // 'after'
-    const handle = this.toolRows.get(call.id);
-    const startedAt = this.toolStartTimes.get(call.id);
-    this.toolRows.delete(call.id);
-    this.toolStartTimes.delete(call.id);
-    if (!handle || startedAt === undefined) {
-      // Even if we lost the handle, the indicator may still need to
-      // be re-armed so the next gap shows activity. Tool-name-aware
-      // verb selection happens in the hook itself.
-      try { this.afterEachToolHook?.(call.name); } catch { /* defensive */ }
-      // v4.1.5+ Path A — loop-trace sink fires even when handle was
-      // lost (rare; happens if before/after pairing slipped) so the
-      // trace never under-counts tool calls.
-      try {
-        this.toolTraceAfterHook?.(call.id, call.name, call.arguments);
-      } catch { /* defensive */ }
-      return;
-    }
-    const ms = Date.now() - startedAt;
     const err = result?.error;
-    if (typeof err === 'string' && err.includes('URL provenance gate')) {
-      handle.blocked();
-      // v4.1.5+ Path A — blocked path still needs the trace sink so
-      // the URL-provenance failure mode shows up in loop diagnostics.
-      try {
-        this.toolTraceAfterHook?.(call.id, call.name, call.arguments);
-      } catch { /* defensive */ }
-      return;
-    }
-    // v4.3 Phase 3 — render a structured "agent needs human help"
-    // card when the browser observer detected a manual blocker
-    // (CAPTCHA / login / 2FA / verification / consent). Renders for
-    // ALL trail-row outcomes below — the blocker is independent of
-    // the tool's own success/fail signal. Inline placement gives
-    // the user immediate awareness; the model's next reply will
-    // explain in prose. Defensive: missing fields silently skip.
-    try { this.renderBlockerCardIfPresent(result); } catch { /* defensive */ }
-    // v4.1.4 reply-quality polish — Part 1.6. Helper used by ALL
-    // outcome branches below so the activity indicator gets re-armed
-    // for the gap that follows this tool (next tool, or final reply).
-    // Tool-name-aware verb selection happens in the hook (chatSession
-    // wires it through `verbForActivity`).
     const fireAfter = (): void => {
       try { this.afterEachToolHook?.(call.name); } catch { /* defensive */ }
       // v4.1.5+ Path A — also fire the loop-trace `after` sink so the
@@ -464,33 +448,36 @@ export class CliCallbacks {
       } catch { /* defensive */ }
     };
 
+    let settled: boolean;
     if (typeof err === 'string' && err.includes('URL provenance gate')) {
-      handle.blocked();
-      fireAfter();
-      return;
+      settled = this.activities.settle(call.id, { state: 'blocked' });
+    } else if (err) {
+      settled = this.activities.settle(call.id, { state: 'failed' });
+    } else if (result?.degraded) {
+      settled = this.activities.settle(call.id, {
+        state: 'degraded',
+        reason: result.degradedReason,
+      });
+    } else {
+      const payload = result?.result;
+      const status = payload && typeof payload === 'object'
+        ? (payload as { status?: unknown }).status
+        : undefined;
+      const dismiss = call.name === 'clarify' || call.name === 'plan_approval';
+      settled = status === 'cancelled'
+        ? this.activities.settle(call.id, { state: 'cancelled', dismiss })
+        : this.activities.settle(call.id, { state: 'completed', dismiss });
     }
+
+    // Duplicate and stale terminal callbacks cannot repaint or re-arm rows.
+    if (!settled) return;
+
+    try { this.renderBlockerCardIfPresent(result); } catch { /* defensive */ }
     if (err) {
-      handle.fail(ms);
-      // v4.1.3-essentials: when the tool's failure payload includes a
-      // structured capability card (auth missing, platform unsupported),
-      // render the card immediately after the fail row. The card sits
-      // on its own multi-line block — the fail row is still useful as
-      // the action timeline anchor; the card adds the state assessment
-      // the user actually needs. No card → plain failure surface.
       if (result?.capabilityCard) {
         this.display.capabilityCard(result.capabilityCard);
       }
-      fireAfter();
-      return;
     }
-    // v4.1.3-repl-polish: degraded outcome — tool completed but with a
-    // partial / best-effort result. Show in trail yellow instead of silent.
-    if (result?.degraded) {
-      handle.degraded(ms, result.degradedReason);
-      fireAfter();
-      return;
-    }
-    handle.ok(ms);
     fireAfter();
   };
 
@@ -522,6 +509,12 @@ export class CliCallbacks {
 
   /** ApprovalEngine.callbacks.promptUser */
   promptApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
+    return this.withModalActivity(() => this.exclusiveInput
+      ? this.exclusiveInput('approval', (stdin) => this.promptApprovalCore(req, stdin))
+      : this.promptApprovalCore(req));
+  };
+
+  private promptApprovalCore = async (req: ApprovalRequest, stdin?: ModalStdin): Promise<ApprovalDecision> => {
     // Phase 22 Task 5B: yellow-bordered rounded box for emphasis.
     // Yellow distinguishes the awaiting-attention state from the
     // brand-orange (informational) frames used by setup-complete and
@@ -538,7 +531,7 @@ export class CliCallbacks {
       choice = await prompts.select({
         message: 'Decision',
         choices: decisionChoicesFor(req),
-      });
+      }, stdin ? { input: stdin } : undefined);
     } catch {
       // The prompt was interrupted (Ctrl+C / the turn ended) before the user
       // answered. Fail closed — the tool does NOT run — but report it as an
@@ -557,6 +550,22 @@ export class CliCallbacks {
    * a menu plus an "Other" escape to free text.
    */
   promptClarify = async (question: string, options?: string[]): Promise<string | null> => {
+    p2aDiag('clarify.callback.start', { question, hasOptions: !!options?.length });
+    const answer = await this.withModalActivity(() => this.exclusiveInput
+      ? this.exclusiveInput('clarify', (stdin) => this.promptClarifyCore(question, options, stdin))
+      : this.promptClarifyCore(question, options));
+    p2aDiag('clarify.callback.resolve', {
+      answer, activeActivities: this.activities.activeCount(),
+      modalDepth: this.activities.modalPauseDepth(),
+    });
+    return answer;
+  };
+
+  private promptClarifyCore = async (
+    question: string,
+    options?: string[],
+    stdin?: ModalStdin,
+  ): Promise<string | null> => {
     const prompts = await this.promptsPromise;
     const OTHER = '__clarify_other__';
     try {
@@ -565,12 +574,13 @@ export class CliCallbacks {
           .slice(0, 4)
           .map((o) => ({ name: o, value: o }));
         choices.push({ name: 'Other (type a custom answer)…', value: OTHER });
-        const picked = await prompts.select({ message: question, choices });
+        const context = stdin ? { input: stdin } : undefined;
+        const picked = await prompts.select({ message: question, choices }, context);
         if (picked !== OTHER) return picked;
-        const typed = await prompts.input({ message: 'Your answer' });
+        const typed = await prompts.input({ message: 'Your answer' }, context);
         return typed.trim().length > 0 ? typed : null;
       }
-      const typed = await prompts.input({ message: question });
+      const typed = await prompts.input({ message: question }, stdin ? { input: stdin } : undefined);
       return typed.trim().length > 0 ? typed : null;
     } catch {
       // Ctrl+C / cancel — mirror approval's fail path. Return null so the
@@ -606,6 +616,12 @@ Reply with ONE word: safe, caution, or dangerous.`;
 
   /** SkillTeacher.callbacks.promptUser */
   promptSkillProposal = async (proposal: SkillProposal): Promise<boolean> => {
+    return this.exclusiveInput
+      ? this.exclusiveInput('skill_prompt', (stdin) => this.promptSkillProposalCore(proposal, stdin))
+      : this.promptSkillProposalCore(proposal);
+  };
+
+  private promptSkillProposalCore = async (proposal: SkillProposal, stdin?: ModalStdin): Promise<boolean> => {
     // Phase 23.5: dividers removed — blank lines carry the boundary.
     this.display.write('\n');
     this.display.info(`Skill suggestion: ${proposal.proposedName}`);
@@ -621,7 +637,7 @@ Reply with ONE word: safe, caution, or dangerous.`;
       return await prompts.confirm({
         message: 'Save this as a reusable skill?',
         default: false,
-      });
+      }, stdin ? { input: stdin } : undefined);
     } catch {
       return false;
     }
@@ -806,6 +822,14 @@ Reply with ONE word: safe, caution, or dangerous.`;
       };
     }
   };
+}
+
+function p2aDiag(event: string, data: Record<string, unknown>): void {
+  if (process.env.AIDEN_P2A_DIAG !== '1') return;
+  try {
+    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
+    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
+  } catch { /* diagnostics must never affect callbacks */ }
 }
 
 // Tier-3.1 (v4.1-tier3.1): replaced 🟢/🟡/🔴 emoji badges with
