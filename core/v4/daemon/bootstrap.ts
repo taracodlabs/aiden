@@ -116,6 +116,9 @@ import { insertIncarnation, markEnded } from './incarnationStore';
 // silently failed under vite-node (CJS `.ts` resolution) and the
 // `/api/runs` route never mounted in tests.
 import { mountRunsRoutes } from './api/runs';
+import { initSpawnPause } from '../subagent/spawnPause';
+import { initRecoveryStore } from '../selfimprovement/recoveryStore';
+import { setRunActionForTests } from '../cron/cronManager';
 
 export interface DaemonBootstrapHandle {
   /** True when the foundation actually initialized (AIDEN_DAEMON=1). */
@@ -372,8 +375,6 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     // (treat as "not paused"). The daemon's startup probe below
     // is best-effort.
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { initSpawnPause } = require('../subagent/spawnPause');
       const sp = initSpawnPause({ aidenHome: aidenRoot });
       if (sp.isPaused()) {
         const s = sp.status();
@@ -401,8 +402,6 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     // failure must not block daemon bootstrap; the TCE write-through
     // path silently no-ops when the singleton is missing.
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { initRecoveryStore } = require('../selfimprovement/recoveryStore');
       initRecoveryStore({ db });
     } catch (e) {
       log('warn', '[daemon] recovery-store init failed (non-fatal): ' +
@@ -908,12 +907,10 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     // hot path unless the user actually runs cron. The import is
     // lazy so non-cron CLIs don't pay the cost.
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const cm = require('../cron/cronManager') as typeof import('../cron/cronManager');
       const emitter = createCronEmitter({
         triggerBus, db, log,
       });
-      cm.setRunActionForTests(emitter);
+      setRunActionForTests(emitter);
       log('info', `[cron-emitter] daemon-mode runAction installed`);
     } catch (e) {
       log('warn', `[cron-emitter] install skipped: ${e instanceof Error ? e.message : String(e)}`);
