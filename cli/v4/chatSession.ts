@@ -117,7 +117,6 @@ import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { captureArtifactFromTrace } from '../../core/v4/daemon/artifactStore';
 // v4.12.1 Pillar 4 Slice 2a — type-next-while-busy.
 import { DuringTurnInput, resolveConfiguredBusyMode, type BusyEnterMode } from './duringTurnInput';
-import { modeStatusLine } from './commands/mode';
 import { attachTurnInputListener } from './turnInputListener';
 import { InputAuthority } from './inputAuthority';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
@@ -2895,6 +2894,8 @@ export class ChatSession implements ChatSessionLike {
       display.write('\n');
     }
 
+    const startupTrust = this.opts.approvalEngine?.getAutonomyPolicy?.()?.level ?? 'Assistant';
+
     // Status pills.
     // Phase v4.1.2-version-display: append the running version as the
     // fifth pill so users see what they're on without invoking
@@ -2902,7 +2903,7 @@ export class ChatSession implements ChatSessionLike {
     display.write(
       display.statusPillsRow({
         coreOnline:   true,
-        mode:         'auto',
+        trust:        startupTrust,
         model:        this.currentModelId,
         memoryActive: true,
         providerOk:   !this.opts.unconfigured,
@@ -3078,13 +3079,6 @@ export class ChatSession implements ChatSessionLike {
         });
       }
     } catch { /* never let the greeter crash boot */ }
-
-    // v4.14 BUG 1 — show the trust level calmly at boot so the user always knows
-    // how autonomous Aiden is right now, and that /mode changes it. One dim line.
-    try {
-      const lvl = this.opts.approvalEngine?.getAutonomyPolicy()?.level;
-      if (lvl) display.dim(`  ${modeStatusLine(lvl)}  ·  /mode to change`);
-    } catch { /* never break boot */ }
 
     // v4.9.0 pre-ship UI: hint moved BEFORE the closing rule so the
     // rule sits adjacent to the active prompt (it becomes the visual

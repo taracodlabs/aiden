@@ -21,6 +21,8 @@ import { marked } from 'marked';
 // marked-terminal exports a CommonJS factory.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const TerminalRenderer: new (opts?: unknown) => unknown = require('marked-terminal').default ?? require('marked-terminal');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
 
 import { SkinEngine, getSkinEngine, type ColorKind } from './skinEngine';
 import { visibleLength, truncateVisible } from './box';
@@ -594,14 +596,14 @@ export class Display {
 
   /**
    * Status pills row — one line, four pills separated by 4 spaces.
-   * Format: `● core online    ● mode auto    ● model X    ● memory active`.
+   * Wide format: `● core online    ● trust Assistant    ● model X    ● memory active`.
    * Dot is success-green when on, muted when off. Label is muted, value
    * is rendered in `agent` (off-white) for legibility without competing
    * with the banner orange.
    */
   statusPillsRow(args: {
     coreOnline: boolean;
-    mode: string;
+    trust: string;
     model: string;
     memoryActive: boolean;
     /**
@@ -629,18 +631,51 @@ export class Display {
       `${dot(on)} ${lab(label)} ${val(value)}`;
     const providerOk = args.providerOk !== false;
     const modelValue = providerOk ? args.model : 'not configured';
-    const pills = [
-      pill(args.coreOnline, 'core', args.coreOnline ? 'online' : 'starting'),
-      pill(true, 'mode', args.mode),
-      pill(providerOk, 'model', modelValue),
-      pill(args.memoryActive, 'memory', args.memoryActive ? 'active' : 'off'),
-    ];
-    if (args.version) {
-      // Version pill: dot + value, no label (the `v` prefix is the label).
-      // Always-on dot — informational, not a health indicator.
-      pills.push(`${dot(true)} ${val(`v${args.version}`)}`);
+    const indent = '  ';
+    const separator = '    ';
+    const columns = typeof this.out.columns === 'number' && this.out.columns > 0
+      ? this.out.columns
+      : this.cols();
+    const widthOf = (value: string): number =>
+      stringWidth(value.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, ''));
+    const truncateText = (value: string, maxWidth: number): string => {
+      if (widthOf(value) <= maxWidth) return value;
+      if (maxWidth <= 1) return '…';
+      let result = '';
+      for (const character of value) {
+        if (widthOf(result + character) > maxWidth - 1) break;
+        result += character;
+      }
+      return result + '…';
+    };
+
+    const corePill = pill(args.coreOnline, 'core', args.coreOnline ? 'online' : 'starting');
+    const trustPill = pill(true, 'trust', args.trust);
+    const memoryPill = pill(args.memoryActive, 'memory', args.memoryActive ? 'active' : 'off');
+    const versionPill = args.version ? `${dot(true)} ${val(`v${args.version}`)}` : null;
+    const modelPill = (maxWidth: number): string => {
+      const prefix = `${dot(providerOk)} ${lab('model')} `;
+      return prefix + val(truncateText(modelValue, Math.max(1, maxWidth - widthOf(prefix))));
+    };
+
+    if (columns < 80) {
+      const firstRow = indent + corePill + separator + trustPill;
+      const modelRow = indent + modelPill(columns - widthOf(indent));
+      if (widthOf(firstRow) <= columns) return firstRow + '\n' + modelRow;
+      return indent + corePill + '\n' + indent + trustPill + '\n' + modelRow;
     }
-    return '  ' + pills.join('    ');
+
+    if (columns < 120) {
+      const modelWidth = columns - widthOf(indent + corePill + separator + trustPill + separator);
+      const firstRow = indent + [corePill, trustPill, modelPill(modelWidth)].join(separator);
+      const secondRow = indent + [memoryPill, versionPill].filter((value): value is string => value !== null).join(separator);
+      return secondRow === indent ? firstRow : firstRow + '\n' + secondRow;
+    }
+
+    const trailing = [memoryPill, versionPill].filter((value): value is string => value !== null);
+    const suffix = trailing.length > 0 ? separator + trailing.join(separator) : '';
+    const modelWidth = columns - widthOf(indent + corePill + separator + trustPill + separator + suffix);
+    return indent + corePill + separator + trustPill + separator + modelPill(modelWidth) + suffix;
   }
 
   /**
