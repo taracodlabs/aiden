@@ -34,6 +34,7 @@ import {
 } from './terminalDriver';
 import { makeInitialState, reducer, type FrameState, type FrameAction } from './state';
 import { makeComposer, type InkComponents } from './composer';
+import { emitComposerReadyForTests } from '../composerReadiness';
 
 // Lazily imported Ink module (ESM). Captured once per process so the
 // dynamic import cost is paid only on first frame mount.
@@ -240,6 +241,7 @@ export async function createFrameRuntime(): Promise<FrameRuntime> {
     // (which routes through unsafeWrite — already token-bypassed —
     // but arming first is still cleaner).
     arm();
+    emitComposerReadyForTests();
 
     try {
       return await finished;

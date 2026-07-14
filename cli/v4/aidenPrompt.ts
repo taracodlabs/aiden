@@ -42,6 +42,7 @@ import {
 
 import { findGhost } from './ghostMatch';
 import { getSkinEngine } from './skinEngine';
+import { emitComposerReadyForTests } from './composerReadiness';
 
 /** Lightweight slash command shape — minimum the dropdown needs. */
 export interface SlashCommandLite {
@@ -206,6 +207,7 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
     setValue('');
     setGhost(null);
     setDropdownOpen(false);
+    emitComposerReadyForTests();
     void rl;
   }, []);
 

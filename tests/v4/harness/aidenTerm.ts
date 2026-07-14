@@ -35,6 +35,7 @@ import * as pty from 'node-pty';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 
 export interface SpawnAidenTermOptions {
   /** Columns. Default 120 — wide enough for full-density status footer. */
@@ -135,6 +136,18 @@ export async function spawnAidenTerm(
   const aidenHome = opts.aidenHome ?? await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-term-home-'));
   const entry = opts.entry ?? defaultEntry();
 
+  // This harness exercises the interactive REPL, not first-run onboarding.
+  // Keep every PTY suite on the same deterministic boot boundary even when a
+  // caller supplies a freshly-created home directory.
+  await fs.mkdir(aidenHome, { recursive: true });
+  await fs.writeFile(
+    path.join(aidenHome, '.onboarding-shown'),
+    'pty-harness\n',
+    { encoding: 'utf8', flag: 'wx' },
+  ).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EEXIST') throw error;
+  });
+
   // Verify the entry exists — fail loud rather than spawn a broken child.
   try {
     await fs.access(entry);
@@ -155,6 +168,7 @@ export async function spawnAidenTerm(
     ...process.env as Record<string, string>,
     AIDEN_HOME:                aidenHome,
     AIDEN_NO_UPDATE_CHECK:     '1',
+    AIDEN_TEST_COMPOSER_READY: '1',
     TELEGRAM_BOT_TOKEN:        '',
     NO_COLOR:                  '0',     // keep ANSI so the harness can see escapes
     FORCE_COLOR:               '1',
@@ -176,6 +190,7 @@ export async function spawnAidenTerm(
 
   let buffer = '';
   let exitCode: number | null = null;
+  let readinessSeen = 0;
   child.onData((data: string) => {
     buffer += data;
   });
@@ -213,12 +228,12 @@ export async function spawnAidenTerm(
   };
 
   const waitForPrompt = async (waitOpts?: { timeoutMs?: number }): Promise<void> => {
-    // The chat prompt always renders the brand-orange `▲ ` glyph.
-    // Strip ANSI first so we just look at the literal char.
+    const target = readinessSeen + 1;
     await waitFor(
-      (plain) => plain.includes('▲'),
-      { ...waitOpts, label: '▲ prompt' },
+      () => buffer.split(COMPOSER_READY_TOKEN).length - 1 >= target,
+      { ...waitOpts, label: 'composer readiness marker' },
     );
+    readinessSeen = target;
   };
 
   const waitForExit = async (waitOpts?: { timeoutMs?: number }): Promise<number> => {
