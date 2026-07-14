@@ -4,10 +4,12 @@
  */
 /** Render-free exclusive-input lease for prompts that run during a turn. */
 import type { TurnKey } from './turnInputListener';
+import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 
 export type RawKeyHandler = (str: string | undefined, key: TurnKey) => void;
 export type InputOwner = 'during_turn' | 'approval' | 'skill_prompt' | 'clarify';
 export type ModalStdin = NodeJS.ReadStream;
+export type RawReleaseMode = 'restore' | 'handoff';
 
 export interface RawStdinLike {
   isTTY?: boolean;
@@ -88,7 +90,7 @@ export class InputAuthority {
   mountedCount(): number { return this.active ? 1 : 0; }
   isRawSubscribed(): boolean { return this.active?.kind === 'raw' && this.active.subscribed; }
 
-  mountRawOwner(owner: 'during_turn', handler: RawKeyHandler): () => void {
+  mountRawOwner(owner: 'during_turn', handler: RawKeyHandler): (mode?: RawReleaseMode) => void {
     if (this.active?.kind === 'modal') throw new Error('Cannot mount raw input during an exclusive input lease');
     if (this.active?.kind === 'raw') this.deactivateRaw(this.active, true);
     const registration = {} as RawRegistration;
@@ -112,14 +114,28 @@ export class InputAuthority {
     });
     this.active = registration;
     this.activateRaw(registration);
+    turnIdleDiagnostic('input.raw.mount', {
+      owner, leaseId: registration.leaseId, epoch: registration.epoch,
+      initialPaused: registration.initialPaused,
+      flowChanged: registration.flowChanged,
+    });
     let released = false;
-    return () => {
+    return (mode: RawReleaseMode = 'restore') => {
       if (released) return;
       released = true;
       if (this.active !== registration || registration.epoch !== this.epoch) return;
       ++this.epoch;
-      this.deactivateRaw(registration, true);
+      turnIdleDiagnostic('input.raw.release.start', {
+        owner, leaseId: registration.leaseId, epoch: registration.epoch,
+        initialPaused: registration.initialPaused,
+        flowChanged: registration.flowChanged,
+        mode,
+      });
+      this.deactivateRaw(registration, true, mode === 'handoff');
       if (this.active === registration) this.active = null;
+      turnIdleDiagnostic('input.raw.release.complete', {
+        owner, leaseId: registration.leaseId, epoch: this.epoch, mode,
+      });
     };
   }
 
@@ -300,13 +316,21 @@ export class InputAuthority {
     }
   }
 
-  private deactivateRaw(reg: RawRegistration, finalRelease: boolean): void {
+  private deactivateRaw(reg: RawRegistration, finalRelease: boolean, handoff = false): void {
     if (reg.subscribed) {
       try { this.stdin.removeListener('keypress', reg.dispatch); } catch { /* best effort */ }
       reg.subscribed = false;
     }
-    this.restoreRaw(reg);
-    this.restoreFlow(reg, finalRelease);
+    if (handoff) {
+      // The next composer is another raw TTY owner. Transfer the live state so
+      // Windows does not stop and restart its console reader between owners.
+      // The composer performs its own raw/flow cleanup when it settles.
+      reg.rawChanged = false;
+      reg.flowChanged = false;
+    } else {
+      this.restoreRaw(reg);
+      this.restoreFlow(reg, finalRelease);
+    }
     if (reg.exitFn) {
       try { this.offExit(reg.exitFn); } catch { /* best effort */ }
       reg.exitFn = null;

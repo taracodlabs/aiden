@@ -189,6 +189,22 @@ describe('InputAuthority exclusive leases', () => {
     second();
     expect(stdin.isPaused?.()).toBe(true);
   });
+
+  it('hands the live raw and flowing state to the next composer without a console-reader restart', () => {
+    const stdin = fakeStdin(false, true);
+    const authority = new InputAuthority({ stdin, emitKeypressEvents: vi.fn(), onProcessExit: vi.fn(), offProcessExit: vi.fn() });
+    const release = authority.mountRawOwner('during_turn', vi.fn());
+    const rawCallsBefore = vi.mocked(stdin.setRawMode!).mock.calls.length;
+    const pauseCallsBefore = vi.mocked(stdin.pause!).mock.calls.length;
+
+    release('handoff');
+
+    expect(authority.currentOwner()).toBeNull();
+    expect(stdin.isRaw).toBe(true);
+    expect(stdin.isPaused?.()).toBe(false);
+    expect(vi.mocked(stdin.setRawMode!).mock.calls.length).toBe(rawCallsBefore);
+    expect(vi.mocked(stdin.pause!).mock.calls.length).toBe(pauseCallsBefore);
+  });
 });
 
 describe('interactive callback lease wiring', () => {

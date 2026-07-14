@@ -24,6 +24,18 @@ function makeTtyDisplay(): { display: Display; output: () => string } {
   };
 }
 
+function makeTtyDisplayWithFrames(): { display: Display; frames: string[] } {
+  const frames: string[] = [];
+  const out = new Writable({
+    write(chunk, _encoding, done) { frames.push(chunk.toString()); done(); },
+  }) as unknown as NodeJS.WriteStream;
+  Object.defineProperty(out, 'isTTY', { value: true });
+  return {
+    display: new Display({ skin: new SkinEngine({ forceMono: true }), stdout: out }),
+    frames,
+  };
+}
+
 function makeRow(): ToolRowHandle {
   return {
     ok: vi.fn(), fail: vi.fn(), degraded: vi.fn(), retry: vi.fn(),
@@ -42,6 +54,25 @@ function result(id: string, name: string, payload: unknown): ToolCallResult {
 }
 
 describe('central CLI activity lifecycle', () => {
+  it('replaces each timer frame with one atomic terminal write', () => {
+    vi.useFakeTimers();
+    try {
+      const { display, frames } = makeTtyDisplayWithFrames();
+      const row = display.toolRow('file_operations', { path: 'report.md' });
+      const afterStart = frames.length;
+      vi.advanceTimersByTime(1_000);
+      expect(frames.length - afterStart).toBe(1);
+      expect(frames.at(-1)).toMatch(/^\x1b\[1A\x1b\[2K\r[^\r]*\n$/);
+
+      const beforeSettle = frames.length;
+      row.ok(1_000);
+      expect(frames.length - beforeSettle).toBe(1);
+      expect(frames.at(-1)).toMatch(/^\x1b\[1A\x1b\[2K\r[^\r]*\n$/);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('stops the real row timer while a modal owns the terminal', () => {
     vi.useFakeTimers();
     try {

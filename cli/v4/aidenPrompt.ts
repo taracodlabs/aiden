@@ -43,6 +43,7 @@ import {
 import { findGhost } from './ghostMatch';
 import { getSkinEngine } from './skinEngine';
 import { emitComposerReadyForTests } from './composerReadiness';
+import { nextComposerGeneration, turnIdleDiagnostic } from './turnIdleDiagnostics';
 
 /** Lightweight slash command shape — minimum the dropdown needs. */
 export interface SlashCommandLite {
@@ -155,6 +156,7 @@ function defaultFilter(
  * highlighted row, resolves with `/<row.name>` instead.
  */
 export default createPrompt<string, AidenPromptConfig>((config, done) => {
+  const generationRef = useRef(0);
   const theme = makeTheme<Theme>({}, config.theme);
   const [status, setStatus] = useState<'idle' | 'done'>('idle');
   const [value, setValue] = useState('');
@@ -165,17 +167,6 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   // Snapshot of the typed value when the user starts navigating
   // history — restored when they reach the bottom of the stack.
   const historyDraftRef = useRef('');
-  // Tier-3.1c: paste-burst guard. When bracketed paste mode isn't
-  // honoured by the terminal (no CSI 200~/201~ wrap) the paste
-  // arrives as raw bytes; the first internal `\n` becomes an Enter
-  // event and submits before the user can review. We can't always
-  // suppress that at the stdin level, so as a defence-in-depth the
-  // prompt records the timestamp of the last NON-Enter keypress and
-  // refuses to submit on Enter that arrives within
-  // PASTE_BURST_GUARD_MS of it. Real user Enter comes after a
-  // pause, so this only blocks the rapid Enter-from-paste path.
-  const lastNonEnterKeyMsRef = useRef(0);
-
   const prefix = usePrefix({ status, theme });
   const dropdownLimit = config.dropdownLimit ?? DEFAULT_DROPDOWN_LIMIT;
   const filterFn = config.filter
@@ -207,33 +198,29 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
     setValue('');
     setGhost(null);
     setDropdownOpen(false);
+    generationRef.current = nextComposerGeneration();
+    const diagnosticReadline = rl as typeof rl & { isPaused?: () => boolean };
+    turnIdleDiagnostic('composer.ready', {
+      generation: generationRef.current,
+      readlineActive: true,
+      readlinePaused: typeof diagnosticReadline.isPaused === 'function'
+        ? diagnosticReadline.isPaused()
+        : undefined,
+    });
     emitComposerReadyForTests();
-    void rl;
   }, []);
 
   useKeypress((key, rl) => {
     if (status !== 'idle') return;
+    turnIdleDiagnostic('composer.key', {
+      generation: generationRef.current,
+      key: key.name ?? null,
+      sequenceLength: (key as typeof key & { sequence?: string }).sequence?.length ?? 0,
+      lineLength: rl.line.length,
+    });
 
     // ── Submit ──
     if (isEnterKey(key)) {
-      // Tier-3.1c: paste-burst guard. If a non-Enter keystroke fired
-      // within the last 50ms, this Enter is almost certainly an
-      // internal `\n` from an unbracketed paste, not a deliberate
-      // user submit. Suppress and let readline keep accumulating
-      // bytes — the user will press Enter again once the paste
-      // settles.
-      const PASTE_BURST_GUARD_MS = 50;
-      const sinceLastKey = Date.now() - lastNonEnterKeyMsRef.current;
-      if (lastNonEnterKeyMsRef.current > 0 && sinceLastKey < PASTE_BURST_GUARD_MS) {
-        // Reset so subsequent rapid Enters are also caught while
-        // the burst continues.
-        lastNonEnterKeyMsRef.current = Date.now();
-        // Resync value in case readline already cleared the line
-        // on this Enter (it does — we can't fully prevent that, but
-        // we keep the buffered fragments in `value` for context).
-        rederive(rl.line);
-        return;
-      }
       if (dropdownOpen) {
         const matches = filterFn(value);
         const picked = matches[selectedIdx];
@@ -337,17 +324,12 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
     if (isBackspaceKey(key)) {
       // rl.line already updated by the readline event before this
       // handler runs, so we just resync.
-      lastNonEnterKeyMsRef.current = Date.now();
       setHistoryIdx(null);
       rederive(rl.line);
       return;
     }
 
     // ── Default — sync from rl.line, recompute derived state ──
-    // Tier-3.1c: any non-Enter keystroke updates the burst-guard
-    // timestamp; the Enter handler reads it to decide whether the
-    // submit is a real user Enter or part of a paste burst.
-    lastNonEnterKeyMsRef.current = Date.now();
     setHistoryIdx(null);
     rederive(rl.line);
   });

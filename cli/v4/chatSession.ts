@@ -120,6 +120,7 @@ import { DuringTurnInput, resolveConfiguredBusyMode, type BusyEnterMode } from '
 import { modeStatusLine } from './commands/mode';
 import { attachTurnInputListener } from './turnInputListener';
 import { InputAuthority } from './inputAuthority';
+import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 import { requestTurnCancel } from './frame/interruptControls';
 
 /**
@@ -2168,6 +2169,7 @@ export class ChatSession implements ChatSessionLike {
               // No-op when no tool fired (turnHadTools=false).
               if (!firstStreamByteSeen) {
                 firstStreamByteSeen = true;
+                this.opts.callbacks.settleActivitiesBeforeOutput?.();
                 emitToolReplySeparator();
               }
               // v4.11 Slice 1 — first delta of the segment paints
@@ -2259,6 +2261,7 @@ export class ChatSession implements ChatSessionLike {
         toolCallCount: result.toolCallCount,
       });
       stopIndicatorOnce();
+      if (!streamingActive) this.opts.callbacks.settleActivitiesBeforeOutput?.();
       // Hide the progress bar before any post-stream content
       // (statusFooter, the next prompt) lands on its line.
       progressBar?.hide();
@@ -2752,6 +2755,12 @@ export class ChatSession implements ChatSessionLike {
       // Tool/activity rows are turn-scoped. Terminal callbacks normally settle
       // them earlier; this sweep catches cancellation and missing callbacks.
       try { this.opts.callbacks.completeActivityTurn(); } catch { /* defensive */ }
+      turnIdleDiagnostic('turn.activities.finalized', {
+        turnId,
+        activityCount: this.opts.callbacks.activeActivityCount?.() ?? 0,
+        activityTimers: this.opts.callbacks.activityTimerCount?.() ?? 0,
+        modalPauseDepth: this.opts.callbacks.activityModalPauseDepth?.() ?? 0,
+      });
       // v4.11 Slice 3 — release the per-turn cancel handles. ORDER
       // MATTERS:
       //   1. Drop activeTurnId FIRST so any late callbacks already
@@ -2776,7 +2785,19 @@ export class ChatSession implements ChatSessionLike {
       this.lastInterruptAt = 0;
       // v4.12.1 Slice 2a — detach the during-turn listener + restore raw mode
       // on EVERY exit path (success / error / abort / throw).
-      try { detachTurnInput(); } catch { /* defensive — never break turn teardown */ }
+      turnIdleDiagnostic('turn.input.detach.start', {
+        turnId,
+        owner: this.inputAuthority.currentOwner(),
+        leaseId: this.inputAuthority.currentLeaseId(),
+        epoch: this.inputAuthority.currentEpoch(),
+      });
+      try { detachTurnInput({ nextOwner: 'composer' }); } catch { /* defensive — never break turn teardown */ }
+      turnIdleDiagnostic('turn.input.detach.complete', {
+        turnId,
+        owner: this.inputAuthority.currentOwner(),
+        leaseId: this.inputAuthority.currentLeaseId(),
+        epoch: this.inputAuthority.currentEpoch(),
+      });
       // Slice 2c — clear the live composer so the row hands cleanly back to the
       // normal prompt (no stale typed text lingering on the owned row).
       try { this.opts.display.clearComposer(); } catch { /* defensive */ }
@@ -2790,6 +2811,11 @@ export class ChatSession implements ChatSessionLike {
         const { isFrameModeRequested, resumeFrame } = require('./frame') as typeof import('./frame');
         if (isFrameModeRequested()) await resumeFrame();
       } catch { /* never break a turn on frame cleanup */ }
+      turnIdleDiagnostic('turn.finally.complete', {
+        turnId,
+        activityCount: this.opts.callbacks.activeActivityCount?.() ?? 0,
+        activityTimers: this.opts.callbacks.activityTimerCount?.() ?? 0,
+      });
     }
   }
 
@@ -3193,7 +3219,16 @@ export class ChatSession implements ChatSessionLike {
     // our own bare prefix so the result reads `▲ <user input>`.
     const promptText = this.opts.display.promptPrefix();
 
+    turnIdleDiagnostic('composer.read.start', {
+      activityCount: this.opts.callbacks.activeActivityCount?.() ?? 0,
+      activityTimers: this.opts.callbacks.activityTimerCount?.() ?? 0,
+      modalPauseDepth: this.opts.callbacks.activityModalPauseDepth?.() ?? 0,
+      inputOwner: this.inputAuthority.currentOwner(),
+      inputLeaseId: this.inputAuthority.currentLeaseId(),
+      inputEpoch: this.inputAuthority.currentEpoch(),
+    });
     let raw = await api.readLine(promptText);
+    turnIdleDiagnostic('composer.read.settle', { valueLength: raw?.length ?? 0 });
     if (raw == null) return '';
 
     // Tier-3.1a: stdin pre-tap (pasteIntercept) already converted any

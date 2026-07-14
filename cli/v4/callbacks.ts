@@ -315,6 +315,10 @@ export class CliCallbacks {
     this.toolTraceAfterHook = undefined;
   }
 
+  settleActivitiesBeforeOutput(): void {
+    this.activities.sweep();
+  }
+
   activeActivityCount(): number { return this.activities.activeCount(); }
   activityTimerCount(): number { return this.activities.timerCount(); }
   activityModalPauseDepth(): number { return this.activities.modalPauseDepth(); }

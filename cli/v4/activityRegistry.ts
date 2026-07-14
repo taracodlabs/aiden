@@ -1,5 +1,6 @@
 /** Central lifecycle owner for live CLI tool activity rows. */
 import type { ToolRowHandle } from './display';
+import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 
 export type ActivityState = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -41,6 +42,9 @@ export class ActivityRegistry {
     entry.state = 'running';
     this.entries.set(id, entry);
     if (this.modalDepth > 0) entry.handle.pause();
+    turnIdleDiagnostic('activity.start', {
+      id, name, activeCount: this.entries.size, modalDepth: this.modalDepth,
+    });
     return true;
   }
 
@@ -80,6 +84,10 @@ export class ActivityRegistry {
       id, state: entry.state, modalDepth: this.modalDepth,
       activeCount: this.entries.size,
     });
+    turnIdleDiagnostic('activity.settle', {
+      id, name: entry.name, state: entry.state,
+      activeCount: this.entries.size, modalDepth: this.modalDepth,
+    });
     return true;
   }
 
@@ -114,10 +122,16 @@ export class ActivityRegistry {
   }
 
   sweep(): void {
+    turnIdleDiagnostic('activity.sweep.start', {
+      activeCount: this.entries.size, modalDepth: this.modalDepth,
+    });
     for (const id of [...this.entries.keys()]) {
       this.settle(id, { state: 'cancelled', dismiss: true });
     }
     this.modalDepth = 0;
+    turnIdleDiagnostic('activity.sweep.complete', {
+      activeCount: this.entries.size, modalDepth: this.modalDepth,
+    });
   }
 
   activeCount(): number { return this.entries.size; }

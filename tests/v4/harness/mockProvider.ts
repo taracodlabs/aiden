@@ -41,6 +41,8 @@ export interface MockProviderOptions {
   chunkCount?: number;
   /** Delay between chunks in ms. Default: 10. */
   chunkDelayMs?: number;
+  /** Optional delay before response headers, for cancellation tests. */
+  headerDelayMs?: number;
   /** Model id served + accepted. Default: "mock-model". */
   modelId?: string;
   /** Optional deterministic response per provider call. */
@@ -73,6 +75,7 @@ export async function startMockProvider(
   const responseText = opts.responseText ?? 'hello from mock';
   const chunkCount   = Math.max(1, opts.chunkCount ?? 4);
   const chunkDelay   = opts.chunkDelayMs ?? 10;
+  const headerDelay  = opts.headerDelayMs ?? 0;
   const modelId      = opts.modelId ?? 'mock-model';
   const script       = opts.script;
 
@@ -105,6 +108,7 @@ export async function startMockProvider(
     const scriptedTurn = script?.[callCount];
     callCount += 1;
 
+    if (headerDelay > 0) await sleep(headerDelay);
     res.writeHead(200, {
       'Content-Type':  'text/event-stream',
       'Cache-Control': 'no-cache',

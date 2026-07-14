@@ -48,6 +48,7 @@ import { renderCitationFooter } from './citationFooter';
 import { buildToolPreview } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
 import { ComposerLane, composerLaneEnabled, type LaneSink } from './composerLane';
+import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
 // `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
 // through frame helpers so the visible left edge / right margin / wrap
@@ -1501,9 +1502,16 @@ export class Display {
       const liveSuffix = elapsed >= 1000
         ? `  ${sk.applyColors(`running ${formatToolDuration(elapsed)}…`, 'muted')}`
         : '';
-      return `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
-             `${sk.applyColors(padVerb(verb), 'tool')} ` +
-             `${sk.applyColors(detail, 'muted')}${liveSuffix}${this.composerSuffix()}\n`;
+      const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
+        `${sk.applyColors(padVerb(verb), 'tool')} `;
+      const suffix = `${liveSuffix}${this.composerSuffix()}`;
+      const detailText = sk.applyColors(detail, 'muted');
+      if (terminalRowWidth === null) return `${prefix}${detailText}${suffix}\n`;
+      const availableDetail = Math.max(
+        0,
+        terminalRowWidth - visibleLength(prefix) - visibleLength(suffix),
+      );
+      return `${prefix}${truncateVisible(detailText, availableDetail)}${suffix}\n`;
     };
 
     // Outcome row — entire line colored by outcome kind.
@@ -1517,6 +1525,13 @@ export class Display {
     // Capture stream reference so closures don't need `this`.
     const out = this.out;
     const isTty = !!out.isTTY;
+    // Keep a two-cell safety margin. Windows ConPTY can report the cursor
+    // width one cell beyond the last safe printable column; filling that cell
+    // sets the terminal's pending-wrap flag and makes the next repaint walk
+    // down the screen instead of replacing the existing activity row.
+    const terminalRowWidth = isTty && typeof out.columns === 'number'
+      ? Math.max(1, out.columns - 2)
+      : null;
     let printed = false;
     let pausedRow = false;
     let settled = false;
@@ -1544,6 +1559,19 @@ export class Display {
       }
     };
 
+    const fitTerminalRow = (row: string): string => {
+      if (terminalRowWidth === null) return row;
+      const body = row.endsWith('\n') ? row.slice(0, -1) : row;
+      return `${truncateVisible(body, terminalRowWidth)}\n`;
+    };
+
+    const replaceLast = (row: string): void => {
+      const fitted = fitTerminalRow(row);
+      if (isTty && printed) out.write(`\x1b[1A\x1b[2K\r${fitted}`);
+      else out.write(fitted);
+      printed = true;
+    };
+
     // Erase the last printed line (TTY only).
     const eraseLast = (): void => {
       if (isTty && printed) {
@@ -1554,9 +1582,8 @@ export class Display {
 
     const writeFinal = (suffix: string, kind: ColorKindForBracket): void => {
       stopTick();
-      eraseLast();
-      out.write(outcomeRow(suffix, kind));
-      printed = true;
+      turnIdleDiagnostic('activity.row.final', { name });
+      replaceLast(outcomeRow(suffix, kind));
     };
 
     const startRunningTick = (): void => {
@@ -1579,7 +1606,7 @@ export class Display {
       // its own newline-fencing + in-place rerender of the just-streamed
       // chunk so this row lands cleanly on its own line below.
       this.commitStreamChunk();
-      out.write(runningRow());
+      out.write(fitTerminalRow(runningRow()));
       printed = true;
       // v4.1.3-essentials: start the live-elapsed ticker. Fires every
       // 1s; first tick at +1s, when `runningRow()` starts emitting the
@@ -1597,9 +1624,8 @@ export class Display {
       // busy hint in its lane: composer content never bleeds into tool rows.
       repaintRunning = (): void => {
         if (printed && !pausedRow && this.composerRepaintIs(repaintRunning!)) {
-          eraseLast();
-          out.write(runningRow());
-          printed = true;
+          turnIdleDiagnostic('activity.row.timer', { name });
+          replaceLast(runningRow());
         }
       };
       // v4.12.1 Slice 2c — while the tool row owns the bottom, a keystroke
@@ -1676,11 +1702,9 @@ export class Display {
         // Update the running row with retry count.
         // v4.8.0 Slice 11c — double-space between glyph and verb (see
         // runningRow comment above for the emoji-width rationale).
-        eraseLast();
         const content =
           `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detail}  retry ${n}/${m} …`;
-        out.write(sk.applyColors(content, 'warn') + '\n');
-        printed = true;
+        replaceLast(sk.applyColors(content, 'warn') + '\n');
       },
       blocked() {
         if (!beginSettle()) return;
@@ -1713,7 +1737,7 @@ export class Display {
         if (settled || !pausedRow) return;
         pausedRow = false;
         if (!isTty) return;
-        out.write(runningRow());
+        out.write(fitTerminalRow(runningRow()));
         printed = true;
         startRunningTick();
       },

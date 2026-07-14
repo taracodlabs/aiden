@@ -132,6 +132,11 @@ export interface AttachOptions {
   authority?: import('./inputAuthority').InputAuthority;
 }
 
+export interface DetachTurnInputOptions {
+  /** Transfer the active TTY state directly to the next composer. */
+  nextOwner?: 'composer';
+}
+
 /**
  * Attach the during-turn listener; returns an idempotent `detach()`. On a
  * non-TTY stdin it's a no-op (input stays blocked, today's behaviour) — this
@@ -139,7 +144,7 @@ export interface AttachOptions {
  * prior raw-mode state and removes the listener; a process-exit hook restores
  * raw mode even if `detach()` never runs (crash safety).
  */
-export function attachTurnInputListener(opts: AttachOptions): () => void {
+export function attachTurnInputListener(opts: AttachOptions): (detachOpts?: DetachTurnInputOptions) => void {
   // P2A — route through the exclusive-input lease when one is supplied.
   // The authority owns the raw subscription + raw-mode and can suspend this
   // source while an exclusive prompt reads, closing the double-consume race. The
@@ -148,10 +153,10 @@ export function attachTurnInputListener(opts: AttachOptions): () => void {
     const handler = makeKeypressHandler(opts.cb);
     const unmount = opts.authority.mountRawOwner('during_turn', handler);
     let detached = false;
-    return () => {
+    return (detachOpts?: DetachTurnInputOptions) => {
       if (detached) return;
       detached = true;
-      unmount(); // authority restores raw-mode + removes the subscription
+      unmount(detachOpts?.nextOwner === 'composer' ? 'handoff' : 'restore');
     };
   }
   const stdin = (opts.stdin ?? (process.stdin as unknown as RawStdinLike));
