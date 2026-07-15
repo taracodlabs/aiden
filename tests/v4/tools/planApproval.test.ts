@@ -47,22 +47,28 @@ const OPS = [
 ];
 
 describe('parseApprovalSelection', () => {
-  it('all/none/y/n forms', () => {
+  it('accepts canonical words and blank as the existing explicit-none policy', () => {
     expect(parseApprovalSelection('all', 3)).toEqual([0, 1, 2]);
+    expect(parseApprovalSelection('yes', 3)).toEqual([0, 1, 2]);
     expect(parseApprovalSelection('y', 3)).toEqual([0, 1, 2]);
     expect(parseApprovalSelection('none', 3)).toEqual([]);
+    expect(parseApprovalSelection('no', 3)).toEqual([]);
     expect(parseApprovalSelection('n', 3)).toEqual([]);
     expect(parseApprovalSelection('', 3)).toEqual([]);
   });
-  it('numbers + ranges, deduped and sorted', () => {
+  it('accepts canonical integers and ranges, including values above nine, deduped and sorted', () => {
+    expect(parseApprovalSelection('1', 12)).toEqual([0]);
     expect(parseApprovalSelection('1,3', 3)).toEqual([0, 2]);
+    expect(parseApprovalSelection('1-3', 3)).toEqual([0, 1, 2]);
+    expect(parseApprovalSelection('1,3-5', 5)).toEqual([0, 2, 3, 4]);
+    expect(parseApprovalSelection('12,2,12', 12)).toEqual([1, 11]);
     expect(parseApprovalSelection('1-2, 2', 3)).toEqual([0, 1]);
   });
-  it('invalid forms are rejected, never guessed', () => {
-    expect(parseApprovalSelection('4', 3)).toBe('invalid');
-    expect(parseApprovalSelection('0', 3)).toBe('invalid');
-    expect(parseApprovalSelection('banana', 3)).toBe('invalid');
-    expect(parseApprovalSelection('2-1', 3)).toBe('invalid');
+  it.each([
+    '1.5', '1e1', '+1', '-1', '0', ',', ',,', '1,', ',1', '1,,2',
+    '3-1', 'a', '1-a', '4',
+  ])('rejects malformed or out-of-range selection %j', (answer) => {
+    expect(parseApprovalSelection(answer, 3)).toBe('invalid');
   });
 });
 
@@ -121,7 +127,26 @@ describe('plan_approval — present + record, never execute', () => {
     expect(r.declined).toEqual([expect.objectContaining({ required: false })]);
   });
 
-  it('unparseable answer → one retry → still unparseable counts as NONE (never guess approval)', async () => {
+  it('invalid then valid uses the bounded retry and records only the explicit selection', async () => {
+    const engine = mkEngine();
+    const clarify = vi.fn()
+      .mockResolvedValueOnce('1.5')
+      .mockResolvedValueOnce('1');
+    const r = await planApprovalTool.execute(
+      { title: 't', operations: OPS },
+      ctx({ clarify, approvalEngine: engine as never }),
+    ) as Record<string, unknown>;
+    expect(clarify).toHaveBeenCalledTimes(2);
+    expect(r.status).toBe('partially_approved');
+    expect(r.approvedCount).toBe(1);
+    expect(engine.allowForSession).toHaveBeenCalledTimes(1);
+    expect(engine.allowForSession).toHaveBeenCalledWith(
+      OPS[0].tool,
+      argSignature(OPS[0].tool, OPS[0].args),
+    );
+  });
+
+  it('unparseable answer then unparseable answer returns structured invalid without declines', async () => {
     const engine = mkEngine();
     const clarify = vi.fn(async () => 'whatever');
     const r = await planApprovalTool.execute(
@@ -129,7 +154,34 @@ describe('plan_approval — present + record, never execute', () => {
       ctx({ clarify, approvalEngine: engine as never }),
     ) as Record<string, unknown>;
     expect(clarify).toHaveBeenCalledTimes(2);
-    expect(r.approvedCount).toBe(0);
+    expect(r).toMatchObject({ success: false, status: 'invalid' });
+    expect(r).not.toHaveProperty('declined');
+    expect(engine.allowForSession).not.toHaveBeenCalled();
+  });
+
+  it('null cancellation returns structured cancelled without grants or false declines', async () => {
+    const engine = mkEngine();
+    const clarify = vi.fn(async () => null);
+    const r = await planApprovalTool.execute(
+      { title: 't', operations: OPS },
+      ctx({ clarify, approvalEngine: engine as never }),
+    ) as Record<string, unknown>;
+    expect(r).toMatchObject({ success: false, status: 'cancelled' });
+    expect(r).not.toHaveProperty('declined');
+    expect(engine.allowForSession).not.toHaveBeenCalled();
+  });
+
+  it('cancellation during the validation retry remains cancelled, not invalid or denied', async () => {
+    const engine = mkEngine();
+    const clarify = vi.fn()
+      .mockResolvedValueOnce('1.5')
+      .mockResolvedValueOnce(null);
+    const r = await planApprovalTool.execute(
+      { title: 't', operations: OPS },
+      ctx({ clarify, approvalEngine: engine as never }),
+    ) as Record<string, unknown>;
+    expect(r).toMatchObject({ success: false, status: 'cancelled' });
+    expect(r).not.toHaveProperty('declined');
     expect(engine.allowForSession).not.toHaveBeenCalled();
   });
 

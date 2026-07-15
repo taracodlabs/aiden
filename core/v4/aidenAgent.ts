@@ -2031,6 +2031,7 @@ export class AidenAgent {
             name:     call.name,
             result:   result.result,
             error:    result.error,
+            approvalDecision: result.approvalDecision,
             verified: this.resolveVerifiedFlag?.(result),
             // v4.7.0 Phase 2.3 — stamp the handler's `mutates` flag
             // at dispatch time so the post-loop honesty verifier can
@@ -2068,6 +2069,7 @@ export class AidenAgent {
                 mutates:        handlerMutatesForCall(call, this.resolveMutates),
                 result:         result.result,
                 error:          result.error,
+                approvalDecision: result.approvalDecision,
                 verification,
                 aborted:        !!this._currentSignal?.aborted,
               });
@@ -2093,9 +2095,13 @@ export class AidenAgent {
             );
             if (this._currentSignal?.aborted) {
               aggregateTiming.terminalClassification = 'cancelled';
+            } else if (result.approvalDecision?.state === 'interrupted') {
+              aggregateTiming.terminalClassification = 'cancelled';
             } else if (classification?.category === 'timeout' || /timed?\s*out|timeout/i.test(result.error ?? '')) {
               aggregateTiming.terminalClassification = 'timed_out';
-            } else if (result.error?.includes('denied by approval engine')) {
+            } else if (result.approvalDecision?.state === 'blocked') {
+              aggregateTiming.terminalClassification = 'blocked';
+            } else if (result.approvalDecision?.state === 'denied' || result.error?.includes('denied by approval engine')) {
               aggregateTiming.terminalClassification = 'denied';
             } else if (result.degraded) {
               aggregateTiming.terminalClassification = 'degraded';

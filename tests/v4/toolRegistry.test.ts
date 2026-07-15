@@ -129,6 +129,73 @@ describe('ToolRegistry', () => {
     expect(result.activityTiming?.terminalClassification).toBe('cancelled');
   });
 
+  it('preserves approval interruption without requiring the turn signal to be aborted', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register(makeHandler('interrupted-approval', {
+      category: 'write',
+      mutates: true,
+      execute,
+    }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => 'interrupted',
+    });
+
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('interrupted-approval'),
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.approvalDecision).toMatchObject({ state: 'interrupted', approved: false });
+    expect(result.error).toMatch(/interrupted/i);
+    expect(result.error).not.toMatch(/denied by approval engine/i);
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.terminalClassification).toBe('cancelled');
+  });
+
+  it('preserves explicit denial as denied with no handler execution', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register(makeHandler('explicit-denial', {
+      category: 'write',
+      mutates: true,
+      execute,
+    }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => 'deny',
+    });
+
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('explicit-denial'),
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.approvalDecision).toMatchObject({ state: 'denied', approved: false });
+    expect({ ...result }.approvalDecision).toMatchObject({ state: 'denied', approved: false });
+    expect(result.error).toMatch(/denied by approval engine/i);
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.terminalClassification).toBe('denied');
+  });
+
+  it('keeps a hard security block distinct from denial and cancellation', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register(makeHandler('shell_exec', {
+      category: 'execute',
+      mutates: true,
+      riskTier: 'dangerous',
+      execute,
+    }));
+    const approvalEngine = new ApprovalEngine('off');
+
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('shell_exec', { command: 'rm -rf /' }),
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.approvalDecision).toMatchObject({ state: 'blocked', approved: false });
+    expect(result.error).toMatch(/blocked/i);
+    expect(result.error).not.toMatch(/you declined/i);
+    expect(result.activityTiming?.terminalClassification).toBe('blocked');
+  });
+
   it('cancellation during handler retains elapsed execution once', async () => {
     let now = 0;
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);

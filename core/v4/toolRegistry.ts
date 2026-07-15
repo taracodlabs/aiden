@@ -35,6 +35,7 @@ import type {
   ToolActivityTiming,
   ToolActivityUpdate,
   ToolTerminalClassification,
+  ToolApprovalDecision,
 } from '../../providers/v4/types';
 // v4.11 perf — wire the legacy v3 responseCache into the v4 hot path.
 // Cache is keyed by (tool name, arguments hash); has its own per-tool
@@ -420,6 +421,7 @@ export class ToolRegistry {
         dispatchStartedAt: Date.now(),
         executionAttempts: [],
       };
+      let approvalDecision: ToolApprovalDecision | undefined;
       const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
         try { onActivity?.({ phase, at: Date.now(), attempt, timing }); } catch { /* observational */ }
       };
@@ -444,6 +446,14 @@ export class ToolRegistry {
           configurable: true,
           enumerable: false,
         });
+        if (approvalDecision) {
+          Object.defineProperty(result, 'approvalDecision', {
+            value: approvalDecision,
+            writable: true,
+            configurable: true,
+            enumerable: true,
+          });
+        }
         return result;
       };
       const handler = this.handlers.get(call.name);
@@ -567,7 +577,20 @@ export class ToolRegistry {
         emit('awaiting_approval');
         let allowed: boolean;
         try {
-          allowed = await context.approvalEngine.checkApproval(approvalReq);
+          const engine = context.approvalEngine as ApprovalEngine & {
+            checkApprovalDetailed?: (req: ApprovalRequest) => Promise<ToolApprovalDecision>;
+          };
+          if (typeof engine.checkApprovalDetailed === 'function') {
+            approvalDecision = await engine.checkApprovalDetailed(approvalReq);
+            allowed = approvalDecision.approved;
+          } else {
+            allowed = await engine.checkApproval(approvalReq);
+            approvalDecision = {
+              state: allowed ? 'approved' : 'denied',
+              approved: allowed,
+              ...(!allowed ? { reason: engine.explainDenial(approvalReq) } : {}),
+            };
+          }
         } catch (error) {
           timing.approvalEndedAt = Date.now();
           const message = error instanceof Error ? error.message : String(error);
@@ -578,11 +601,27 @@ export class ToolRegistry {
         }
         timing.approvalEndedAt = Date.now();
         if (!allowed) {
+          if (approvalDecision?.state === 'interrupted') {
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `Approval interrupted before tool execution${approvalDecision.reason ? ` — ${approvalDecision.reason}` : '.'}`,
+            }, 'cancelled');
+          }
+          if (approvalDecision?.state === 'blocked') {
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `Tool execution blocked by approval safety policy${approvalDecision.reason ? ` — ${approvalDecision.reason}` : '.'}`,
+            }, 'blocked');
+          }
           // Phase 6 — keep the "denied by approval engine" phrase (downstream
           // detectors match it) AND append the honest why + how-to-allow:
           // which gate fired (hard-block / autonomy-floor / manual-deny) and
           // the safe way forward.
-          const why = context.approvalEngine.explainDenial(approvalReq);
+          const why = approvalDecision?.reason ?? context.approvalEngine.explainDenial(approvalReq);
           return finish({
             id: call.id,
             name: call.name,

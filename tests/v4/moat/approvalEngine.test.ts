@@ -14,6 +14,29 @@ const writeReq = (over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({
 });
 
 describe('ApprovalEngine — manual mode', () => {
+  it('preserves an interrupted prompt as a detailed non-approval while the boolean seam stays false', async () => {
+    const engine = new ApprovalEngine('manual', {
+      promptUser: async () => 'interrupted',
+    });
+
+    const detailed = await engine.checkApprovalDetailed(writeReq());
+
+    expect(detailed).toMatchObject({ state: 'interrupted', approved: false });
+    expect(detailed.reason).not.toMatch(/denied by approval engine/i);
+    expect(await engine.checkApproval(writeReq())).toBe(false);
+  });
+
+  it('preserves an explicit denial as distinct detailed state', async () => {
+    const engine = new ApprovalEngine('manual', {
+      promptUser: async () => 'deny',
+    });
+
+    await expect(engine.checkApprovalDetailed(writeReq())).resolves.toMatchObject({
+      state: 'denied',
+      approved: false,
+    });
+  });
+
   it('1. read tool is auto-allowed without prompting', async () => {
     const promptUser = vi.fn();
     const engine = new ApprovalEngine('manual', { promptUser });

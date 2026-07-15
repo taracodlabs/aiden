@@ -101,6 +101,22 @@ describe('task outcome presentation mapper', () => {
 
   it.each([
     ['approval denial', 'denied', [{ name: 'file_write', result: null, error: 'Tool execution denied by approval engine — policy', handlerMutates: true }]],
+    ['approval interruption', 'cancelled', [{
+      name: 'file_write',
+      result: null,
+      error: 'Approval interrupted before tool execution.',
+      handlerMutates: true,
+      approvalDecision: { state: 'interrupted', approved: false },
+    }]],
+    ['batch cancellation', 'cancelled', [{ name: 'plan_approval', result: { status: 'cancelled' }, handlerMutates: false }]],
+    ['batch invalid exhaustion', 'cancelled', [{ name: 'plan_approval', result: { status: 'invalid' }, handlerMutates: false }]],
+    ['hard security block', 'failed', [{
+      name: 'shell_exec',
+      result: null,
+      error: 'Tool execution blocked by the approval safety floor.',
+      handlerMutates: true,
+      approvalDecision: { state: 'blocked', approved: false },
+    }]],
     ['clarification cancellation', 'cancelled', [{ name: 'clarify', result: { status: 'cancelled' }, handlerMutates: false }]],
     ['structured timeout', 'timed_out', [{ name: 'shell_exec', result: null, error: 'stopped', handlerMutates: true, classification: { category: 'timeout', confidence: 1, recoverable: false } }]],
     ['execution failure', 'failed', [{ name: 'file_write', result: null, error: 'disk error', handlerMutates: true }]],

@@ -30,6 +30,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type { VerificationResult } from './verifier';
+import type { ToolApprovalDecision } from '../../providers/v4/types';
 
 // ── Identity ────────────────────────────────────────────────────────────────
 
@@ -102,6 +103,7 @@ export type ApprovalState =
   | 'awaiting_user'  // prompt open
   | 'allowed'        // approval granted (auto or user)
   | 'denied'         // refused — a user/policy DECISION, not a failure
+  | 'blocked'        // refused by a non-bypassable safety boundary
   | 'interrupted';   // decision abandoned mid-prompt (Ctrl+C)
 
 /** What happened when (if) the tool ran. */
@@ -254,6 +256,7 @@ export interface BuildCommandRecordInput {
   startedAt?: number;
   endedAt?: number;
   approvalVia?: ApprovalDecision['via'];
+  approvalDecision?: ToolApprovalDecision;
 }
 
 export interface CommandAxes {
@@ -263,11 +266,15 @@ export interface CommandAxes {
 }
 
 function deriveExecution(i: BuildCommandRecordInput): CommandOutcome {
-  const denied = isDenial(i.error);
-  const interrupted = !denied && isInterrupt(i.error, i.aborted);
+  const denied = i.approvalDecision?.state === 'denied'
+    || (!i.approvalDecision && isDenial(i.error));
+  const approvalInterrupted = i.approvalDecision?.state === 'interrupted';
+  const approvalBlocked = i.approvalDecision?.state === 'blocked';
+  const interrupted = approvalInterrupted
+    || (!denied && !approvalBlocked && isInterrupt(i.error, i.aborted));
   const exitCode = exitCodeOf(i.result);
   let state: ExecutionState;
-  if (denied) state = 'not_started';
+  if (denied || approvalInterrupted || approvalBlocked) state = 'not_started';
   else if (interrupted) state = 'interrupted';
   else if (i.error) state = 'errored';
   else if (typeof exitCode === 'number' && exitCode !== 0) state = 'nonzero_exit';
@@ -285,6 +292,15 @@ function deriveExecution(i: BuildCommandRecordInput): CommandOutcome {
 }
 
 function deriveApproval(i: BuildCommandRecordInput, exec: CommandOutcome): ApprovalDecision {
+  if (i.approvalDecision?.state === 'blocked') {
+    return { state: 'blocked', via: 'hard_block', reason: i.approvalDecision.reason };
+  }
+  if (i.approvalDecision?.state === 'interrupted') {
+    return { state: 'interrupted', via: 'user_prompt', reason: i.approvalDecision.reason };
+  }
+  if (i.approvalDecision?.state === 'denied') {
+    return { state: 'denied', via: i.approvalVia, reason: i.approvalDecision.reason ?? i.error };
+  }
   if (exec.denied) return { state: 'denied', via: i.approvalVia, reason: i.error };
   if (!i.mutates) return { state: 'not_required' };
   // A mutating tool that ran (or errored/interrupted mid-run, but was not

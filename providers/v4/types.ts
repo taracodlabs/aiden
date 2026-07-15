@@ -188,6 +188,20 @@ export interface ToolCallResult {
   capabilityCard?: CapabilityCardData;
   /** Optional observational timing. It never affects execution or policy. */
   activityTiming?: ToolActivityTiming;
+  /** Structured approval outcome retained when execution was gated. */
+  approvalDecision?: ToolApprovalDecision;
+}
+
+export type ToolApprovalDecisionState =
+  | 'approved'
+  | 'denied'
+  | 'interrupted'
+  | 'blocked';
+
+export interface ToolApprovalDecision {
+  state: ToolApprovalDecisionState;
+  approved: boolean;
+  reason?: string;
 }
 
 export type ToolActivityPhase =

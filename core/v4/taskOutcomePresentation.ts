@@ -208,14 +208,22 @@ export function taskOutcomeInputFromFinalization(args: {
     error: entry.error,
     verification: entry.verification as never,
     aborted: args.finishReason === 'interrupted',
+    approvalDecision: entry.approvalDecision,
   }));
 
   const timedOut = trace.some((entry) => entry.classification?.category === 'timeout');
-  const cancelledInteraction = trace.some((entry) =>
-    (entry.name === 'clarify' || entry.name === 'plan_approval') && resultStatus(entry) === 'cancelled');
-  const cancellationRequested = args.finishReason === 'interrupted' || cancelledInteraction;
+  const cancelledInteraction = trace.some((entry) => {
+    const status = resultStatus(entry);
+    return (entry.name === 'clarify' || entry.name === 'plan_approval')
+      && (status === 'cancelled' || status === 'invalid');
+  });
+  const interruptedApproval = axes.some((record) => record.approval.state === 'interrupted');
+  const blockedApproval = axes.some((record) => record.approval.state === 'blocked');
+  const cancellationRequested = args.finishReason === 'interrupted'
+    || cancelledInteraction
+    || interruptedApproval;
   const denialRecorded = axes.some((record) => record.approval.state === 'denied');
-  const hasExecutionFailure = axes.some((record) =>
+  const hasExecutionFailure = blockedApproval || axes.some((record) =>
     record.execution.state === 'errored' || record.execution.state === 'nonzero_exit');
   const mutatingEntries = trace.filter((entry) => entry.handlerMutates === true);
   const mutatingAxes = axes.filter((_, index) => trace[index]?.handlerMutates === true);
@@ -226,10 +234,11 @@ export function taskOutcomeInputFromFinalization(args: {
   const directRequiredDenials = mutatingAxes.filter((record) => record.approval.state === 'denied').length;
   const requiredDeniedCount = plan.required + directRequiredDenials;
   const requiredFailedCount = mutatingAxes.filter((record) =>
-    record.execution.state === 'errored'
+    record.approval.state === 'blocked'
+    || record.execution.state === 'errored'
     || record.execution.state === 'nonzero_exit'
     || record.execution.state === 'interrupted'
-    || record.verification.state === 'failed').length;
+    || (record.execution.state !== 'not_started' && record.verification.state === 'failed')).length;
   const requiredCompletedCount = successfulMutations;
   const requiredSkippedCount = args.finalization.evidence.skipped?.length ?? 0;
   // The current trace/finalization contract has no independent unresolved-op
