@@ -207,7 +207,8 @@ describe('Display Phase 14b helpers', () => {
       inspectable: true,
       prominent: true,
     });
-    expect(chunks.join('')).toContain('Could not verify required outcome · Details: /tasks 7');
+    expect(chunks.join('')).toContain('Could not verify required outcome · Task: 7');
+    expect(chunks.join('')).toContain('Next: /status');
     expect(chunks.join('').match(/Could not verify required outcome/g)).toHaveLength(1);
   });
   function captureDisplay() {

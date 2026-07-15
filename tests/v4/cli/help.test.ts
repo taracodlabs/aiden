@@ -113,8 +113,8 @@ describe('cli/v4/commands/help — Phase 22 Task 2', () => {
 
     const { display, chunks } = mkDisplay();
     await help.handler({
-      args: [],
-      rawArgs: '',
+      args: ['all'],
+      rawArgs: 'all',
       display,
       registry: reg,
     } as unknown as SlashCommandContext);
@@ -141,8 +141,8 @@ describe('cli/v4/commands/help — Phase 22 Task 2', () => {
 
     const { display, chunks } = mkDisplay();
     await help.handler({
-      args: [],
-      rawArgs: '',
+      args: ['all'],
+      rawArgs: 'all',
       display,
       registry: reg,
     } as unknown as SlashCommandContext);

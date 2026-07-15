@@ -193,6 +193,22 @@ function splitArgs(rest: string): { rawArgs: string; args: string[] } {
   return { rawArgs, args };
 }
 
+function editDistance(left: string, right: string): number {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i];
+    for (let j = 1; j <= right.length; j += 1) {
+      current[j] = Math.min(
+        previous[j] + 1,
+        current[j - 1] + 1,
+        previous[j - 1] + Number(left[i - 1] !== right[j - 1]),
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length];
+}
+
 export class CommandRegistry {
   private readonly commands = new Map<string, SlashCommand>();
   private readonly aliasIndex = new Map<string, string>();
@@ -294,9 +310,10 @@ export class CommandRegistry {
 
     const cmd = this.get(parsed.name);
     if (!cmd) {
+      const suggestion = this.closestVisibleCommand(parsed.name);
       ctx.display.printError(
         `Unknown command: /${parsed.name}`,
-        'Type /help for a list.',
+        suggestion ? `Did you mean /${suggestion}? Type /help for a list.` : 'Type /help for a list.',
       );
       return { handled: true };
     }
@@ -312,6 +329,20 @@ export class CommandRegistry {
     const result: SlashCommandResult = raw ? raw : {};
     this.recordRecent(cmd.name);
     return { handled: true, exit: result.exit, clearHistory: result.clearHistory, rerun: result.rerun };
+  }
+
+  private closestVisibleCommand(input: string): string | null {
+    const normalized = input.trim().toLowerCase();
+    if (!normalized) return null;
+    let best: { name: string; distance: number } | null = null;
+    for (const command of this.list()) {
+      const distance = editDistance(normalized, command.name.toLowerCase());
+      if (!best || distance < best.distance || (distance === best.distance && command.name < best.name)) {
+        best = { name: command.name, distance };
+      }
+    }
+    const limit = Math.max(1, Math.floor(normalized.length * 0.4));
+    return best && best.distance <= limit ? best.name : null;
   }
 
   /**

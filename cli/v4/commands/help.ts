@@ -18,6 +18,7 @@
  */
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import { renderFramedPanel, type PanelRow } from '../display/framedPanel';
+import { fitStartupLine } from '../startupDashboard';
 
 /**
  * Order matters: sections render in this order. Commands within a
@@ -136,6 +137,52 @@ export function subsectionFor(commandName: string): Subsection {
   return SUBSECTION_MAP[commandName] ?? 'System';
 }
 
+const DEFAULT_HELP_GROUPS: ReadonlyArray<{ title: string; commands: readonly string[] }> = [
+  { title: 'Start working', commands: ['mode', 'skills', 'tools'] },
+  { title: 'Models and setup', commands: ['model', 'doctor', 'auth'] },
+  { title: 'Tasks and recovery', commands: ['status', 'queue', 'busy', 'retry'] },
+  { title: 'Memory and skills', commands: ['memory', 'skills', 'history'] },
+  { title: 'Integrations', commands: ['mcp', 'plugins', 'channel'] },
+  { title: 'Settings and diagnostics', commands: ['providers', 'usage', 'setup'] },
+];
+
+function writeLines(ctx: SlashCommandContext, lines: readonly string[]): void {
+  const columns = (ctx.display as typeof ctx.display & { terminalColumns?: () => number }).terminalColumns?.() ?? 80;
+  const width = Math.max(1, columns - 2);
+  ctx.display.write(lines.map((line) => fitStartupLine(line, width)).join('\n') + '\n');
+}
+
+function renderDefaultHelp(ctx: SlashCommandContext): void {
+  const lines = ['Help', ''];
+  for (const group of DEFAULT_HELP_GROUPS) {
+    const commands = group.commands
+      .map((name) => ctx.registry.get(name))
+      .filter((command): command is SlashCommand => Boolean(command && !command.hidden));
+    if (commands.length === 0) continue;
+    lines.push(group.title);
+    for (const command of commands) lines.push(`  /${command.name}  ${command.description}`);
+    lines.push('');
+  }
+  lines.push('Use /help <command> for details · /help all for every command.');
+  writeLines(ctx, lines);
+}
+
+function renderCommandDetail(ctx: SlashCommandContext, requested: string): void {
+  const command = ctx.registry.get(requested);
+  if (!command || command.hidden) {
+    writeLines(ctx, [`Unknown command: /${requested}`, 'Use /help to browse available commands.']);
+    return;
+  }
+  const aliases = (command.aliases ?? []).filter((alias) => alias !== command.name);
+  writeLines(ctx, [
+    `Help: /${command.name}`,
+    command.description,
+    `Usage: /${command.name}`,
+    ...(aliases.length > 0 ? [`Aliases: ${aliases.map((alias) => `/${alias}`).join(', ')}`] : []),
+    'Use /help all to browse every command.',
+  ]);
+}
+
 export const help: SlashCommand = {
   name: 'help',
   description: 'List available slash commands.',
@@ -143,6 +190,15 @@ export const help: SlashCommand = {
   icon: '?',
   aliases: ['h', '?'],
   handler: async (ctx: SlashCommandContext) => {
+    const requested = (ctx.args[0] ?? '').trim().toLowerCase();
+    if (requested && requested !== 'all') {
+      renderCommandDetail(ctx, requested);
+      return {};
+    }
+    if (!requested) {
+      renderDefaultHelp(ctx);
+      return {};
+    }
     const all = ctx.registry.list();
     const system = all.filter((c) => c.category === 'system');
     const skill = all.filter((c) => c.category === 'skill');

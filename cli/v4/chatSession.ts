@@ -654,6 +654,7 @@ export class ChatSession implements ChatSessionLike {
    * listener attached for the duration of each turn.
    */
   private readonly duringTurnInput = new DuringTurnInput();
+  private queueGuidanceShown = false;
   /** P2A transitional lease for prompts that overlap during-turn input. */
   private readonly inputAuthority = new InputAuthority();
 
@@ -1666,6 +1667,7 @@ export class ChatSession implements ChatSessionLike {
     // pre-snapshot reference is a no-op `.abort()` on a settled
     // controller per the WHATWG spec.
     const turnId    = ++this.nextTurnId;
+    this.queueGuidanceShown = false;
     const turnAbort = new AbortController();
     this.currentAbortController = turnAbort;
     this.activeTurnId           = turnId;
@@ -1708,7 +1710,11 @@ export class ChatSession implements ChatSessionLike {
           }
           const act = this.duringTurnInput.onBusyEnter(submission);
           if (act.action === 'queued') {
-            try { this.opts.display.dim(`  ✓ queued (${act.count} pending) — runs after this turn`); } catch { /* defensive */ }
+            try {
+              const guidance = this.queueGuidanceShown ? '' : ' — FIFO after this turn · /queue to inspect';
+              this.queueGuidanceShown = true;
+              this.opts.display.dim(`  ✓ queued (${act.count} pending)${guidance}`);
+            } catch { /* defensive */ }
           } else if (act.action === 'steered') {
             // Slice 2b — buffered; lands after the current tool, next iteration.
             try { this.opts.display.dim(`  ◆ redirecting: ${act.text} — applies from the next step`); } catch { /* defensive */ }

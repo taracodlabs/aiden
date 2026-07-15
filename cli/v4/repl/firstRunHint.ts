@@ -72,11 +72,8 @@ export async function renderFirstRunHint(opts: FirstRunHintOptions): Promise<boo
 
   const columns = typeof out.columns === 'number' && out.columns > 0 ? out.columns : 80;
   const line = columns >= 64
-    ? '  ' + c.muted('Tip:') + ' ' +
-      italic(c.muted('try ')) +
-      c.accent('/walkthrough') +
-      italic(c.muted(' for a 60-second tour of what Aiden can do'))
-    : '  ' + c.muted('Tip:') + ' ' + c.accent('/walkthrough');
+    ? '  ' + c.muted('Try asking: ') + italic(c.muted('Read this folder and explain what this project does.'))
+    : '  ' + c.muted('Try asking: ') + c.accent('Explain this folder');
   out.write(fitStartupLine(line, Math.max(1, columns - 2)) + '\n\n');
   await markFirstRunHintDismissed(opts.paths);
   return true;
