@@ -419,6 +419,8 @@ export interface AidenAgentOptions {
    * the gap the rest of Issue K's wave bar covers.
    */
   onProviderRequestStart?: (providerId: string) => void;
+  /** Optional sink for transcript preflight repairs. */
+  preflightWarn?: (message: string) => void;
   /** Stage-0 intent pre-arm: look up a skill's `required_tools`. */
   lookupSkillRequiredTools?: (skillName: string) => Promise<string[] | null>;
 }
@@ -638,6 +640,7 @@ export class AidenAgent {
   private readonly onMemoryRefreshStart?:       AidenAgentOptions['onMemoryRefreshStart'];
   private readonly onPromptBuilt?:              AidenAgentOptions['onPromptBuilt'];
   private readonly onProviderRequestStart?:     AidenAgentOptions['onProviderRequestStart'];
+  private readonly preflightWarn?:              AidenAgentOptions['preflightWarn'];
   private readonly lookupSkillRequiredTools?:   AidenAgentOptions['lookupSkillRequiredTools'];
 
   // ── Cross-call state ─────────────────────────────────────────────────
@@ -739,6 +742,7 @@ export class AidenAgent {
     this.onMemoryRefreshStart     = opts.onMemoryRefreshStart;
     this.onPromptBuilt            = opts.onPromptBuilt;
     this.onProviderRequestStart   = opts.onProviderRequestStart;
+    this.preflightWarn            = opts.preflightWarn;
     this.lookupSkillRequiredTools = opts.lookupSkillRequiredTools;
     // v4.5 Phase 7 — explicit sessionId. Existing access path
     // `(this as { sessionId?: string }).sessionId` at line 751–752
@@ -2164,6 +2168,23 @@ export class AidenAgent {
           toolCallId:  call.id,
           content:     _retryAnnotation ? `${_baseContent}\n${_retryAnnotation}` : _baseContent,
         });
+        if (result.approvalDecision?.state === 'interrupted') {
+          // An interrupted approval is a terminal user interaction, not a tool
+          // failure for the model to interpret. Balance the provider transcript,
+          // cancel the remaining issued calls, and end this turn before another
+          // provider request can recreate a live provider row.
+          fillRemainingAsBlocked(
+            turnToolMessages,
+            output.toolCalls,
+            callIndex + 1,
+            'cancelled',
+            'skipped',
+          );
+          messages.push(...turnToolMessages);
+          finishReason = 'interrupted';
+          finalContent = '';
+          break;
+        }
         // Ladder hints raised DURING retry attempts still reach the
         // model as system messages (same pattern as the post-call hint).
         for (const h of pendingRetryHints) {
@@ -2445,7 +2466,9 @@ export class AidenAgent {
     // adapter seam, so this second pass is idempotent (a no-op on clean
     // input); it stays here as defense-in-depth for any unwrapped provider
     // (test doubles, NullAdapter). See core/v4/toolCallInvariant.ts.
-    messages = preflightMessages(messages);
+    messages = preflightMessages(messages, this.preflightWarn
+      ? { onWarn: this.preflightWarn }
+      : undefined);
 
     const wantStream = runOptions.stream === true && typeof this.provider.callStream === 'function';
     // v4.1.5 Issue K — fire just before the HTTP request opens, so the

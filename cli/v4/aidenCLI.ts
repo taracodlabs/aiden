@@ -1702,6 +1702,7 @@ export async function buildAgentRuntime(
   // the loader instance — every per-turn caller (chatSession banner,
   // skillCommands, skill_manage, etc.) reads the cache.
   const skillsLogger = createFileLogger(paths.logsDir, 'skills');
+  const preflightLogger = createFileLogger(paths.logsDir, 'preflight');
   const skillLoader = new SkillLoader(paths, { logger: skillsLogger });
   await skillLoader.loadAll().catch(() => undefined);
   const skillCounts = skillLoader.getLastCounts();
@@ -2440,6 +2441,7 @@ export async function buildAgentRuntime(
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
+    preflightWarn: (message) => preflightLogger.warn(message),
     // v4.11 preflight compression — wire the compressor so
     // runConversation step 7 actually runs at the 50% threshold.
     contextCompressor,

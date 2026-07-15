@@ -18,8 +18,8 @@
  */
 
 import type { Display } from './display';
-import { ActivityRegistry } from './activityRegistry';
-import { boxBottom, boxLine, boxTopTitled } from './box';
+import { ActivityRegistry, type ModalActivityOptions } from './activityRegistry';
+import { boxBottom, boxLine, boxTopTitled, truncateVisible, visibleLength } from './box';
 import type {
   ApprovalRequest,
   ApprovalDecision,
@@ -293,7 +293,11 @@ export class CliCallbacks {
       : defaultPrompts();
     this.skillTeacher = opts.skillTeacher;
     this.resolveToolInteraction = opts.resolveToolInteraction;
-    this.activities = new ActivityRegistry((name, args) => this.display.toolRow(name, args));
+    this.activities = new ActivityRegistry(
+      (name, args, read) => this.display.toolRow(name, args, read, { externalTicker: true }),
+      Date.now,
+      (verb) => this.display.liveActivityRow(verb),
+    );
   }
 
   /**
@@ -314,8 +318,8 @@ export class CliCallbacks {
     this.exclusiveInput = runner;
   }
 
-  async withModalActivity<T>(run: () => Promise<T>): Promise<T> {
-    return this.activities.runModal(run);
+  async withModalActivity<T>(run: () => Promise<T>, options?: ModalActivityOptions<T>): Promise<T> {
+    return this.activities.runModal(run, options);
   }
 
   completeActivityTurn(): void {
@@ -335,6 +339,10 @@ export class CliCallbacks {
   activeActivityCount(): number { return this.activities.activeCount(); }
   activityTimerCount(): number { return this.activities.timerCount(); }
   activityModalPauseDepth(): number { return this.activities.modalPauseDepth(); }
+  beginTurnActivity(verb = 'thinking'): boolean { return this.activities.startTurnActivity(verb); }
+  setTurnActivityPhase(verb: string): void { this.activities.setTurnPhase(verb); }
+  settleTurnActivity(): boolean { return this.activities.settleTurnActivity(); }
+  invalidateActivityLayout(): void { this.activities.invalidateLayout(); }
 
   /** Update verbose mode at runtime (wired to /verbose). */
   setVerboseMode(mode: VerboseMode): void {
@@ -408,12 +416,18 @@ export class CliCallbacks {
   // mapping a lifecycle event to a verb string. Defensive try/catch so
   // a misbehaving display sink can't unwind the agent loop.
   onMemoryRefreshStart = (): void => {
+    this.activities.startTurnActivity('refreshing memory');
+    this.activities.setTurnPhase('refreshing memory');
     try { this.phaseVerbHook?.('refreshing memory'); } catch { /* defensive */ }
   };
   onPromptBuilt = (_info: { tools: number; skills: number; memoryFacts: number }): void => {
+    this.activities.startTurnActivity('preparing prompt');
+    this.activities.setTurnPhase('preparing prompt');
     try { this.phaseVerbHook?.('preparing prompt'); } catch { /* defensive */ }
   };
   onProviderRequestStart = (_providerId: string): void => {
+    this.activities.startTurnActivity('calling provider');
+    this.activities.setTurnPhase('calling provider');
     try { this.phaseVerbHook?.('calling provider'); } catch { /* defensive */ }
   };
 
@@ -430,6 +444,7 @@ export class CliCallbacks {
     result?: ToolCallResult,
   ): void => {
     if (phase === 'before') {
+      this.activities.settleTurnActivity();
       if (!this.activities.start(call.id, call.name, call.arguments)) return;
       if (!this.firstToolFiredThisTurn) {
         this.firstToolFiredThisTurn = true;
@@ -537,9 +552,15 @@ export class CliCallbacks {
 
   /** ApprovalEngine.callbacks.promptUser */
   promptApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
-    return this.withModalActivity(() => this.exclusiveInput
-      ? this.exclusiveInput('approval', (stdin) => this.promptApprovalCore(req, stdin))
-      : this.promptApprovalCore(req));
+    // A modal is a hard boundary between provider wait and tool execution.
+    // Never retain an older provider phase across the approval screen.
+    this.activities.settleTurnActivity();
+    return this.withModalActivity(
+      () => this.exclusiveInput
+        ? this.exclusiveInput('approval', (stdin) => this.promptApprovalCore(req, stdin))
+        : this.promptApprovalCore(req),
+      { resumeActivityWhen: (decision) => decision !== 'deny' && decision !== 'interrupted' },
+    );
   };
 
   private promptApprovalCore = async (req: ApprovalRequest, stdin?: ModalStdin): Promise<ApprovalDecision> => {
@@ -884,13 +905,11 @@ function badgeForTier(tier?: RiskTier): string {
 
 // ─── Phase 22 Task 5B — boxed approval prompt ─────────────────────────
 
-const APPROVAL_BOX_WIDTH = 64;
 // Args limit kept under the visible content width (BOX_WIDTH minus the
 // 1-char gutter on each side and the ` Args: ` label) so the explicit
 // ellipsis we append surfaces inside the box. Setting this above the
 // visible budget would let `boxLine`'s hard truncation eat the ellipsis
 // and the user wouldn't see they were viewing a partial value.
-const APPROVAL_ARGS_LIMIT = 50;
 
 /**
  * Render an approval request with the Aiden-native framed-panel chrome
@@ -911,21 +930,25 @@ export function renderApprovalBox(req: ApprovalRequest, display: Display): strin
   //     (arrow-key navigation), not fictional y/a/n keystrokes.
   //   - Leading + trailing blank lines for vertical breathing room
   //     between the event row above and the inquirer picker below.
-  const indent = '  ';
-  const innerW = APPROVAL_BOX_WIDTH;
+  const columns = Math.max(12, display.terminalColumns());
+  const safeWidth = Math.max(1, columns - 1);
+  const indent = columns >= 32 ? '  ' : '';
   const bar = display.applyColors(glyphs.panel.bar, 'brand');
-  const line = (content: string): string => `${indent}${bar}  ${content}`;
-  const divider = display.muted(glyphs.chrome.hLine.repeat(innerW - 2));
+  const prefix = `${indent}${bar}${columns >= 20 ? '  ' : ' '}`;
+  const contentWidth = Math.max(1, safeWidth - visibleLength(prefix));
+  const line = (content: string): string => `${prefix}${truncateVisible(content, contentWidth)}`;
+  const divider = display.muted(glyphs.chrome.hLine.repeat(contentWidth));
 
   let argsPreview = '';
   try { argsPreview = JSON.stringify(req.args); }
   catch { argsPreview = String(req.args); }
-  if (argsPreview.length > APPROVAL_ARGS_LIMIT) {
-    argsPreview = argsPreview.slice(0, APPROVAL_ARGS_LIMIT - 1) + '…';
+  const argsValueWidth = Math.max(1, contentWidth - (columns >= 48 ? 12 : 5));
+  if (argsPreview.length > argsValueWidth) {
+    argsPreview = truncateApproval(argsPreview, argsValueWidth);
   }
 
   // Key-value rows. Key column padded to 12 cells for vertical alignment.
-  const KEY_W = 12;
+  const KEY_W = columns >= 48 ? 12 : 5;
   const kv = (k: string, v: string): string =>
     `${display.muted(k.padEnd(KEY_W))}${v}`;
 
@@ -951,10 +974,18 @@ export function renderApprovalBox(req: ApprovalRequest, display: Display): strin
     }
   }
   lines.push(line(divider));
-  lines.push(line(display.muted('↑↓ navigate · enter select · esc cancel')));
+  lines.push(line(display.muted(columns >= 52
+    ? '↑↓ navigate · enter select · esc cancel'
+    : '↑↓ · enter · esc')));
 
   // Leading + trailing blank lines: caller already adds one trailing
   // newline, so producing '\n<panel>\n' yields one blank above + one
   // blank below once the caller's own '\n' lands.
   return '\n' + lines.join('\n') + '\n';
+}
+
+function truncateApproval(value: string, width: number): string {
+  if (value.length <= width) return value;
+  if (width <= 1) return value.slice(0, width);
+  return `${value.slice(0, width - 1)}…`;
 }

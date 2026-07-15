@@ -1035,6 +1035,7 @@ export class ChatSession implements ChatSessionLike {
             try {
               (this.opts.display as { resetStreamFrameForResize?: () => void })
                 .resetStreamFrameForResize?.();
+              this.opts.callbacks.invalidateActivityLayout?.();
             } catch { /* defensive — never break the resize listener */ }
           },
         });
@@ -1910,7 +1911,16 @@ export class ChatSession implements ChatSessionLike {
     // category-aware verb (reading / searching / analyzing / drafting).
     // When the first stream delta arrives OR the final agentTurn is
     // about to write, the indicator stops permanently.
-    const indicator = this.opts.display.activityIndicator('thinking');
+    this.opts.callbacks.beginTurnActivity?.('thinking');
+    const indicator = {
+      stop: () => { this.opts.callbacks.settleTurnActivity?.(); },
+      pause: () => { /* ActivityRegistry settles the turn row before tool output. */ },
+      resume: (_verb?: string) => { /* The next provider lifecycle event starts a fresh row. */ },
+      setVerb: (verb: string) => {
+        this.opts.callbacks.beginTurnActivity?.(verb);
+        this.opts.callbacks.setTurnActivityPhase?.(verb);
+      },
+    };
     let indicatorStopped = false;
     let streamingActive  = false;
     // v4.8.0 Phase 2.3 fix-2 — clear the ui-event flag at turn-start.

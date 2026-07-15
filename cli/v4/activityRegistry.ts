@@ -1,5 +1,5 @@
 /** Central lifecycle owner for live CLI tool activity rows. */
-import type { ToolRowHandle } from './display';
+import type { LiveActivityRowHandle, ToolRowHandle } from './display';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 import type {
   ToolActivityPhase,
@@ -20,7 +20,13 @@ interface ActivityEntry {
   phasePausedAt?: number;
   phasePausedMs: number;
   timing?: ToolActivityTiming;
+  repaintEligible: boolean;
   handle: ToolRowHandle;
+}
+
+export interface ModalActivityOptions<T> {
+  /** Return false when the settled modal outcome makes the paused activity terminal. */
+  resumeActivityWhen?: (result: T) => boolean;
 }
 
 export interface ActivitySnapshot {
@@ -48,6 +54,9 @@ export class ActivityRegistry {
   private readonly entries = new Map<string, ActivityEntry>();
   private readonly terminalStates = new Map<string, ActivityState>();
   private readonly pendingUpdates = new Map<string, ToolActivityUpdate>();
+  private turnActivity?: LiveActivityRowHandle;
+  private ticker: ReturnType<typeof setInterval> | null = null;
+  private tickerFrame = 0;
   private modalDepth = 0;
   private static readonly MAX_TERMINAL_TOMBSTONES = 2_048;
 
@@ -58,7 +67,34 @@ export class ActivityRegistry {
       read: () => ActivitySnapshot,
     ) => ToolRowHandle,
     private readonly now: () => number = Date.now,
+    private readonly createTurnRow?: (verb: string) => LiveActivityRowHandle,
   ) {}
+
+  startTurnActivity(verb: string): boolean {
+    if (this.turnActivity?.isActive() || !this.createTurnRow) return false;
+    this.turnActivity = this.createTurnRow(verb);
+    if (this.modalDepth > 0) this.turnActivity.pause();
+    this.ensureTicker();
+    return true;
+  }
+
+  setTurnPhase(verb: string): void {
+    this.turnActivity?.setVerb(verb);
+  }
+
+  settleTurnActivity(): boolean {
+    if (!this.turnActivity) return false;
+    const row = this.turnActivity;
+    this.turnActivity = undefined;
+    row.stop();
+    this.stopTickerIfIdle();
+    return true;
+  }
+
+  invalidateLayout(): void {
+    this.turnActivity?.invalidateLayout();
+    for (const entry of this.entries.values()) entry.handle.refresh?.();
+  }
 
   start(id: string, name: string, args: unknown): boolean {
     if (this.entries.has(id) || this.terminalStates.has(id)) return false;
@@ -75,12 +111,14 @@ export class ActivityRegistry {
       phaseStartedAt: pending?.at ?? startedAt,
       phasePausedMs: 0,
       timing: pending?.timing ? cloneTiming(pending.timing) : undefined,
+      repaintEligible: true,
       handle: undefined as unknown as ToolRowHandle,
     };
     this.entries.set(id, entry);
     entry.handle = this.createRow(name, args, () => this.snapshot(id));
     entry.state = 'running';
     if (this.modalDepth > 0) entry.handle.pause();
+    this.ensureTicker();
     turnIdleDiagnostic('activity.start', {
       id, name, activeCount: this.entries.size, modalDepth: this.modalDepth,
     });
@@ -155,6 +193,7 @@ export class ActivityRegistry {
       id, name: entry.name, state: entry.state,
       activeCount: this.entries.size, modalDepth: this.modalDepth,
     });
+    this.stopTickerIfIdle();
     return true;
   }
 
@@ -165,11 +204,13 @@ export class ActivityRegistry {
       activities: [...this.entries.values()].map((entry) => ({ id: entry.id, name: entry.name, state: entry.state })),
     });
     if (this.modalDepth !== 1) return;
+    this.stopTicker();
     const now = this.now();
     for (const entry of this.entries.values()) {
       entry.phasePausedAt ??= now;
       entry.handle.pause();
     }
+    this.turnActivity?.pause();
   }
 
   resumeAfterModal(): void {
@@ -186,14 +227,24 @@ export class ActivityRegistry {
         entry.phasePausedMs += Math.max(0, now - entry.phasePausedAt);
         entry.phasePausedAt = undefined;
       }
-      entry.handle.resume();
+      if (entry.repaintEligible) entry.handle.resume();
     }
+    this.turnActivity?.resume();
+    this.ensureTicker();
   }
 
-  async runModal<T>(run: () => Promise<T>): Promise<T> {
+  async runModal<T>(run: () => Promise<T>, options: ModalActivityOptions<T> = {}): Promise<T> {
     this.pauseForModal();
     try {
-      return await run();
+      const result = await run();
+      if (options.resumeActivityWhen?.(result) === false) {
+        // The modal result already made the paused operation terminal. Keep its
+        // row paused until the normal tool callback records the exact outcome;
+        // releasing the modal must not resurrect an older provider/tool frame.
+        for (const entry of this.entries.values()) entry.repaintEligible = false;
+        this.settleTurnActivity();
+      }
+      return result;
     } finally {
       this.resumeAfterModal();
     }
@@ -206,6 +257,8 @@ export class ActivityRegistry {
     for (const id of [...this.entries.keys()]) {
       this.settle(id, { state: 'cancelled', dismiss: true });
     }
+    this.settleTurnActivity();
+    this.stopTicker();
     this.modalDepth = 0;
     this.pendingUpdates.clear();
     turnIdleDiagnostic('activity.sweep.complete', {
@@ -214,7 +267,7 @@ export class ActivityRegistry {
   }
 
   activeCount(): number { return this.entries.size; }
-  timerCount(): number { return this.entries.size; }
+  timerCount(): number { return this.ticker === null ? 0 : 1; }
   modalPauseDepth(): number { return this.modalDepth; }
   stateOf(id: string): ActivityState | null {
     return this.entries.get(id)?.state ?? this.terminalStates.get(id) ?? null;
@@ -262,6 +315,35 @@ export class ActivityRegistry {
     if (this.terminalStates.size <= ActivityRegistry.MAX_TERMINAL_TOMBSTONES) return;
     const oldest = this.terminalStates.keys().next().value as string | undefined;
     if (oldest !== undefined) this.terminalStates.delete(oldest);
+  }
+
+  private ensureTicker(): void {
+    if (this.ticker !== null || this.modalDepth > 0 || !this.hasRepaintableActivity()) return;
+    this.ticker = setInterval(() => {
+      this.tickerFrame = (this.tickerFrame + 1) % 4;
+      this.turnActivity?.refresh(this.tickerFrame);
+      if (this.tickerFrame === 0) {
+        for (const entry of this.entries.values()) {
+          if (entry.repaintEligible) entry.handle.refresh?.();
+        }
+      }
+    }, 250);
+    this.ticker.unref?.();
+  }
+
+  private stopTickerIfIdle(): void {
+    if (!this.hasRepaintableActivity()) this.stopTicker();
+  }
+
+  private hasRepaintableActivity(): boolean {
+    return !!this.turnActivity || [...this.entries.values()].some((entry) => entry.repaintEligible);
+  }
+
+  private stopTicker(): void {
+    if (this.ticker === null) return;
+    clearInterval(this.ticker);
+    this.ticker = null;
+    this.tickerFrame = 0;
   }
 }
 

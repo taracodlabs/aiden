@@ -83,4 +83,53 @@ describe('approval decision projection', () => {
     });
     expect(presentation).toMatchObject({ kind: 'denied', label: 'Denied' });
   });
+
+  it('ends an interrupted approval without a provider continuation', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    const handler: ToolHandler = {
+      schema: {
+        name: 'shell_exec', description: 'Execute a command.',
+        inputSchema: { type: 'object', properties: { command: { type: 'string' } }, required: ['command'] },
+      },
+      category: 'execute', mutates: true, execute,
+    };
+    const registry = new ToolRegistry();
+    registry.register(handler);
+    const registryExecutor = registry.buildExecutor({
+      cwd: process.cwd(),
+      paths: resolveAidenPaths({ rootOverride: process.cwd() }),
+      approvalEngine: new ApprovalEngine('manual', { promptUser: async () => 'interrupted' }),
+    });
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.toolUse([{
+        id: 'interrupt-shell', name: 'shell_exec', arguments: { command: 'must-not-run' },
+      }]),
+      MockProviderAdapter.stop('This continuation must not run.'),
+    ]);
+    const providerCall = vi.spyOn(provider, 'call');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: async (...args) => ({ ...await registryExecutor(...args) }),
+      tools: [handler.schema],
+      resolveMutates: (name) => registry.get(name)?.mutates,
+      honestyEnforcement: new HonestyEnforcement('enforce'),
+    });
+
+    const result = await agent.runConversation([{ role: 'user', content: 'run the command' }]);
+    const presentation = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
+      finalization: computeTaskFinalization({
+        finishReason: result.finishReason,
+        toolCallTrace: result.toolCallTrace,
+      }),
+      trace: result.toolCallTrace,
+      finishReason: result.finishReason,
+    }));
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(providerCall).toHaveBeenCalledTimes(1);
+    expect(result.finishReason).toBe('interrupted');
+    expect(result.toolCallTrace[0].approvalDecision?.state).toBe('interrupted');
+    expect(result.messages.some((message) => message.role === 'tool' && message.toolCallId === 'interrupt-shell')).toBe(true);
+    expect(presentation).toMatchObject({ kind: 'cancelled', label: 'Cancelled' });
+  });
 });

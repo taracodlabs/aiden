@@ -452,6 +452,11 @@ export class Display {
     return Math.min(frameGetTerminalCols(this.out), 100);
   }
 
+  /** Raw terminal width for geometry-sensitive, single-row surfaces. */
+  terminalColumns(): number {
+    return frameGetTerminalCols(this.out);
+  }
+
   /**
    * Thin horizontal rule (`──…──`) in muted colour, full body width.
    * v4.1.4 reply-quality polish: width sourced from `frame.getBodyWidth()`
@@ -953,7 +958,7 @@ export class Display {
     } else {
       segments = [provModel, ctxSegCompact, sessionSeg || elapsed];
     }
-    return `  ${segments.join(SEP)}`;
+    return truncateVisible(`  ${segments.join(SEP)}`, Math.max(1, cols - 2));
   }
 
   /** Map a per-turn outcome to the colour kind used by the state dot. */
@@ -1464,6 +1469,100 @@ export class Display {
     };
   }
 
+  /**
+   * Registry-driven turn activity row. Timing is deliberately external: the
+   * ActivityRegistry is the only interval owner and calls refresh().
+   */
+  liveActivityRow(initialVerb: string = 'thinking'): LiveActivityRowHandle {
+    const out = this.out;
+    const isTty = !!out.isTTY;
+    let startedAt = Date.now();
+    let verb = initialVerb;
+    let active = true;
+    let paused = !isTty;
+    let printed = false;
+    let invalidated = false;
+    let lastBody = '';
+    let frameIndex = 0;
+
+    const animation = (width: number): string => {
+      if (width >= 60) {
+        const cells = Array.from({ length: 6 }, (_, index) => index === frameIndex % 6
+          ? this.skin.applyColors(glyphs.shimmer.block, 'brand')
+          : this.skin.applyColors(glyphs.shimmer.track, 'muted'));
+        return `${cells.join('')} `;
+      }
+      const frames = ['◐', '◓', '◑', '◒'];
+      return `${this.skin.applyColors(frames[frameIndex % frames.length], 'brand')} `;
+    };
+
+    const body = (): string => {
+      const width = Math.max(1, this.terminalColumns() - 2);
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const time = elapsed > 0 && width >= 28 ? ` (${elapsed}s)` : '';
+      const prefix = width >= 60 ? '  ' : '';
+      const phase = width < 28 && verb === 'calling provider' ? 'provider' : verb;
+      const busy = this.composerSuffix().length > 0;
+      const suffix = !busy ? ''
+        : width >= 80 ? this.composerSuffix()
+        : width >= 36 ? '  Ctrl+C stop'
+        : '  Ctrl+C';
+      return truncateVisible(`${prefix}${animation(width)}${phase}${time}${suffix}`, width);
+    };
+    const erase = (): void => {
+      if (!printed || !isTty) return;
+      out.write('\x1b[1A\x1b[2K\r');
+      printed = false;
+      lastBody = '';
+    };
+    const refresh = (frame?: number): void => {
+      if (!active || paused || !isTty) return;
+      if (typeof frame === 'number') frameIndex = frame;
+      const next = body();
+      if (printed && !invalidated && next === lastBody) return;
+      out.write(printed
+        ? `\x1b[1A\x1b[2K\r${next}\x1b[1B\r`
+        : `${next}\n`);
+      printed = true;
+      invalidated = false;
+      lastBody = next;
+    };
+
+    refresh();
+    return {
+      refresh,
+      setVerb: (next: string) => {
+        if (!active || !next || next === verb) return;
+        verb = next;
+        startedAt = Date.now();
+        invalidated = true;
+        refresh();
+      },
+      pause: () => {
+        if (!active || paused) return;
+        paused = true;
+        erase();
+      },
+      resume: () => {
+        if (!active || !paused) return;
+        paused = false;
+        invalidated = true;
+        refresh();
+      },
+      stop: () => {
+        if (!active) return;
+        active = false;
+        erase();
+      },
+      invalidateLayout: () => {
+        if (!active) return;
+        invalidated = true;
+        refresh();
+      },
+      isActive: () => active,
+    };
+  }
+
   // ── Phase 23.5 — tool event row ───────────────────────────────────────
   // One line per tool call: a "·" gutter, the keyword `tool`, the
   // tool name (soft cyan, padded), a brief truncated arg preview, and
@@ -1476,7 +1575,12 @@ export class Display {
   // completion so each line in the log carries the final state — no
   // ANSI cursor games on a dumb sink.
 
-  toolRow(name: string, args: unknown, readActivity?: () => ActivitySnapshot): ToolRowHandle {
+  toolRow(
+    name: string,
+    args: unknown,
+    readActivity?: () => ActivitySnapshot,
+    opts: { externalTicker?: boolean } = {},
+  ): ToolRowHandle {
     // v4.1.5 Phase 1d (Q-Q2-a) — TRAIL_HIDE_TOOLS suppression.
     //
     // Some tools are pure agent plumbing — the model calls them to
@@ -1551,10 +1655,11 @@ export class Display {
         `${sk.applyColors(padVerb(verb), 'tool')} `;
       const suffix = `${liveSuffix}${this.composerSuffix()}`;
       const detailText = sk.applyColors(detail, 'muted');
-      if (terminalRowWidth === null) return `${prefix}${detailText}${suffix}\n`;
+      const width = terminalRowWidth();
+      if (width === null) return `${prefix}${detailText}${suffix}\n`;
       const availableDetail = Math.max(
         0,
-        terminalRowWidth - visibleLength(prefix) - visibleLength(suffix),
+        width - visibleLength(prefix) - visibleLength(suffix),
       );
       return `${prefix}${truncateVisible(detailText, availableDetail)}${suffix}\n`;
     };
@@ -1563,9 +1668,10 @@ export class Display {
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
       const prefix = `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} `;
       const suffixText = suffix ? `  ${suffix}` : '';
-      const availableDetail = terminalRowWidth === null
+      const width = terminalRowWidth();
+      const availableDetail = width === null
         ? Number.POSITIVE_INFINITY
-        : Math.max(0, terminalRowWidth - visibleLength(prefix) - visibleLength(suffixText));
+        : Math.max(0, width - visibleLength(prefix) - visibleLength(suffixText));
       const content = `${prefix}${availableDetail === Number.POSITIVE_INFINITY
         ? detail
         : truncateVisible(detail, availableDetail)}${suffixText}`;
@@ -1579,7 +1685,7 @@ export class Display {
     // width one cell beyond the last safe printable column; filling that cell
     // sets the terminal's pending-wrap flag and makes the next repaint walk
     // down the screen instead of replacing the existing activity row.
-    const terminalRowWidth = isTty && typeof out.columns === 'number'
+    const terminalRowWidth = (): number | null => isTty && typeof out.columns === 'number'
       ? Math.max(1, out.columns - 2)
       : null;
     let printed = false;
@@ -1610,14 +1716,20 @@ export class Display {
     };
 
     const fitTerminalRow = (row: string): string => {
-      if (terminalRowWidth === null) return row;
+      const width = terminalRowWidth();
+      if (width === null) return row;
       const body = row.endsWith('\n') ? row.slice(0, -1) : row;
-      return `${truncateVisible(body, terminalRowWidth)}\n`;
+      return `${truncateVisible(body, width)}\n`;
     };
 
-    const replaceLast = (row: string): void => {
+    const replaceLast = (row: string, settle = false): void => {
       const fitted = fitTerminalRow(row);
-      if (isTty && printed) out.write(`\x1b[1A\x1b[2K\r${fitted}`);
+      if (isTty && printed) {
+        const body = fitted.endsWith('\n') ? fitted.slice(0, -1) : fitted;
+        out.write(settle
+          ? `\x1b[1A\x1b[2K\r${body}\n`
+          : `\x1b[1A\x1b[2K\r${body}\x1b[1B\r`);
+      }
       else out.write(fitted);
       printed = true;
     };
@@ -1633,11 +1745,11 @@ export class Display {
     const writeFinal = (suffix: string, kind: ColorKindForBracket): void => {
       stopTick();
       turnIdleDiagnostic('activity.row.final', { name });
-      replaceLast(outcomeRow(suffix, kind));
+      replaceLast(outcomeRow(suffix, kind), true);
     };
 
     const startRunningTick = (): void => {
-      if (!isTty || settled || pausedRow || repaintRunning === null || tickTimer !== null) return;
+      if (opts.externalTicker || !isTty || settled || pausedRow || repaintRunning === null || tickTimer !== null) return;
       tickTimer = setInterval(repaintRunning, 1000);
       restoreComposerRepaint = this.setComposerRepaint(repaintRunning);
     };
@@ -2954,6 +3066,16 @@ export function makeNoOpToolRowHandle(): ToolRowHandle {
 // while staying in scrollback. Failure / degraded / retry keep their
 // coloured outcomes.
 type ColorKindForBracket = 'success' | 'warn' | 'error' | 'degraded' | 'muted';
+
+export interface LiveActivityRowHandle {
+  refresh(frame?: number): void;
+  setVerb(verb: string): void;
+  pause(): void;
+  resume(): void;
+  stop(): void;
+  invalidateLayout(): void;
+  isActive(): boolean;
+}
 
 /**
  * Handle returned by `Display.toolRow()`. Mutates the row in place once

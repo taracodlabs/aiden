@@ -71,7 +71,6 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           id: 'single-approval', name: 'file_write',
           arguments: { path: interruptedPath, content: 'must not exist' },
         }] },
-        { content: 'SINGLE CANCELLATION COMPLETE' },
         { toolCalls: [{
           id: 'single-denial', name: 'shell_exec',
           arguments: {
@@ -173,7 +172,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (state === 'single-prompt' && plain.includes('Decision')) {
           state = 'single-settle';
           setTimeout(() => child!.write('\x03'), 250);
-        } else if (state === 'single-settle' && plain.includes('SINGLE CANCELLATION COMPLETE') && readyCount >= 2) {
+        } else if (state === 'single-settle' && plain.slice(turnStart).includes('Cancelled') && readyCount >= 2) {
           settled.single = plain.slice(turnStart);
           state = 'single-denial-prompt';
           turnStart = plain.length;
@@ -237,7 +236,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
       });
     });
 
-    expect(provider.callCount()).toBe(11);
+    expect(provider.callCount()).toBe(10);
     expect(settled.single).toContain('Cancelled');
     expect(settled.single).not.toMatch(/\bfailed\b/i);
     expect(settled.single).not.toMatch(/denied by approval engine/i);

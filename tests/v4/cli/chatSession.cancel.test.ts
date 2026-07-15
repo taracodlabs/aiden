@@ -292,7 +292,7 @@ describe('ChatSession — mid-turn cancel (v4.11 Slice 3)', () => {
     expect(calls).toBe(2);
   });
 
-  it('R2: AbortError throw path stops the indicator BEFORE rendering "(turn interrupted)"', async () => {
+  it('R2: AbortError throw path settles turn activity BEFORE rendering "(turn interrupted)"', async () => {
     // Slice 3 introduced the abort-aware catch branch but missed
     // calling stopIndicatorOnce() before the dim line. Result: the
     // setInterval kept ticking after the cancel confirmation, painting
@@ -315,14 +315,10 @@ describe('ChatSession — mid-turn cancel (v4.11 Slice 3)', () => {
     // The activityIndicator handle is constructed inside chatSession;
     // we observe via output side-effects.
     const callOrder: string[] = [];
-    // Wrap activityIndicator to record stop()
-    const realActivityIndicator = display.activityIndicator.bind(display);
-    vi.spyOn(display, 'activityIndicator').mockImplementation((...args) => {
-      const handle = realActivityIndicator(...args);
-      const realStop = handle.stop.bind(handle);
-      handle.stop = () => { callOrder.push('stop'); realStop(); };
-      return handle;
-    });
+    const callbacks = {
+      beginTurnActivity: vi.fn(() => true),
+      settleTurnActivity: vi.fn(() => { callOrder.push('stop'); return true; }),
+    };
     // Spy on dim but call through so the real text reaches stdout
     // — lets us verify both ordering AND user-visible output.
     const realDim = display.dim.bind(display);
@@ -333,6 +329,7 @@ describe('ChatSession — mid-turn cancel (v4.11 Slice 3)', () => {
     const session = new ChatSession(buildBaseOpts({
       agent:     agent as never,
       display,
+      callbacks: callbacks as never,
       promptApi: mkPromptApi(['cancel-me', '/quit']),
     }));
     await session.run();

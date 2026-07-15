@@ -62,6 +62,166 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', () => {
+  it('does not repaint or continue the provider after approval Ctrl+C', async () => {
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-approval-cancel-home-'));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-approval-cancel-cwd-'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-approval-cancel-outside-'));
+    cleanup.push(aidenHome, cwd, outside);
+    const blockedPath = path.join(outside, 'approval-cancelled.txt');
+    provider = await startMockProvider({
+      modelId: 'custom-default', chunkDelayMs: 5,
+      script: [
+        { toolCalls: [{ id: 'cancel-shell', name: 'shell_exec', arguments: {
+          command: `Set-Content -LiteralPath '${blockedPath.replace(/'/g, "''")}' -Value blocked`,
+        } }] },
+        { content: 'UNEXPECTED PROVIDER CONTINUATION' },
+      ],
+    });
+    await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'approval-cancel\n', 'utf8');
+    await fs.writeFile(path.join(aidenHome, 'config.yaml'), [
+      'model:', '  provider: custom_openai', '  modelId: custom-default',
+      'providers:', '  custom_openai:', '    apiKey: approval-cancel-key',
+      'display:', '  streaming: true', '  renderer: legacy',
+    ].join('\n') + '\n', 'utf8');
+    child = pty.spawn(process.execPath, [
+      '-r', path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs'),
+      path.join(repoRoot, 'dist/cli/v4/aidenCLI.js'),
+    ], {
+      cwd, cols: 100, rows: 40,
+      env: { ...process.env, AIDEN_HOME: aidenHome, AIDEN_TEST_REPO_ROOT: repoRoot,
+        AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl, CUSTOM_OPENAI_API_KEY: 'approval-cancel-key',
+        AIDEN_NO_UPDATE_CHECK: '1', AIDEN_TEST_COMPOSER_READY: '1', TELEGRAM_BOT_TOKEN: '',
+        FORCE_COLOR: '0', NO_COLOR: '1' },
+    });
+    let output = '';
+    let state = 'boot';
+    let interruptedAt = 0;
+    const completion = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(
+        `approval cancellation timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
+      )), 45_000);
+      child!.onData((chunk) => {
+        output += chunk;
+        const plain = stripAnsi(output);
+        const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
+        if (state === 'boot' && readyCount >= 1) {
+          state = 'approval';
+          typeLikeKeyboard(child!, 'request approval then cancel');
+        } else if (state === 'approval' && plain.includes('Decision')) {
+          state = 'cancelled';
+          interruptedAt = output.length;
+          child!.write('\x03');
+        } else if (state === 'cancelled' && plain.includes('Cancelled') && readyCount >= 2) {
+          state = 'queue';
+          typeLikeKeyboard(child!, '/queue');
+        } else if (state === 'queue' && /queue is empty/i.test(plain)) {
+          state = 'done';
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
+    await completion;
+    const afterInterrupt = stripAnsi(output.slice(interruptedAt));
+    expect(afterInterrupt).not.toContain('calling provider');
+    expect(afterInterrupt).not.toContain('UNEXPECTED PROVIDER CONTINUATION');
+    expect(afterInterrupt).toContain('(turn interrupted)');
+    expect(afterInterrupt).toContain('Cancelled');
+    expect(afterInterrupt).toContain('queue is empty');
+    expect(provider.callCount()).toBe(1);
+    await expect(fs.access(blockedPath)).rejects.toThrow();
+  }, 55_000);
+
+  it('keeps provider activity bounded through resize and approval handoff', async () => {
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-resize-home-'));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-resize-cwd-'));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-resize-outside-'));
+    cleanup.push(aidenHome, cwd, outside);
+    const deniedPath = path.join(outside, 'resize-denied.txt');
+    provider = await startMockProvider({
+      modelId: 'custom-default', headerDelayMs: 3_000, chunkDelayMs: 5,
+      script: [
+        { toolCalls: [{ id: 'resize-shell', name: 'shell_exec', arguments: {
+          command: `Set-Content -LiteralPath '${deniedPath.replace(/'/g, "''")}' -Value denied`,
+        } }] },
+        { content: 'RESIZE APPROVAL COMPLETE' },
+        { content: 'NORMAL AFTER RESIZE' },
+      ],
+    });
+    await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'resize\n', 'utf8');
+    await fs.writeFile(path.join(aidenHome, 'config.yaml'), [
+      'model:', '  provider: custom_openai', '  modelId: custom-default',
+      'providers:', '  custom_openai:', '    apiKey: resize-key',
+      'display:', '  streaming: true', '  renderer: legacy',
+    ].join('\n') + '\n', 'utf8');
+    child = pty.spawn(process.execPath, [
+      '-r', path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs'),
+      path.join(repoRoot, 'dist/cli/v4/aidenCLI.js'),
+    ], {
+      cwd, cols: 120, rows: 40,
+      env: { ...process.env, AIDEN_HOME: aidenHome, AIDEN_TEST_REPO_ROOT: repoRoot,
+        AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl, CUSTOM_OPENAI_API_KEY: 'resize-key',
+        AIDEN_NO_UPDATE_CHECK: '1', AIDEN_TEST_COMPOSER_READY: '1', TELEGRAM_BOT_TOKEN: '',
+        FORCE_COLOR: '0', NO_COLOR: '1' },
+    });
+    let output = '';
+    let state = 'boot';
+    let modalStart = 0;
+    let modalEnd = 0;
+    const providerAnimationPrefixes: string[] = [];
+    const completion = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(
+        `resize acceptance timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
+      )), 50_000);
+      child!.onData((chunk) => {
+        if (state === 'provider' || state === 'resizing') {
+          for (const line of stripAnsi(chunk).split(/\r?\n/)) {
+            const match = line.match(/([─█◐◓◑◒ ]+)calling provider/);
+            if (match) providerAnimationPrefixes.push(match[1].trim());
+          }
+        }
+        output += chunk;
+        const plain = stripAnsi(output);
+        const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
+        if (state === 'boot' && readyCount >= 1) {
+          state = 'provider';
+          typeLikeKeyboard(child!, 'request resize approval');
+        } else if (state === 'provider' && plain.includes('calling provider')) {
+          state = 'resizing';
+          setTimeout(() => child!.resize(44, 40), 500);
+          setTimeout(() => child!.resize(110, 40), 1_700);
+        } else if (state === 'resizing' && plain.includes('Decision')) {
+          state = 'denying';
+          modalStart = output.length;
+          setTimeout(() => {
+            modalEnd = output.length;
+            pressDownThenEnter(child!, 1);
+          }, 350);
+        } else if (state === 'denying' && plain.includes('RESIZE APPROVAL COMPLETE') && readyCount >= 2) {
+          state = 'normal';
+          typeLikeKeyboard(child!, 'normal after resize');
+        } else if (state === 'normal' && plain.includes('NORMAL AFTER RESIZE') && readyCount >= 3) {
+          state = 'queue';
+          typeLikeKeyboard(child!, '/queue');
+        } else if (state === 'queue' && /queue is empty/i.test(plain)) {
+          state = 'done';
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
+    await completion;
+    const plain = stripAnsi(output);
+    expect(provider.callCount()).toBe(3);
+    expect(new Set(providerAnimationPrefixes).size).toBeGreaterThanOrEqual(2);
+    expect(stripAnsi(output.slice(modalStart, modalEnd))).not.toContain('calling provider');
+    expect(plain).not.toContain('[preflight]');
+    expect(plain).toContain('queue is empty');
+    await expect(fs.access(deniedPath)).rejects.toThrow();
+  }, 60_000);
+
   it.each([
     { label: '600 ms', secondPromptDelayMs: 600 },
     { label: '10 seconds', secondPromptDelayMs: 10_000 },

@@ -11,15 +11,17 @@ function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
 }
 
-function makeDisplay(opts: { mono: boolean }): Display {
+function makeDisplay(opts: { mono: boolean; columns?: number }): Display {
   const out = new Writable({
     write(_c, _e, cb) {
       cb();
     },
-  }) as unknown as NodeJS.WriteStream;
+  }) as Writable & { isTTY?: boolean; columns?: number };
+  out.isTTY = true;
+  out.columns = opts.columns ?? 100;
   return new Display({
     skin: new SkinEngine({ forceMono: opts.mono }),
-    stdout: out,
+    stdout: out as unknown as NodeJS.WriteStream,
   });
 }
 
@@ -259,5 +261,20 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     const out = renderApprovalBox(SAMPLE_REQ as any, display);
     // brand orange = #FF6B35 → rgb 255, 107, 53.
     expect(out).toContain('\x1b[38;2;255;107;53m');
+  });
+
+  it.each([120, 80, 60, 44, 24])('fits every approval-preview line within %i columns', (columns) => {
+    const display = makeDisplay({ mono: true, columns });
+    const req = {
+      ...SAMPLE_REQ,
+      reason: 'a deliberately long approval reason that must not wrap into the prompt',
+      args: { command: 'Write-Output ' + 'x'.repeat(160) },
+    };
+    const out = stripAnsi(renderApprovalBox(req as any, display));
+    const lines = out.split('\n').filter(Boolean);
+    expect(lines.length).toBeGreaterThan(0);
+    expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(columns - 1);
+    expect(out).toContain('tool');
+    expect(out).toContain('file_delete');
   });
 });
