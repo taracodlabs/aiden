@@ -1,0 +1,26 @@
+{
+  "name": "morning-brief",
+  "version": "1.0.0",
+  "description": "Daily morning briefing with weather, market movers, and news headlines",
+  "author": "SpencerJung",
+  "license": "Apache-2.0",
+  "tools": ["web_search", "get_stocks", "notify"],
+  "trigger_phrases": [
+    "give me my morning brief",
+    "what's happening today",
+    "morning briefing",
+    "today's summary",
+    "daily brief"
+  ],
+  "compatible_agents": ["aiden"],
+  "min_agent_version": "3.0.0",
+  "tags": [
+    "productivity",
+    "news",
+    "weather",
+    "finance",
+    "stocks",
+    "daily-brief"
+  ],
+  "created": "2026-05-27T00:00:00.000Z"
+}
