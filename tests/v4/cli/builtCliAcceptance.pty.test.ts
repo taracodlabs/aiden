@@ -62,6 +62,76 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', () => {
+  it('preserves an exact multiline busy submission through resize and provider handoff', async () => {
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-busy-queue-home-'));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-busy-queue-cwd-'));
+    cleanup.push(aidenHome, cwd);
+    const queued = '  first line\n\n    second line  \n';
+    provider = await startMockProvider({
+      modelId: 'custom-default',
+      headerDelayMs: 2_500,
+      chunkDelayMs: 5,
+      script: [
+        { content: 'ACTIVE TURN COMPLETE' },
+        { content: 'QUEUED TURN COMPLETE' },
+      ],
+    });
+    await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'busy-queue\n', 'utf8');
+    await fs.writeFile(path.join(aidenHome, 'config.yaml'), [
+      'model:', '  provider: custom_openai', '  modelId: custom-default',
+      'providers:', '  custom_openai:', '    apiKey: busy-queue-key',
+      'display:', '  streaming: true', '  renderer: legacy',
+    ].join('\n') + '\n', 'utf8');
+    child = pty.spawn(process.execPath, [
+      '-r', path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs'),
+      path.join(repoRoot, 'dist/cli/v4/aidenCLI.js'),
+    ], {
+      cwd, cols: 120, rows: 40,
+      env: { ...process.env, AIDEN_HOME: aidenHome, AIDEN_TEST_REPO_ROOT: repoRoot,
+        AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl, CUSTOM_OPENAI_API_KEY: 'busy-queue-key',
+        AIDEN_NO_UPDATE_CHECK: '1', AIDEN_TEST_COMPOSER_READY: '1', TELEGRAM_BOT_TOKEN: '',
+        FORCE_COLOR: '0', NO_COLOR: '1' },
+    });
+
+    let output = '';
+    let state = 'boot';
+    const completion = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(
+        `busy queue timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
+      )), 45_000);
+      child!.onData((chunk) => {
+        output += chunk;
+        const plain = stripAnsi(output);
+        const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
+        if (state === 'boot' && readyCount >= 1) {
+          state = 'active';
+          typeLikeKeyboard(child!, 'hold the provider open');
+        } else if (state === 'active' && plain.includes('calling provider')) {
+          state = 'queueing';
+          child!.write(`\x1b[200~${queued}\x1b[201~`);
+          setTimeout(() => child!.resize(44, 40), 120);
+          setTimeout(() => child!.resize(110, 40), 240);
+          setTimeout(() => child!.write('\r'), 400);
+        } else if (state === 'queueing' && plain.includes('QUEUED TURN COMPLETE') && readyCount >= 2) {
+          state = 'queue-check';
+          typeLikeKeyboard(child!, '/queue');
+        } else if (state === 'queue-check' && /queue is empty/i.test(plain)) {
+          state = 'done';
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    });
+    await completion;
+
+    expect(provider.callCount()).toBe(2);
+    const request = provider.lastRequest() as { messages?: Array<{ role?: string; content?: string }> };
+    const userMessages = request.messages?.filter((message) => message.role === 'user') ?? [];
+    expect(userMessages.at(-1)?.content).toBe(queued);
+    expect(stripAnsi(output)).toMatch(/queue is empty/i);
+  }, 55_000);
+
   it('does not repaint or continue the provider after approval Ctrl+C', async () => {
     const repoRoot = path.resolve(__dirname, '../../..');
     const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-approval-cancel-home-'));

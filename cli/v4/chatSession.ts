@@ -1670,10 +1670,14 @@ export class ChatSession implements ChatSessionLike {
       authority: this.inputAuthority,
       cb: {
         onLine: (text) => {
+          // The global paste interceptor presents a compact label to the live
+          // input lane. Restore its exact normalized payload before command
+          // routing or queue ownership sees the complete submission.
+          const submission = expandPasteLabels(text);
           // v4.14 — during-turn control words act IMMEDIATELY (never queued).
           // Pause/resume are only meaningful mid-turn, so they live here (like
           // the Enter-modes), not as prompt-level slash commands.
-          const word = text.trim().toLowerCase();
+          const word = submission.trim().toLowerCase();
           if (word === '/pause') {
             const ok = this.duringTurnInput.requestPause();
             try {
@@ -1690,7 +1694,7 @@ export class ChatSession implements ChatSessionLike {
             } catch { /* defensive */ }
             return;
           }
-          const act = this.duringTurnInput.onBusyEnter(text);
+          const act = this.duringTurnInput.onBusyEnter(submission);
           if (act.action === 'queued') {
             try { this.opts.display.dim(`  ✓ queued (${act.count} pending) — runs after this turn`); } catch { /* defensive */ }
           } else if (act.action === 'steered') {

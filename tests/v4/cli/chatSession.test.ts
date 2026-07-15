@@ -14,6 +14,7 @@ import { retry } from '../../../cli/v4/commands/retry';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { Message } from '../../../providers/v4/types';
+import { DuringTurnInput } from '../../../cli/v4/duringTurnInput';
 
 function mkDisplay() {
   const chunks: string[] = [];
@@ -209,6 +210,24 @@ function buildOpts(over: Partial<ChatSessionOptions> = {}): ChatSessionOptions {
 }
 
 describe('ChatSession.run', () => {
+  it('hands a queued submission to the agent exactly once without downstream mutation', async () => {
+    const { agent, calls } = mkAgent();
+    const session = new ChatSession(buildOpts({
+      agent: agent as never,
+      promptApi: mkPromptApi({ inputs: ['/quit'] }),
+    }));
+    const submitted = '  const answer = 42;\n\n\treturn answer;  \n';
+    (session as unknown as { duringTurnInput: DuringTurnInput }).duringTurnInput.enqueue(submitted);
+
+    await session.run();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].filter((message) => message.role === 'user')).toEqual([
+      { role: 'user', content: submitted },
+    ]);
+    expect(session.listQueue()).toEqual([]);
+  });
+
   it('boots a session and persists turn to SessionManager', async () => {
     const { display, out } = mkDisplay();
     const { agent, calls } = mkAgent({ finalContent: 'hello there' });

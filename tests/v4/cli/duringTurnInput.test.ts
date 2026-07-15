@@ -22,15 +22,52 @@ describe('DuringTurnInput — queue', () => {
     expect(c.dequeue()).toBeNull();
   });
 
-  it('enqueue trims; peek is a copy; clear empties + returns count', () => {
+  it('enqueue preserves leading and trailing whitespace; peek is a copy; clear empties + returns count', () => {
     const c = new DuringTurnInput();
     c.enqueue('  padded  ');
-    expect(c.peek()).toEqual(['padded']);
+    expect(c.peek()).toEqual(['  padded  ']);
     const copy = c.peek(); copy.push('mutated');
     expect(c.count()).toBe(1);             // peek copy didn't mutate internal
     expect(c.clear()).toBe(1);
     expect(c.count()).toBe(0);
     expect(c.clear()).toBe(0);
+  });
+
+  it('preserves multiline indentation, internal blank lines, tabs, and a final newline', () => {
+    const c = new DuringTurnInput();
+    const submitted = '  first\n\n\n    second\n\tthird\n';
+    c.enqueue(submitted);
+    expect(c.peek()).toEqual([submitted]);
+    expect(c.dequeue()).toBe(submitted);
+  });
+
+  it('normalizes CRLF and standalone CR to LF without changing other characters', () => {
+    const c = new DuringTurnInput();
+    c.enqueue('first\r\n  second\r\nthird\r');
+    expect(c.peek()).toEqual(['first\n  second\nthird\n']);
+    expect(c.dequeue()).toBe('first\n  second\nthird\n');
+  });
+
+  it.each(['', ' ', '\t', '\r\n', ' \r\n\t '])('rejects a blank normalized submission %j', (submitted) => {
+    const c = new DuringTurnInput();
+    c.enqueue('kept');
+    expect(c.enqueue(submitted)).toBe(1);
+    expect(c.peek()).toEqual(['kept']);
+  });
+
+  it('keeps repeated identical entries distinct and dequeues rapid submissions in FIFO order', () => {
+    const c = new DuringTurnInput();
+    for (const text of ['same', 'same', 'A', 'B', 'C']) c.enqueue(text);
+    expect([c.dequeue(), c.dequeue(), c.dequeue(), c.dequeue(), c.dequeue()])
+      .toEqual(['same', 'same', 'A', 'B', 'C']);
+    expect(c.dequeue()).toBeNull();
+  });
+
+  it('preserves Unicode, emoji, accents, and combining characters', () => {
+    const c = new DuringTurnInput();
+    const submitted = '  मराठी · café · e\u0301 · 🚀  ';
+    c.enqueue(submitted);
+    expect(c.dequeue()).toBe(submitted);
   });
 });
 
@@ -44,6 +81,16 @@ describe('DuringTurnInput — mode + onBusyEnter', () => {
     expect(c.onBusyEnter('hello')).toEqual({ action: 'queued', count: 1, text: 'hello' });
     expect(c.onBusyEnter('world')).toEqual({ action: 'queued', count: 2, text: 'world' });
     expect(c.count()).toBe(2);
+  });
+
+  it('queue mode reports and stores the complete canonical submission', () => {
+    const c = new DuringTurnInput();
+    expect(c.onBusyEnter('  first\r\n\tsecond  ')).toEqual({
+      action: 'queued',
+      count: 1,
+      text: '  first\n\tsecond  ',
+    });
+    expect(c.dequeue()).toBe('  first\n\tsecond  ');
   });
 
   it('interrupt mode: Enter signals interrupt and does NOT queue', () => {
