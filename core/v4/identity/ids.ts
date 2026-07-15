@@ -16,8 +16,8 @@
  * the daemon DB, the structured log, future remote sinks, and crash
  * reports without needing a central counter.
  *
- * The `uuid` package on disk is v9, which doesn't ship UUIDv7 (added in
- * uuid@10). We hand-roll the 16-byte layout from RFC 9562 §5.7:
+ * Aiden generates UUIDv7 locally so identifier behavior does not depend on
+ * an external implementation. The 16-byte layout follows RFC 9562 §5.7:
  *
  *     0                   1                   2                   3
  *     0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1

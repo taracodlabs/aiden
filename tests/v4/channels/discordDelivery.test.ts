@@ -26,6 +26,20 @@ const uid = () => `u_${Date.now()}_${seq++}`;
 function mkAdapter() { return new DiscordAdapter() as any; }
 
 describe('DC.3 — Discord delivery binding (chunking replaces truncation)', () => {
+  it('stays disabled when no bot token is configured', async () => {
+    const previousToken = process.env.DISCORD_BOT_TOKEN;
+    delete process.env.DISCORD_BOT_TOKEN;
+
+    try {
+      const adapter = new DiscordAdapter();
+      await adapter.start();
+      expect(adapter.isHealthy()).toBe(false);
+    } finally {
+      if (previousToken === undefined) delete process.env.DISCORD_BOT_TOKEN;
+      else process.env.DISCORD_BOT_TOKEN = previousToken;
+    }
+  });
+
   it('declares honest capabilities (chunkLongMessages true; edit/media/etc not wired)', () => {
     const a = mkAdapter();
     const binding: DeliveryBinding = a.buildDeliveryBinding(async () => {});
