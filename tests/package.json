@@ -34,7 +34,7 @@
     "execa":               "^9.6.1",
     "express":             "^5.2.1",
     "node-fetch":          "^3.3.2",
-    "node-telegram-bot-api": "^0.67.0",
+    "node-telegram-bot-api": "^1.2.0",
     "pdf-parse":           "^2.4.5",
     "playwright":          "^1.58.2"
   },

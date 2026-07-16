@@ -42,6 +42,16 @@ export function isBusyEnterMode(s: unknown): s is BusyEnterMode {
   return s === 'queue' || s === 'interrupt' || s === 'redirect';
 }
 
+/** Canonicalize a complete busy submission at the queue ownership boundary. */
+export function normalizeSubmittedText(input: string): string {
+  return input.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+/** Blank detection never supplies the value that is stored or delivered. */
+export function isBlankSubmission(normalized: string): boolean {
+  return normalized.trim().length === 0;
+}
+
 /**
  * Read the persisted preferred busy-mode from config (`agent.busyMode`) so the
  * user's choice survives a restart — the boot path seeds `DuringTurnInput` with
@@ -92,8 +102,8 @@ export class DuringTurnInput {
   /** Append a message to the type-next queue. Empty/whitespace is ignored.
    *  Returns the new pending count. */
   enqueue(text: string): number {
-    const t = text.trim();
-    if (t.length > 0) this.queue.push(t);
+    const normalized = normalizeSubmittedText(text);
+    if (!isBlankSubmission(normalized)) this.queue.push(normalized);
     return this.queue.length;
   }
 
@@ -147,14 +157,16 @@ export class DuringTurnInput {
    * buffer the nudge; interrupt → fire the turn-scoped abort.
    */
   onBusyEnter(text: string): BusyEnterAction {
-    if (text.trim().length === 0) return { action: 'ignored' };
+    const normalized = normalizeSubmittedText(text);
+    if (isBlankSubmission(normalized)) return { action: 'ignored' };
     if (this.mode === 'interrupt') return { action: 'interrupt' };
     if (this.mode === 'redirect') {
       this.setPendingSteer(text);
       return { action: 'steered', text: text.trim() };
     }
-    const count = this.enqueue(text);
-    return { action: 'queued', count, text: text.trim() };
+    this.queue.push(normalized);
+    const count = this.queue.length;
+    return { action: 'queued', count, text: normalized };
   }
 
   // ── Pause / Resume (v4.14) ────────────────────────────────────────────────

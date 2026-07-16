@@ -181,9 +181,10 @@ export const WORKBENCH_DASHBOARD_HTML = `<!doctype html>
     var n = ev.name || ev.kind || '';
     if (n === 'artifact_verified'){
       var oc = pget(ev,'outcome') || {};
+      var pr = pget(ev,'presentation') || {};
       var k = oc.kind || (pget(ev,'verified') ? 'verified' : 'unverifiable');
       var okv = k === 'verified';
-      var lbl = k==='verified'?'verified':k==='no_evidence'?'no evidence':k==='failed'?'failed':'unverified';
+      var lbl = pr.label || (k==='verified'?'verified':k==='no_evidence'?'no evidence':k==='failed'?'failed':'unverified');
       return { g:okv?'\\u2713':'\\u26a0', c:okv?'ok':'warn', label:lbl,
                detail:'verdict: ' + (pget(ev,'verdict')||'?') + ' \\u00b7 ' + (pget(ev,'handles')||0) + ' handle(s)' };
     }

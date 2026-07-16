@@ -186,6 +186,75 @@ export interface ToolCallResult {
    * failure paths. Pure data — render is the REPL's concern.
    */
   capabilityCard?: CapabilityCardData;
+  /** Optional observational timing. It never affects execution or policy. */
+  activityTiming?: ToolActivityTiming;
+  /** Structured approval outcome retained when execution was gated. */
+  approvalDecision?: ToolApprovalDecision;
+}
+
+export type ToolApprovalDecisionState =
+  | 'approved'
+  | 'denied'
+  | 'interrupted'
+  | 'blocked';
+
+export interface ToolApprovalDecision {
+  state: ToolApprovalDecisionState;
+  approved: boolean;
+  reason?: string;
+}
+
+export type ToolActivityPhase =
+  | 'queued'
+  | 'awaiting_approval'
+  | 'running'
+  | 'verifying'
+  | 'retrying'
+  | 'terminal';
+
+export type ToolTerminalClassification =
+  | 'completed'
+  | 'failed'
+  | 'degraded'
+  | 'blocked'
+  | 'denied'
+  | 'cancelled'
+  | 'timed_out';
+
+export interface ToolExecutionAttemptTiming {
+  attempt: number;
+  startedAt: number;
+  endedAt?: number;
+  terminalResult?: ToolTerminalClassification;
+}
+
+/**
+ * Observational timing carried beside a tool result. All fields are optional
+ * except the dispatch boundary and attempt list so compatibility executors can
+ * progressively populate only the boundaries they own.
+ */
+export interface ToolActivityTiming {
+  dispatchStartedAt: number;
+  dispatchEndedAt?: number;
+  approvalStartedAt?: number;
+  approvalEndedAt?: number;
+  approvalWaitMs?: number;
+  executionAttempts: ToolExecutionAttemptTiming[];
+  verificationStartedAt?: number;
+  verificationEndedAt?: number;
+  verificationDurationMs?: number;
+  executionDurationMs?: number;
+  retryBackoffMs?: number;
+  attemptCount?: number;
+  terminalClassification?: ToolTerminalClassification;
+}
+
+/** A phase notification for live presentation; observational only. */
+export interface ToolActivityUpdate {
+  phase: ToolActivityPhase;
+  at: number;
+  attempt?: number;
+  timing?: ToolActivityTiming;
 }
 
 /**

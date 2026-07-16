@@ -84,4 +84,23 @@ describe('renderTaskDetail', () => {
     expect(text).not.toMatch(/files touched/);
     expect(text).not.toMatch(/side effects/);
   });
+
+  it('keeps a required declined operation inspectable after partial execution', () => {
+    const text = render(baseTask({
+      status: 'failed',
+      filesTouched: ['C:/approved.txt'],
+      evidence: {
+        v: 1,
+        verdict: 'failed',
+        decidedAt: 4,
+        handles: [{ tool: 'file_write', kind: 'path', value: 'C:/approved.txt', verified: true, code: 'ok' }],
+        failures: [],
+        declined: [{ tool: 'file_write', target: 'C:/denied.txt', reason: 'required operation denied' }],
+      },
+    }));
+
+    expect(text).toMatch(/declined by user \(1\)/);
+    expect(text).toMatch(/file_write .* C:\/denied\.txt \(required operation denied\)/);
+    expect(text).toMatch(/file_write path=C:\/approved\.txt/);
+  });
 });

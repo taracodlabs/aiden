@@ -41,6 +41,8 @@ import {
 import { VERSION as AIDEN_VERSION } from '../../core/version';
 import { renderCapabilityCard } from './display/capabilityCard';
 import type { CapabilityCardData } from '../../providers/v4/types';
+import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
+import { recoveryActionsForOutcome } from './recoveryActions';
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
 // replaces marked-terminal's defaults with structured headers, lists,
 // code blocks, blockquotes, and links.
@@ -51,6 +53,7 @@ import { buildToolPreview } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
 import { ComposerLane, composerLaneEnabled, type LaneSink } from './composerLane';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
+import type { ActivitySnapshot } from './activityRegistry';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
 // `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
 // through frame helpers so the visible left edge / right margin / wrap
@@ -94,8 +97,8 @@ export interface SpinnerHandle {
  */
 export interface ActivityIndicatorHandle {
   /**
-   * Stop ticking and erase the indicator line. State preserved so a
-   * later `resume(verb?)` continues from the same elapsed counter.
+   * Stop ticking and erase the indicator line. Resuming the same verb keeps
+   * its phase clock; resuming with a new verb starts a new phase clock.
    * Idempotent.
    */
   pause(): void;
@@ -448,6 +451,11 @@ export class Display {
    */
   cols(): number {
     return Math.min(frameGetTerminalCols(this.out), 100);
+  }
+
+  /** Raw terminal width for geometry-sensitive, single-row surfaces. */
+  terminalColumns(): number {
+    return frameGetTerminalCols(this.out);
   }
 
   /**
@@ -819,11 +827,17 @@ export class Display {
    */
   bottomPromptHint(): string {
     const sk = this.skin;
+    const columns = this.terminalColumns();
+    const message = columns >= 64
+      ? 'Type your message · /help for commands · /skills to add more'
+      : columns >= 36
+        ? 'Type your message · /help'
+        : 'Type · /help';
     const text = sk.applyColors(
-      'Type your message · /help for commands · /skills to add more',
+      message,
       'muted',
     );
-    return `    ${text}`;
+    return `  ${truncateVisible(text, Math.max(1, columns - 4))}`;
   }
 
   /**
@@ -951,7 +965,7 @@ export class Display {
     } else {
       segments = [provModel, ctxSegCompact, sessionSeg || elapsed];
     }
-    return `  ${segments.join(SEP)}`;
+    return truncateVisible(`  ${segments.join(SEP)}`, Math.max(1, cols - 2));
   }
 
   /** Map a per-turn outcome to the colour kind used by the state dot. */
@@ -1144,10 +1158,8 @@ export class Display {
    *
    * Pause/resume semantics:
    *   - `pause()` erases the line + stops the tick + sets paused=true.
-   *     Elapsed time keeps accumulating wall-clock — when a later
-   *     `resume()` re-renders, the indicator shows the TOTAL elapsed
-   *     since the original `activityIndicator()` call, not just since
-   *     the last resume.
+   *     Resuming the same phase preserves its elapsed time; supplying a new
+   *     verb resets the phase clock so hidden tool time is not provider time.
    *   - `resume(verb?)` re-renders on a fresh line below the current
    *     cursor and restarts the tick. Optional `verb` swap is the
    *     supported way to transition phases ("thinking" → "drafting").
@@ -1185,7 +1197,7 @@ export class Display {
     const sk     = this.skin;
     const out    = this.out;
     const isTty  = !!out.isTTY;
-    const startTime = Date.now();
+    let phaseStartedAt = Date.now();
 
     let verb        = initialVerb;
     let dotFrame    = 0;
@@ -1275,7 +1287,7 @@ export class Display {
 
     const buildLine = (): string => {
       const dots = '.'.repeat(dotFrame); // 0..3 dots
-      const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+      const elapsedSec = Math.floor((Date.now() - phaseStartedAt) / 1000);
       const elapsedStr = elapsedSec >= 1
         ? ` ${sk.applyColors(`(${elapsedSec}s)`, 'muted')}`
         : '';
@@ -1408,7 +1420,10 @@ export class Display {
       },
       resume: (newVerb?: string) => {
         if (stopped) return;
-        if (typeof newVerb === 'string' && newVerb.length > 0) verb = newVerb;
+        if (typeof newVerb === 'string' && newVerb.length > 0 && newVerb !== verb) {
+          verb = newVerb;
+          phaseStartedAt = Date.now();
+        }
         if (!paused) return;
         paused = false;
         if (!isTty) return;
@@ -1431,7 +1446,10 @@ export class Display {
         this.setComposerRepaint(paintComposerNow);
       },
       setVerb: (newVerb: string) => {
-        if (typeof newVerb === 'string' && newVerb.length > 0) verb = newVerb;
+        if (typeof newVerb === 'string' && newVerb.length > 0 && newVerb !== verb) {
+          verb = newVerb;
+          phaseStartedAt = Date.now();
+        }
       },
       stop: () => {
         if (stopped) return;
@@ -1458,6 +1476,100 @@ export class Display {
     };
   }
 
+  /**
+   * Registry-driven turn activity row. Timing is deliberately external: the
+   * ActivityRegistry is the only interval owner and calls refresh().
+   */
+  liveActivityRow(initialVerb: string = 'thinking'): LiveActivityRowHandle {
+    const out = this.out;
+    const isTty = !!out.isTTY;
+    let startedAt = Date.now();
+    let verb = initialVerb;
+    let active = true;
+    let paused = !isTty;
+    let printed = false;
+    let invalidated = false;
+    let lastBody = '';
+    let frameIndex = 0;
+
+    const animation = (width: number): string => {
+      if (width >= 60) {
+        const cells = Array.from({ length: 6 }, (_, index) => index === frameIndex % 6
+          ? this.skin.applyColors(glyphs.shimmer.block, 'brand')
+          : this.skin.applyColors(glyphs.shimmer.track, 'muted'));
+        return `${cells.join('')} `;
+      }
+      const frames = ['◐', '◓', '◑', '◒'];
+      return `${this.skin.applyColors(frames[frameIndex % frames.length], 'brand')} `;
+    };
+
+    const body = (): string => {
+      const width = Math.max(1, this.terminalColumns() - 2);
+      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const time = elapsed > 0 && width >= 28 ? ` (${elapsed}s)` : '';
+      const prefix = width >= 60 ? '  ' : '';
+      const phase = width < 28 && verb === 'calling provider' ? 'provider' : verb;
+      const busy = this.composerSuffix().length > 0;
+      const suffix = !busy ? ''
+        : width >= 80 ? this.composerSuffix()
+        : width >= 36 ? '  Ctrl+C stop'
+        : '  Ctrl+C';
+      return truncateVisible(`${prefix}${animation(width)}${phase}${time}${suffix}`, width);
+    };
+    const erase = (): void => {
+      if (!printed || !isTty) return;
+      out.write('\x1b[1A\x1b[2K\r');
+      printed = false;
+      lastBody = '';
+    };
+    const refresh = (frame?: number): void => {
+      if (!active || paused || !isTty) return;
+      if (typeof frame === 'number') frameIndex = frame;
+      const next = body();
+      if (printed && !invalidated && next === lastBody) return;
+      out.write(printed
+        ? `\x1b[1A\x1b[2K\r${next}\x1b[1B\r`
+        : `${next}\n`);
+      printed = true;
+      invalidated = false;
+      lastBody = next;
+    };
+
+    refresh();
+    return {
+      refresh,
+      setVerb: (next: string) => {
+        if (!active || !next || next === verb) return;
+        verb = next;
+        startedAt = Date.now();
+        invalidated = true;
+        refresh();
+      },
+      pause: () => {
+        if (!active || paused) return;
+        paused = true;
+        erase();
+      },
+      resume: () => {
+        if (!active || !paused) return;
+        paused = false;
+        invalidated = true;
+        refresh();
+      },
+      stop: () => {
+        if (!active) return;
+        active = false;
+        erase();
+      },
+      invalidateLayout: () => {
+        if (!active) return;
+        invalidated = true;
+        refresh();
+      },
+      isActive: () => active,
+    };
+  }
+
   // ── Phase 23.5 — tool event row ───────────────────────────────────────
   // One line per tool call: a "·" gutter, the keyword `tool`, the
   // tool name (soft cyan, padded), a brief truncated arg preview, and
@@ -1470,7 +1582,12 @@ export class Display {
   // completion so each line in the log carries the final state — no
   // ANSI cursor games on a dumb sink.
 
-  toolRow(name: string, args: unknown): ToolRowHandle {
+  toolRow(
+    name: string,
+    args: unknown,
+    readActivity?: () => ActivitySnapshot,
+    opts: { externalTicker?: boolean } = {},
+  ): ToolRowHandle {
     // v4.1.5 Phase 1d (Q-Q2-a) — TRAIL_HIDE_TOOLS suppression.
     //
     // Some tools are pure agent plumbing — the model calls them to
@@ -1516,11 +1633,9 @@ export class Display {
     const mapped = buildToolPreview(name, args);
     const detail = truncDetail(mapped ?? previewToolArgs(args));
 
-    // v4.1.3-essentials: live tool indicator. Capture wall-clock start
-    // so the running-row renderer can append an elapsed-time suffix
-    // ("running 3s…") after the first second. Sub-second tools render
-    // without the suffix — no flash of `running 0s` for fast paths.
-    const startedAt = Date.now();
+    // Semantic elapsed time comes from ActivityRegistry. A compatibility row
+    // without a source advances only on its own repaint ticks.
+    let fallbackPhaseElapsedMs = 0;
 
     // Running row — muted pipe, raw icon, tool-colored verb, muted detail.
     // The optional `running Ns…` tail appears once the tool crosses the
@@ -1533,27 +1648,40 @@ export class Display {
     // by the emoji's right cell. Two spaces guarantees one visible gap
     // regardless of how the terminal measures the glyph.
     const runningRow = (): string => {
-      const elapsed = Date.now() - startedAt;
+      const snapshot = readActivity?.();
+      const elapsed = snapshot?.phaseElapsedMs ?? fallbackPhaseElapsedMs;
+      const phaseLabel = snapshot?.phase === 'awaiting_approval' ? 'awaiting approval'
+        : snapshot?.phase === 'verifying' ? 'verifying'
+        : snapshot?.phase === 'retrying' ? 'retrying'
+        : snapshot?.phase === 'queued' ? 'queued'
+        : 'running';
       const liveSuffix = elapsed >= 1000
-        ? `  ${sk.applyColors(`running ${formatToolDuration(elapsed)}…`, 'muted')}`
+        ? `  ${sk.applyColors(`${phaseLabel} ${formatToolDuration(elapsed)}…`, 'muted')}`
         : '';
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
         `${sk.applyColors(padVerb(verb), 'tool')} `;
       const suffix = `${liveSuffix}${this.composerSuffix()}`;
       const detailText = sk.applyColors(detail, 'muted');
-      if (terminalRowWidth === null) return `${prefix}${detailText}${suffix}\n`;
+      const width = terminalRowWidth();
+      if (width === null) return `${prefix}${detailText}${suffix}\n`;
       const availableDetail = Math.max(
         0,
-        terminalRowWidth - visibleLength(prefix) - visibleLength(suffix),
+        width - visibleLength(prefix) - visibleLength(suffix),
       );
       return `${prefix}${truncateVisible(detailText, availableDetail)}${suffix}\n`;
     };
 
     // Outcome row — entire line colored by outcome kind.
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
-      const content =
-        `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detail}` +
-        (suffix ? `  ${suffix}` : '');
+      const prefix = `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} `;
+      const suffixText = suffix ? `  ${suffix}` : '';
+      const width = terminalRowWidth();
+      const availableDetail = width === null
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, width - visibleLength(prefix) - visibleLength(suffixText));
+      const content = `${prefix}${availableDetail === Number.POSITIVE_INFINITY
+        ? detail
+        : truncateVisible(detail, availableDetail)}${suffixText}`;
       return `${sk.applyColors(content, kind)}\n`;
     };
 
@@ -1564,7 +1692,7 @@ export class Display {
     // width one cell beyond the last safe printable column; filling that cell
     // sets the terminal's pending-wrap flag and makes the next repaint walk
     // down the screen instead of replacing the existing activity row.
-    const terminalRowWidth = isTty && typeof out.columns === 'number'
+    const terminalRowWidth = (): number | null => isTty && typeof out.columns === 'number'
       ? Math.max(1, out.columns - 2)
       : null;
     let printed = false;
@@ -1595,14 +1723,20 @@ export class Display {
     };
 
     const fitTerminalRow = (row: string): string => {
-      if (terminalRowWidth === null) return row;
+      const width = terminalRowWidth();
+      if (width === null) return row;
       const body = row.endsWith('\n') ? row.slice(0, -1) : row;
-      return `${truncateVisible(body, terminalRowWidth)}\n`;
+      return `${truncateVisible(body, width)}\n`;
     };
 
-    const replaceLast = (row: string): void => {
+    const replaceLast = (row: string, settle = false): void => {
       const fitted = fitTerminalRow(row);
-      if (isTty && printed) out.write(`\x1b[1A\x1b[2K\r${fitted}`);
+      if (isTty && printed) {
+        const body = fitted.endsWith('\n') ? fitted.slice(0, -1) : fitted;
+        out.write(settle
+          ? `\x1b[1A\x1b[2K\r${body}\n`
+          : `\x1b[1A\x1b[2K\r${body}\x1b[1B\r`);
+      }
       else out.write(fitted);
       printed = true;
     };
@@ -1618,11 +1752,11 @@ export class Display {
     const writeFinal = (suffix: string, kind: ColorKindForBracket): void => {
       stopTick();
       turnIdleDiagnostic('activity.row.final', { name });
-      replaceLast(outcomeRow(suffix, kind));
+      replaceLast(outcomeRow(suffix, kind), true);
     };
 
     const startRunningTick = (): void => {
-      if (!isTty || settled || pausedRow || repaintRunning === null || tickTimer !== null) return;
+      if (opts.externalTicker || !isTty || settled || pausedRow || repaintRunning === null || tickTimer !== null) return;
       tickTimer = setInterval(repaintRunning, 1000);
       restoreComposerRepaint = this.setComposerRepaint(repaintRunning);
     };
@@ -1659,6 +1793,7 @@ export class Display {
       // busy hint in its lane: composer content never bleeds into tool rows.
       repaintRunning = (): void => {
         if (printed && !pausedRow && this.composerRepaintIs(repaintRunning!)) {
+          if (!readActivity) fallbackPhaseElapsedMs += 1000;
           turnIdleDiagnostic('activity.row.timer', { name });
           replaceLast(runningRow());
         }
@@ -1674,6 +1809,44 @@ export class Display {
     // with the final state; live updates would be noise in scrollback.
 
     return {
+      refresh() {
+        if (settled || pausedRow || !isTty) return;
+        replaceLast(runningRow());
+      },
+      finish(snapshot: ActivitySnapshot) {
+        if (!beginSettle()) return;
+        const waited = snapshot.approvalWaitMs >= 1_000
+          ? ` · waited ${formatToolDuration(snapshot.approvalWaitMs)}`
+          : '';
+        const attempts = snapshot.attemptCount > 1 ? ` · ${snapshot.attemptCount} attempts` : '';
+        const backoff = snapshot.retryBackoffMs >= 1_000
+          ? ` · backoff ${formatToolDuration(snapshot.retryBackoffMs)}`
+          : '';
+        const execution = formatToolDuration(snapshot.executionDurationMs);
+        switch (snapshot.terminalClassification) {
+          case 'denied':
+            writeFinal(`denied${waited}`, 'warn');
+            break;
+          case 'cancelled':
+            writeFinal(snapshot.executionDurationMs > 0 ? `cancelled after ${execution}` : `cancelled${waited}`, 'muted');
+            break;
+          case 'timed_out':
+            writeFinal(snapshot.executionDurationMs > 0 ? `timed out after ${execution}` : `timed out${waited}`, 'error');
+            break;
+          case 'blocked':
+            writeFinal('blocked', 'warn');
+            break;
+          case 'failed':
+            writeFinal(snapshot.executionDurationMs > 0 ? `fail ${execution}${attempts}${waited}${backoff}` : `failed${waited}`, 'error');
+            break;
+          case 'degraded':
+            writeFinal(`partial ${execution}${waited}`, 'degraded');
+            break;
+          default:
+            writeFinal(`done ${execution}${attempts}${waited}${backoff}`, 'muted');
+            break;
+        }
+      },
       ok(durationMs: number, retries = 0) {
         if (!beginSettle()) return;
         stopTick();
@@ -2071,6 +2244,17 @@ export class Display {
   /** Muted ("dim") line for low-priority diagnostics. */
   dim(text: string): void {
     this.out.write(`${this.skin.applyColors(text, 'muted')}\n`);
+  }
+
+  /** Render the single structured outcome owned by turn finalization. */
+  taskOutcome(outcome: TaskOutcomePresentation): void {
+    const details = outcome.taskId ? ` · Task: ${outcome.taskId}` : '';
+    const recovery = recoveryActionsForOutcome(outcome)[0];
+    const next = recovery?.command ? ` · Next: ${recovery.command}` : recovery?.instruction ? ` · ${recovery.instruction}` : '';
+    const text = `${outcome.label}${outcome.summary ? ` · ${outcome.summary}` : ''}${details}${next}`;
+    if (outcome.severity === 'success') this.success(text);
+    else if (outcome.severity === 'error' || outcome.severity === 'warning') this.warn(text);
+    else this.dim(text);
   }
 
   /**
@@ -2868,6 +3052,8 @@ export const TRAIL_HIDE_TOOLS: Set<string> = new Set([
  */
 export function makeNoOpToolRowHandle(): ToolRowHandle {
   return {
+    refresh:    () => { /* no-op: hidden from trail */ },
+    finish:     () => { /* no-op: hidden from trail */ },
     ok:         () => { /* no-op: hidden from trail */ },
     fail:       () => { /* no-op: hidden from trail */ },
     degraded:   () => { /* no-op: hidden from trail */ },
@@ -2890,25 +3076,37 @@ export function makeNoOpToolRowHandle(): ToolRowHandle {
 // coloured outcomes.
 type ColorKindForBracket = 'success' | 'warn' | 'error' | 'degraded' | 'muted';
 
+export interface LiveActivityRowHandle {
+  refresh(frame?: number): void;
+  setVerb(verb: string): void;
+  pause(): void;
+  resume(): void;
+  stop(): void;
+  invalidateLayout(): void;
+  isActive(): boolean;
+}
+
 /**
  * Handle returned by `Display.toolRow()`. Mutates the row in place once
  * the tool resolves. Each method writes exactly once; subsequent calls
  * would double-print.
  */
 export interface ToolRowHandle {
-  ok(durationMs: number, retries?: number): void;
-  fail(durationMs: number, retries?: number): void;
+  refresh?(): void;
+  finish?(snapshot: ActivitySnapshot): void;
+  ok(durationMs: number, retries?: number, summary?: ActivitySnapshot): void;
+  fail(durationMs: number, retries?: number, summary?: ActivitySnapshot): void;
   /**
    * v4.1.3-repl-polish — tool completed but with a degraded / best-effort
    * result (e.g. recall_session returned cached data, app_launch fell back
    * to CLI). Row persists in degraded yellow.
    */
-  degraded(durationMs: number, reason?: string): void;
+  degraded(durationMs: number, reason?: string, summary?: ActivitySnapshot): void;
   retry(n: number, m: number): void;
   blocked(): void;
   emptyRetry(): void;
   emptyFail(): void;
-  cancel(durationMs: number): void;
+  cancel(durationMs: number, summary?: ActivitySnapshot): void;
   dismiss(): void;
   pause(): void;
   resume(): void;

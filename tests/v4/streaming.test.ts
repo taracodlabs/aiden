@@ -320,7 +320,62 @@ class FakeStreamingAdapter implements ProviderAdapter {
   }
 }
 
+class ScriptedStreamingAdapter implements ProviderAdapter {
+  apiMode = 'chat_completions' as const;
+  public calls = 0;
+  constructor(private readonly scripts: StreamEvent[][]) {}
+  async call(): Promise<ProviderCallOutput> {
+    throw new Error('streaming path expected');
+  }
+  async *callStream(): AsyncGenerator<StreamEvent, void, void> {
+    const script = this.scripts[this.calls++];
+    if (!script) throw new Error('script exhausted');
+    for (const event of script) yield event;
+  }
+}
+
 describe('AidenAgent runConversation stream:true', () => {
+  it('holds and reconciles a post-approval final segment before it becomes visible', async () => {
+    const call: ToolCallRequest = { id: 'approved-stream', name: 'shell_exec', arguments: { command: 'run' } };
+    const adapter = new ScriptedStreamingAdapter([
+      [
+        { type: 'tool_call', toolCall: call },
+        { type: 'done', output: { content: null, toolCalls: [call], finishReason: 'tool_use' } },
+      ],
+      [
+        { type: 'delta', content: 'No approval modal ' },
+        { type: 'delta', content: 'was triggered by the runtime.' },
+        { type: 'done', output: {
+          content: 'No approval modal was triggered by the runtime.',
+          toolCalls: [],
+          finishReason: 'stop',
+        } },
+      ],
+    ]);
+    const visible: string[] = [];
+    const agent = new AidenAgent({
+      provider: adapter,
+      tools: [{ name: 'shell_exec', description: 'run', inputSchema: { type: 'object' } }],
+      resolveMutates: () => true,
+      toolExecutor: async () => ({
+        id: call.id,
+        name: call.name,
+        result: { exitCode: 0, stdout: 'done' },
+        approvalDecision: { state: 'approved', approved: true },
+      }),
+    });
+
+    const result = await agent.runConversation([userMsg('run')], {
+      stream: true,
+      onDelta: (text) => visible.push(text),
+    });
+
+    expect(adapter.calls).toBe(2);
+    expect(visible.join('')).toBe('The command was approved and executed successfully.');
+    expect(visible.join('')).not.toContain('No approval modal');
+    expect(result.finalContent).toBe('The command was approved and executed successfully.');
+  });
+
   it('relays delta events through onDelta and onFirstDelta', async () => {
     const adapter = new FakeStreamingAdapter([
       { type: 'delta', content: 'Hel' },

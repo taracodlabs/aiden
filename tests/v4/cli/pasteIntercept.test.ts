@@ -69,6 +69,14 @@ describe('pasteIntercept — robust state machine (Slice 2 hotfix #6)', () => {
     expect(expandPasteLabels(out)).toBe('alpha\nbeta\ngamma');
   });
 
+  it('keeps an intentional final newline in the recoverable original', async () => {
+    const h = makeHarness();
+    h.emit(`${PASTE_BEGIN}  alpha  \n\n\tbeta  \n${PASTE_END}`);
+    const out = await h.drain();
+    expect(out).toMatch(/^\[paste #\d+:/);
+    expect(expandPasteLabels(out)).toBe('  alpha  \n\n\tbeta  \n');
+  });
+
   // ── 2. Watchdog — PASTE_END never arrives ───────────────────────────
 
   it('watchdog flushes stuck in_marker_paste after timeout', async () => {

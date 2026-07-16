@@ -5,6 +5,8 @@ import * as pty from 'node-pty';
 function stripAnsi(value: string): string {
   return value
     // eslint-disable-next-line no-control-regex
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, '')
+    // eslint-disable-next-line no-control-regex
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '');
 }
 
@@ -22,6 +24,8 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
     });
     let raw = '';
     child.onData((chunk) => { raw += chunk; });
+    setTimeout(() => child.resize(44, 20), 1_100);
+    setTimeout(() => child.resize(90, 20), 2_600);
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         child.kill();
@@ -36,7 +40,10 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
 
     const frames = [...raw.matchAll(/\x1b\[(?:H|\d+;1H)([^\r\n]*)/g)]
       .map((match) => stripAnsi(match[1]))
-      .filter((line) => line.includes('calling') || line.includes('running'));
+      .filter((line) => line.includes('calling') || line.includes('running'))
+      // ConPTY reflows its existing screen into one synthetic chunk while a
+      // resize is applied. It is not an application repaint frame.
+      .filter((line) => (line.match(/calling/g) ?? []).length <= 1);
     expect(frames.length, JSON.stringify(raw)).toBeGreaterThanOrEqual(5);
     for (const frame of frames) {
       expect(frame.length, JSON.stringify({ frame, raw })).toBeLessThanOrEqual(48);
@@ -45,7 +52,7 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
     expect(frames.filter((frame) => frame.includes('running')).length).toBeGreaterThanOrEqual(4);
     const activityCursorRows = [...raw.matchAll(/\x1b\[(H|(\d+);1H)([^\r\n]*(?:calling|running)[^\r\n]*)/g)]
       .map((match) => match[2] === undefined ? 1 : Number(match[2]));
-    expect(activityCursorRows.every((row) => row === 1), JSON.stringify(raw)).toBe(true);
+    expect(new Set(activityCursorRows).size, JSON.stringify(raw)).toBeLessThanOrEqual(2);
     const settledAt = raw.indexOf('__ACTIVITY_SETTLED__');
     expect(settledAt).toBeGreaterThan(0);
     expect(raw.slice(settledAt)).not.toContain('running');

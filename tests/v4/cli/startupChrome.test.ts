@@ -20,7 +20,7 @@ function stripAnsi(value: string): string {
   );
 }
 
-function captureDisplay(columns: number): { display: Display; chunks: string[] } {
+function captureDisplay(columns: number): { display: Display; chunks: string[]; out: NodeJS.WriteStream } {
   const chunks: string[] = [];
   const out = new Writable({
     write(chunk, _encoding, callback) {
@@ -38,7 +38,7 @@ function captureDisplay(columns: number): { display: Display; chunks: string[] }
     stdout: out,
     stderr: err,
   });
-  return { display, chunks };
+  return { display, chunks, out };
 }
 
 function buildSession(
@@ -59,12 +59,13 @@ function buildSession(
     sessionManager: {} as never,
     approvalEngine,
     skin: new SkinEngine({ forceMono: true }),
-    toolRegistry: { list: () => [] } as never,
-    skillLoader: { list: async () => [] } as never,
+    toolRegistry: { list: () => Array.from({ length: 77 }, () => ({})) } as never,
+    skillLoader: { list: async () => Array.from({ length: 76 }, () => ({})) } as never,
     resolver: {} as never,
     config: {} as never,
     initialProviderId: 'groq',
     initialModelId: 'llama-3.3-70b-versatile',
+    memoryManager: {} as never,
     installSignalHandler: false,
   };
   return { session: new ChatSession(options), chunks };
@@ -148,5 +149,69 @@ describe('responsive startup status rows', () => {
       expect(plain).toMatch(/memory\s+active/i);
       expect(plain).toContain('v4.14.9');
     }
+  });
+});
+
+describe('responsive startup dashboard integration', () => {
+  it.each([
+    { columns: 120, tier: 'wide', sections: true, frame: true },
+    { columns: 80, tier: 'medium', sections: true, frame: false },
+    { columns: 48, tier: 'narrow', sections: false, frame: false },
+    { columns: 20, tier: 'minimal', sections: false, frame: false },
+  ])('renders the $tier transcript once at $columns columns', async ({ columns, sections, frame }) => {
+    const { session, chunks } = buildSession('Partner', columns);
+    await session.renderStartupCard();
+    const output = stripAnsi(chunks.join(''));
+
+    const logo = sections ? /Autonomous AI Engine/g : /AIDEN/g;
+    expect(output.match(logo)).toHaveLength(1);
+    expect(output).toContain('Partner');
+    expect(output).toContain('llama-3.3-70b-versatile'.slice(0, columns >= 48 ? 8 : 3));
+    expect(output).toMatch(/built solo/i);
+    expect(output.includes('Environment')).toBe(sections);
+    expect(output.includes('Capabilities')).toBe(sections);
+    expect(output.includes('╭')).toBe(frame);
+    if (sections) {
+      expect(output).toMatch(/77 (?:loaded|tools)/);
+      expect(output).toMatch(/76 (?:loaded|skills)/);
+      expect(output).toContain('memory active');
+    }
+    for (const line of output.split(/\r?\n/)) {
+      expect(stringWidth(line), line).toBeLessThanOrEqual(Math.max(1, columns - 2));
+    }
+  });
+
+  it('does not subscribe the completed startup transcript to resize events', async () => {
+    const { display, chunks, out } = captureDisplay(120);
+    const approvalEngine = new ApprovalEngine('smart', {});
+    approvalEngine.setAutonomyPolicy(resolveAutonomyPolicy('Partner', {
+      workspaceRoots: [process.cwd()],
+    }));
+    const session = new ChatSession({
+      agent: {} as never,
+      display,
+      commandRegistry: new CommandRegistry(),
+      callbacks: {} as never,
+      sessionManager: {} as never,
+      approvalEngine,
+      skin: new SkinEngine({ forceMono: true }),
+      toolRegistry: { list: () => [] } as never,
+      skillLoader: { list: async () => [] } as never,
+      resolver: {} as never,
+      config: {} as never,
+      initialProviderId: 'groq',
+      initialModelId: 'test-model',
+      installSignalHandler: false,
+    });
+
+    await session.renderStartupCard();
+    const rendered = chunks.join('');
+    (out as unknown as { columns: number }).columns = 44;
+    out.emit('resize');
+    (out as unknown as { columns: number }).columns = 120;
+    out.emit('resize');
+
+    expect(chunks.join('')).toBe(rendered);
+    expect(stripAnsi(rendered).match(/Autonomous AI Engine/g)).toHaveLength(1);
   });
 });

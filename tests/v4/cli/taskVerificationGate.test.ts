@@ -166,9 +166,8 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
     expect(task!.status).toBe('verification_failed');
     expect(task!.evidence!.verdict).toBe('verification_failed');
     expect(task!.evidence!.failures[0].tool).toBe('file_write');
-    // Honest surface: the user is told what was claimed without evidence.
-    expect(chunks.join('')).toMatch(/verification failed/i);
-    expect(chunks.join('')).toMatch(/file_write/);
+    expect(chunks.join('')).toMatch(/Could not verify required outcome/i);
+    expect(chunks.join('').match(/Could not verify required outcome/gi)).toHaveLength(1);
   });
 
   it('happy path: evidence-backed mutation (file present on disk) → completed with handles persisted on the row', async () => {
@@ -176,7 +175,7 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
     // stats it before trusting the verdict (part b), so the test writes it.
     const outPath = path.join(tmp, 'out.txt');
     await fs.writeFile(outPath, 'x'.repeat(42));
-    const { task } = await runTurn({
+    const { task, chunks } = await runTurn({
       toolCallTrace: [{
         name: 'file_write',
         result: { success: true, path: outPath, bytesWritten: 42 },
@@ -188,6 +187,7 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
     const handles = task!.evidence!.handles;
     expect(handles.some((h) => h.kind === 'path' && h.value === outPath && h.verified)).toBe(true);
     expect(handles.some((h) => h.kind === 'bytes' && h.value === 42)).toBe(true);
+    expect(chunks.join('')).toMatch(/Verified/);
   });
 
   it('missing artifact: verifier-ok but the claimed file is NOT on disk → verification_failed (part b, through the real seam)', async () => {
@@ -217,13 +217,15 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
       }],
     });
     expect(task!.status).toBe('completed_unverified');
-    expect(chunks.join('')).toMatch(/completed unverified/i);
+    expect(chunks.join('')).toMatch(/Completed/i);
+    expect(chunks.join('')).not.toMatch(/weak evidence|completed unverified/i);
   });
 
   it('pure prose turn → completed (nothing claimed, nothing gates)', async () => {
-    const { task } = await runTurn({ toolCallTrace: [] });
+    const { task, chunks } = await runTurn({ toolCallTrace: [] });
     expect(task!.status).toBe('completed');
     expect(task!.evidence!.verdict).toBe('completed');
+    expect(chunks.join('')).not.toMatch(/^.*Completed.*$/m);
   });
 
   it('model-declared ui_task_done failure → row finalized as failed with the declaration recorded (never upgraded by a clean stop)', async () => {

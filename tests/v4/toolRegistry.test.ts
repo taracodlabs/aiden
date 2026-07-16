@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { ApprovalEngine } from '../../moat/approvalEngine';
 
 import {
   ToolRegistry,
@@ -50,6 +51,200 @@ describe('ToolRegistry', () => {
 
   beforeEach(() => {
     registry = new ToolRegistry();
+  });
+
+  it('records approval wait separately from actual handler execution', async () => {
+    let now = 1_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      registry.register(makeHandler('timed-write', {
+        category: 'write',
+        mutates: true,
+        async execute() {
+          now += 6_000;
+          return { ok: true };
+        },
+      }));
+      const approvalEngine = new ApprovalEngine('manual', {
+        promptUser: async () => {
+          now += 8_000;
+          return 'allow';
+        },
+      });
+      const exec = registry.buildExecutor({ ...makeContext(), approvalEngine });
+
+      const result = await exec(call('timed-write'));
+
+      expect(result.activityTiming?.approvalStartedAt).toBe(1_000);
+      expect(result.activityTiming?.approvalEndedAt).toBe(9_000);
+      expect(result.activityTiming?.executionAttempts).toEqual([{
+        attempt: 1,
+        startedAt: 9_000,
+        endedAt: 15_000,
+        terminalResult: 'completed',
+      }]);
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('records a delayed denial without fabricating handler execution', async () => {
+    let now = 5_000;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const execute = vi.fn(async () => ({ ok: true }));
+    try {
+      registry.register(makeHandler('denied-write', { category: 'write', mutates: true, execute }));
+      const approvalEngine = new ApprovalEngine('manual', {
+        promptUser: async () => {
+          now += 8_000;
+          return 'deny';
+        },
+      });
+      const exec = registry.buildExecutor({ ...makeContext(), approvalEngine });
+
+      const result = await exec(call('denied-write'));
+
+      expect(execute).not.toHaveBeenCalled();
+      expect(result.activityTiming?.approvalEndedAt! - result.activityTiming?.approvalStartedAt!).toBe(8_000);
+      expect(result.activityTiming?.executionAttempts).toEqual([]);
+      expect(result.activityTiming?.terminalClassification).toBe('denied');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('cancellation during approval records no execution attempt', async () => {
+    const controller = new AbortController();
+    registry.register(makeHandler('cancelled-approval', { category: 'write', mutates: true }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => {
+        controller.abort();
+        return 'interrupted';
+      },
+    });
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('cancelled-approval'), controller.signal,
+    );
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.terminalClassification).toBe('cancelled');
+  });
+
+  it('preserves approval interruption without requiring the turn signal to be aborted', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register(makeHandler('interrupted-approval', {
+      category: 'write',
+      mutates: true,
+      execute,
+    }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => 'interrupted',
+    });
+
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('interrupted-approval'),
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.approvalDecision).toMatchObject({ state: 'interrupted', approved: false });
+    expect(result.error).toMatch(/interrupted/i);
+    expect(result.error).not.toMatch(/denied by approval engine/i);
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.terminalClassification).toBe('cancelled');
+  });
+
+  it('preserves explicit denial as denied with no handler execution', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register(makeHandler('explicit-denial', {
+      category: 'write',
+      mutates: true,
+      execute,
+    }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => 'deny',
+    });
+
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('explicit-denial'),
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.approvalDecision).toMatchObject({ state: 'denied', approved: false });
+    expect({ ...result }.approvalDecision).toMatchObject({ state: 'denied', approved: false });
+    expect(result.error).toMatch(/denied by approval engine/i);
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.terminalClassification).toBe('denied');
+  });
+
+  it('keeps a hard security block distinct from denial and cancellation', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register(makeHandler('shell_exec', {
+      category: 'execute',
+      mutates: true,
+      riskTier: 'dangerous',
+      execute,
+    }));
+    const approvalEngine = new ApprovalEngine('off');
+
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(
+      call('shell_exec', { command: 'rm -rf /' }),
+    );
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(result.approvalDecision).toMatchObject({ state: 'blocked', approved: false });
+    expect(result.error).toMatch(/blocked/i);
+    expect(result.error).not.toMatch(/you declined/i);
+    expect(result.activityTiming?.terminalClassification).toBe('blocked');
+  });
+
+  it('cancellation during handler retains elapsed execution once', async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const controller = new AbortController();
+    try {
+      registry.register(makeHandler('cancelled-run', {
+        async execute() {
+          now = 2_500;
+          controller.abort();
+          throw new Error('interrupted');
+        },
+      }));
+      const result = await registry.buildExecutor(makeContext())(call('cancelled-run'), controller.signal);
+      expect(result.activityTiming?.executionDurationMs).toBe(2_500);
+      expect(result.activityTiming?.executionAttempts).toHaveLength(1);
+      expect(result.activityTiming?.terminalClassification).toBe('cancelled');
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
+  it('timeout before handler records no execution duration', async () => {
+    registry.register(makeHandler('approval-timeout', { category: 'write', mutates: true }));
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => { throw new Error('approval timed out'); },
+    });
+    const result = await registry.buildExecutor({ ...makeContext(), approvalEngine })(call('approval-timeout'));
+    expect(result.activityTiming?.executionAttempts).toEqual([]);
+    expect(result.activityTiming?.executionDurationMs).toBe(0);
+    expect(result.activityTiming?.terminalClassification).toBe('timed_out');
+  });
+
+  it('timeout during handler retains execution duration and one settlement', async () => {
+    let now = 0;
+    const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    try {
+      registry.register(makeHandler('handler-timeout', {
+        async execute() {
+          now = 3_000;
+          throw new Error('handler timeout');
+        },
+      }));
+      const result = await registry.buildExecutor(makeContext())(call('handler-timeout'));
+      expect(result.activityTiming?.executionDurationMs).toBe(3_000);
+      expect(result.activityTiming?.executionAttempts).toHaveLength(1);
+      expect(result.activityTiming?.terminalClassification).toBe('timed_out');
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it('1. register/get round-trip returns the same handler', () => {
@@ -146,6 +341,31 @@ describe('ToolRegistry', () => {
       .toEqual(['a', 'u1', 'b', 'u2']);
     expect(registry.getSchemas().map((s) => s.name))
       .toEqual(['a', 'u1', 'b', 'u2']);
+  });
+
+  it('registers optional future interaction metadata without exposing it in provider schemas', () => {
+    const schema = makeSchema('plugin_prompt');
+    registry.register(makeHandler('plugin_prompt', {
+      schema,
+      mutates: false,
+      interaction: {
+        mode: 'exclusive_modal',
+        decision: 'future_plugin_decision',
+        cancellation: 'cancelled',
+        futureField: 'preserved internally',
+      },
+    } as never));
+    registry.register(makeHandler('ordinary_plugin', { mutates: false }));
+    registry.register(makeHandler('mutating_plugin', { mutates: true }));
+
+    expect(registry.get('plugin_prompt')?.interaction).toMatchObject({
+      mode: 'exclusive_modal',
+      decision: 'future_plugin_decision',
+    });
+    expect(registry.get('ordinary_plugin')?.interaction).toBeUndefined();
+    expect(registry.get('mutating_plugin')?.interaction).toBeUndefined();
+    expect(registry.getSchemas().find((item) => item.name === 'plugin_prompt')).toEqual(schema);
+    expect(JSON.stringify(registry.getSchemas())).not.toContain('interaction');
   });
 
   it('9. byCategory returns handlers matching the requested category', () => {

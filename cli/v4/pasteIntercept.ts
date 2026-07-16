@@ -109,7 +109,8 @@ function compressSync(text: string): { id: string; label: string } {
   const id = String(next);
   writeFileSync(path.join(dir, `paste_${id}.txt`), text, 'utf8');
   writeNextIdSync(next + 1);
-  const lineCount = (text.match(/\n/g)?.length ?? 0) + 1;
+  const newlineCount = text.match(/\n/g)?.length ?? 0;
+  const lineCount = Math.max(1, newlineCount + (text.endsWith('\n') ? 0 : 1));
   return { id, label: `[paste #${id}: ${lineCount} lines, ${formatBytes(text)}]` };
 }
 
@@ -153,18 +154,17 @@ function normalize(text: string): string {
  * user sees identical chrome regardless of how the paste arrived.
  */
 function payloadToEmission(payload: string): string {
-  const trimmed = payload.replace(/\n+$/, '');
-  if (!trimmed.includes('\n') && trimmed.length <= 500) {
-    return trimmed;
+  if (!payload.includes('\n') && payload.length <= 500) {
+    return payload;
   }
   try {
-    const { id, label } = compressSync(trimmed);
-    originals.set(id, trimmed);
+    const { id, label } = compressSync(payload);
+    originals.set(id, payload);
     return label;
   } catch {
     // Disk failure: collapse newlines so the auto-submit we're
     // preventing doesn't fire downstream.
-    return trimmed.replace(/\n/g, ' ');
+    return payload.replace(/\n/g, ' ');
   }
 }
 

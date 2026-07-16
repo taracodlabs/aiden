@@ -12,6 +12,7 @@ import {
   makeNoOpToolRowHandle,
 } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+import type { ActivitySnapshot } from '../../../cli/v4/activityRegistry';
 
 // Strip ANSI escape sequences so assertions stay terminal-agnostic.
 function stripAnsi(s: string): string {
@@ -186,6 +187,30 @@ describe('Display', () => {
 });
 
 describe('Display Phase 14b helpers', () => {
+  it('renders one concise structured task outcome with an inspectability hint', () => {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(chunk, _enc, cb) { chunks.push(chunk.toString()); cb(); },
+    });
+    const d = new Display({
+      stdout: out as unknown as NodeJS.WriteStream,
+      skin: new SkinEngine({ forceMono: true }),
+    });
+    d.taskOutcome({
+      kind: 'unverified_required',
+      severity: 'error',
+      label: 'Could not verify required outcome',
+      taskId: '7',
+      evidenceCount: 0,
+      hasRequiredEvidenceGap: true,
+      executionStarted: true,
+      inspectable: true,
+      prominent: true,
+    });
+    expect(chunks.join('')).toContain('Could not verify required outcome · Task: 7');
+    expect(chunks.join('')).toContain('Next: /status');
+    expect(chunks.join('').match(/Could not verify required outcome/g)).toHaveLength(1);
+  });
   function captureDisplay() {
     const chunks: string[] = [];
     const out = new Writable({
@@ -250,7 +275,7 @@ describe('Display Phase 14b helpers', () => {
 //
 // All tests force AIDEN_UI_ICONS=0 so emoji don't sneak into assertions.
 describe('Display v4.1.3-repl-polish toolRow', () => {
-  function captureDisplay(opts: { tty: boolean }) {
+  function captureDisplay(opts: { tty: boolean; columns?: number }) {
     const chunks: string[] = [];
     const out = new Writable({
       write(chunk, _enc, cb) {
@@ -259,6 +284,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
       },
     }) as unknown as NodeJS.WriteStream;
     (out as unknown as { isTTY: boolean }).isTTY = opts.tty;
+    if (opts.columns !== undefined) (out as unknown as { columns: number }).columns = opts.columns;
     const skin = new SkinEngine({ forceMono: true });
     const d = new Display({ skin, stdout: out });
     return { d, chunks };
@@ -485,6 +511,59 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('renders active phases from the registry-owned snapshot', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    let snapshot: ActivitySnapshot = {
+      phase: 'awaiting_approval', phaseElapsedMs: 8_000, lifecycleElapsedMs: 8_000,
+      approvalWaitMs: 8_000, executionDurationMs: 0, verificationDurationMs: 0,
+      retryBackoffMs: 0, attemptCount: 0,
+    };
+    const row = d.toolRow('shell_exec', { command: 'echo ok' }, () => snapshot);
+    expect(stripAnsi(chunks.join(''))).toContain('awaiting approval 8.0s');
+    snapshot = { ...snapshot, phase: 'running', phaseElapsedMs: 6_100, executionDurationMs: 6_100, attemptCount: 1 };
+    row.refresh?.();
+    expect(stripAnsi(chunks.at(-1) ?? '')).toContain('running 6.1s');
+    snapshot = { ...snapshot, phase: 'verifying', phaseElapsedMs: 180, verificationDurationMs: 180 };
+    row.refresh?.();
+    expect(stripAnsi(chunks.at(-1) ?? '')).not.toContain('running 6.1s');
+    row.dismiss();
+  });
+
+  it.each([
+    ['completed', 'done 6.1s · waited 8.0s'],
+    ['denied', 'denied · waited 8.0s'],
+    ['cancelled', 'cancelled after 6.1s'],
+    ['timed_out', 'timed out after 6.1s'],
+  ] as const)('renders truthful %s terminal wording', (terminalClassification, expected) => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    const snapshot: ActivitySnapshot = {
+      phase: 'terminal', phaseElapsedMs: 0, lifecycleElapsedMs: 14_100,
+      approvalWaitMs: 8_000,
+      executionDurationMs: terminalClassification === 'denied' ? 0 : 6_100,
+      verificationDurationMs: 100, retryBackoffMs: 0, attemptCount: terminalClassification === 'denied' ? 0 : 1,
+      terminalClassification,
+    };
+    const row = d.toolRow('shell_exec', { command: 'echo ok' }, () => snapshot);
+    chunks.length = 0;
+    row.finish?.(snapshot);
+    expect(stripAnsi(chunks.join(''))).toContain(expected);
+  });
+
+  it('keeps the primary outcome and execution duration at narrow width', () => {
+    const { d, chunks } = captureDisplay({ tty: true, columns: 50 });
+    const snapshot: ActivitySnapshot = {
+      phase: 'terminal', phaseElapsedMs: 0, lifecycleElapsedMs: 14_100,
+      approvalWaitMs: 8_000, executionDurationMs: 6_100, verificationDurationMs: 100,
+      retryBackoffMs: 2_000, attemptCount: 2, terminalClassification: 'completed',
+    };
+    const row = d.toolRow('shell_exec', { command: 'a very long command that cannot fit beside timing' }, () => snapshot);
+    chunks.length = 0;
+    row.finish?.(snapshot);
+    const rendered = stripAnsi(chunks.join(''));
+    expect(rendered).toContain('done 6.1s');
+    expect(rendered.split(/\r?\n/).filter(Boolean).every((line) => line.replace(/\r/g, '').length <= 48)).toBe(true);
   });
 
   it('non-TTY: no live indicator scheduled (no "running …" ever appears)', () => {

@@ -302,8 +302,7 @@ describe('AidenAgent — PlannerGuard opt-in toggle (v4.6 Phase 2M)', () => {
  * HonestyEnforcement.check at the post-loop scan site
  * (aidenAgent.ts:712-727). Three invariants:
  *
- *   - finalContent gets the footer APPENDED when enforce mode finds
- *     unverified outcomes — never rewritten in place
+ *   - finalContent remains clean when enforce mode finds unverified outcomes
  *   - findings are captured into honestyFindings regardless of mode
  *     (off mode short-circuits before this point)
  *   - loopResult.messages history is NEVER mutated by the verifier
@@ -336,7 +335,7 @@ describe('AidenAgent — HonestyEnforcement wiring', () => {
     expect(result.honestyFindings).toHaveLength(0);
   });
 
-  it('5. mutating tool errored: footer appended in enforce mode, message history untouched', async () => {
+  it('5. mutating tool errored: structured findings returned, content and history untouched', async () => {
     const provider = new MockProviderAdapter([
       MockProviderAdapter.toolUse([tc('a', 'file_write', {})]),
       MockProviderAdapter.stop('I saved the file.'),
@@ -357,27 +356,22 @@ describe('AidenAgent — HonestyEnforcement wiring', () => {
     });
     const result = await agent.runConversation([userMsg('save the file')]);
 
-    // The model's original text is preserved AND the footer is appended.
-    expect(result.finalContent.startsWith('I saved the file.')).toBe(true);
-    expect(result.finalContent).toContain('Verifier');
-    expect(result.finalContent).toContain('file_write');
-    expect(result.finalContent).toContain('errored');
-    expect(result.finalContent).toContain('EACCES');
+    expect(result.finalContent).toBe('I saved the file.');
+    expect(result.finalContent).not.toContain('Verifier');
 
     expect(result.honestyFindings).toBeDefined();
     expect(result.honestyFindings).toHaveLength(1);
     expect(result.honestyFindings![0].reason).toBe('tool_errored');
 
-    // CRITICAL invariant: the assistant message in loopResult.messages
-    // history is NEVER mutated. The footer lives only in
-    // result.finalContent (the caller-visible final string).
+    // CRITICAL invariant: neither caller-visible content nor history is
+    // mutated by presentation prose.
     const lastAssistant = [...result.messages]
       .reverse()
       .find((m) => m.role === 'assistant' && (!m.toolCalls || m.toolCalls.length === 0));
     expect(lastAssistant?.content).toBe('I saved the file.');
   });
 
-  it('6. memory_add verified=false: footer appended, finalContent never rewritten in place', async () => {
+  it('6. memory_add verified=false: structured finding returned with clean content', async () => {
     const provider = new MockProviderAdapter([
       MockProviderAdapter.toolUse([tc('a', 'memory_add', { fact: 'x' })]),
       MockProviderAdapter.stop('I remembered that fact.'),
@@ -406,11 +400,8 @@ describe('AidenAgent — HonestyEnforcement wiring', () => {
     expect(result.honestyFindings).toHaveLength(1);
     expect(result.honestyFindings![0].reason).toBe('memory_verified_false');
 
-    // finalContent has the original text intact + appended footer.
-    expect(result.finalContent.startsWith('I remembered that fact.')).toBe(true);
-    expect(result.finalContent).toContain('Verifier');
-    expect(result.finalContent).toContain('memory_add');
-    expect(result.finalContent).toContain('not verified');
+    expect(result.finalContent).toBe('I remembered that fact.');
+    expect(result.finalContent).not.toContain('Verifier');
   });
 
   it('7. detect mode: findings captured but no footer appended', async () => {

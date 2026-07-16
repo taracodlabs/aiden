@@ -9,6 +9,7 @@
 import Docker from 'dockerode'
 import path   from 'path'
 import fs     from 'fs'
+import { createHash } from 'node:crypto'
 
 // ── Types ──────────────────────────────────────────────────────
 
@@ -37,6 +38,13 @@ const ENTRYPOINT_CMD = [
     'tail -f /dev/null',
   ].join(' && '),
 ]
+
+function containerNameForTask(taskId: string): string {
+  const safeTaskId = /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,47}$/.test(taskId)
+    ? taskId
+    : `task-${createHash('sha256').update(taskId).digest('hex').slice(0, 12)}`
+  return `devos-browser-${safeTaskId}`
+}
 
 // ── Persistence ────────────────────────────────────────────────
 
@@ -79,10 +87,10 @@ class BrowserVaultManager {
     const existing = this.vaults.get(taskId)
     if (existing) return existing
 
-    const containerName = `devos-browser-${taskId}`
+    const containerName = containerNameForTask(taskId)
     const hostPort      = this.allocatePort()
 
-    let container: Docker.Container
+    let container: Docker.Container | undefined
     try {
       container = await this.docker.createContainer({
         name:  containerName,
@@ -102,9 +110,14 @@ class BrowserVaultManager {
         },
       })
       await container.start()
-    } catch (err: any) {
-      throw new Error(`[BrowserVault] Failed to create container: ${err.message}`)
+    } catch {
+      if (container) {
+        try { await container.remove({ force: true }) } catch {}
+      }
+      throw new Error('[BrowserVault] Failed to create container. Ensure Docker is available.')
     }
+
+    if (!container) throw new Error('[BrowserVault] Failed to create container. Ensure Docker is available.')
 
     const vault: BrowserVault = {
       taskId, containerId: container.id, containerName, hostPort, createdAt: Date.now(),

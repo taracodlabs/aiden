@@ -27,7 +27,7 @@
 //   - Bot replies suppressed (no bot loops)
 //   - Token never logged or surfaced in error messages
 
-import TelegramBotApi from 'node-telegram-bot-api'
+import TelegramBotApi, { type Message, type MessageEntity } from 'node-telegram-bot-api'
 import { promises as fsPromises, createWriteStream } from 'node:fs'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -920,7 +920,7 @@ export class TelegramAdapter implements ChannelAdapter {
   protected wireMessageHandlers(): void {
     if (!this.client) return
     const dispatch = (source: 'message' | 'voice' | 'audio' | 'photo' | 'document') =>
-      async (msg: TelegramBotApi.Message): Promise<void> => {
+      async (msg: Message): Promise<void> => {
         // Phase v4.1-3.2 — third liveness log. Fires once per process
         // on the first inbound message regardless of content type. If
         // "polling launched" + "polling getMe ok" fired but this never
@@ -976,7 +976,7 @@ export class TelegramAdapter implements ChannelAdapter {
    * process), false if we've already handled it (caller should skip).
    * Bounded FIFO of 256 entries — older keys get evicted.
    */
-  private markMessageSeen(msg: TelegramBotApi.Message): boolean {
+  private markMessageSeen(msg: Message): boolean {
     const chatId    = msg.chat?.id
     const messageId = msg.message_id
     if (chatId === undefined || messageId === undefined) {
@@ -995,7 +995,7 @@ export class TelegramAdapter implements ChannelAdapter {
     return true
   }
 
-  private async handleIncoming(msg: TelegramBotApi.Message): Promise<void> {
+  private async handleIncoming(msg: Message): Promise<void> {
     this.lastMessageAt = Date.now()
 
     // Phase v4.1-3.1 — shape fingerprint at the dispatch boundary.
@@ -1257,7 +1257,7 @@ export class TelegramAdapter implements ChannelAdapter {
    * annotation so the agent sees both signals on one user turn.
    */
   private async handleVoiceMessage(
-    msg:        TelegramBotApi.Message,
+    msg:        Message,
     file:       TelegramVoiceFile,
     isAudio:    boolean,
     chatId:     string,
@@ -1492,7 +1492,7 @@ export class TelegramAdapter implements ChannelAdapter {
    * annotation), concat caption when present.
    */
   private async handlePhotoMessage(
-    msg:        TelegramBotApi.Message,
+    msg:        Message,
     photoArr:   TelegramPhotoSize[],
     chatId:     string,
     userId:     string,
@@ -1615,7 +1615,7 @@ export class TelegramAdapter implements ChannelAdapter {
    *   - Anything else → friendly reject reply
    */
   private async handleDocumentMessage(
-    msg:        TelegramBotApi.Message,
+    msg:        Message,
     file:       TelegramDocumentFile,
     chatId:     string,
     userId:     string,
@@ -1955,7 +1955,7 @@ export class TelegramAdapter implements ChannelAdapter {
    * and surfaces the right user-visible reply when one is needed.
    */
   private async routeCommand(
-    msg: TelegramBotApi.Message,
+    msg: Message,
     chatId: string,
     userId: string,
   ): Promise<boolean> {
@@ -2002,7 +2002,7 @@ export class TelegramAdapter implements ChannelAdapter {
    * address. Voice/audio without text uses the caption (or
    * reply-to-bot) as its mention signal.
    */
-  private isAddressedToBot(msg: TelegramBotApi.Message, text: string): boolean {
+  private isAddressedToBot(msg: Message, text: string): boolean {
     const username = (this.botUsername ?? '').toLowerCase()
     if (username && text.toLowerCase().startsWith(`@${username}`)) return true
     // Telegram exposes `entities` (text messages) and `caption_entities`
@@ -2010,7 +2010,7 @@ export class TelegramAdapter implements ChannelAdapter {
     // in groups, the mention lives on the caption.
     const entitySources = [
       msg.entities,
-      (msg as any).caption_entities as TelegramBotApi.MessageEntity[] | undefined,
+      (msg as any).caption_entities as MessageEntity[] | undefined,
     ]
     for (const entities of entitySources) {
       if (!entities) continue
@@ -2044,7 +2044,7 @@ export class TelegramAdapter implements ChannelAdapter {
    * instructions" lands inside `<message>...</message>` rather than as
    * an apparent system override.
    */
-  private wrapGroupMessage(msg: TelegramBotApi.Message, content: string): string {
+  private wrapGroupMessage(msg: Message, content: string): string {
     const username = msg.from?.username ? `@${msg.from.username}` : (msg.from?.first_name ?? 'unknown')
     const groupName = msg.chat.title ?? `chat ${msg.chat.id}`
     return (

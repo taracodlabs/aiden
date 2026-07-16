@@ -128,6 +128,19 @@ describe('CommandRegistry', () => {
     expect(err.join('')).toBe(''); // error helper returns string, not stderr
   });
 
+  it('suggests a close visible command but keeps low-confidence commands on /help', async () => {
+    reg.register(mkCmd({ name: 'model', description: 'choose model' }));
+    reg.register(mkCmd({ name: 'doctor', description: 'diagnose setup' }));
+    const { display, out } = mkDisplay();
+    await reg.execute('/modle', { display });
+    expect(out.join('')).toContain('Did you mean /model?');
+
+    out.length = 0;
+    await reg.execute('/unrelated-command', { display });
+    expect(out.join('')).toContain('Type /help for a list.');
+    expect(out.join('')).not.toContain('Did you mean');
+  });
+
   it('filter("/m") returns prefix-match commands first', () => {
     reg.register(mkCmd({ name: 'model', description: 'switch model' }));
     reg.register(mkCmd({ name: 'memory', description: 'show memory' }));

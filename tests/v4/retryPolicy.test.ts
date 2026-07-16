@@ -24,7 +24,7 @@ import {
 } from '../../core/v4/retryPolicy';
 import { AidenAgent, type ToolExecutor } from '../../core/v4/aidenAgent';
 import { MockProviderAdapter } from '../../core/v4/__mocks__/mockProvider';
-import type { Message, ToolCallRequest, ToolSchema } from '../../providers/v4/types';
+import type { Message, ToolCallRequest, ToolCallResult, ToolSchema } from '../../providers/v4/types';
 import { decideTaskVerdict } from '../../core/v4/taskVerification';
 
 // ── Part 1 — the policy table (pure) ────────────────────────────────────
@@ -160,11 +160,25 @@ describe('agent-loop retry integration', () => {
       MockProviderAdapter.toolUse([tc('1', 'fetch_url', { url: 'http://x' })]),
       MockProviderAdapter.stop('done'),
     ]);
-    const agent = new AidenAgent({ provider, toolExecutor: flakyExecutor, tools: NO_TOOLS });
+    let finalToolResult: ToolCallResult | undefined;
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: flakyExecutor,
+      tools: NO_TOOLS,
+      onToolCall: (_call, phase, toolResult) => {
+        if (phase === 'after') finalToolResult = toolResult;
+      },
+    });
     const result = await agent.runConversation([userMsg('get it')]);
 
     // ONE model tool call, TWO executor attempts (the retry).
     expect(calls).toBe(2);
+    expect(finalToolResult?.activityTiming?.executionAttempts).toHaveLength(2);
+    expect(finalToolResult?.activityTiming?.attemptCount).toBe(2);
+    expect(finalToolResult?.activityTiming?.retryBackoffMs).toBeGreaterThan(0);
+    expect(finalToolResult?.activityTiming?.executionDurationMs).toBeLessThan(
+      finalToolResult?.activityTiming?.retryBackoffMs ?? 0,
+    );
     const entry = result.toolCallTrace.find((t) => t.name === 'fetch_url')!;
     expect(entry.retries).toBeDefined();
     expect(entry.retries![0].category).toBe('network');

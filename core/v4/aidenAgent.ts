@@ -45,6 +45,8 @@ import type {
   ToolSchema,
   ToolCallRequest,
   ToolCallResult,
+  ToolActivityTiming,
+  ToolActivityUpdate,
   ProviderAdapter,
   ProviderCallOutput,
 } from '../../providers/v4/types';
@@ -75,10 +77,16 @@ import type { PromptCaching } from './promptCaching';
 import { TurnState, type RecoveryDecision } from './turnState';
 import { handlerMutatesForCall } from './handlerMutates';
 import {
+  isExclusiveToolInteraction,
+  type ToolInteraction,
+} from './toolRegistry';
+import {
   buildCommandRecord,
   type CommandId,
   type CommandRecord,
 } from './executionContract';
+import type { TaskOutcomePresentation } from './taskOutcomePresentation';
+import { projectApprovalFacts, reconcileApprovalResponse } from './approvalResponseConsistency';
 import {
   decideRecoveryAction,
   resolveRetryPolicyConfig,
@@ -157,7 +165,87 @@ import { preArmIntent } from './agent/intentPreArm';
  * The loop catches throws defensively so a buggy executor still keeps
  * the conversation alive.
  */
-export type ToolExecutor = (call: ToolCallRequest, signal?: AbortSignal) => Promise<ToolCallResult>;
+export type ToolExecutor = (
+  call: ToolCallRequest,
+  signal?: AbortSignal,
+  onActivity?: (update: ToolActivityUpdate) => void,
+) => Promise<ToolCallResult>;
+
+async function invokeToolWithTiming(
+  executor: ToolExecutor,
+  call: ToolCallRequest,
+  signal: AbortSignal | undefined,
+  onActivity: ((update: ToolActivityUpdate) => void) | undefined,
+): Promise<ToolCallResult> {
+  const startedAt = Date.now();
+  let result: ToolCallResult;
+  try {
+    result = await executor(call, signal, onActivity);
+  } catch (error) {
+    result = {
+      id: call.id,
+      name: call.name,
+      result: null,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  if (result.activityTiming) return result;
+  const endedAt = Date.now();
+  const terminalClassification = signal?.aborted
+    ? 'cancelled'
+    : result.error
+      ? (/timed?\s*out|timeout/i.test(result.error) ? 'timed_out' : 'failed')
+      : result.degraded ? 'degraded' : 'completed';
+  return {
+    ...result,
+    activityTiming: {
+      dispatchStartedAt: startedAt,
+      dispatchEndedAt: endedAt,
+      executionAttempts: [{
+        attempt: 1,
+        startedAt,
+        endedAt,
+        terminalResult: terminalClassification,
+      }],
+      executionDurationMs: Math.max(0, endedAt - startedAt),
+      approvalWaitMs: 0,
+      attemptCount: 1,
+      terminalClassification,
+    },
+  };
+}
+
+function mergeActivityTiming(
+  target: ToolActivityTiming | undefined,
+  source: ToolActivityTiming | undefined,
+): ToolActivityTiming | undefined {
+  if (!source) return target;
+  if (!target) {
+    return {
+      ...source,
+      executionAttempts: source.executionAttempts.map((attempt, index) => ({ ...attempt, attempt: index + 1 })),
+    };
+  }
+  const offset = target.executionAttempts.length;
+  const executionAttempts = [
+    ...target.executionAttempts,
+    ...source.executionAttempts.map((attempt, index) => ({ ...attempt, attempt: offset + index + 1 })),
+  ];
+  return {
+    ...target,
+    dispatchStartedAt: Math.min(target.dispatchStartedAt, source.dispatchStartedAt),
+    dispatchEndedAt: source.dispatchEndedAt ?? target.dispatchEndedAt,
+    approvalStartedAt: target.approvalStartedAt ?? source.approvalStartedAt,
+    approvalEndedAt: source.approvalEndedAt ?? target.approvalEndedAt,
+    approvalWaitMs: (target.approvalWaitMs ?? 0) + (source.approvalWaitMs ?? 0),
+    executionAttempts,
+    executionDurationMs: (target.executionDurationMs ?? 0) + (source.executionDurationMs ?? 0),
+    verificationDurationMs: (target.verificationDurationMs ?? 0) + (source.verificationDurationMs ?? 0),
+    retryBackoffMs: (target.retryBackoffMs ?? 0) + (source.retryBackoffMs ?? 0),
+    attemptCount: executionAttempts.length,
+    terminalClassification: source.terminalClassification ?? target.terminalClassification,
+  };
+}
 
 /**
  * Phase v4.1.2 alive-core: identity / memory files that can flip the
@@ -235,6 +323,8 @@ export interface AidenAgentOptions {
     phase:   'before' | 'after',
     result?: ToolCallResult,
   ) => void;
+  /** Optional live phase observer. It is observational and may be omitted. */
+  onToolActivity?: (call: ToolCallRequest, update: ToolActivityUpdate) => void;
   /**
    * Fires once at caution and once at warning. `kind` distinguishes the
    * iteration budget (turn/maxTurns) from the v4.12 BE.1 token budget
@@ -283,6 +373,8 @@ export interface AidenAgentOptions {
    * Undefined means "treat as a normal executable tool" (default).
    */
   resolveUiOnly?:          (toolName: string) => boolean | undefined;
+  /** Resolves runtime-only interaction metadata from the live tool registry. */
+  resolveToolInteraction?: (toolName: string) => ToolInteraction | undefined;
   // ── Context layers ───────────────────────────────────────────────────
   promptBuilder?:          PromptBuilder;
   promptBuilderOptions?:   PromptBuilderOptions;
@@ -328,6 +420,8 @@ export interface AidenAgentOptions {
    * the gap the rest of Issue K's wave bar covers.
    */
   onProviderRequestStart?: (providerId: string) => void;
+  /** Optional sink for transcript preflight repairs. */
+  preflightWarn?: (message: string) => void;
   /** Stage-0 intent pre-arm: look up a skill's `required_tools`. */
   lookupSkillRequiredTools?: (skillName: string) => Promise<string[] | null>;
 }
@@ -342,6 +436,8 @@ export interface AidenAgentResult {
   totalUsage:          { inputTokens: number; outputTokens: number };
   toolCallTrace:       HonestyTraceEntry[];
   honestyFindings?:    HonestyFinding[];
+  /** Optional structured turn outcome, populated by a finalization owner. */
+  taskOutcome?:         TaskOutcomePresentation;
   skillCreated?:       string;
   /**
    * v4.1.6 Polish 2 — when SkillTeacher's `observeTurn` returns a
@@ -514,6 +610,7 @@ export class AidenAgent {
   private readonly modelMetadata = new ModelMetadata();
   private readonly fallback?:                   FallbackStrategy;
   private readonly onToolCall?:                 AidenAgentOptions['onToolCall'];
+  private readonly onToolActivity?:             AidenAgentOptions['onToolActivity'];
   private readonly onBudgetWarning?:            AidenAgentOptions['onBudgetWarning'];
   private readonly plannerGuard?:               PlannerGuard;
   private readonly onPlannerGuardDecision?:     AidenAgentOptions['onPlannerGuardDecision'];
@@ -527,6 +624,7 @@ export class AidenAgent {
   private readonly resolveToolset?:             AidenAgentOptions['resolveToolset'];
   private readonly resolveMutates?:             AidenAgentOptions['resolveMutates'];
   private readonly resolveUiOnly?:              AidenAgentOptions['resolveUiOnly'];
+  private readonly resolveToolInteraction?:     AidenAgentOptions['resolveToolInteraction'];
   private readonly promptBuilder?:              PromptBuilder;
   private          promptBuilderOptions?:       PromptBuilderOptions;
   private readonly contextCompressor?:          ContextCompressor;
@@ -543,6 +641,7 @@ export class AidenAgent {
   private readonly onMemoryRefreshStart?:       AidenAgentOptions['onMemoryRefreshStart'];
   private readonly onPromptBuilt?:              AidenAgentOptions['onPromptBuilt'];
   private readonly onProviderRequestStart?:     AidenAgentOptions['onProviderRequestStart'];
+  private readonly preflightWarn?:              AidenAgentOptions['preflightWarn'];
   private readonly lookupSkillRequiredTools?:   AidenAgentOptions['lookupSkillRequiredTools'];
 
   // ── Cross-call state ─────────────────────────────────────────────────
@@ -615,6 +714,7 @@ export class AidenAgent {
     this.sessionTokenCap          = opts.sessionTokenCap;
     this.fallback                 = opts.fallback;
     this.onToolCall               = opts.onToolCall;
+    this.onToolActivity           = opts.onToolActivity;
     this.onBudgetWarning          = opts.onBudgetWarning;
     this.plannerGuard             = opts.plannerGuard;
     this.onPlannerGuardDecision   = opts.onPlannerGuardDecision;
@@ -627,6 +727,7 @@ export class AidenAgent {
     this.resolveToolset           = opts.resolveToolset;
     this.resolveMutates           = opts.resolveMutates;
     this.resolveUiOnly            = opts.resolveUiOnly;
+    this.resolveToolInteraction   = opts.resolveToolInteraction;
     this.promptBuilder            = opts.promptBuilder;
     this.promptBuilderOptions     = opts.promptBuilderOptions;
     this.contextCompressor        = opts.contextCompressor;
@@ -642,6 +743,7 @@ export class AidenAgent {
     this.onMemoryRefreshStart     = opts.onMemoryRefreshStart;
     this.onPromptBuilt            = opts.onPromptBuilt;
     this.onProviderRequestStart   = opts.onProviderRequestStart;
+    this.preflightWarn            = opts.preflightWarn;
     this.lookupSkillRequiredTools = opts.lookupSkillRequiredTools;
     // v4.5 Phase 7 — explicit sessionId. Existing access path
     // `(this as { sessionId?: string }).sessionId` at line 751–752
@@ -916,11 +1018,22 @@ export class AidenAgent {
     // v4.7.0 Phase 2.3 — the verifier now records deterministic
     // outcome events from `toolCallTrace` (not regex over the
     // assistant's text). When `findings.length > 0` AND mode is
-    // `enforce`, it returns an append-only `footer` we concatenate
-    // to `finalContent`. The model's text is NEVER rewritten —
-    // that was the v4.6.x failure mode this verifier replaces.
+    // Findings remain structured on the result. Presentation belongs to the
+    // finalization owner, so model content stays clean for every consumer.
     let honestyFindings: HonestyFinding[] | undefined;
-    let finalContent = loopResult.finalContent;
+    const approvalFacts = projectApprovalFacts(loopResult.toolCallTrace);
+    const finalContent = reconcileApprovalResponse(loopResult.finalContent, approvalFacts);
+    const resultMessages = [...loopResult.messages];
+    if (finalContent !== loopResult.finalContent) {
+      for (let index = resultMessages.length - 1; index >= 0; index -= 1) {
+        const message = resultMessages[index];
+        if (message.role !== 'assistant' || message.toolCalls?.length) continue;
+        if (message.content === loopResult.finalContent) {
+          resultMessages[index] = { ...message, content: finalContent };
+        }
+        break;
+      }
+    }
     if (this.honestyEnforcement && loopResult.finishReason === 'stop') {
       try {
         const scan = await this.honestyEnforcement.check(
@@ -930,9 +1043,6 @@ export class AidenAgent {
           loopResult.uiClaims,
         );
         honestyFindings = scan.findings;
-        if (scan.footer) {
-          finalContent = `${finalContent}\n\n${scan.footer}`;
-        }
       } catch {
         /* honesty failures must not break the turn */
       }
@@ -1028,7 +1138,7 @@ export class AidenAgent {
 
     return {
       finalContent,
-      messages:           loopResult.messages,
+      messages:           resultMessages,
       turnCount:          loopResult.turnCount,
       toolCallCount:      loopResult.toolCallCount,
       fallbackActivated:  loopResult.fallbackActivated,
@@ -1363,6 +1473,16 @@ export class AidenAgent {
       }
 
       let output: ProviderCallOutput;
+      // Once this turn has authoritative approval facts, hold subsequent
+      // streamed prose until the provider segment completes. Contradictory
+      // text cannot be repaired after it has already reached the terminal.
+      // No-approval turns retain token streaming unchanged.
+      const deferApprovalStream = runOptions.stream === true
+        && typeof this.provider.callStream === 'function'
+        && projectApprovalFacts(toolCallTrace).occurred === true;
+      const providerRunOptions = deferApprovalStream
+        ? { ...runOptions, onFirstDelta: undefined, onDelta: undefined }
+        : runOptions;
       const _llmStartedAt = _perfDiag ? Date.now() : 0;
       p2aDiag('provider.continuation.start', {
         iteration: turnCount,
@@ -1383,7 +1503,7 @@ export class AidenAgent {
             shim.db,
             { model: this.modelId ?? 'unknown', provider: this.providerId ?? 'unknown' },
             async (_ctx, patchAttrs) => {
-              const out = await this.callProvider(messages, effectiveTools, runOptions);
+              const out = await this.callProvider(messages, effectiveTools, providerRunOptions);
               patchAttrs({
                 input_tokens:        out.usage?.inputTokens ?? 0,
                 output_tokens:       out.usage?.outputTokens ?? 0,
@@ -1396,7 +1516,18 @@ export class AidenAgent {
             },
           );
         } else {
-          output = await this.callProvider(messages, effectiveTools, runOptions);
+          output = await this.callProvider(messages, effectiveTools, providerRunOptions);
+        }
+        if (deferApprovalStream && output.content) {
+          const safeContent = stripLeakedUiMarkup(output.content);
+          const reconciled = reconcileApprovalResponse(
+            safeContent,
+            projectApprovalFacts(toolCallTrace),
+          );
+          if (reconciled) {
+            runOptions.onFirstDelta?.();
+            runOptions.onDelta?.(reconciled);
+          }
         }
         p2aDiag('provider.continuation.complete', {
           iteration: turnCount,
@@ -1568,56 +1699,24 @@ export class AidenAgent {
       // ordering the model may have intended (we never reorder across
       // a mutating call).
       //
-      // Results land in `preComputedResults` keyed by call.id. The
-      // for-of loop checks this map at the toolExecutor dispatch site
-      // and uses the pre-computed result when available, falling
-      // through to live execution otherwise (mutating calls always,
-      // single-call read-only batches that we don't bother batching).
+      // Results land in `preComputedResults` keyed by call.id. A batch
+      // starts only when ordered dispatch reaches its first call, so a
+      // later read can never execute across an exclusive modal boundary.
+      // Mutating calls and single read calls stay on the live path.
       //
       // Errors caught per-call so one failure doesn't abort the
       // Promise.all — each cell of the batch returns a synthesized
       // error ToolCallResult that the downstream verifier path
       // handles identically to a live-execution error.
       const preComputedResults = new Map<string, ToolCallResult>();
-      {
-        const toolCalls = output.toolCalls;
-        const isReadOnly = (name: string): boolean =>
-          this.resolveMutates?.(name) !== true &&
-          this.resolveUiOnly?.(name) !== true;
-        // These read-only tools can open an exclusive terminal prompt. Keep
-        // them on the ordered live-dispatch path instead of Promise.all.
-        const isInteractive = (name: string): boolean =>
-          name === 'clarify' || name === 'plan_approval';
-        const isParallelRead = (name: string): boolean =>
-          isReadOnly(name) && !isInteractive(name);
-        let i = 0;
-        while (i < toolCalls.length) {
-          if (!isParallelRead(toolCalls[i].name)) { i += 1; continue; }
-          // Find the maximal consecutive read-only batch starting at i.
-          let j = i;
-          while (j < toolCalls.length && isParallelRead(toolCalls[j].name)) j += 1;
-          const batch = toolCalls.slice(i, j);
-          // Skip the parallel path for solo batches — no benefit, and
-          // keeps the live-execution path on the sequential loop where
-          // its existing timing instrumentation can still observe it.
-          if (batch.length > 1) {
-            const batchResults = await Promise.all(
-              batch.map((c) =>
-                this.toolExecutor(c, this._currentSignal).catch((err: unknown): ToolCallResult => ({
-                  id:     c.id,
-                  name:   c.name,
-                  result: null,
-                  error:  err instanceof Error ? err.message : String(err),
-                })),
-              ),
-            );
-            for (let k = 0; k < batch.length; k += 1) {
-              preComputedResults.set(batch[k].id, batchResults[k]);
-            }
-          }
-          i = j;
-        }
-      }
+      const toolCalls = output.toolCalls;
+      const isReadOnly = (name: string): boolean =>
+        this.resolveMutates?.(name) !== true &&
+        this.resolveUiOnly?.(name) !== true;
+      const isParallelRead = (name: string): boolean =>
+        isReadOnly(name) && !isExclusiveToolInteraction(
+          this.resolveToolInteraction?.(name),
+        );
       // v4.9.4 Slice 1 — `.entries()` so the surface + abort fill sites
       // can slice from `callIndex + 1` to compute the un-dispatched tail.
       for (const [callIndex, call] of output.toolCalls.entries()) {
@@ -1672,6 +1771,31 @@ export class AidenAgent {
         const blockedByRequiredClarification =
           this.pendingRequiredClarification !== null &&
           this.resolveMutates?.(call.name) === true;
+        // Start a read batch only when ordered dispatch reaches it. Adjacent
+        // reads still overlap, but never across an exclusive interaction.
+        if (isParallelRead(call.name) && !preComputedResults.has(call.id)) {
+          let batchEnd = callIndex;
+          while (
+            batchEnd < toolCalls.length &&
+            isParallelRead(toolCalls[batchEnd].name)
+          ) batchEnd += 1;
+          const batch = toolCalls.slice(callIndex, batchEnd);
+          if (batch.length > 1) {
+            const batchResults = await Promise.all(
+              batch.map((candidate) => invokeToolWithTiming(
+                this.toolExecutor,
+                candidate,
+                this._currentSignal,
+                (update) => {
+                  try { this.onToolActivity?.(candidate, update); } catch { /* observational */ }
+                },
+              )),
+            );
+            for (let index = 0; index < batch.length; index += 1) {
+              preComputedResults.set(batch[index].id, batchResults[index]);
+            }
+          }
+        }
         this.onToolCall?.(call, 'before');
         // v4.2 Phase 4 — mark any active checkpoints as containing a
         // mutating call BEFORE dispatch. Done pre-dispatch (not post)
@@ -1718,6 +1842,7 @@ export class AidenAgent {
         let finalPolicyDecision: RecoveryActionDecision | null = null;
         let preRecordedRecovery: RecoveryDecision | null = null;
         let attemptNo = 0;
+        let aggregateTiming: ToolActivityTiming | undefined;
         let afterFired = false;
         try {
           for (;;) {
@@ -1736,27 +1861,27 @@ export class AidenAgent {
             } else if (attemptNo === 1 && _preComputed) {
               result = _preComputed;
             } else {
-              try {
-                p2aDiag('tool.executor.start', {
-                  iteration: turnCount, callId: call.id, tool: call.name,
-                  attempt: attemptNo, aborted: this._currentSignal?.aborted === true,
-                  pendingPromise: 'toolExecutor',
-                });
-                result = await this.toolExecutor(call, this._currentSignal);
-                p2aDiag('tool.executor.complete', {
-                  iteration: turnCount, callId: call.id, tool: call.name,
-                  attempt: attemptNo, hasError: result.error != null,
-                  aborted: this._currentSignal?.aborted === true,
-                });
-              } catch (err) {
-                result = {
-                  id:     call.id,
-                  name:   call.name,
-                  result: null,
-                  error:  err instanceof Error ? err.message : String(err),
-                };
-              }
+              p2aDiag('tool.executor.start', {
+                iteration: turnCount, callId: call.id, tool: call.name,
+                attempt: attemptNo, aborted: this._currentSignal?.aborted === true,
+                pendingPromise: 'toolExecutor',
+              });
+              result = await invokeToolWithTiming(
+                this.toolExecutor,
+                call,
+                this._currentSignal,
+                (update) => {
+                  try { this.onToolActivity?.(call, update); } catch { /* observational */ }
+                },
+              );
+              p2aDiag('tool.executor.complete', {
+                iteration: turnCount, callId: call.id, tool: call.name,
+                attempt: attemptNo, hasError: result.error != null,
+                aborted: this._currentSignal?.aborted === true,
+              });
             }
+            aggregateTiming = mergeActivityTiming(aggregateTiming, result.activityTiming);
+            if (aggregateTiming) result.activityTiming = aggregateTiming;
             if (_perfDiag) {
               const toolMs = Date.now() - _toolStartedAt;
               const ok = result.error == null;
@@ -1769,6 +1894,15 @@ export class AidenAgent {
             // per-tool verification ALWAYS (pure/synchronous) so the
             // post-loop honesty footer reflects real outcomes independent
             // of whether TCE/recovery is active.
+            const verificationStartedAt = Date.now();
+            if (aggregateTiming) {
+              aggregateTiming.verificationStartedAt = verificationStartedAt;
+              try {
+                this.onToolActivity?.(call, {
+                  phase: 'verifying', at: verificationStartedAt, attempt: attemptNo, timing: aggregateTiming,
+                });
+              } catch { /* observational */ }
+            }
             try {
               verification = verifierRegistry.resolve(call.name)(
                 call.name, call.arguments, result,
@@ -1776,6 +1910,14 @@ export class AidenAgent {
             } catch {
               // Defensive — a buggy verifier never breaks the agent loop.
               verification = undefined;
+            }
+            const verificationEndedAt = Date.now();
+            if (aggregateTiming) {
+              aggregateTiming.verificationEndedAt = verificationEndedAt;
+              aggregateTiming.verificationDurationMs =
+                (aggregateTiming.verificationDurationMs ?? 0) +
+                Math.max(0, verificationEndedAt - verificationStartedAt);
+              result.activityTiming = aggregateTiming;
             }
             classification = null;
             if (turnState.isEnabled() && verification && !verification.ok) {
@@ -1828,7 +1970,16 @@ export class AidenAgent {
               reason:    classification.reason,
               backoffMs: decision.backoffMs ?? 0,
             });
-            await sleepWithSignal(decision.backoffMs ?? 0, this._currentSignal);
+            const backoffMs = decision.backoffMs ?? 0;
+            if (aggregateTiming) {
+              aggregateTiming.retryBackoffMs = (aggregateTiming.retryBackoffMs ?? 0) + backoffMs;
+              try {
+                this.onToolActivity?.(call, {
+                  phase: 'retrying', at: Date.now(), attempt: attemptNo, timing: aggregateTiming,
+                });
+              } catch { /* observational */ }
+            }
+            await sleepWithSignal(backoffMs, this._currentSignal);
             if (this._currentSignal?.aborted) break;
           }
           toolCallCount += 1;
@@ -1915,10 +2066,11 @@ export class AidenAgent {
               this.pendingRequiredClarification = null;
             }
           }
-          toolCallTrace.push({
+          const traceEntry: HonestyTraceEntry = {
             name:     call.name,
             result:   result.result,
             error:    result.error,
+            approvalDecision: result.approvalDecision,
             verified: this.resolveVerifiedFlag?.(result),
             // v4.7.0 Phase 2.3 — stamp the handler's `mutates` flag
             // at dispatch time so the post-loop honesty verifier can
@@ -1941,7 +2093,15 @@ export class AidenAgent {
             // re-attempt (class, reason, backoff). Undefined when the call
             // went through on the first attempt.
             retries: retryNotes.length > 0 ? retryNotes : undefined,
-          });
+          };
+          const interaction = this.resolveToolInteraction?.(call.name);
+          if (interaction !== undefined) {
+            Object.defineProperty(traceEntry, 'interaction', {
+              value: interaction,
+              enumerable: false,
+            });
+          }
+          toolCallTrace.push(traceEntry);
           fullTrace.push({ name: call.name, args: call.arguments });
           // P1A shadow-collect (non-authoritative) — build a CommandRecord from
           // the signals already in hand and store it in the turn-local ledger
@@ -1956,6 +2116,7 @@ export class AidenAgent {
                 mutates:        handlerMutatesForCall(call, this.resolveMutates),
                 result:         result.result,
                 error:          result.error,
+                approvalDecision: result.approvalDecision,
                 verification,
                 aborted:        !!this._currentSignal?.aborted,
               });
@@ -1969,6 +2130,38 @@ export class AidenAgent {
           const skillView = extractSkillViewRequiredTools(call.name, result.result);
           if (skillView) {
             trackers.skill.recordSkillView(skillView.skillName, skillView.requiredTools);
+          }
+          if (aggregateTiming) {
+            aggregateTiming.attemptCount = aggregateTiming.executionAttempts.length;
+            aggregateTiming.executionDurationMs = aggregateTiming.executionAttempts.reduce(
+              (total, attemptTiming) => total + Math.max(
+                0,
+                (attemptTiming.endedAt ?? Date.now()) - attemptTiming.startedAt,
+              ),
+              0,
+            );
+            if (this._currentSignal?.aborted) {
+              aggregateTiming.terminalClassification = 'cancelled';
+            } else if (result.approvalDecision?.state === 'interrupted') {
+              aggregateTiming.terminalClassification = 'cancelled';
+            } else if (classification?.category === 'timeout' || /timed?\s*out|timeout/i.test(result.error ?? '')) {
+              aggregateTiming.terminalClassification = 'timed_out';
+            } else if (result.approvalDecision?.state === 'blocked') {
+              aggregateTiming.terminalClassification = 'blocked';
+            } else if (result.approvalDecision?.state === 'denied' || result.error?.includes('denied by approval engine')) {
+              aggregateTiming.terminalClassification = 'denied';
+            } else if (result.degraded) {
+              aggregateTiming.terminalClassification = 'degraded';
+            } else if (verification && !verification.ok) {
+              aggregateTiming.terminalClassification = 'failed';
+            } else if (result.error) {
+              aggregateTiming.terminalClassification = aggregateTiming.terminalClassification === 'blocked'
+                ? 'blocked'
+                : 'failed';
+            } else {
+              aggregateTiming.terminalClassification = 'completed';
+            }
+            result.activityTiming = aggregateTiming;
           }
           this.onToolCall?.(call, 'after', result);
           afterFired = true;
@@ -2009,6 +2202,23 @@ export class AidenAgent {
           toolCallId:  call.id,
           content:     _retryAnnotation ? `${_baseContent}\n${_retryAnnotation}` : _baseContent,
         });
+        if (result.approvalDecision?.state === 'interrupted') {
+          // An interrupted approval is a terminal user interaction, not a tool
+          // failure for the model to interpret. Balance the provider transcript,
+          // cancel the remaining issued calls, and end this turn before another
+          // provider request can recreate a live provider row.
+          fillRemainingAsBlocked(
+            turnToolMessages,
+            output.toolCalls,
+            callIndex + 1,
+            'cancelled',
+            'skipped',
+          );
+          messages.push(...turnToolMessages);
+          finishReason = 'interrupted';
+          finalContent = '';
+          break;
+        }
         // Ladder hints raised DURING retry attempts still reach the
         // model as system messages (same pattern as the post-call hint).
         for (const h of pendingRetryHints) {
@@ -2290,7 +2500,9 @@ export class AidenAgent {
     // adapter seam, so this second pass is idempotent (a no-op on clean
     // input); it stays here as defense-in-depth for any unwrapped provider
     // (test doubles, NullAdapter). See core/v4/toolCallInvariant.ts.
-    messages = preflightMessages(messages);
+    messages = preflightMessages(messages, this.preflightWarn
+      ? { onWarn: this.preflightWarn }
+      : undefined);
 
     const wantStream = runOptions.stream === true && typeof this.provider.callStream === 'function';
     // v4.1.5 Issue K — fire just before the HTTP request opens, so the

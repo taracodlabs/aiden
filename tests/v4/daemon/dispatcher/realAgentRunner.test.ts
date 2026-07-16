@@ -281,5 +281,6 @@ describe('createRealAgentRunner — failure paths', () => {
     const v = JSON.parse(verified!.payload);
     expect(v.outcome.kind).not.toBe('verified');   // evidence-typed: not a verified outcome
     expect(v.verdict).not.toBe('completed');
+    expect(v.presentation).toMatchObject({ kind: 'failed', label: 'Failed', severity: 'error' });
   });
 });

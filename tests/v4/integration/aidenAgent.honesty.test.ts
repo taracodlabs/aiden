@@ -92,7 +92,7 @@ describe('AidenAgent honesty layer (real LLM)', () => {
 
       if (result.honestyFindings && result.honestyFindings.length > 0) {
         expect(result.honestyFindings[0].reason).toBe('memory_verified_false');
-        expect(result.finalContent).toContain('NOT VERIFIED');
+        expect(result.finalContent).not.toMatch(/Verifier|NOT VERIFIED/);
       } else {
         expect(
           result.toolCallTrace.some((t) => t.verified === false),

@@ -72,6 +72,7 @@ import type {
 } from './agentRunner';
 import { buildInitialHistory } from './agentRunner';
 import { computeTaskFinalization } from '../../taskVerification';
+import { mapTaskOutcomePresentation, taskOutcomeInputFromFinalization } from '../../taskOutcomePresentation';
 import { emitArtifactVerified, emitCostUpdated, type PillarEventSink } from '../../pillarEvents';
 import type { TaskStore } from '../taskStore';
 import {
@@ -484,6 +485,13 @@ export function createRealAgentRunner(
             },
             { approvalMode: approvalPolicy, now: now() },
           );
+          const presentation = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
+            finalization: fin,
+            trace: result?.toolCallTrace,
+            finishReason: finishReason === 'delivered' ? 'stop' : finishReason,
+            taskId: taskId ?? undefined,
+          }));
+          if (result) result.taskOutcome = presentation;
           opts.taskStore.setStatus(taskId, 'pending_verification');
           opts.taskStore.finalizeVerification(taskId, fin.status, fin.evidence, fin.jobCard);
           // v4.14 Pillar 5 Slice C — artifact_verified onto the run's stream.
@@ -495,6 +503,7 @@ export function createRealAgentRunner(
                 outcome:  fin.outcome,
                 handles:  fin.evidence.handles?.length ?? 0,
                 taskId:   taskId ?? undefined,
+                presentation,
               },
             );
           } catch { /* telemetry must never break dispatch */ }

@@ -32,6 +32,10 @@ import type {
   ToolSchema,
   ToolCallRequest,
   ToolCallResult,
+  ToolActivityTiming,
+  ToolActivityUpdate,
+  ToolTerminalClassification,
+  ToolApprovalDecision,
 } from '../../providers/v4/types';
 // v4.11 perf — wire the legacy v3 responseCache into the v4 hot path.
 // Cache is keyed by (tool name, arguments hash); has its own per-tool
@@ -170,6 +174,21 @@ export interface ToolContext {
  * wrappers SHOULD prefer returning a structured `{ error: ... }` object
  * (or rethrowing with a clear message) over silently absorbing failures.
  */
+export interface ToolInteraction {
+  mode: 'exclusive_modal';
+  decision: string;
+  cancellation?: 'cancelled';
+  /** Forward-compatible metadata for plugin-defined interaction facts. */
+  [key: string]: unknown;
+}
+
+/** Shared generic predicate for tools that exclusively own interactive input. */
+export function isExclusiveToolInteraction(
+  interaction: ToolInteraction | undefined,
+): boolean {
+  return interaction?.mode === 'exclusive_modal';
+}
+
 export interface ToolHandler {
   schema: ToolSchema;
   execute(args: Record<string, unknown>, context: ToolContext): Promise<unknown>;
@@ -178,6 +197,8 @@ export interface ToolHandler {
   mutates: boolean;
   /** Group label — `web`, `files`, `browser`, `sessions`, `skills`, etc. */
   toolset?: string;
+  /** Runtime-only interaction metadata; never included in provider schemas. */
+  interaction?: ToolInteraction;
   /**
    * v4.4 Phase 1 — per-tool risk tier. Optional for backward compat.
    * Tools without an explicit annotation default via
@@ -403,16 +424,63 @@ export class ToolRegistry {
    */
   buildExecutor(
     context: ToolContext,
-  ): (call: ToolCallRequest, signal?: AbortSignal) => Promise<ToolCallResult> {
-    return async (call: ToolCallRequest, signal?: AbortSignal): Promise<ToolCallResult> => {
+  ): (
+    call: ToolCallRequest,
+    signal?: AbortSignal,
+    onActivity?: (update: ToolActivityUpdate) => void,
+  ) => Promise<ToolCallResult> {
+    return async (
+      call: ToolCallRequest,
+      signal?: AbortSignal,
+      onActivity?: (update: ToolActivityUpdate) => void,
+    ): Promise<ToolCallResult> => {
+      const timing: ToolActivityTiming = {
+        dispatchStartedAt: Date.now(),
+        executionAttempts: [],
+      };
+      let approvalDecision: ToolApprovalDecision | undefined;
+      const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
+        try { onActivity?.({ phase, at: Date.now(), attempt, timing }); } catch { /* observational */ }
+      };
+      const finish = (
+        result: ToolCallResult,
+        terminalClassification: ToolTerminalClassification,
+      ): ToolCallResult => {
+        timing.dispatchEndedAt = Date.now();
+        timing.attemptCount = timing.executionAttempts.length;
+        timing.approvalWaitMs = timing.approvalStartedAt !== undefined && timing.approvalEndedAt !== undefined
+          ? Math.max(0, timing.approvalEndedAt - timing.approvalStartedAt)
+          : 0;
+        timing.executionDurationMs = timing.executionAttempts.reduce(
+          (total, attemptTiming) => total + Math.max(0, (attemptTiming.endedAt ?? timing.dispatchEndedAt!) - attemptTiming.startedAt),
+          0,
+        );
+        timing.terminalClassification = terminalClassification;
+        emit('terminal');
+        Object.defineProperty(result, 'activityTiming', {
+          value: timing,
+          writable: true,
+          configurable: true,
+          enumerable: false,
+        });
+        if (approvalDecision) {
+          Object.defineProperty(result, 'approvalDecision', {
+            value: approvalDecision,
+            writable: true,
+            configurable: true,
+            enumerable: true,
+          });
+        }
+        return result;
+      };
       const handler = this.handlers.get(call.name);
       if (!handler) {
-        return {
+        return finish({
           id: call.id,
           name: call.name,
           result: null,
           error: `Tool "${call.name}" is not registered`,
-        };
+        }, 'failed');
       }
 
       const args = call.arguments ?? {};
@@ -425,12 +493,12 @@ export class ToolRegistry {
       // it. Never guesses a repair.
       const argShapeError = validateToolArgs(handler.schema.inputSchema, args);
       if (argShapeError) {
-        return {
+        return finish({
           id: call.id,
           name: call.name,
           result: null,
           error: `Invalid arguments for ${call.name}: ${argShapeError}`,
-        };
+        }, 'failed');
       }
 
       // ── Gate 1 — approval engine for mutating tools (runs FIRST) ───
@@ -522,19 +590,61 @@ export class ToolRegistry {
           // no extra line (graceful degradation).
           effects:  handler.effects,
         };
-        const allowed = await context.approvalEngine.checkApproval(approvalReq);
+        timing.approvalStartedAt = Date.now();
+        emit('awaiting_approval');
+        let allowed: boolean;
+        try {
+          const engine = context.approvalEngine as ApprovalEngine & {
+            checkApprovalDetailed?: (req: ApprovalRequest) => Promise<ToolApprovalDecision>;
+          };
+          if (typeof engine.checkApprovalDetailed === 'function') {
+            approvalDecision = await engine.checkApprovalDetailed(approvalReq);
+            allowed = approvalDecision.approved;
+          } else {
+            allowed = await engine.checkApproval(approvalReq);
+            approvalDecision = {
+              state: allowed ? 'approved' : 'denied',
+              approved: allowed,
+              ...(!allowed ? { reason: engine.explainDenial(approvalReq) } : {}),
+            };
+          }
+        } catch (error) {
+          timing.approvalEndedAt = Date.now();
+          const message = error instanceof Error ? error.message : String(error);
+          const terminal = signal?.aborted
+            ? 'cancelled'
+            : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
+          return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);
+        }
+        timing.approvalEndedAt = Date.now();
         if (!allowed) {
+          if (approvalDecision?.state === 'interrupted') {
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `Approval interrupted before tool execution${approvalDecision.reason ? ` — ${approvalDecision.reason}` : '.'}`,
+            }, 'cancelled');
+          }
+          if (approvalDecision?.state === 'blocked') {
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: `Tool execution blocked by approval safety policy${approvalDecision.reason ? ` — ${approvalDecision.reason}` : '.'}`,
+            }, 'blocked');
+          }
           // Phase 6 — keep the "denied by approval engine" phrase (downstream
           // detectors match it) AND append the honest why + how-to-allow:
           // which gate fired (hard-block / autonomy-floor / manual-deny) and
           // the safe way forward.
-          const why = context.approvalEngine.explainDenial(approvalReq);
-          return {
+          const why = approvalDecision?.reason ?? context.approvalEngine.explainDenial(approvalReq);
+          return finish({
             id: call.id,
             name: call.name,
             result: null,
             error: `Tool execution denied by approval engine — ${why}`,
-          };
+          }, signal?.aborted ? 'cancelled' : 'denied');
         }
       }
 
@@ -551,12 +661,12 @@ export class ToolRegistry {
         if (url && /^https?:/i.test(url)) {
           const ssrf = await context.ssrfProtection.check(url);
           if (ssrf.blocked) {
-            return {
+            return finish({
               id: call.id,
               name: call.name,
               result: null,
               error: `URL blocked: ${ssrf.reason}`,
-            };
+            }, 'blocked');
           }
         }
       }
@@ -569,12 +679,12 @@ export class ToolRegistry {
           const findings = context.tirithScanner.scanCommand(command);
           const dangerous = findings.find((f) => f.severity === 'dangerous');
           if (dangerous) {
-            return {
+            return finish({
               id: call.id,
               name: call.name,
               result: null,
               error: `Tirith blocked: ${dangerous.description}`,
-            };
+            }, 'blocked');
           }
         }
       }
@@ -592,7 +702,7 @@ export class ToolRegistry {
         // below; we keep the cached envelope shape (no JSON.parse) so
         // the consumer (aidenAgent dispatch) sees the same
         // ToolCallResult shape it would on a fresh run.
-        return { id: call.id, name: call.name, result: _cached };
+        return finish({ id: call.id, name: call.name, result: _cached }, 'completed');
       }
       // v4.9.0 Slice 6 — wrap the handler call in a tool span when the
       // daemon foundation is up AND an ExecutionContext is active. NOOP
@@ -629,6 +739,12 @@ export class ToolRegistry {
       }
 
       let result: unknown;
+      const executionAttempt = {
+        attempt: context.attempt ?? 1,
+        startedAt: Date.now(),
+      } as ToolActivityTiming['executionAttempts'][number];
+      timing.executionAttempts.push(executionAttempt);
+      emit('running', executionAttempt.attempt);
       try {
         const sliced = sliceSpanShim();
         if (sliced && sliced.db && sliced.hasContext()) {
@@ -656,6 +772,8 @@ export class ToolRegistry {
         } else {
           result = await dispatch(args);
         }
+        executionAttempt.endedAt = Date.now();
+        executionAttempt.terminalResult = 'completed';
         const inner = result as
           | { degraded?: unknown; degradedReason?: unknown }
           | null
@@ -707,21 +825,27 @@ export class ToolRegistry {
               .catch(() => { /* post-capture fault → no pair */ });
           } catch { /* synchronous capture fault → no pair; `out` is untouched */ }
         }
-        return out;
+        return finish(out, out.degraded ? 'degraded' : 'completed');
       } catch (err) {
+        executionAttempt.endedAt ??= Date.now();
+        executionAttempt.terminalResult = signal?.aborted ? 'cancelled' : 'failed';
         // v4.9.0 Slice 12a — hook blocks surface as a structured
         // rejection so the model gets the hook's `reason` / `model_message`
         // verbatim instead of a bare exception string.
         if (err instanceof HookBlockedError) {
-          return {
+          return finish({
             id: call.id,
             name: call.name,
             result: null,
             error: err.modelMessage ?? err.message,
-          };
+          }, 'blocked');
         }
         const message = err instanceof Error ? err.message : String(err);
-        return { id: call.id, name: call.name, result: null, error: message };
+        const terminal = signal?.aborted
+          ? 'cancelled'
+          : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
+        executionAttempt.terminalResult = terminal;
+        return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);
       }
     };
   }

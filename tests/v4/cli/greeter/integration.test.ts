@@ -143,6 +143,23 @@ describe('renderGreeter — speaks when an offer wins', () => {
     );
   });
 
+  it('bounds a long greeting to the startup viewport when width is available', async () => {
+    const MORN = new Date(2026, 4, 25, 9, 0, 0);
+    await fs.writeFile(
+      path.join(root, '.update_check.json'),
+      JSON.stringify({ latest: '4.9.4' }), 'utf8',
+    );
+    await writeHistory(paths, mkHistory({ lastCwd: process.cwd() }));
+    display.terminalColumns = () => 48;
+
+    await renderGreeter({ paths, version: VERSION, display, now: MORN });
+
+    const line = writes[0].split('\n')[0];
+    expect(line.length).toBeLessThanOrEqual(46);
+    expect(line).toContain('Update 4.9.4');
+    expect(line).toContain('/update install');
+  });
+
   it('persists the offered offer with no response (pending) so next boot can reconcile', async () => {
     const MORN = new Date(2026, 4, 25, 9, 0, 0);
     await fs.writeFile(

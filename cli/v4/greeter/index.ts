@@ -33,6 +33,7 @@ import { selectOffer } from './selectOffer';
 import type { GreeterHistory, Offer } from './types';
 import { WELCOME_FALLBACKS } from './welcomeLine';
 import { readUserName } from '../onboarding/speakFirst';
+import { fitStartupLine } from '../startupDashboard';
 
 /**
  * Minimal Display surface the greeter needs. We accept this narrow
@@ -42,6 +43,7 @@ import { readUserName } from '../onboarding/speakFirst';
 export interface GreeterDisplay {
   write(text: string): void;
   paint(text: string, kind: 'brand' | 'success' | 'warn' | 'error' | 'muted'): string;
+  terminalColumns?(): number;
 }
 
 export interface RenderGreeterOptions {
@@ -144,7 +146,20 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
   // ── Render (or stay silent) -----------------------------------------
   if (offer) {
     // 2-space indent + trailing blank to match firstRunHint layout.
-    opts.display.write('  ' + offer.speech + '\n\n');
+    const columns = opts.display.terminalColumns?.();
+    const fullLine = '  ' + offer.speech;
+    const targetVersion = offer.id.slice('update-available-'.length);
+    const compactLine = offer.templateId !== 'update-available' || typeof columns !== 'number'
+      ? fullLine
+      : columns >= 64
+        ? `  There's a newer version available (${opts.version} → ${targetVersion}) · /update install`
+        : columns >= 32
+          ? `  Update ${targetVersion} · /update install`
+          : '  Update · /update';
+    const line = typeof columns === 'number'
+      ? fitStartupLine(compactLine, Math.max(1, columns - 2))
+      : fullLine;
+    opts.display.write(line + '\n\n');
   }
 
   // ── Persist updated history -----------------------------------------

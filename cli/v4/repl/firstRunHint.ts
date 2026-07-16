@@ -28,6 +28,7 @@ import path from 'node:path';
 
 import { c, italic } from '../../../core/v4/ui/theme';
 import type { AidenPaths } from '../../../core/v4/paths';
+import { fitStartupLine } from '../startupDashboard';
 
 const MARKER_NAME = '.first-run-shown';
 
@@ -69,12 +70,11 @@ export async function renderFirstRunHint(opts: FirstRunHintOptions): Promise<boo
   if (!out.isTTY) return false;
   if (await isFirstRunHintShown(opts.paths)) return false;
 
-  const line =
-    '  ' + c.muted('Tip:') + ' ' +
-    italic(c.muted('try ')) +
-    c.accent('/walkthrough') +
-    italic(c.muted(' for a 60-second tour of what Aiden can do'));
-  out.write(line + '\n\n');
+  const columns = typeof out.columns === 'number' && out.columns > 0 ? out.columns : 80;
+  const line = columns >= 64
+    ? '  ' + c.muted('Try asking: ') + italic(c.muted('Read this folder and explain what this project does.'))
+    : '  ' + c.muted('Try asking: ') + c.accent('Explain this folder');
+  out.write(fitStartupLine(line, Math.max(1, columns - 2)) + '\n\n');
   await markFirstRunHintDismissed(opts.paths);
   return true;
 }

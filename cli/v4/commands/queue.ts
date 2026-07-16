@@ -13,6 +13,14 @@
  */
 import type { SlashCommand } from '../commandRegistry';
 
+/** Build a display-only preview without changing the queued submission. */
+export function formatQueuePreview(message: string, maxLength = 100): string {
+  const singleLine = message.replace(/\s+/gu, ' ').trim();
+  return singleLine.length > maxLength
+    ? `${singleLine.slice(0, Math.max(0, maxLength - 1))}…`
+    : singleLine;
+}
+
 export const queue: SlashCommand = {
   name: 'queue',
   description: 'List the type-next queue (or `/queue clear` to empty it).',
@@ -36,7 +44,7 @@ export const queue: SlashCommand = {
       return {};
     }
     ctx.display.info(`Type-next queue (${items.length}) — runs in order after the current turn:`);
-    items.forEach((m, i) => ctx.display.write(`  ${i + 1}. ${m.length > 100 ? m.slice(0, 99) + '…' : m}\n`));
+    items.forEach((m, i) => ctx.display.write(`  ${i + 1}. ${formatQueuePreview(m)}\n`));
     ctx.display.dim('Run /queue clear to empty it.');
     return {};
   },

@@ -46,8 +46,10 @@ import {
   levelRank,
   type AutonomyPolicy,
 } from './autonomy';
+import type { ToolApprovalDecision } from '../providers/v4/types';
 
 export type ApprovalMode = 'manual' | 'smart' | 'off';
+export type ApprovalCheckResult = ToolApprovalDecision;
 export type ApprovalDecision =
   | 'allow'
   | 'deny'
@@ -760,5 +762,35 @@ export class ApprovalEngine {
       return true;
     }
     return false;
+  }
+
+  /** Detailed companion to the stable boolean approval seam. */
+  async checkApprovalDetailed(req: ApprovalRequest): Promise<ApprovalCheckResult> {
+    const approved = await this.checkApproval(req);
+    if (approved) return { state: 'approved', approved: true };
+
+    const promptDecision = this.lastPromptDecision;
+    if (promptDecision === 'interrupted') {
+      return {
+        state: 'interrupted',
+        approved: false,
+        reason: this.explainDenial(req),
+      };
+    }
+
+    const hardBlock = matchesHardBlock(req);
+    if (hardBlock.blocked) {
+      return {
+        state: 'blocked',
+        approved: false,
+        reason: hardBlock.reason,
+      };
+    }
+
+    return {
+      state: 'denied',
+      approved: false,
+      reason: this.explainDenial(req),
+    };
   }
 }

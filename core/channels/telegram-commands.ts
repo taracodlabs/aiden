@@ -31,7 +31,7 @@
 // admin list by replying "you are not an admin"; just don't react.
 // All diagnostics route through the v4.1-1.3a Logger contract.
 
-import type TelegramBotApi from 'node-telegram-bot-api'
+import type { Message } from 'node-telegram-bot-api'
 import { noopLogger, type Logger } from '../v4/logger'
 import { TelegramGroupStore } from './telegram-groups'
 
@@ -80,7 +80,7 @@ export class TelegramCommandRouter {
    * sends messages itself; the caller renders the reply text and
    * applies state changes.
    */
-  async route(msg: TelegramBotApi.Message): Promise<RouteOutcome> {
+  async route(msg: Message): Promise<RouteOutcome> {
     const text = (msg.text ?? '').trim()
     if (!text.startsWith('/')) return { kind: 'agent' }
 

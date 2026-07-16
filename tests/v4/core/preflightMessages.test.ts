@@ -16,7 +16,7 @@
  * A missing tool result becomes an honest "result unavailable" stub — NEVER a
  * fake success.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   preflightMessages,
   PreflightRepairError,
@@ -217,6 +217,23 @@ describe('preflightMessages — strict mode + idempotency', () => {
     const out = preflightMessages(msgs, { onWarn: (m) => warnings.push(m) });
     expect(warnings.length).toBeGreaterThan(0);
     expect(out.some((m) => m.role === 'tool')).toBe(false);
+  });
+
+  it('routes repair warnings to the supplied sink without touching console.warn', () => {
+    const warnings: string[] = [];
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const dirty = [
+      asst([{ id: 'call-1', name: 'read_file', arguments: {} }]),
+      toolResult('call-1'),
+      { role: 'user', content: 'continue' } as Message,
+    ];
+    const out = preflightMessages(dirty, { onWarn: (message) => warnings.push(message) });
+    expect(warnings).toEqual([
+      'inserted an assistant placeholder between a tool result and a user message',
+    ]);
+    expect(consoleWarn).not.toHaveBeenCalled();
+    expect(out.at(-1)?.role).toBe('user');
+    consoleWarn.mockRestore();
   });
 
   it('idempotent — a second pass over clean output is a no-op (no repairs, equal shape)', () => {

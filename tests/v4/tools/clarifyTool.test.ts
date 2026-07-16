@@ -20,6 +20,15 @@ import { SUBAGENT_BLOCKED_TOOL_NAMES } from '../../../core/v4/subagent/childBuil
 
 const tool = makeClarifyTool();
 
+it('declares exclusive clarification interaction metadata without changing its provider schema', () => {
+  expect(tool.interaction).toEqual({
+    mode: 'exclusive_modal',
+    decision: 'clarification',
+    cancellation: 'cancelled',
+  });
+  expect(JSON.stringify(tool.schema)).not.toContain('interaction');
+});
+
 /** Minimal ToolContext — only `clarify` matters to this tool. */
 function ctx(over: Partial<ToolContext> = {}): ToolContext {
   return { cwd: '/tmp', paths: {} as any, ...over };

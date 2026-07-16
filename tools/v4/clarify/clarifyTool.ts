@@ -69,6 +69,11 @@ export function makeClarifyTool(): ToolHandler {
     category: 'read',
     mutates:  false,
     toolset:  'clarify',
+    interaction: {
+      mode: 'exclusive_modal',
+      decision: 'clarification',
+      cancellation: 'cancelled',
+    },
     riskTier: 'safe',
     // REPL-only: no interactive user exists in the daemon context.
     contexts: ['repl'],

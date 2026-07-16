@@ -113,7 +113,7 @@ describe('barrel exports', () => {
 describe('/help', () => {
   it('lists registered system commands grouped by Phase 22 sub-section', async () => {
     const { ctx, output } = makeCtx();
-    await help.handler(ctx as any);
+    await help.handler({ ...ctx, args: ['all'], rawArgs: 'all' } as any);
     const out = output();
     // Slice 4 (commit 1545e590): /help adopts framedPanel chrome.
     // Sections render as orange-bar panel titles, not `── Section ──` rules.

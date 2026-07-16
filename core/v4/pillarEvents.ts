@@ -21,6 +21,7 @@
  */
 import { categorizeEvent } from './daemon/eventCategories';
 import type { VerificationOutcome } from './taskVerification';
+import type { TaskOutcomePresentation } from './taskOutcomePresentation';
 
 export interface PillarEventSink {
   /** Durable run-event store (optional — absent in tests / headless). */
@@ -62,7 +63,13 @@ export function emitArtifactVerified(
   // set it to a truthy value; only the smart constructors build a `verified`
   // outcome, and only with a non-empty evidence tuple. `verdict` (row status)
   // and `taskId` are preserved; `handles` stays as the total-handle count.
-  v: { verdict: string; outcome: VerificationOutcome; handles: number; taskId?: string },
+  v: {
+    verdict: string;
+    outcome: VerificationOutcome;
+    handles: number;
+    taskId?: string;
+    presentation?: TaskOutcomePresentation;
+  },
 ): void {
   emitPillarEvent(sink, 'artifact_verified', v);
 }

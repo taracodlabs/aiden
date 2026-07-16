@@ -16,7 +16,7 @@
  *   - Non-TTY: completely silent — no paint, no ticks, no erases.
  *   - pause(): erases line, stops tick; resume() re-paints + restarts.
  *   - stop(): terminal — refuses further pause/resume.
- *   - Elapsed time is wall-clock cumulative; preserved across pauses.
+ *   - Elapsed time belongs to the current provider phase and resets on a new verb.
  *   - "▸▸ Ctrl+C cancel" hint folded into the line.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -195,7 +195,7 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     expect(chunks.length).toBe(0);
   });
 
-  it('pause() then resume() preserves cumulative elapsed time', () => {
+  it('pause() then resume() with a new provider phase resets elapsed time', () => {
     let now = 1_000_000_000_000;
     nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);
     const { d, chunks } = makeDisplay({ tty: true });
@@ -206,12 +206,13 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     now += 5000; // 5s pass while paused (would not count toward "running")
     handle.resume('drafting');
     expect(handle.isPaused()).toBe(false);
-    // Tick once to repaint with elapsed time.
+    // Tick once to repaint. The new phase has not reached one second yet.
+    vi.advanceTimersByTime(400);
+    expect(stripAnsi(chunks.join(''))).not.toMatch(/\(7s\)/);
+    now += 1_000;
     vi.advanceTimersByTime(400);
     const full = stripAnsi(chunks.join(''));
-    // Wall-clock since start = 7s. Test asserts the indicator surfaces
-    // total wall-clock, not paused-time-subtracted.
-    expect(full).toMatch(/\(7s\)/);
+    expect(full).toMatch(/\(1s\)/);
     expect(full).toContain('drafting');
     handle.stop();
     nowSpy.mockRestore();

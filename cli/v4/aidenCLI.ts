@@ -174,7 +174,6 @@ import {
   PluginLoader,
   evaluatePermissionState,
   resolveBundledPluginsDir,
-  formatPluginBootCard,
 } from '../../core/v4/plugins';
 import { OAuthProviderRegistry } from '../../core/v4/auth/providerAuth';
 
@@ -192,6 +191,14 @@ import { createBootLogger, CoreLogger, FileSink } from '../../core/v4/logger';
 
 import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
+import {
+  buildMcpAuthNotice,
+  buildNoProviderNotice,
+  buildPluginGrantNotice,
+  buildProviderFallbackNotice,
+  buildProviderResolutionNotice,
+  type StartupNotice,
+} from './startupNotices';
 // v4.11 toolset grouping — boot-time profile resolution. Picks
 // `minimal`/`standard`/`full`/`custom` from env or config and feeds
 // the resulting toolset list to `toolRegistry.getSchemas` so the
@@ -1535,6 +1542,15 @@ export async function buildAgentRuntime(
     ? new Display({ skin, stdout: process.stderr, stderr: process.stderr })
     : new Display({ skin });
   const warnSink = (msg: string) => display.warn(msg);
+  const startupNotices: StartupNotice[] = [];
+  const recordStartupNotice = (notice: StartupNotice | null | undefined): void => {
+    if (!notice) return;
+    startupNotices.push(notice);
+    if (headless) {
+      display.warn(notice.detail ? `${notice.title}: ${notice.detail}` : notice.title);
+      if (notice.command) display.warn(`Run: ${notice.command}`);
+    }
+  };
 
   // Resolver + adapter.
   const credentialResolver = new CredentialResolver(paths.authJson);
@@ -1545,6 +1561,7 @@ export async function buildAgentRuntime(
   // all tell the same honest story: what won, where it came from, and — on a
   // fallback — the durable reason plus every provider tried.
   const requestedProvider   = providerId;
+  const requestedModel      = modelId;
   const requestedExplicit   = isExplicitSource(bootSource);
   const decisionAttempts: ProviderAttempt[] = [];
   let fallbackReason: string | undefined;
@@ -1572,32 +1589,26 @@ export async function buildAgentRuntime(
       // Phase 6 — honest wording: an EXPLICIT --provider that failed is never
       // mislabelled as a "default". The reason carries any fix command the
       // resolver embedded (e.g. `/auth refresh <provider>` for an expiry).
-      display.warn(
-        requestedExplicit
-          ? `You asked for '${requestedProvider}', but it failed: ${reason}`
-          : `Provider '${requestedProvider}' unavailable: ${reason}`,
-      );
+      recordStartupNotice(buildProviderResolutionNotice(providerId, err));
       const fb = await resolveFirstWorkingProvider(resolver, config, paths, providerId);
       decisionAttempts.push(...fb.attempts);
       if (fb.result) {
         adapter    = fb.result.adapter;
         providerId = fb.result.providerId;
         modelId    = fb.result.modelId;
-        // Phase 6 — say WHAT was asked for, WHY it failed, and WHAT won.
-        display.warn(
-          requestedExplicit
-            ? `[boot] you asked for ${requestedProvider}; it failed (${reason}); fell back to ${providerId} · ${modelId}`
-            : `[boot] ${requestedProvider} unavailable (${reason}); fell back to ${providerId} · ${modelId}`,
-        );
+        recordStartupNotice(buildProviderFallbackNotice({
+          requestedProvider,
+          requestedModel,
+          activeProvider: providerId,
+          activeModel: modelId,
+          reason,
+          explicit: requestedExplicit,
+        }));
       } else {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const { NullAdapter } = require('../../providers/v4/nullAdapter');
         adapter = new NullAdapter();
-        display.warn(
-          'No working provider found — starting in recovery mode. Run ' +
-          '`/auth login <provider>` or `/auth refresh <provider>`, or `/model` ' +
-          'to pick a configured provider, then restart.',
-        );
+        recordStartupNotice(buildNoProviderNotice());
       }
     }
     // Phase v4.1.2-bug1: surface the auto-pick in the boot log when
@@ -1659,6 +1670,8 @@ export async function buildAgentRuntime(
   // Tool registry + executor.
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
+  const resolveToolInteraction = (name: string) =>
+    toolRegistry.get(name)?.interaction;
 
   // v4.11 toolset grouping — resolve the active tool profile ONCE at
   // boot. The profile name comes from (env > config > 'standard')
@@ -1700,6 +1713,7 @@ export async function buildAgentRuntime(
   // the loader instance — every per-turn caller (chatSession banner,
   // skillCommands, skill_manage, etc.) reads the cache.
   const skillsLogger = createFileLogger(paths.logsDir, 'skills');
+  const preflightLogger = createFileLogger(paths.logsDir, 'preflight');
   const skillLoader = new SkillLoader(paths, { logger: skillsLogger });
   await skillLoader.loadAll().catch(() => undefined);
   const skillCounts = skillLoader.getLastCounts();
@@ -1750,17 +1764,11 @@ export async function buildAgentRuntime(
   // register() complete or never registered hooks, so this only fires
   // hooks of fully-loaded plugins.
   await pluginLoader.fireHook('onActivate');
-  // Render the boot card per Phase 17 Task 5 spec.
-  const bootCard = formatPluginBootCard(pluginLoader.getRegistry().list());
-  for (const ln of bootCard.lines) {
-    if (ln.severity === 'green') display.success(ln.text);
-    else if (ln.severity === 'yellow') display.warn(ln.text);
-    else if (ln.severity === 'red') display.printError(ln.text);
-    else display.dim(ln.text);
+  for (const plugin of pluginLoader.getRegistry().list()) {
+    if (plugin.status === 'pending-grant' || plugin.status === 'suspended') {
+      recordStartupNotice(buildPluginGrantNotice(plugin.manifest.name));
+    }
   }
-  // v4.5 TUI polish — blank line so the plugin boot card breathes
-  // before the AIDEN banner stamps in below.
-  display.write('\n');
 
   // Phase 16g: surface the SOUL.md upgrade notice once on boot (only
   // when set — for users with edited SOUL.md that would have been
@@ -1957,6 +1965,7 @@ export async function buildAgentRuntime(
     display,
     auxiliaryClient,
     verboseMode: 'normal',
+    resolveToolInteraction,
   });
   approvalEngine['callbacks'] = {
     promptUser: callbacks.promptApproval,
@@ -2103,7 +2112,7 @@ export async function buildAgentRuntime(
   try {
     const needsAuth = (mcpClient?.list() ?? []).filter((s) => s.status === 'needs-auth').map((s) => s.config.name);
     if (needsAuth.length > 0) {
-      display.dim(`  MCP: ${needsAuth.join(', ')} ${needsAuth.length === 1 ? 'needs' : 'need'} authorization — run \`/mcp auth ${needsAuth[0]}\`.`);
+      for (const name of needsAuth) recordStartupNotice(buildMcpAuthNotice(name));
     }
   } catch { /* never let the hint break boot */ }
 
@@ -2437,6 +2446,7 @@ export async function buildAgentRuntime(
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
+    preflightWarn: (message) => preflightLogger.warn(message),
     // v4.11 preflight compression — wire the compressor so
     // runConversation step 7 actually runs at the 50% threshold.
     contextCompressor,
@@ -2547,7 +2557,7 @@ export async function buildAgentRuntime(
           } else {
             const startedAt = replToolCallStartTimes.get(call.id) ?? Date.now();
             replToolCallStartTimes.delete(call.id);
-            const durationMs = Date.now() - startedAt;
+            const durationMs = result?.activityTiming?.executionDurationMs ?? (Date.now() - startedAt);
             const tags = categorizeEvent('tool_call_completed');
             replRunStore.emitEventRich({
               runId:      rid,
@@ -2573,6 +2583,7 @@ export async function buildAgentRuntime(
       }
       callbacks.onToolCall?.(call, phase, result);
     },
+    onToolActivity: callbacks.onToolActivity,
     onCompression: callbacks.onCompression,
     onBudgetWarning: callbacks.onBudgetWarning,
     onPlannerGuardDecision: callbacks.onPlannerGuardDecision,
@@ -2581,6 +2592,7 @@ export async function buildAgentRuntime(
     resolveToolset,
     resolveMutates,
     resolveUiOnly,
+    resolveToolInteraction,
     providerId,
     modelId,
     // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.
@@ -2726,6 +2738,7 @@ export async function buildAgentRuntime(
     resolveToolset,
     resolveMutates,
     resolveUiOnly,
+    resolveToolInteraction,
     // v4.7.0 Phase 2.4 — share the REPL's config-resolved honesty mode
     // with daemon-built agents so autonomous turns honour the same
     // setting interactive turns do.
@@ -2882,6 +2895,7 @@ export async function buildAgentRuntime(
       resolveToolset,
       resolveMutates,
       resolveUiOnly,
+      resolveToolInteraction,
       runStore:            replRunStore,
       instanceId:          replInstanceId,
       logger:              bootLogger.child('subagent'),
@@ -3552,6 +3566,7 @@ export async function buildAgentRuntime(
     // context AND so tests can introspect that production has a
     // non-undefined instance (formerly dormant in Phase 13).
     contextCompressor,
+    startupNotices,
     commandRegistry,
     mcpClient,
     providerId,
@@ -3617,6 +3632,7 @@ export interface AgentRuntime {
   agent: AidenAgent;
   /** v4.11 preflight compression — production-wired (no longer dormant). */
   contextCompressor: ContextCompressor;
+  startupNotices: StartupNotice[];
   commandRegistry: CommandRegistry;
   mcpClient: ReturnType<typeof setupMcpFromConfig> extends Promise<infer R>
     ? R extends { client: infer C }
@@ -3913,6 +3929,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     paths: runtime.paths,
     personalityManager: runtime.personalityManager,
     pluginLoader: runtime.pluginLoader,
+    startupNotices: runtime.startupNotices,
     // Phase 30.2.1 — boot card renders "model not configured" and
     // chat attempts get the friendly NotConfiguredError message.
     unconfigured: runtime.exploreMode,
