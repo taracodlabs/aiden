@@ -126,6 +126,10 @@ import { attachTurnInputListener } from './turnInputListener';
 import { InputAuthority } from './inputAuthority';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 import { requestTurnCancel } from './frame/interruptControls';
+import {
+  renderStartupDashboard,
+  resolveStartupDashboardTier,
+} from './startupDashboard';
 
 /**
  * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
@@ -2889,46 +2893,60 @@ export class ChatSession implements ChatSessionLike {
       void summarizeChannelState(null);
     }
 
-    const cols = display.cols();
-    const isNarrow = cols < 60;
-    const showEnvCapBlock = cols >= 70;
+    const columns = display.terminalColumns();
+    const tier = resolveStartupDashboardTier(columns);
     const version = AIDEN_VERSION;
-
-    display.write('\n');
-
-    if (isNarrow) {
-      // Compact — single-line text logo + one-line capability summary.
-      display.write(`  ${display.brand('AIDEN')}  ${display.muted(`v${version}`)}\n`);
-      display.write(
-        `  ${display.muted('Local AI · controls your computer · never forgets')}\n`,
-      );
-    } else {
-      // Wide — full ASCII art + subtitle. Tier-3.1c: dropped the
-      // tagline + sponsor lines from the top section because they
-      // duplicate the credits already inside the scrollFooter at
-      // the bottom of the boot card. Subtitle stays — it's the only
-      // brand anchor between the ASCII art and the pills row.
-      display.printBanner(version);
-      display.write(`  ${display.muted('Autonomous AI Engine')}\n`);
-      display.write('\n');
-    }
-
     const startupTrust = this.opts.approvalEngine?.getAutonomyPolicy?.()?.level ?? 'Assistant';
-
-    // Status pills.
-    // Phase v4.1.2-version-display: append the running version as the
-    // fifth pill so users see what they're on without invoking
-    // `aiden --version`. Sourced from the build-injected core/version.ts.
-    display.write(
-      display.statusPillsRow({
-        coreOnline:   true,
-        trust:        startupTrust,
-        model:        this.currentModelId,
-        memoryActive: true,
-        providerOk:   !this.opts.unconfigured,
-        version:      AIDEN_VERSION,
-      }) + '\n',
-    );
+    const includeDetails = tier === 'wide' || tier === 'medium';
+    const toolsCount = includeDetails ? this.opts.toolRegistry.list().length : undefined;
+    let skillsLoaded: number | undefined;
+    if (includeDetails) {
+      try {
+        skillsLoaded = (await this.opts.skillLoader.list()).length;
+      } catch {
+        skillsLoaded = undefined;
+      }
+    }
+    const sourceLabel = bootSourceLabel(this.opts.initialBootSource);
+    const dashboard = renderStartupDashboard({
+      columns,
+      banner: display.banner(version),
+      style: {
+        brand: (value) => display.brand(value),
+        muted: (value) => display.muted(value),
+        text: (value) => display.applyColors(value, 'agent'),
+        success: (value) => display.success_(value),
+      },
+      data: {
+        trust: startupTrust,
+        model: this.currentModelId,
+        memory: this.opts.memoryManager ? 'active' : undefined,
+        version,
+        providerReady: !this.opts.unconfigured,
+        persistedModelNote: sourceLabel ?? undefined,
+        environment: includeDetails ? {
+          os: detectOS(),
+          shell: detectShell(),
+          runtime: 'local-first',
+          tools: toolsCount,
+          skills: skillsLoaded,
+        } : undefined,
+        capabilities: includeDetails ? {
+          web: 'research · extract',
+          browser: 'navigate · automate',
+          files: 'read · patch · organize',
+          execution: 'shell · code · workflows',
+          memory: 'persistent recall',
+        } : undefined,
+        project: {
+          identity: 'Built solo',
+          github: 'github.com/taracodlabs/aiden',
+          website: 'aiden.taracod.com',
+          contact: 'contact@taracod.com',
+        },
+      },
+    });
+    display.write(`\n${dashboard.lines.join('\n')}\n`);
 
     // v4.6 Phase 3A — operator kill-switch indicator. Lands ABOVE
     // the blank-line + provider-source annotation so an operator
@@ -2950,78 +2968,6 @@ export class ChatSession implements ChatSessionLike {
     } catch {
       // Singleton not initialised (test stubs, etc.) — silently skip.
     }
-
-    // v4.5 TUI polish — blank line so the status pills row doesn't
-    // crowd the muted source annotation right beneath it.
-    display.write('\n');
-
-    // v4.1.3-prebump: dim source annotation under the pills row so the
-    // user can see WHY this provider/model was chosen — closes the
-    // information gap that made Case 3 (persisted-config) look like a
-    // bug ("why is it still on groq when I auth'd chatgpt-plus?"). One
-    // line, dim, only when the source is informative.
-    const sourceLabel = bootSourceLabel(this.opts.initialBootSource);
-    if (sourceLabel) {
-      display.write(`  ${display.muted(sourceLabel)}\n`);
-    }
-
-    // Tier-3.1b: rule + environment/capabilities block + rule + scroll
-    // + bottom prompt hint. Skipped at <70 cols to keep the narrow
-    // boot card from wrapping into noise.
-    display.write(`  ${display.rule()}\n`);
-
-    if (showEnvCapBlock) {
-      // Detect environment lazily (cheap on every boot — no caching
-      // needed; tools/skills counts are already loaded by this point).
-      const toolsCount = this.opts.toolRegistry.list().length;
-      let skillsLoaded = 0;
-      try {
-        skillsLoaded = (await this.opts.skillLoader.list()).length;
-      } catch {
-        skillsLoaded = 0;
-      }
-
-      display.write('\n');
-      // Pass sideBySideThreshold=120 so 70-119 cols stack vertically
-      // (per the tier3.1b dispatch's width-tier policy) and only
-      // ≥120 renders the full side-by-side block.
-      display.write(
-        display.twoColumnBlock(
-          {
-            title: 'Environment',
-            rows:  [
-              { key: 'OS',       value: detectOS() },
-              { key: 'shell',    value: detectShell() },
-              { key: 'runtime',  value: 'local-first' },
-              { key: 'tools',    value: `${toolsCount} loaded` },
-              { key: 'skills',   value: `${skillsLoaded} loaded` },
-            ],
-          },
-          {
-            title: 'Capabilities',
-            rows:  [
-              { key: 'web',       value: 'research · extract' },
-              { key: 'browser',   value: 'navigate · automate' },
-              { key: 'files',     value: 'read · patch · organize' },
-              { key: 'execution', value: 'shell · code · workflows' },
-              { key: 'memory',    value: 'persistent recall' },
-            ],
-          },
-          // Tier-3.1c: lowered from 120 → 100 so wide-but-not-huge
-          // terminals (laptop screens, default Windows Terminal) get
-          // the side-by-side block instead of the stacked fallback.
-          // Each column at ~38 chars + 4-char separator + 2-char
-          // indent fits in 82 chars; 100 leaves 18 chars headroom.
-          { sideBySideThreshold: 100 },
-        ) + '\n',
-      );
-      display.write('\n');
-      display.write(`  ${display.rule()}\n`);
-      display.write('\n');
-    }
-
-    // Scroll footer (parchment at ≥80 cols, single-line credits below).
-    display.write(display.scrollFooter() + '\n');
 
     // v4.5 update system — boxed three-option prompt rendered AFTER
     // the boot card / status pills (Q-U5b less-intrusive position),
@@ -3108,7 +3054,7 @@ export class ChatSession implements ChatSessionLike {
     display.write('\n');
     display.write(display.bottomPromptHint() + '\n');
     display.write('\n');
-    display.write(`  ${display.rule()}\n`);
+    display.write(`  ${display.rule(Math.max(1, columns - 4))}\n`);
   }
 
   /**

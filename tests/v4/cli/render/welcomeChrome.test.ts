@@ -13,7 +13,7 @@ describe('renderStartupCard closing-line order', () => {
   it('hint precedes the closing rule', () => {
     const h = SRC.indexOf('display.bottomPromptHint() + ');
     expect(h).toBeGreaterThan(0);
-    expect(SRC.indexOf('display.rule()}\\n`)', h)).toBeGreaterThan(h);
+    expect(SRC.indexOf('display.rule(Math.max(1, columns - 4))', h)).toBeGreaterThan(h);
   });
   it('turn loop does not emit bottomPromptHint per turn', () => {
     const slice = SRC.slice(SRC.indexOf('while (iter < max)'), SRC.indexOf('await this.runAgentTurn(input)'));

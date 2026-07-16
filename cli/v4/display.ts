@@ -826,11 +826,17 @@ export class Display {
    */
   bottomPromptHint(): string {
     const sk = this.skin;
+    const columns = this.terminalColumns();
+    const message = columns >= 64
+      ? 'Type your message · /help for commands · /skills to add more'
+      : columns >= 36
+        ? 'Type your message · /help'
+        : 'Type · /help';
     const text = sk.applyColors(
-      'Type your message · /help for commands · /skills to add more',
+      message,
       'muted',
     );
-    return `    ${text}`;
+    return `  ${truncateVisible(text, Math.max(1, columns - 4))}`;
   }
 
   /**
