@@ -10,10 +10,10 @@ import fs   from 'fs'
 import path from 'path'
 
 // ── LRU cache for on-demand skill content loading ─────────────
-// lru-cache v6 (CommonJS). max = maximum number of items.
+// lru-cache v10 (CommonJS). max = maximum number of items.
 // Full SKILL.md is loaded lazily on first access and evicted when
 // the 50-entry limit is reached (LRU eviction).
-const _LRUClass = require('lru-cache') as { new(opts: { max: number }): { get(k: string): string | undefined; set(k: string, v: string): void; itemCount: number } }
+const { LRUCache: _LRUClass } = require('lru-cache') as { LRUCache: { new(opts: { max: number }): { get(k: string): string | undefined; set(k: string, v: string): void; size: number } } }
 const _contentCache = new _LRUClass({ max: 50 })
 
 /**
@@ -33,7 +33,7 @@ export function getSkillContent(filePath: string): string | null {
 }
 
 export function getSkillCacheStats(): { size: number; max: number } {
-  return { size: _contentCache.itemCount, max: 50 }
+  return { size: _contentCache.size, max: 50 }
 }
 
 // ── Skill injection guard ─────────────────────────────────────
