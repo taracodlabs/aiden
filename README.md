@@ -10,7 +10,7 @@
 
 Autonomous AI Engine — local-first, Windows-native, yours to own
 
-67 skills · 68 tools · 19 providers · 9 channels · AGPL-3.0
+76 skills · 121 tools · 19 providers · 9 channels · AGPL-3.0
 
 Windows · Linux · WSL · macOS (API Mode)
 ```
@@ -20,7 +20,7 @@ Windows · Linux · WSL · macOS (API Mode)
 
 **Autonomous AI Engine — local-first, Windows-native, yours to own**
 
-*67 skills · 68 tools · 19 providers · 9 channels · AGPL-3.0*
+*76 skills · 121 tools · 19 providers · 9 channels · AGPL-3.0*
 
 <br>
 
