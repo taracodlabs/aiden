@@ -130,6 +130,11 @@ import {
   renderStartupDashboard,
   resolveStartupDashboardTier,
 } from './startupDashboard';
+import {
+  prepareStartupNotices,
+  renderStartupNoticeLines,
+  type StartupNotice,
+} from './startupNotices';
 
 /**
  * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
@@ -351,6 +356,9 @@ export interface ChatSessionOptions {
 
   /** Phase 17 Task 5: forwarded to /plugins commands. */
   pluginLoader?: PluginLoader;
+
+  /** One-shot provider/model/plugin/MCP startup notices. */
+  startupNotices?: readonly StartupNotice[];
 
   /** Optional: resume an existing session id. */
   resumeSessionId?: string;
@@ -2946,6 +2954,11 @@ export class ChatSession implements ChatSessionLike {
         },
       },
     });
+    const notices = prepareStartupNotices(this.opts.startupNotices ?? [], this.opts.commandRegistry);
+    const noticeLines = renderStartupNoticeLines(notices, { columns });
+    if (noticeLines.length > 0) {
+      display.write(`\n${noticeLines.join('\n')}\n`);
+    }
     display.write(`\n${dashboard.lines.join('\n')}\n`);
 
     // v4.6 Phase 3A — operator kill-switch indicator. Lands ABOVE
