@@ -276,6 +276,8 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     docsUrl: 'https://docs.together.ai/',
     supportsToolCalling: true,
     modelIds: [
+      'openai/gpt-oss-120b',
+      'openai/gpt-oss-20b',
       'meta-llama/Llama-3.3-70B-Instruct-Turbo',
       'meta-llama/Llama-3.1-8B-Instruct-Turbo',
       'deepseek-ai/DeepSeek-V3',
@@ -301,7 +303,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     // flash family per DeepSeek docs; deprecated-but-live). Removal
     // is its own deprecation slice. Per-call thinking + reasoning
     // _effort defaults for v4-pro live in providers/v4/modelDefaults.ts.
-    modelIds: ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
+    modelIds: ['deepseek-v4-pro', 'deepseek-v4-flash', 'deepseek-chat', 'deepseek-reasoner'],
   },
   mistral: {
     id: 'mistral',
