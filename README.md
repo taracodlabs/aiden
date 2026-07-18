@@ -8,7 +8,7 @@
 ██║  ██║██║██████╔╝███████╗██║ ╚████║
 ╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝
 
-Autonomous AI Engine — local-first, Windows-native, yours to own
+Autonomous Work Engine — plans, acts, recovers, and proves the result
 
 76 skills · 121 tools · 19 providers · 9 channels · AGPL-3.0
 
@@ -18,7 +18,7 @@ Windows · Linux · WSL · macOS (API Mode)
 
 # Aiden
 
-**Autonomous AI Engine — local-first, Windows-native, yours to own**
+**Autonomous Work Engine — plans, acts, recovers, and proves the result**
 
 *76 skills · 121 tools · 19 providers · 9 channels · AGPL-3.0*
 
