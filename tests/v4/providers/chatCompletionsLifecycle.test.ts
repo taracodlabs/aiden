@@ -13,6 +13,7 @@ let server: Server | null = null;
 const sockets = new Set<Socket>();
 
 afterEach(async () => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   for (const socket of sockets) socket.destroy();
   sockets.clear();
@@ -111,13 +112,20 @@ describe('ChatCompletionsAdapter request lifecycle', () => {
     ['after_event', 'body_idle_timeout'],
   ] as const)('reports the exact phase when stalled at %s', async (stage, phase) => {
     const fixture = await startServer(stage);
+    if (stage === 'before_headers') {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    }
     const pending = consume(adapter(fixture.baseUrl, 0, {
       connectionTimeoutMs: stage === 'before_headers' ? 70 : 5_000,
       firstByteTimeoutMs: stage === 'after_headers' ? 80 : 5_000,
       totalTimeoutMs: 10_000,
     }));
-    if (stage !== 'before_headers') await fixture.ready;
-    await expect(pending).rejects.toMatchObject({
+    const rejection = pending.catch((error: unknown) => error);
+    await fixture.ready;
+    if (stage === 'before_headers') {
+      await vi.advanceTimersByTimeAsync(70);
+    }
+    await expect(rejection).resolves.toMatchObject({
       name: 'ProviderPhaseTimeoutError',
       phase,
     });
