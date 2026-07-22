@@ -59,6 +59,18 @@ function message(child: ChildProcess, type: string): Promise<WorkerMessage> {
   });
 }
 
+function waitForExit(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise<void>((resolveExit) => {
+    const onExit = (): void => { resolveExit(); };
+    child.once('exit', onExit);
+    if (child.exitCode !== null || child.signalCode !== null) {
+      child.off('exit', onExit);
+      resolveExit();
+    }
+  });
+}
+
 function seed(): { jobId: string; attemptId: string } {
   const db = new Database(dbPath);
   runMigrations(db);
@@ -88,9 +100,12 @@ beforeEach(() => {
   children = [];
 });
 
-afterEach(() => {
-  for (const child of children) child.kill();
-  rmSync(directory, { recursive: true, force: true });
+afterEach(async () => {
+  for (const child of children) {
+    if (child.exitCode === null && child.signalCode === null) child.kill();
+  }
+  await Promise.all(children.map(waitForExit));
+  rmSync(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
 });
 
 describe('Job engine process arbitration', () => {
@@ -147,14 +162,13 @@ describe('Job engine process arbitration', () => {
       action: 'claim_and_crash', attemptId: admitted.attemptId,
       ownerId: 'process_crash', ttlMs: 10, now: base,
     });
+    const exited = waitForExit(crashing);
     const claim = await message(crashing, 'claimed');
     expect(claim.result).toMatchObject({
       lease: { acquired: true, generation: 1 },
       started: { applied: true },
     });
-    if (crashing.exitCode === null) {
-      await new Promise<void>((resolveExit) => crashing.once('exit', () => resolveExit()));
-    }
+    await exited;
 
     const recovering = startWorker({
       action: 'recover', attemptId: admitted.attemptId,
@@ -195,6 +209,7 @@ describe('Job engine process arbitration', () => {
       ttlMs: 10,
       now: base,
     });
+    const exited = waitForExit(crashing);
     const started = await message(crashing, 'tool_started');
     expect(started.result).toMatchObject({
       lease: { acquired: true, generation: 1 },
@@ -202,9 +217,7 @@ describe('Job engine process arbitration', () => {
       prepared: { applied: true },
       started: { applied: true },
     });
-    if (crashing.exitCode === null) {
-      await new Promise<void>((resolveExit) => crashing.once('exit', () => resolveExit()));
-    }
+    await exited;
 
     const recovering = startWorker({
       action: 'recover', attemptId: admitted.attemptId,
