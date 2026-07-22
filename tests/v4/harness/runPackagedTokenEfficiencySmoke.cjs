@@ -6,6 +6,7 @@ const os = require('node:os');
 const path = require('node:path');
 
 const repoRoot = path.resolve(__dirname, '../../..');
+const expectedVersion = require(path.join(repoRoot, 'package.json')).version;
 const npmCli = process.env.AIDEN_TEST_NPM_CLI;
 if (!npmCli) throw new Error('AIDEN_TEST_NPM_CLI is required.');
 
@@ -13,12 +14,13 @@ const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-token-package-'));
 const packDir = path.join(tempRoot, 'pack');
 const globalPrefix = path.join(tempRoot, 'global');
 const localRoot = path.join(tempRoot, 'local');
+const npxCache = path.join(tempRoot, 'npx-cache');
 const aidenHome = path.join(tempRoot, 'home');
 const cwd = path.join(tempRoot, 'workspace');
 const readyPath = path.join(tempRoot, 'provider-ready.txt');
 const countPath = path.join(tempRoot, 'provider-count.txt');
 const fixturePath = path.join(cwd, 'fixture.txt');
-for (const directory of [packDir, globalPrefix, localRoot, aidenHome, cwd]) {
+for (const directory of [packDir, globalPrefix, localRoot, npxCache, aidenHome, cwd]) {
   fs.mkdirSync(directory, { recursive: true });
 }
 fs.writeFileSync(fixturePath, 'packaged tool fixture\n', 'utf8');
@@ -125,7 +127,7 @@ try {
     cwd,
     env: globalEnv,
   });
-  assertContains(globalVersion.stdout, '4.15.0', 'global --version');
+  assertContains(globalVersion.stdout, expectedVersion, 'global --version');
   const globalHelp = run(process.env.ComSpec ?? 'cmd.exe', ['/d', '/c', 'call', globalBin, '--help'], {
     cwd,
     env: globalEnv,
@@ -172,16 +174,48 @@ try {
     cwd,
     env: localEnv,
   });
-  assertContains(localVersion.stdout, '4.15.0', 'local package runner --version');
+  assertContains(localVersion.stdout, expectedVersion, 'local package runner --version');
   const localTurn = run(process.execPath, [npmCli, 'exec', '--prefix', localRoot, '--offline', '--', 'aiden-runtime', '-q', 'reply simply'], {
     cwd,
     env: localEnv,
   });
   assertContains(localTurn.stdout, 'PACKAGED SIMPLE PASS', 'local package runner turn');
 
+  const npxEnv = {
+    ...childEnvironment,
+    AIDEN_TEST_INSTALLED_ROOT: npxCache,
+    AIDEN_TEST_PROVIDER_BASE_URL: baseUrl,
+    NODE_OPTIONS: `--require=${path.join(__dirname, 'installedProviderPreload.cjs')}`,
+    npm_config_cache: npxCache,
+  };
+  const npxVersion = run(process.execPath, [npmCli, 'exec', '--yes', '--package', tarball, '--', 'aiden-runtime', '--version'], {
+    cwd,
+    env: npxEnv,
+    timeout: 300_000,
+  });
+  assertContains(npxVersion.stdout, expectedVersion, 'fresh tarball package runner --version');
+  const npxHelp = run(process.execPath, [npmCli, 'exec', '--yes', '--package', tarball, '--', 'aiden-runtime', '--help'], {
+    cwd,
+    env: npxEnv,
+    timeout: 300_000,
+  });
+  assertContains(npxHelp.stdout, '--query', 'fresh tarball package runner --help');
+  const npxSimple = run(process.execPath, [npmCli, 'exec', '--yes', '--package', tarball, '--', 'aiden-runtime', '-q', 'reply simply'], {
+    cwd,
+    env: npxEnv,
+    timeout: 300_000,
+  });
+  assertContains(npxSimple.stdout, 'PACKAGED SIMPLE PASS', 'fresh tarball package runner plain turn');
+  const npxTool = run(process.execPath, [npmCli, 'exec', '--yes', '--package', tarball, '--', 'aiden-runtime', '-q', 'use a tool'], {
+    cwd,
+    env: npxEnv,
+    timeout: 300_000,
+  });
+  assertContains(npxTool.stdout, 'PACKAGED TOOL PASS', 'fresh tarball package runner tool turn');
+
   const callCount = Number.parseInt(fs.readFileSync(countPath, 'utf8'), 10);
-  if (callCount !== 16) throw new Error(`Expected sixteen physical provider calls; received ${callCount}.`);
-  const combinedOutput = [simple, tool, restart, interactive, localTurn]
+  if (callCount !== 19) throw new Error(`Expected nineteen physical provider calls; received ${callCount}.`);
+  const combinedOutput = [simple, tool, restart, interactive, localTurn, npxSimple, npxTool]
     .flatMap((result) => [result.stdout, result.stderr])
     .join('\n');
   if (combinedOutput.includes('controlled-package-value')) {
@@ -205,7 +239,7 @@ try {
   const successfulOneShot = ledgerRows.find(
     (row) => row.entry_point === 'oneshot' && row.status === 'success',
   );
-  if (!successfulOneShot || successfulOneShot.count !== 5) {
+  if (!successfulOneShot || successfulOneShot.count !== 8) {
     throw new Error(`Packaged ledger mismatch: ${JSON.stringify(ledgerRows)}`);
   }
   const successfulInteractive = ledgerRows.find(
@@ -233,6 +267,7 @@ try {
     package: path.basename(tarball),
     globalVersion: globalVersion.stdout.trim(),
     localVersion: localVersion.stdout.trim(),
+    freshTarballVersion: npxVersion.stdout.trim(),
     providerCalls: callCount,
     ledgerRows,
     restoredActiveState: {
@@ -246,6 +281,7 @@ try {
     restart: 'PASS',
     interactive: JSON.parse(interactive.stdout.trim()),
     localPackageRunner: 'PASS',
+    freshTarballPackageRunner: 'PASS',
   }, null, 2) + '\n');
   if (providerError) process.stderr.write(providerError);
 } finally {

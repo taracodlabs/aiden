@@ -18,26 +18,32 @@ import { AidenAgent } from '../../../core/v4/aidenAgent';
 import type { ToolSchema } from '../../../providers/v4/types';
 
 const OLLAMA_BASE = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-const OLLAMA_MODEL = process.env.OLLAMA_TEST_MODEL || 'llama3.2';
 
-async function probeOllama(): Promise<boolean> {
+async function discoverOllamaModel(): Promise<string | null> {
   try {
     const res = await fetch(`${OLLAMA_BASE}/api/tags`, {
       signal: AbortSignal.timeout(2000),
     });
-    return res.ok;
+    if (!res.ok) return null;
+    const body = await res.json() as { models?: Array<{ name?: string }> };
+    const installed = (body.models ?? [])
+      .map((model) => model.name?.trim() ?? '')
+      .filter((name) => name.length > 0);
+    const requested = process.env.OLLAMA_TEST_MODEL?.trim();
+    if (requested) return installed.includes(requested) ? requested : null;
+    return installed[0] ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-const ollamaUp = await probeOllama();
+const OLLAMA_MODEL = await discoverOllamaModel();
 
-describe.skipIf(!ollamaUp)('LocalPromptToolsAdapter — real local-runtime integration', () => {
+describe.skipIf(!OLLAMA_MODEL)('LocalPromptToolsAdapter — real local-runtime integration', () => {
   it('completes a simple conversation (no tools)', async () => {
     const adapter = new LocalPromptToolsAdapter({
       baseUrl: OLLAMA_BASE,
-      model: OLLAMA_MODEL,
+      model: OLLAMA_MODEL!,
       providerName: 'ollama',
     });
 
@@ -54,7 +60,7 @@ describe.skipIf(!ollamaUp)('LocalPromptToolsAdapter — real local-runtime integ
   it('completes a tool-calling conversation end-to-end (best-effort)', async () => {
     const adapter = new LocalPromptToolsAdapter({
       baseUrl: OLLAMA_BASE,
-      model: OLLAMA_MODEL,
+      model: OLLAMA_MODEL!,
       providerName: 'ollama',
     });
 

@@ -174,7 +174,10 @@ describe('runModelPicker', () => {
       currentModelId: 'llama3.2',
     });
 
-    expect(fetchImpl).toHaveBeenCalledWith('http://localhost:11434/api/tags');
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'http://localhost:11434/api/tags',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
     expect(result).toEqual({ providerId: 'ollama', modelId: 'gemma4:e4b-32k' });
     expect(providerMessage).toMatch(/configured: ollama.*llama3\.2.*not installed/i);
     expect(providerChoices.find((choice) => choice.value === 'ollama').name)
