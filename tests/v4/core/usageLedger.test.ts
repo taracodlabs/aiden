@@ -109,6 +109,47 @@ describe('ProviderAttemptLedger', () => {
     expect(Object.isFrozen(records[0])).toBe(true);
   });
 
+  it('links each physical attempt to the durable Job, Attempt, and generation', () => {
+    ledger.append(attempt({
+      callId: 'call-linked-1',
+      jobId: 'task_job',
+      attemptId: 'attempt_job',
+      attemptGeneration: 3,
+    }));
+
+    const records = ledger.query({ jobId: 'task_job', attemptId: 'attempt_job' });
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      callId: 'call-linked-1',
+      jobId: 'task_job',
+      attemptId: 'attempt_job',
+      attemptGeneration: 3,
+    });
+  });
+
+  it('reconciles only missing linkage from an exact authoritative task/run mapping', () => {
+    ledger.append(attempt({ callId: 'call-gap', jobId: null, attemptId: null, attemptGeneration: null }));
+    ledger.append(attempt({
+      callId: 'call-other-run', runId: 'run-2', jobId: null, attemptId: null, attemptGeneration: null,
+    }));
+    ledger.append(attempt({
+      callId: 'call-conflict', jobId: 'task-other', attemptId: 'attempt-other', attemptGeneration: 9,
+    }));
+
+    expect(ledger.reconcileJobLinkage({
+      taskId: 'task-1', runId: 'run-1',
+      jobId: 'task-job', attemptId: 'attempt-job', attemptGeneration: 3,
+    })).toBe(1);
+    expect(ledger.query({ callId: 'call-gap' })[0]).toMatchObject({
+      jobId: 'task-job', attemptId: 'attempt-job', attemptGeneration: 3,
+    });
+    expect(ledger.query({ callId: 'call-other-run' })[0]?.jobId).toBeNull();
+    expect(ledger.query({ callId: 'call-conflict' })[0]).toMatchObject({
+      jobId: 'task-other', attemptId: 'attempt-other', attemptGeneration: 9,
+    });
+  });
+
   it('keeps failed attempts and unknown spend explicit instead of recording zero', () => {
     ledger.append(attempt({
       callId: 'call-failed-1',

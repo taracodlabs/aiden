@@ -264,27 +264,29 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
     const cols = db.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>;
     const colNames = cols.map((c) => c.name).sort();
     expect(colNames).toEqual([
-      'artifact_ids', 'channel_id',
+      'active_attempt_id', 'artifact_ids', 'channel_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
-      'constraints',
-      'created_at',
+      'constraints', 'crash_count', 'created_at', 'entry_point',
       // v4.13 Gap 1 (v16 migration) — verify-before-done evidence envelope.
       'evidence',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
-      'failure_state', 'files_touched',
-      'goal', 'id',
-      'parent_task_id',
+      'failure_state', 'files_touched', 'finish_reason',
+      'goal', 'id', 'idempotency_key', 'idempotency_namespace',
+      'next_event_sequence', 'parent_task_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
-      'permissions',
+      'permissions', 'policy_snapshot_id', 'principal_id', 'recovery_state',
+      'request_fingerprint',
       // v4.13 Gap 4 (v18 migration) — wake-loop cap.
-      'resume_count',
-      'session_id',
+      'resume_count', 'root_job_id', 'session_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
-      'side_effects',
-      'status', 'title', 'trace_ids', 'updated_at',
+      'side_effects', 'source', 'state_version', 'status',
+      'terminal_at', 'terminal_outcome', 'title', 'trace_ids', 'updated_at',
+      'workspace_id',
     ]);
     const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name NOT LIKE 'sqlite_%'`).all() as Array<{ name: string }>;
     expect(idx.map((i) => i.name).sort()).toEqual([
+      'idx_tasks_idempotency',
+      'idx_tasks_root_job',
       'idx_tasks_session_created',
       'idx_tasks_status',
     ]);

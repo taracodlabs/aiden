@@ -55,6 +55,7 @@ import {
   type ToolResultArtifactStore,
 } from './toolResultBoundary';
 import { selectEconomyTools } from './usagePolicy';
+import { recordDurableToolVerification } from './daemon/jobExecutionContext';
 import {
   createLogicalProviderCallId,
   currentProviderAttemptLedger,
@@ -1997,6 +1998,13 @@ export class AidenAgent {
             } catch {
               // Defensive — a buggy verifier never breaks the agent loop.
               verification = undefined;
+            }
+            // Denied, blocked, and interrupted approvals never reach the tool
+            // handler, so no durable ToolCall exists to receive verification.
+            // Keep their verifier result in the normal trace, but do not turn a
+            // deliberate non-execution into a stale-fence persistence error.
+            if (verification && result.approvalDecision?.approved !== false) {
+              recordDurableToolVerification(call.id, verification);
             }
             const verificationEndedAt = Date.now();
             if (aggregateTiming) {

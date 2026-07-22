@@ -160,6 +160,9 @@ export function beginPhysicalProviderAttempt(
       runId: context?.runId === undefined || context.runId === null
         ? null
         : String(context.runId),
+      jobId: context?.jobId ?? context?.taskId ?? null,
+      attemptId: context?.attemptId ?? null,
+      attemptGeneration: context?.attemptGeneration ?? null,
       entryPoint: context?.entryPoint ?? 'unknown',
       purpose: effectivePurpose(context, metadata.attemptIndex, metadata.fallbackIndex ?? 0),
       providerConfigured: context?.providerConfigured ?? metadata.providerActual,

@@ -304,6 +304,16 @@ function newTaskId(): string {
 
 export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
   const db = opts.db;
+  const assertCompatibilityMutation = (id: string, operation: string): void => {
+    const row = db.prepare('SELECT entry_point FROM tasks WHERE id = ?').get(id) as {
+      entry_point: string | null;
+    } | undefined;
+    if (row?.entry_point) {
+      throw new Error(
+        `TaskStore.${operation} cannot mutate durable Job ${id}; use the Job transition authority`,
+      );
+    }
+  };
   return {
     create({ title, goal, sessionId, channelId, parentTaskId, status }) {
       const now = Date.now();
@@ -335,16 +345,19 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
       return r ? rowToTask(r) : null;
     },
     setStatus(id, status) {
+      assertCompatibilityMutation(id, 'setStatus');
       db.prepare(
         `UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?`,
       ).run(status, Date.now(), id);
     },
     setGoal(id, goal) {
+      assertCompatibilityMutation(id, 'setGoal');
       db.prepare(
         `UPDATE tasks SET goal = ?, updated_at = ? WHERE id = ?`,
       ).run(goal, Date.now(), id);
     },
     finalizeVerification(id, status, evidence, jobCard) {
+      assertCompatibilityMutation(id, 'finalizeVerification');
       // Read-merge for the accumulating arrays (same discipline as
       // appendTraceId), then ONE UPDATE carrying every field — status,
       // evidence, and job-card land atomically or not at all.
@@ -424,6 +437,7 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
       ).run(JSON.stringify(arr), Date.now(), id);
     },
     incrementResumeCount(id) {
+      assertCompatibilityMutation(id, 'incrementResumeCount');
       db.prepare(
         `UPDATE tasks SET resume_count = resume_count + 1, updated_at = ? WHERE id = ?`,
       ).run(Date.now(), id);
@@ -460,7 +474,9 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
       const info = db.prepare(
         `UPDATE tasks
             SET status = 'interrupted', updated_at = ?
-          WHERE status IN ('active', 'pending_verification') AND created_at < ?`,
+          WHERE status IN ('active', 'pending_verification')
+            AND entry_point IS NULL
+            AND created_at < ?`,
       ).run(Date.now(), beforeMs);
       return info.changes;
     },

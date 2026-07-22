@@ -11,7 +11,9 @@ import { promisify } from 'util'
 import fs   from 'fs'
 import path from 'path'
 import os   from 'os'
+import { randomUUID } from 'crypto'
 import { getUserDataDir } from './paths'
+import { executeWithDurableToolCall } from './v4/daemon/jobExecutionContext'
 
 import {
   moveMouse,
@@ -2880,7 +2882,7 @@ async function runTool(tool: string, input: Record<string, any>): Promise<RawRes
 // maxRetries: number of retries AFTER the first attempt (default 2 = 3 total tries)
 // timeoutMs: fallback timeout when tool has no entry in TOOL_TIMEOUTS
 
-export async function executeTool(
+async function executeToolInner(
   tool:       string,
   input:      Record<string, any>,
   maxRetries: number = 2,
@@ -2966,6 +2968,25 @@ export async function executeTool(
 // ── Sprint 29: TOOL_DESCRIPTIONS ────────────────────────────────
 // Human-readable descriptions for all tools, used by the MCP server to advertise
 // capabilities to Claude Desktop and other MCP clients.
+
+export async function executeTool(
+  tool:       string,
+  input:      Record<string, any>,
+  maxRetries: number = 2,
+  timeoutMs:  number = 30000,
+): Promise<ToolResult> {
+  const metadata = TOOL_REGISTRY[tool]
+  const mutates = metadata?.retry === false || metadata?.mcp === 'destructive'
+  return executeWithDurableToolCall({
+    toolCallId: `tool_${randomUUID()}`,
+    toolName: tool,
+    args: input,
+    riskTier: String(metadata?.tier ?? 'unknown'),
+    mutates,
+    execute: () => executeToolInner(tool, input, maxRetries, timeoutMs),
+    isSuccessful: (result) => result.success,
+  })
+}
 
 export const TOOL_DESCRIPTIONS: Record<string, string> = {
   web_search:              'Search the web for current information, news, or any topic',

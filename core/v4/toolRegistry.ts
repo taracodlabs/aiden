@@ -62,6 +62,7 @@ import { classifyBrowserAction } from './browserState';
 import { pwBrowserStatus, pwDialogPendingTier } from '../playwrightBridge';
 import type { SkillLoader } from './skillLoader';
 import type { BundledManifest } from './skillBundledManifest';
+import { executeWithDurableToolCall } from './daemon/jobExecutionContext';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -719,7 +720,14 @@ export class ToolRegistry {
       // only when a signal is present, so a normal call allocates nothing and a
       // child agent's own signal never leaks into the shared session context.
       const dispatch = async (a: Record<string, unknown>): Promise<unknown> =>
-        handler.execute(a, signal ? { ...context, signal } : context);
+        executeWithDurableToolCall({
+          toolCallId: call.id,
+          toolName: call.name,
+          args: a,
+          riskTier: handler.riskTier ?? (handler.mutates === false ? 'safe' : 'caution'),
+          mutates: handler.mutates ?? true,
+          execute: () => handler.execute(a, signal ? { ...context, signal } : context),
+        });
 
       // ── P1B-2B — FAIL-SAFE pre-state snapshot (shadow, non-authoritative) ──
       // Post-approval, pre-spawn. In its OWN try/catch, independent of the

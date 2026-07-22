@@ -124,4 +124,20 @@ describe('reclaimStuckRuns — v4.9.0 Slice 3', () => {
       expect(readRun(id).status).toBe('interrupted');
     }
   });
+
+  it('does not bypass the Job lease recovery authority for durable Attempts', () => {
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO tasks
+         (id, title, goal, status, created_at, updated_at, session_id,
+          idempotency_namespace, idempotency_key)
+       VALUES ('task-durable', 'durable', 'durable', 'running', ?, ?, 'sess-durable',
+               'durable-test', 'durable-key')`,
+    ).run(now, now);
+    const runId = seedRun({ instanceId: 'inst-dead', status: 'running', sessionId: 'sess-durable' });
+    db.prepare("UPDATE runs SET task_id = 'task-durable' WHERE id = ?").run(runId);
+
+    expect(reclaimStuckRuns(db, { instanceId: 'inst-dead' })).toEqual({ reclaimed: 0, runIds: [] });
+    expect(readRun(runId).status).toBe('running');
+  });
 });

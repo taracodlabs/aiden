@@ -13,6 +13,7 @@ import {
   consumeCleanShutdownMarker,
   evaluateBootState,
 } from '../../../core/v4/daemon/cleanShutdown';
+import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 
 let db: Database.Database;
 let tmpDir: string;
@@ -109,5 +110,31 @@ describe('evaluateBootState', () => {
     ).run('new', process.pid, 'test', Date.now(), Date.now(), 'test');
     const r = evaluateBootState({ db, markerPath, instanceId: 'new' });
     expect(r.crashDetected).toBe(false);
+  });
+
+  it('leaves Job-managed Attempts for the lease recovery authority', () => {
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('new', ?, 'test', ?, ?, 'test')`,
+    ).run(process.pid, now, now);
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('crashed', 99999, 'test', ?, ?, 'test')`,
+    ).run(now - 60_000, now - 60_000);
+    const engine = createJobEngine({ db });
+    const admitted = engine.submitJob({
+      entryPoint: 'daemon', source: 'test', sessionId: 'durable-session',
+      instanceId: 'crashed', idempotencyNamespace: 'durable-test',
+      idempotencyKey: 'durable-job', requestFingerprint: 'durable-fingerprint',
+      goal: 'recover through lease authority',
+    });
+    db.prepare("UPDATE runs SET status = 'running' WHERE attempt_id = ?").run(admitted.attemptId);
+
+    expect(evaluateBootState({ db, markerPath, instanceId: 'new' }).crashDetected).toBe(true);
+    expect(engine.getAttempt(admitted.attemptId)?.status).toBe('running');
+    expect(engine.getJob(admitted.jobId)?.status).toBe('queued');
   });
 });
