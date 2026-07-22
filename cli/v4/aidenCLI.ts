@@ -41,7 +41,7 @@ import { CliCallbacks } from './callbacks';
 // runtime smoke can find it in the bundled artifact.
 import { AIDEN_UI_BUILD } from './uiBuild';
 export { AIDEN_UI_BUILD };
-import { runSetupWizard, isFreshInstall } from './setupWizard';
+import { runSetupWizard, isFreshInstall, setupRequiresRecoveryMode } from './setupWizard';
 import { runDoctorCli } from './doctor';
 import { runModelPicker } from './commands/modelPicker';
 import { allCommands } from './commands';
@@ -94,6 +94,7 @@ import { PromptBuilder, narrowSkillDesc } from '../../core/v4/promptBuilder';
 import { readinessNote } from '../../core/v4/skillReadiness';
 import { PersonalityManager } from '../../core/v4/personality';
 import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
+import { deduplicateRuntimeSlots, providerRuntimeIdentity } from '../../providers/v4/providerIdentity';
 // v4.11 preflight compression — wire the dormant Phase 13 compressor
 // into production. Both modules existed pre-v4.11 but ContextCompressor
 // was never constructed at boot, so the `if (this.contextCompressor)`
@@ -155,6 +156,9 @@ import { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import { withMessagePreflight } from '../../providers/v4/preflightAdapter';
 import { ChatCompletionsAdapter } from '../../providers/v4/chatCompletionsAdapter';
 import { findModel } from '../../providers/v4/modelCatalog';
+import {
+  providerMainDefault,
+} from '../../providers/v4/providerModelAuthority';
 import {
   FallbackAdapter,
   buildDefaultSlots,
@@ -266,6 +270,7 @@ function buildAgentFallbackSlots(
   primaryAdapter: import('../../providers/v4/types').ProviderAdapter,
   primaryProviderId: string,
   primaryModelId: string,
+  primaryIdentity?: string,
 ): ProviderSlot[] {
   const defaults = buildDefaultSlots({
     adapterFactory: (cfg) =>
@@ -286,12 +291,20 @@ function buildAgentFallbackSlots(
     modelId: primaryModelId,
     keyPresent: true,
     keyTail: null,
+    identity: primaryIdentity,
     build: () => primaryAdapter,
   };
   // Filter out env-var slots whose providerId matches the primary AND
   // whose env-var-derived key would shadow it (avoids double-trying the
   // same Groq account at slots 0 and 1).
-  return [primarySlot, ...defaults];
+  const uniqueDefaults = deduplicateRuntimeSlots(
+    defaults,
+    primaryIdentity ? [primaryIdentity] : [],
+  );
+  return [
+    primarySlot,
+    ...uniqueDefaults,
+  ];
 }
 
 export interface MainOptions {
@@ -1464,6 +1477,12 @@ export async function buildAgentRuntime(
       // Flagged here and consumed below where the adapter is built.
       exploreMode = true;
     }
+    if (setupRequiresRecoveryMode(result)) {
+      // The selected provider remains persisted for explicit recovery, but a
+      // failed readiness transaction must not silently route the first turn
+      // through another provider.
+      exploreMode = true;
+    }
 
     // 'configured' (or 'skipped' — we still want the env/.env reload
     // for slash commands like /providers that read fresh state) →
@@ -1509,7 +1528,7 @@ export async function buildAgentRuntime(
       // so the legacy first-run path (manual API-key entry into .env)
       // still works.
       providerId = 'groq';
-      modelId    = 'llama-3.3-70b-versatile';
+      modelId    = providerMainDefault('groq')!;
       bootSource = 'hardcoded-fallback';
     }
   } catch (err) {
@@ -1648,7 +1667,16 @@ export async function buildAgentRuntime(
     adapter.apiMode === 'chat_completions' &&
     (providerId === 'groq' || providerId === 'together')
   ) {
-    const slots = buildAgentFallbackSlots(adapter, providerId, modelId);
+    const activeResolution = await resolver.describe({ providerId, modelId, config, paths });
+    const primaryIdentity = activeResolution.effectiveCredential
+      ? providerRuntimeIdentity({
+          provider: providerId,
+          endpointFingerprint: activeResolution.effectiveCredential.endpointFingerprint,
+          credentialFingerprint: activeResolution.effectiveCredential.credentialFingerprint,
+          model: modelId,
+        })
+      : undefined;
+    const slots = buildAgentFallbackSlots(adapter, providerId, modelId, primaryIdentity);
     const reachable = slots.filter((s) => s.keyPresent);
     if (reachable.length >= 2) {
       fallbackAdapter = new FallbackAdapter({
@@ -1925,29 +1953,22 @@ export async function buildAgentRuntime(
     } catch { /* refresh is best-effort; never crash a turn */ }
   });
 
-  // Auxiliary client (compression / risk-assessment / session-summary
-  // / skill-describe). v4.8.0 Slice 11 — route through Groq's cheap
-  // 8B model as the default, with the parent provider/model as the
-  // fallback when Groq isn't configured. Fixes the ChatGPT Plus +
-  // gpt-5 routing bug: pre-Slice-11 auxiliary inherited the parent
-  // (codex backend, accepts only `gpt-5-codex`/`gpt-4.1-mini`/etc.)
-  // and every aux call returned a 400 model-not-supported. Groq is
-  // cheap, fast, and reliable for the cheap classify/summarise jobs
-  // auxiliary is designed for. If the user has no GROQ_API_KEY, the
-  // resolver throws and we fall through to the parent — no regression
-  // for non-codex users.
-  //
-  // Skip the parent fallback when the parent IS already the Groq cheap
-  // model — same identity attempt twice is just noise in the verbose
-  // log. (Resolver dedup; the auxiliary client itself doesn't filter.)
-  const AUX_DEFAULT_PROVIDER = 'groq';
-  const AUX_DEFAULT_MODEL    = 'llama-3.1-8b-instant';
-  const parentSameAsDefault =
-    providerId === AUX_DEFAULT_PROVIDER && modelId === AUX_DEFAULT_MODEL;
+  // Auxiliary work is lazy and inherits the already-resolved parent runtime
+  // unless the user explicitly configures a separate provider and model.
+  // Optional classifier and summarisation work cannot block primary startup.
+  const configuredAuxProvider = config.get('auxiliary.provider');
+  const configuredAuxModel = config.get('auxiliary.model');
+  const auxiliaryProvider = configuredAuxProvider && configuredAuxModel
+    ? configuredAuxProvider
+    : providerId;
+  const auxiliaryModel = configuredAuxProvider && configuredAuxModel
+    ? configuredAuxModel
+    : modelId;
+  const auxiliaryUsesParent = auxiliaryProvider === providerId && auxiliaryModel === modelId;
   const auxiliaryClient = new AuxiliaryClient({
-    defaultProvider: AUX_DEFAULT_PROVIDER,
-    defaultModel:    AUX_DEFAULT_MODEL,
-    fallbacks: parentSameAsDefault
+    defaultProvider: auxiliaryProvider,
+    defaultModel: auxiliaryModel,
+    fallbacks: auxiliaryUsesParent
       ? []
       : [{ providerId, modelId }],
     // Phase 21 #5: ensure the auxiliary path also honors entry.oauth →

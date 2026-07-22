@@ -31,7 +31,9 @@
  *     fallback only.
  */
 
+import { createHash } from 'node:crypto';
 import { MODEL_CATALOG, type ModelEntry } from '../../../providers/v4/modelCatalog';
+import { RequestLifecycle, requestDeadlines } from '../../../providers/v4/requestLifecycle';
 
 export interface FetchedModel {
   /** Wire-format model id. */
@@ -44,12 +46,21 @@ export interface FetchedModel {
   recommended?: boolean;
   /** Cost tier hint, '$' / '$$' / '$$$'. Only set on fallback rows. */
   tier?: '$' | '$$' | '$$$' | 'free';
+  /** Model creator, distinct from the inference provider. */
+  creator?: string;
+  /** Inference host shown when it differs from the model creator. */
+  hostedBy?: string;
+  supportsToolCalling?: boolean;
+  supportsStructuredOutput?: boolean;
+  compatibleWithAgent?: boolean;
+  incompatibilityReason?: string;
 }
 
 export interface FetchModelsResult {
   models: FetchedModel[];
   /** Where the list came from. */
-  source: 'live' | 'fallback';
+  source: 'live' | 'last-known-good' | 'fallback';
+  cacheStatus?: 'fresh' | 'cached' | 'last-known-good';
   /** When `source === 'fallback'`, the reason (timeout, 401, parse, etc.). */
   reason?: string;
 }
@@ -65,9 +76,36 @@ export interface FetchOptions {
   timeoutMs?: number;
   /** Override fetch — tests inject a stub. */
   fetchImpl?: typeof fetch;
+  includeIncompatible?: boolean;
+  refresh?: boolean;
+  cacheTtlMs?: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 5000;
+const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1000;
+
+interface DiscoveryCacheEntry {
+  fetchedAt: number;
+  models: FetchedModel[];
+}
+
+const discoveryCache = new Map<string, DiscoveryCacheEntry>();
+
+export function clearModelDiscoveryCache(): void {
+  discoveryCache.clear();
+}
+
+function discoveryCacheKey(opts: FetchOptions): string {
+  const credentialFingerprint = opts.apiKey
+    ? createHash('sha256').update(opts.apiKey).digest('hex').slice(0, 16)
+    : 'anonymous';
+  return [
+    opts.providerId,
+    opts.baseUrl ?? '',
+    credentialFingerprint,
+    opts.includeIncompatible ? 'all' : 'compatible',
+  ].join('|');
+}
 
 function tierFromPricing(p?: ModelEntry['pricing']): FetchedModel['tier'] {
   if (!p) return undefined;
@@ -88,18 +126,69 @@ function fallbackFor(providerId: string, reason?: string): FetchModelsResult {
       contextLength: m.contextLength,
       recommended: m.isDefault,
       tier: tierFromPricing(m.pricing),
+      creator: m.creator,
+      hostedBy: m.hostedBy,
     }));
   return { models, source: 'fallback', reason };
 }
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(new Error(`Timed out after ${ms}ms`)), ms);
-    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
-  });
+interface RawProviderRoute {
+  provider?: string;
+  status?: string;
+  context_length?: number;
+  supports_tools?: boolean;
+  supports_structured_output?: boolean;
 }
 
-interface RawModel { id: string; name?: string; display_name?: string; context_length?: number }
+function safeDiscoveryReason(error: unknown): string {
+  const record = error && typeof error === 'object'
+    ? error as { category?: string; code?: string; message?: string }
+    : {};
+  if (record.category?.endsWith('_timeout') || /timeout/i.test(record.message ?? '')) {
+    return 'provider discovery timeout';
+  }
+  if (record.code === 'ENOTFOUND' || record.code === 'EAI_AGAIN') return 'provider hostname unavailable';
+  if (error instanceof SyntaxError) return 'malformed model catalogue response';
+  if (/^HTTP \d{3}$/.test(record.message ?? '')) return record.message!;
+  return 'provider discovery unavailable';
+}
+
+interface RawModel {
+  id: string;
+  name?: string;
+  display_name?: string;
+  context_length?: number;
+  type?: string;
+  organization?: string;
+  owned_by?: string;
+  hosted_by?: string;
+  supports_tools?: boolean;
+  supports_structured_output?: boolean;
+  compatible_with_agent?: boolean;
+  incompatibility_reason?: string;
+  providers?: RawProviderRoute[];
+}
+
+async function fetchJson(
+  providerId: string,
+  url: string,
+  init: RequestInit | undefined,
+  timeoutMs: number,
+  fetchImpl: typeof fetch,
+): Promise<{ response: Response; body: unknown }> {
+  const lifecycle = new RequestLifecycle(providerId, requestDeadlines(timeoutMs));
+  try {
+    const response = await lifecycle.race(fetchImpl(url, { ...init, signal: lifecycle.signal }));
+    lifecycle.markHeaders();
+    const bodyText = await lifecycle.readText(response);
+    const body = bodyText.length > 0 ? JSON.parse(bodyText) : {};
+    return { response, body };
+  } catch (error) {
+    throw lifecycle.classify(error);
+  } finally {
+    lifecycle.cleanup();
+  }
+}
 
 function normalise(providerId: string, raws: RawModel[]): FetchedModel[] {
   // Cross-reference the static catalog for recommended flags + display names
@@ -115,36 +204,105 @@ function normalise(providerId: string, raws: RawModel[]): FetchedModel[] {
         contextLength: c?.contextLength ?? m.context_length,
         recommended: c?.isDefault,
         tier: tierFromPricing(c?.pricing),
+        creator: c?.creator ?? m.organization ?? m.owned_by,
+        hostedBy: c?.hostedBy ?? m.hosted_by,
+        supportsToolCalling: m.supports_tools ?? c?.supportsToolCalling,
+        supportsStructuredOutput: m.supports_structured_output,
+        compatibleWithAgent: m.compatible_with_agent ?? true,
+        incompatibilityReason: m.incompatibility_reason,
       };
     })
     .sort((a, b) => Number(b.recommended) - Number(a.recommended) || a.displayName.localeCompare(b.displayName));
 }
 
 async function fetchMessageApiModels(o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
-  const res = await withTimeout(o.fetchImpl('https://api.anthropic.com/v1/models', {
+  const { response, body } = await fetchJson('anthropic', 'https://api.anthropic.com/v1/models', {
     headers: { 'x-api-key': o.apiKey, 'anthropic-version': '2023-06-01' },
-  }), o.timeoutMs);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = await res.json() as { data?: RawModel[] };
-  return body.data ?? [];
+  }, o.timeoutMs, o.fetchImpl);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return (body as { data?: RawModel[] }).data ?? [];
 }
 
 async function fetchCompatibleModels(url: string, o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
-  const res = await withTimeout(o.fetchImpl(url, {
+  const { response, body } = await fetchJson('compatible', url, {
     headers: { Authorization: `Bearer ${o.apiKey}` },
-  }), o.timeoutMs);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = await res.json() as { data?: RawModel[] };
-  return body.data ?? [];
+  }, o.timeoutMs, o.fetchImpl);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return (body as { data?: RawModel[] }).data ?? [];
+}
+
+async function fetchTogetherModels(
+  o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>,
+  includeIncompatible: boolean,
+): Promise<RawModel[]> {
+  const { response, body } = await fetchJson(
+    'together',
+    'https://api.together.xyz/v1/models?dedicated=false',
+    { headers: { Authorization: `Bearer ${o.apiKey}` } },
+    o.timeoutMs,
+    o.fetchImpl,
+  );
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const list = Array.isArray(body) ? body as RawModel[] : [];
+  return list.flatMap((model) => {
+    const compatible = model.type === 'chat';
+    if (!includeIncompatible && !compatible) return [];
+    return [{
+      ...model,
+      compatible_with_agent: compatible,
+      incompatibility_reason: compatible ? undefined : `not a chat model (${model.type ?? 'unknown type'})`,
+    }];
+  });
+}
+
+function classifyGroqModels(models: RawModel[], includeIncompatible: boolean): RawModel[] {
+  return models.flatMap((model) => {
+    const incompatibleFamily = /(?:whisper|orpheus|guard|compound)/i.test(model.id);
+    if (!includeIncompatible && incompatibleFamily) return [];
+    return [{
+      ...model,
+      compatible_with_agent: !incompatibleFamily,
+      incompatibility_reason: incompatibleFamily
+        ? 'not a general chat model with custom tool replay'
+        : undefined,
+    }];
+  });
+}
+
+async function fetchHuggingFaceModels(
+  o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>,
+  includeIncompatible: boolean,
+): Promise<RawModel[]> {
+  const models = await fetchCompatibleModels('https://router.huggingface.co/v1/models', o);
+  return models.flatMap((model) => {
+    const liveRoutes = (model.providers ?? []).filter((route) => route.status === 'live');
+    const toolRoute = liveRoutes.find((route) => route.supports_tools === true);
+    const selectedRoute = toolRoute ?? liveRoutes[0];
+    const compatible = !!toolRoute;
+    if (!includeIncompatible && !compatible) return [];
+    return [{
+      ...model,
+      context_length: selectedRoute?.context_length ?? model.context_length,
+      hosted_by: selectedRoute?.provider,
+      supports_tools: selectedRoute?.supports_tools ?? false,
+      supports_structured_output: selectedRoute?.supports_structured_output,
+      compatible_with_agent: compatible,
+      incompatibility_reason: compatible
+        ? undefined
+        : liveRoutes.length === 0
+          ? 'no live inference route'
+          : 'tool calling not advertised by any live route',
+    }];
+  });
 }
 
 async function fetchGenerativeApiModels(o: Required<Pick<FetchOptions, 'apiKey' | 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
   const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(o.apiKey)}`;
-  const res = await withTimeout(o.fetchImpl(url), o.timeoutMs);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = await res.json() as { models?: Array<{ name: string; displayName?: string; inputTokenLimit?: number }> };
+  const { response, body } = await fetchJson('generative-api', url, undefined, o.timeoutMs, o.fetchImpl);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const parsed = body as { models?: Array<{ name: string; displayName?: string; inputTokenLimit?: number }> };
   // Gemini ids come back as "models/gemini-2.0-flash" — strip the prefix.
-  return (body.models ?? []).map((m) => ({
+  return (parsed.models ?? []).map((m) => ({
     id: m.name.replace(/^models\//, ''),
     display_name: m.displayName,
     context_length: m.inputTokenLimit,
@@ -152,10 +310,16 @@ async function fetchGenerativeApiModels(o: Required<Pick<FetchOptions, 'apiKey' 
 }
 
 async function fetchLocalRuntimeModels(baseUrl: string, o: Required<Pick<FetchOptions, 'timeoutMs' | 'fetchImpl'>>): Promise<RawModel[]> {
-  const res = await withTimeout(o.fetchImpl(`${baseUrl.replace(/\/+$/, '')}/api/tags`), o.timeoutMs);
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const body = await res.json() as { models?: Array<{ name: string; size?: number }> };
-  return (body.models ?? []).map((m) => ({ id: m.name, display_name: m.name }));
+  const { response, body } = await fetchJson(
+    'local-runtime',
+    `${baseUrl.replace(/\/+$/, '')}/api/tags`,
+    undefined,
+    o.timeoutMs,
+    o.fetchImpl,
+  );
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return ((body as { models?: Array<{ name: string; size?: number }> }).models ?? [])
+    .map((m) => ({ id: m.name, display_name: m.name }));
 }
 
 /**
@@ -167,6 +331,12 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const apiKey = opts.apiKey ?? '';
+  const cacheKey = discoveryCacheKey(opts);
+  const cached = discoveryCache.get(cacheKey);
+  const cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+  if (!opts.refresh && cached && Date.now() - cached.fetchedAt < cacheTtlMs) {
+    return { models: cached.models, source: 'live', cacheStatus: 'cached' };
+  }
 
   try {
     let raws: RawModel[];
@@ -181,7 +351,28 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
         break;
       case 'groq':
         if (!apiKey) return fallbackFor('groq', 'no API key');
-        raws = await fetchCompatibleModels('https://api.groq.com/openai/v1/models', { apiKey, timeoutMs, fetchImpl });
+        raws = classifyGroqModels(
+          await fetchCompatibleModels('https://api.groq.com/openai/v1/models', { apiKey, timeoutMs, fetchImpl }),
+          opts.includeIncompatible ?? false,
+        );
+        break;
+      case 'together':
+        if (!apiKey) return fallbackFor('together', 'no API key');
+        raws = await fetchTogetherModels(
+          { apiKey, timeoutMs, fetchImpl },
+          opts.includeIncompatible ?? false,
+        );
+        break;
+      case 'deepseek':
+        if (!apiKey) return fallbackFor('deepseek', 'no API key');
+        raws = await fetchCompatibleModels('https://api.deepseek.com/v1/models', { apiKey, timeoutMs, fetchImpl });
+        break;
+      case 'huggingface':
+        if (!apiKey) return fallbackFor('huggingface', 'no API key');
+        raws = await fetchHuggingFaceModels(
+          { apiKey, timeoutMs, fetchImpl },
+          opts.includeIncompatible ?? false,
+        );
         break;
       case 'openrouter':
         // OpenRouter exposes /models without auth, but auth gives the user's
@@ -202,9 +393,18 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
     }
     const models = normalise(opts.providerId, raws);
     if (models.length === 0) return fallbackFor(opts.providerId, 'empty live response');
-    return { models, source: 'live' };
+    discoveryCache.set(cacheKey, { fetchedAt: Date.now(), models });
+    return { models, source: 'live', cacheStatus: 'fresh' };
   } catch (err) {
-    const reason = err instanceof Error ? err.message : String(err);
+    const reason = safeDiscoveryReason(err);
+    if (cached) {
+      return {
+        models: cached.models,
+        source: 'last-known-good',
+        cacheStatus: 'last-known-good',
+        reason,
+      };
+    }
     return fallbackFor(opts.providerId, reason);
   }
 }

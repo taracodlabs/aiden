@@ -8,6 +8,7 @@ import {
   isFreshInstall,
   printPostWizardTutorial,
   aidenHomeDisplayPath,
+  setupRequiresRecoveryMode,
   PROVIDERS,
   type PromptIO,
   type SetupAnswers,
@@ -145,7 +146,73 @@ describe('SetupWizard', () => {
     expect(result.status).toBe('configured');
     expect(result.ran).toBe(true);
     expect(result.config?.model.provider).toBe('groq');
+    expect(result.config?.agent.tool_profile).toBe('minimal');
     expect(prompts.defaultIndexCalls[0]).toBe(expectedIdx);
+  });
+
+  it('does not advance past an empty required credential', async () => {
+    const groqIdx = PROVIDERS.findIndex((provider) => provider.id === 'groq') + 1;
+    const { display } = sinkDisplay();
+    const answers = ['', ['fixture', 'managed', 'credential'].join('-')];
+    let credentialPrompts = 0;
+    const prompts: PromptIO = {
+      async choose(_question, _choices, defaultIndex) {
+        return defaultIndex ?? groqIdx;
+      },
+      async input(question) {
+        if (!question.startsWith('API key for')) throw new Error(`unexpected input prompt: ${question}`);
+        credentialPrompts += 1;
+        return answers.shift()!;
+      },
+      async confirm() {
+        return false;
+      },
+    };
+
+    const result = await runSetupWizard({
+      paths,
+      display,
+      prompts,
+      skipValidation: true,
+      skipCuratedStep: true,
+    });
+
+    expect(result.status).toBe('configured');
+    expect(credentialPrompts).toBe(2);
+    expect(await fs.readFile(paths.envFile, 'utf8')).toMatch(/^GROQ_API_KEY=\S+$/m);
+  });
+
+  it('does not present an incomplete readiness transaction as configured', async () => {
+    const groqIdx = PROVIDERS.findIndex((provider) => provider.id === 'groq') + 1;
+    const { display, chunks } = sinkDisplay();
+    const result = await runSetupWizard({
+      paths,
+      display,
+      prompts: scriptedPrompts({ choose: [groqIdx, 1], input: ['fixture-credential'] }),
+      validator: async () => ({ valid: true }),
+      readinessVerifier: async () => ({
+        state: 'failed_requires_user_action',
+        provider: 'groq',
+        model: 'openai/gpt-oss-120b',
+        endpointFingerprint: 'endpoint',
+        credentialSource: 'managed_environment',
+        transportMode: 'chat_completions',
+        plainCompletionStatus: 'verified',
+        streamingStatus: 'verified',
+        toolCallStatus: 'failed',
+        toolResultReplayStatus: 'failed',
+        structuredArgumentsStatus: 'failed',
+        verificationTimestamp: '2026-07-18T00:00:00.000Z',
+        verificationErrorCategory: 'tool_call_unsupported',
+      }),
+      skipCuratedStep: true,
+    });
+
+    expect(result.readiness?.state).toBe('failed_requires_user_action');
+    const text = chunks.join('');
+    expect(text).not.toMatch(/configured with model/i);
+    expect(text).toMatch(/settings were saved, but runtime readiness did not complete/i);
+    expect(setupRequiresRecoveryMode(result)).toBe(true);
   });
 
   // ── v4.11 — back-navigation (Approach B, hybrid) ─────────────────
@@ -204,7 +271,7 @@ describe('SetupWizard', () => {
     });
     const text = chunks.join('\n');
     expect(text).toMatch(/Press Enter to accept Groq/i);
-    expect(text).toMatch(/free \+ fastest setup/i);
+    expect(text).toMatch(/fast hosted inference; API key required/i);
   });
 
   it('skips when config exists with providers and force=false', async () => {
@@ -267,7 +334,7 @@ describe('SetupWizard', () => {
 
   it('model is filtered by provider', async () => {
     // Phase 30.2.1: Groq is now option [1] with 3 models.
-    // Pick model index 2 → llama-3.1-8b-instant.
+    // Pick the second curated model.
     const groqIdx = PROVIDERS.findIndex((p) => p.id === 'groq') + 1;
     const { display } = sinkDisplay();
     const result = await runSetupWizard({
@@ -278,12 +345,12 @@ describe('SetupWizard', () => {
     });
     expect(result.status).toBe('configured');
     expect(result.config?.model.provider).toBe('groq');
-    expect(result.config?.model.modelId).toBe('llama-3.1-8b-instant');
+    expect(result.config?.model.modelId).toBe('openai/gpt-oss-20b');
   });
 
   it('Custom OpenAI-compatible collects baseUrl + apiKey', async () => {
     // Phase 30.2.1: Custom moved to the end of the list (last entry).
-    const customIdx = PROVIDERS.findIndex((p) => p.id === 'custom') + 1;
+    const customIdx = PROVIDERS.findIndex((p) => p.id === 'custom_openai') + 1;
     const { display } = sinkDisplay();
     const result = await runSetupWizard({
       paths,
@@ -296,10 +363,10 @@ describe('SetupWizard', () => {
       skipValidation: true,
     });
     expect(result.status).toBe('configured');
-    expect(result.config?.model.provider).toBe('custom');
+    expect(result.config?.model.provider).toBe('custom_openai');
     const env = await fs.readFile(paths.envFile, 'utf8');
-    expect(env).toMatch(/CUSTOM_BASE_URL=https:\/\/api\.example\.com\/v1/);
-    expect(env).toMatch(/CUSTOM_API_KEY=custom-key/);
+    expect(result.config?.providers?.custom_openai?.baseUrl).toBe('https://api.example.com/v1');
+    expect(env).toMatch(/CUSTOM_OPENAI_API_KEY=custom-key/);
   });
 
   it('Ollama option probes the local server', async () => {
@@ -367,6 +434,55 @@ describe('SetupWizard', () => {
     });
     expect(result.status).toBe('configured');
     expect(result.config?.model.provider).toBe('anthropic');
+  });
+
+  it('resumes an interrupted persisted readiness transaction without replaying prompts', async () => {
+    await fs.mkdir(path.dirname(paths.configYaml), { recursive: true });
+    await fs.writeFile(paths.configYaml, [
+      'model:',
+      '  provider: groq',
+      '  modelId: openai/gpt-oss-120b',
+      'providers:',
+      '  groq:',
+      '    modelVerification: curated',
+      '    readiness:',
+      '      state: credential_saved',
+      '      provider: groq',
+      '      model: openai/gpt-oss-120b',
+      '      endpointFingerprint: null',
+      '      credentialSource: managed_environment',
+      '      transportMode: chat_completions',
+      '      plainCompletionStatus: not_started',
+      '      toolCallStatus: not_started',
+      '      verificationTimestamp: null',
+      '      verificationErrorCategory: null',
+      '',
+    ].join('\n'));
+    const complete = {
+      state: 'complete' as const,
+      provider: 'groq',
+      model: 'openai/gpt-oss-120b',
+      endpointFingerprint: 'endpoint',
+      credentialSource: 'managed_environment' as const,
+      transportMode: 'chat_completions' as const,
+      plainCompletionStatus: 'verified' as const,
+      toolCallStatus: 'verified' as const,
+      verificationTimestamp: '2026-07-18T00:00:00.000Z',
+      verificationErrorCategory: null,
+    };
+    let resumed = 0;
+    const result = await runSetupWizard({
+      paths,
+      readinessVerifier: async (options) => {
+        resumed += 1;
+        expect(options.providerId).toBe('groq');
+        expect(options.modelId).toBe('openai/gpt-oss-120b');
+        return complete;
+      },
+    });
+    expect(resumed).toBe(1);
+    expect(result.ran).toBe(true);
+    expect(result.readiness).toEqual(complete);
   });
 
   it('banner is shown at start', async () => {

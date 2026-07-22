@@ -109,6 +109,25 @@ export class ProviderTimeoutError extends ProviderError {
   }
 }
 
+export type ProviderTimeoutPhase =
+  | 'connection_timeout'
+  | 'first_byte_timeout'
+  | 'body_idle_timeout'
+  | 'total_timeout';
+
+/** Timeout with an exact request-lifecycle phase. */
+export class ProviderPhaseTimeoutError extends ProviderTimeoutError {
+  constructor(
+    providerName: string,
+    timeoutMs: number,
+    public readonly phase: ProviderTimeoutPhase,
+  ) {
+    super(providerName, timeoutMs);
+    this.name = 'ProviderPhaseTimeoutError';
+    this.message = `Provider ${providerName} exceeded ${phase.replace(/_/g, ' ')} after ${timeoutMs}ms`;
+  }
+}
+
 /** Thrown after retries are exhausted on HTTP 429. Caller may pause and retry. */
 export class ProviderRateLimitError extends ProviderError {
   constructor(providerName: string, raw?: unknown) {

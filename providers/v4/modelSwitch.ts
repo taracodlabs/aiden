@@ -29,6 +29,7 @@ import {
   findProvidersForModelId,
 } from './modelCatalog';
 import { RuntimeResolver } from './runtimeResolver';
+import { resolveModelSelection } from './providerModelAuthority';
 
 export interface ModelSwitchRequest {
   /**
@@ -125,12 +126,18 @@ export class ModelSwitcher {
     const newAdapter = await this.resolver.resolve({
       providerId: parsed.providerId,
       modelId: parsed.modelId,
+      allowUnverifiedModel: true,
     });
 
     // Resolution succeeded — pull the entries for the result. These are
     // guaranteed present since resolve() already validated them.
     const newProvider = PROVIDER_REGISTRY[parsed.providerId];
-    const newModel = findModel(parsed.providerId, parsed.modelId)!;
+    const newModel = findModel(parsed.providerId, parsed.modelId)
+      ?? resolveModelSelection({
+        providerId: parsed.providerId,
+        modelId: parsed.modelId,
+        allowUnverified: true,
+      })!.model;
 
     const changed =
       req.currentProviderId !== parsed.providerId ||

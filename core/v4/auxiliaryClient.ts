@@ -28,7 +28,7 @@
 import type { ProviderAdapter, Message } from '../../providers/v4/types';
 
 export interface AuxiliaryResolver {
-  /** Resolve once at AuxiliaryClient construction. */
+  /** Resolve once, lazily, when the first auxiliary operation is requested. */
   resolve(opts: {
     providerId: string;
     modelId: string;
@@ -109,18 +109,25 @@ export class AuxiliaryClient {
   private readonly opts: AuxiliaryClientOptions;
   private adapterPromise: Promise<ProviderAdapter | null> | null = null;
   private resolveCallCount = 0;
+  private activeAttemptIndex: number | null = null;
+  private nextAttemptIndex = 0;
   private readonly usage = new Map<AuxiliaryPurpose, PurposeUsage>();
   private adapterUnavailable = false;
 
   constructor(opts: AuxiliaryClientOptions) {
     this.opts = opts;
-    // Resolve eagerly (single call) so concurrent first-call requests don't
-    // each kick off their own resolution.
-    this.adapterPromise = this.resolveOnce();
+  }
+
+  private adapter(): Promise<ProviderAdapter | null> {
+    this.adapterPromise ??= this.resolveOnce();
+    return this.adapterPromise;
   }
 
   private async resolveOnce(): Promise<ProviderAdapter | null> {
-    if (this.opts.adapter) return this.opts.adapter;
+    if (this.opts.adapter) {
+      this.activeAttemptIndex = 0;
+      return this.opts.adapter;
+    }
     if (!this.opts.resolver) return null;
 
     // v4.8.0 Slice 11 — resolution chain: default first, then each
@@ -130,18 +137,18 @@ export class AuxiliaryClient {
     // provider/model as the fallback, so auxiliary calls land on
     // Groq when configured and the parent only sees traffic when
     // Groq is absent.
-    const attempts: AuxiliaryAttempt[] = [
-      { providerId: this.opts.defaultProvider, modelId: this.opts.defaultModel },
-      ...(this.opts.fallbacks ?? []),
-    ];
+    const attempts = this.attempts();
     const failures: string[] = [];
-    for (const att of attempts) {
+    for (let index = this.nextAttemptIndex; index < attempts.length; index += 1) {
+      const att = attempts[index];
       this.resolveCallCount += 1;
       try {
         const adapter = await this.opts.resolver.resolve({
           providerId: att.providerId,
           modelId: att.modelId,
         });
+        this.activeAttemptIndex = index;
+        this.nextAttemptIndex = index;
         this.warn(`auxiliary resolved via ${att.providerId}/${att.modelId}`);
         return adapter;
       } catch (err) {
@@ -161,12 +168,6 @@ export class AuxiliaryClient {
   }
 
   async call(opts: AuxiliaryCallOptions): Promise<AuxiliaryCallResult> {
-    const adapter = await this.adapterPromise;
-    if (!adapter) {
-      this.recordUsage(opts.purpose, 0, 0);
-      return { content: '', usage: { inputTokens: 0, outputTokens: 0 } };
-    }
-
     const messages: Message[] = [
       {
         role: 'system',
@@ -178,29 +179,41 @@ export class AuxiliaryClient {
     const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-    try {
-      const result = await this.withTimeout(
-        adapter.call({
-          messages,
-          tools: [],
-          maxTokens,
-        }),
-        timeoutMs,
-      );
-      const inputTokens = result.usage?.inputTokens ?? 0;
-      const outputTokens = result.usage?.outputTokens ?? 0;
-      this.recordUsage(opts.purpose, inputTokens, outputTokens);
-      return {
-        content: result.content ?? '',
-        usage: { inputTokens, outputTokens },
-      };
-    } catch (err) {
-      this.warn(
-        `auxiliary call failed (${opts.purpose}): ${(err as Error).message}`,
-      );
-      this.recordUsage(opts.purpose, 0, 0);
-      return { content: '', usage: { inputTokens: 0, outputTokens: 0 } };
+    let adapter = await this.adapter();
+    while (adapter) {
+      try {
+        const result = await this.withTimeout(
+          adapter.call({
+            messages,
+            tools: [],
+            maxTokens,
+          }),
+          timeoutMs,
+        );
+        const inputTokens = result.usage?.inputTokens ?? 0;
+        const outputTokens = result.usage?.outputTokens ?? 0;
+        this.recordUsage(opts.purpose, inputTokens, outputTokens);
+        return {
+          content: result.content ?? '',
+          usage: { inputTokens, outputTokens },
+        };
+      } catch (err) {
+        this.warn(
+          `auxiliary call failed (${opts.purpose}): ${(err as Error).message}`,
+        );
+        if (!this.advanceAfterCallFailure()) break;
+        adapter = await this.adapter();
+      }
     }
+
+    if (!adapter) {
+      this.warn(
+        `auxiliary client unavailable for ${opts.purpose}`,
+      );
+    }
+    this.adapterUnavailable = true;
+    this.recordUsage(opts.purpose, 0, 0);
+    return { content: '', usage: { inputTokens: 0, outputTokens: 0 } };
   }
 
   /** Per-purpose usage breakdown. Used by /usage command (Phase 14). */
@@ -212,7 +225,7 @@ export class AuxiliaryClient {
     return out;
   }
 
-  /** True after construction-time resolution failed. */
+  /** True after a requested lazy resolution failed. */
   isUnavailable(): boolean {
     return this.adapterUnavailable;
   }
@@ -227,6 +240,24 @@ export class AuxiliaryClient {
     cur.outputTokens += output;
     cur.calls += 1;
     this.usage.set(purpose, cur);
+  }
+
+  private attempts(): AuxiliaryAttempt[] {
+    return [
+      { providerId: this.opts.defaultProvider, modelId: this.opts.defaultModel },
+      ...(this.opts.fallbacks ?? []),
+    ];
+  }
+
+  /** Adapter construction is not a liveness proof; advance only after a real call fails. */
+  private advanceAfterCallFailure(): boolean {
+    if (this.opts.adapter || !this.opts.resolver || this.activeAttemptIndex === null) return false;
+    const next = this.activeAttemptIndex + 1;
+    if (next >= this.attempts().length) return false;
+    this.nextAttemptIndex = next;
+    this.activeAttemptIndex = null;
+    this.adapterPromise = null;
+    return true;
   }
 
   private warn(msg: string) {

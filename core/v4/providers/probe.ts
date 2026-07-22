@@ -4,6 +4,8 @@
  *
  * Aiden — local-first agent.
  */
+
+import { RequestLifecycle, requestDeadlines } from '../../../providers/v4/requestLifecycle';
 /**
  * core/v4/providers/probe.ts — ONB1 slice 7.
  *
@@ -63,13 +65,6 @@ export interface ProbeResult {
 
 const DEFAULT_TIMEOUT_MS = 8000;
 
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(Object.assign(new Error(`timed out after ${ms}ms`), { code: 'TIMEOUT' })), ms);
-    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
-  });
-}
-
 function classifyStatus(status: number, retryAfter?: string | null): { category: ProbeCategory; reason: string; retryAfterSec?: number } {
   if (status === 401 || status === 403) return { category: 'auth', reason: 'API key rejected' };
   if (status === 404) return { category: 'model-not-found', reason: 'Model not on this key\'s allow-list' };
@@ -128,7 +123,7 @@ function buildAuthRequest(o: ProbeOptions): ProbeRequest | null {
       const root = (o.baseUrl ?? 'http://localhost:11434').replace(/\/+$/, '');
       return { url: `${root}/api/tags`, method: 'GET', headers: {} };
     }
-    case 'custom': {
+    case 'custom_openai': {
       const root = (o.baseUrl ?? '').replace(/\/+$/, '');
       if (!root) return null;
       return { url: `${root}/models`, method: 'GET', headers: { Authorization: `Bearer ${apiKey}` } };
@@ -184,6 +179,8 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
     case 'openrouter':
     case 'together':
     case 'nvidia':
+    case 'custom':
+    case 'custom_openai':
       return {
         url: o.providerId === 'openai'
           ? 'https://api.openai.com/v1/chat/completions'
@@ -193,7 +190,9 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
               ? 'https://openrouter.ai/api/v1/chat/completions'
               : o.providerId === 'together'
                 ? 'https://api.together.xyz/v1/chat/completions'
-                : 'https://integrate.api.nvidia.com/v1/chat/completions',
+                : o.providerId === 'custom_openai' || o.providerId === 'custom'
+                  ? `${(o.baseUrl ?? '').replace(/\/+$/, '')}/chat/completions`
+                  : 'https://integrate.api.nvidia.com/v1/chat/completions',
         method: 'POST',
         headers: { Authorization: `Bearer ${o.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -212,14 +211,23 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
 async function runRequest(req: ProbeRequest, o: ProbeOptions): Promise<{ status: number; bodyText: string; retryAfter: string | null }> {
   const fetchImpl = o.fetchImpl ?? fetch;
   const timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const res = await withTimeout(fetchImpl(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: req.body,
-  }), timeoutMs);
-  const retryAfter = res.headers.get('retry-after');
-  const bodyText = await res.text().catch(() => '');
-  return { status: res.status, bodyText, retryAfter };
+  const lifecycle = new RequestLifecycle(o.providerId, requestDeadlines(timeoutMs));
+  try {
+    const res = await lifecycle.race(fetchImpl(req.url, {
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      signal: lifecycle.signal,
+    }));
+    lifecycle.markHeaders();
+    const retryAfter = res.headers.get('retry-after');
+    const bodyText = await lifecycle.readText(res);
+    return { status: res.status, bodyText, retryAfter };
+  } catch (error) {
+    throw lifecycle.classify(error);
+  } finally {
+    lifecycle.cleanup();
+  }
 }
 
 /**

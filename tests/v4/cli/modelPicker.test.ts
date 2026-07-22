@@ -53,9 +53,9 @@ describe('runModelPicker', () => {
   it('parses bare unique model', async () => {
     const result = await runModelPicker({
       resolver: realResolver(),
-      spec: 'llama-3.3-70b-versatile',
+      spec: 'gemini-2.5-pro',
     });
-    expect(result).toEqual({ providerId: 'groq', modelId: 'llama-3.3-70b-versatile' });
+    expect(result).toEqual({ providerId: 'gemini', modelId: 'gemini-2.5-pro' });
   });
 
   it('returns null on ambiguous bare model', async () => {

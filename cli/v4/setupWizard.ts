@@ -62,6 +62,26 @@ import { BundledManifest } from '../../core/v4/skillBundledManifest';
 import { glyphs } from './design/tokens';
 import { fetchModels } from '../../core/v4/providers/modelFetch';
 import { runProbe, type ProbeResult } from '../../core/v4/providers/probe';
+import {
+  providerMainDefault,
+  type ModelVerification,
+} from '../../providers/v4/providerModelAuthority';
+import { PROVIDER_MODEL_POLICIES } from '../../providers/v4/providerPolicies';
+import { CredentialResolver } from '../../providers/v4/credentialResolver';
+import { RuntimeResolver } from '../../providers/v4/runtimeResolver';
+import {
+  initialReadiness,
+  markConfiguredUnverified,
+  runRuntimeReadinessTransaction,
+  type ProviderReadinessRecord,
+} from '../../providers/v4/providerReadiness';
+import {
+  persistManagedCredential,
+  restoreManagedCredentialFile,
+  snapshotManagedCredentialFile,
+  type ManagedCredentialFileSnapshot,
+  type PersistedManagedCredential,
+} from '../../providers/v4/credentialAuthority';
 
 export interface ProviderOption {
   id: string;
@@ -110,12 +130,12 @@ export const PROVIDERS: ProviderOption[] = [
   {
     id: 'groq',
     shortLabel: 'Groq',
-    label: 'Groq — free, fast, limited messages per minute',
+    label: 'Groq — fast hosted inference; API key required',
     kind: 'key',
     envVar: 'GROQ_API_KEY',
     keyUrl: 'https://console.groq.com/keys',
-    defaultModel: 'llama-3.3-70b-versatile',
-    models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+    defaultModel: providerMainDefault('groq'),
+    models: [...PROVIDER_MODEL_POLICIES.groq.curatedModels],
   },
   {
     id: 'gemini',
@@ -175,16 +195,12 @@ export const PROVIDERS: ProviderOption[] = [
   {
     id: 'together',
     shortLabel: 'Together AI',
-    label: 'Together AI — paid, fast & reliable',
+    label: 'Together AI — broad hosted open-model catalogue; usage billed',
     kind: 'key',
     envVar: 'TOGETHER_API_KEY',
     keyUrl: 'https://api.together.xyz/settings/api-keys',
-    defaultModel: 'openai/gpt-oss-120b',
-    models: [
-      'openai/gpt-oss-120b',
-      'meta-llama/Llama-3.3-70B-Instruct-Turbo',
-      'openai/gpt-oss-20b',
-    ],
+    defaultModel: providerMainDefault('together'),
+    models: [...PROVIDER_MODEL_POLICIES.together.curatedModels],
   },
   // ── Subscription sign-ins ──
   {
@@ -198,10 +214,11 @@ export const PROVIDERS: ProviderOption[] = [
   {
     id: 'deepseek',
     shortLabel: 'DeepSeek',
-    label: 'DeepSeek — paid',
+    label: 'DeepSeek — direct API; API key and balance required',
     kind: 'key',
     envVar: 'DEEPSEEK_API_KEY',
-    defaultModel: 'deepseek-chat',
+    defaultModel: providerMainDefault('deepseek'),
+    models: [...PROVIDER_MODEL_POLICIES.deepseek.curatedModels],
   },
   {
     id: 'mistral',
@@ -224,7 +241,7 @@ export const PROVIDERS: ProviderOption[] = [
     shortLabel: 'Kimi',
     label: 'Kimi / Moonshot — paid',
     kind: 'key',
-    envVar: 'MOONSHOT_API_KEY',
+    envVar: 'KIMI_API_KEY',
     defaultModel: 'moonshot-v1-128k',
   },
   {
@@ -238,13 +255,14 @@ export const PROVIDERS: ProviderOption[] = [
   {
     id: 'huggingface',
     shortLabel: 'Hugging Face',
-    label: 'Hugging Face — free tier',
+    label: 'Hugging Face — one token across multiple inference providers',
     kind: 'key',
-    envVar: 'HF_API_KEY',
-    defaultModel: 'meta-llama/Llama-3.3-70B-Instruct',
+    envVar: 'HF_TOKEN',
+    defaultModel: providerMainDefault('huggingface'),
+    models: [...PROVIDER_MODEL_POLICIES.huggingface.curatedModels],
   },
   {
-    id: 'vercel',
+    id: 'vercel_gateway',
     shortLabel: 'Vercel AI Gateway',
     label: 'Vercel AI Gateway — paid',
     kind: 'key',
@@ -252,18 +270,19 @@ export const PROVIDERS: ProviderOption[] = [
     defaultModel: 'anthropic/claude-opus-4',
   },
   {
-    id: 'nous',
+    id: 'nous_portal',
     shortLabel: 'Nous Portal',
     label: 'Nous Portal — subscription',
     kind: 'subscription',
+    envVar: 'NOUS_PORTAL_API_KEY',
     defaultModel: 'hermes-3-llama-3.1-405b',
   },
   {
-    id: 'custom',
+    id: 'custom_openai',
     shortLabel: 'custom endpoint',
     label: 'Custom OpenAI-compatible endpoint',
     kind: 'custom',
-    envVar: 'CUSTOM_API_KEY',
+    envVar: 'CUSTOM_OPENAI_API_KEY',
   },
 ];
 
@@ -338,6 +357,7 @@ export interface SetupOptions {
     provider: OAuthProvider;
     tokens: { expiresAtMs: number; account?: string };
   };
+  readinessVerifier?: typeof runRuntimeReadinessTransaction;
 }
 
 /**
@@ -366,6 +386,15 @@ export interface SetupResult {
   skipReason?: string;
   config?: AidenConfig;
   envFile?: string;
+  readiness?: ProviderReadinessRecord;
+}
+
+/** Failed automatic readiness enters local recovery instead of silent fallback. */
+export function setupRequiresRecoveryMode(result: SetupResult): boolean {
+  return result.status === 'configured'
+    && !!result.readiness
+    && (result.readiness.state === 'failed_retryable'
+      || result.readiness.state === 'failed_requires_user_action');
 }
 
 // ─── v4.9.5 Slice 1.5: finalizeWithCuratedStep ─────────────────────
@@ -742,29 +771,6 @@ async function runRecoveryMenu(
  * key are replaced. New entries are appended to the bottom. Keys are
  * uppercased automatically.
  */
-async function upsertEnvVar(envFile: string, key: string, value: string): Promise<void> {
-  const k = key.toUpperCase();
-  let body = '';
-  try {
-    body = await fs.readFile(envFile, 'utf8');
-  } catch {
-    body = '';
-  }
-  const lines = body.split(/\r?\n/);
-  let replaced = false;
-  for (let i = 0; i < lines.length; i += 1) {
-    if (lines[i].startsWith(`${k}=`)) {
-      lines[i] = `${k}=${value}`;
-      replaced = true;
-    }
-  }
-  if (!replaced) lines.push(`${k}=${value}`);
-  // collapse trailing blank lines
-  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
-  await fs.mkdir(path.dirname(envFile), { recursive: true });
-  await fs.writeFile(envFile, `${lines.join('\n')}\n`, 'utf8');
-}
-
 export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResult> {
   const paths = opts.paths ?? resolveAidenPaths();
   const display = opts.display ?? new Display();
@@ -772,9 +778,38 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   const fetchImpl = opts.fetchImpl ?? fetch;
 
   if (!opts.force && !(await isFreshInstall(paths))) {
-    // Existing config — wizard wasn't needed. Treat as already-configured
-    // so the boot path proceeds to resolver (which will surface real
-    // credential issues with its own error contract).
+    const existing = new ConfigManager(paths);
+    const loaded = await existing.load();
+    const persisted = existing.getValue<ProviderReadinessRecord>(
+      `providers.${loaded.model.provider}.readiness`,
+    );
+    const resumable = persisted && ![
+      'complete',
+      'configured_unverified',
+      'failed_requires_user_action',
+    ].includes(persisted.state);
+    if (resumable) {
+      const verifyReadiness = opts.readinessVerifier ?? runRuntimeReadinessTransaction;
+      const readiness = await verifyReadiness({
+        paths,
+        config: existing,
+        resolver: new RuntimeResolver(new CredentialResolver(paths.authJson)),
+        providerId: loaded.model.provider,
+        modelId: loaded.model.modelId,
+        modelVerification: existing.get(
+          `providers.${loaded.model.provider}.modelVerification`,
+        ) as ModelVerification | undefined,
+      });
+      return {
+        status: 'configured',
+        ran: true,
+        config: loaded,
+        envFile: paths.envFile,
+        readiness,
+      };
+    }
+    // Existing complete, deliberately unverified, or user-actionable config
+    // proceeds to normal boot without replaying setup prompts.
     return {
       status: 'configured',
       ran: false,
@@ -832,7 +867,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   display.write(stepHeader(1));
   display.write('  Welcome — let\'s pick a provider.\n');
   display.write(
-    `  ${kleur.dim('(Press Enter to accept Groq — free + fastest setup.)')}\n\n`,
+    `  ${kleur.dim('(Press Enter to accept Groq — fast hosted inference; API key required.)')}\n\n`,
   );
 
   // Phase 30.2.1 — Groq is the new recommended default for first-time
@@ -964,7 +999,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         ...(DEFAULT_CONFIG.providers ?? {}),
         // Marker for /providers + future tooling. The actual bearer
         // lives in tokenStore — config.yaml does NOT carry the secret.
-        [provider.id]: { auth: 'oauth' },
+        [provider.id]: { auth: 'oauth', modelVerification: 'curated' },
       },
       terminal: { backend: 'auto' },
     };
@@ -986,10 +1021,25 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
 
     const cm = new ConfigManager(paths);
     await cm.save(config);
+    await cm.load();
+    const verifyReadiness = opts.readinessVerifier ?? runRuntimeReadinessTransaction;
+    const oauthReadiness = opts.prompts && !opts.readinessVerifier
+      ? await markConfiguredUnverified(cm, initialReadiness(provider.id, modelId))
+      : await verifyReadiness({
+          paths,
+          config: cm,
+          resolver: new RuntimeResolver(new CredentialResolver(paths.authJson)),
+          providerId: provider.id,
+          modelId,
+          modelVerification: 'curated',
+        });
 
     // Confirmation surface — what's wired now.
     const expIso = new Date(tokens.expiresAtMs).toISOString();
     display.write(`\n✓ ${provider.shortLabel} authed.\n`);
+    if (oauthReadiness.state !== 'complete') {
+      display.write(`${kleur.yellow('  Runtime is configured but not fully verified.')}\n`);
+    }
     if (tokens.account) display.write(`  Account: ${tokens.account}\n`);
     if (oauthProvider.defaultModels?.length) {
       display.write(
@@ -1015,9 +1065,11 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     // ONB1 slice 8: success screen replaces the prior "Try: aiden" tail.
     // The wizard already returns to the boot path, which then drops into
     // the REPL — no process restart needed.
-    renderSuccessScreen({ out: process.stdout });
+    if (oauthReadiness.state === 'complete' || opts.prompts) {
+      renderSuccessScreen({ out: process.stdout });
+    }
 
-    return { status: 'configured', ran: true, config, envFile: paths.envFile };
+    return { status: 'configured', ran: true, config, envFile: paths.envFile, readiness: oauthReadiness };
   }
 
   // ONB1-WIRE-2 Slice B — flow reorder + live model fetch.
@@ -1042,6 +1094,44 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   }
   let apiKey: string | undefined;
   let baseUrl: string | undefined;
+  let persistedCredential: PersistedManagedCredential | undefined;
+  let credentialSnapshot: ManagedCredentialFileSnapshot | undefined;
+
+  const collectRequiredCredential = async (question: string): Promise<string | typeof BACK> => {
+    while (true) {
+      const answer = await prompts.input(question, { mask: true });
+      if (answer === BACK) return BACK;
+      const credential = answer.trim();
+      if (credential.length > 0) return credential;
+      display.write(display.error(
+        'API key is required.',
+        'Enter a non-empty key, or backspace on the empty field to choose another provider.',
+      ));
+    }
+  };
+
+  const persistCurrentCredential = async (): Promise<void> => {
+    if (opts.smokeTest || !provider.envVar || !apiKey) return;
+    credentialSnapshot ??= await snapshotManagedCredentialFile(paths);
+    persistedCredential = await persistManagedCredential({
+      paths,
+      envVar: provider.envVar,
+      credential: apiKey,
+      env: opts.env ?? process.env,
+    });
+  };
+
+  const rollbackCurrentCredential = async (): Promise<void> => {
+    if (!credentialSnapshot || !provider.envVar) return;
+    await restoreManagedCredentialFile({
+      paths,
+      snapshot: credentialSnapshot,
+      envVar: provider.envVar,
+      env: opts.env ?? process.env,
+    });
+    credentialSnapshot = undefined;
+    persistedCredential = undefined;
+  };
 
   if (provider.kind === 'local') {
     const reachable = await probeOllama({ fetchImpl });
@@ -1058,9 +1148,10 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     }
   } else if (provider.kind === 'key' || provider.kind === 'subscription') {
     if (provider.envVar) {
-      const ans = await prompts.input(`API key for ${provider.shortLabel}`, { mask: true });
+      const ans = await collectRequiredCredential(`API key for ${provider.shortLabel}`);
       if (ans === BACK) continue outer;
       apiKey = ans;
+      await persistCurrentCredential();
     }
   }
   // provider.kind === 'custom' — defer credential prompts until AFTER
@@ -1076,6 +1167,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   // resolve to .ts without a loader, and tests don't need a network
   // round-trip anyway. Matches the picker-upgrade gate (slice 5).
   let modelId = provider.defaultModel ?? '';
+  let modelVerification: ModelVerification = 'curated';
   if (opts.prompts) {
     // Legacy curated path — unchanged from pre-Slice-B behaviour.
     if (provider.models && provider.models.length > 1) {
@@ -1083,18 +1175,29 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         `Pick a model for ${provider.shortLabel}\n  ${modelMenuHint}`,
         [...provider.models, BACK_CHOICE],
       );
-      if (modelIndex === provider.models.length + 1) continue outer; // ← Back
+      if (modelIndex === provider.models.length + 1) {
+        await rollbackCurrentCredential();
+        continue outer;
+      }
       modelId = provider.models[modelIndex - 1];
     } else if (provider.kind === 'local') {
       const ans = await prompts.input('Ollama model id', {
         default: provider.defaultModel ?? 'llama3.1:8b',
       });
-      if (ans === BACK) continue outer;
+      if (ans === BACK) {
+        await rollbackCurrentCredential();
+        continue outer;
+      }
       modelId = ans;
+      modelVerification = 'unverified';
     } else if (!modelId) {
       const ans = await prompts.input('Model id', { default: '' });
-      if (ans === BACK) continue outer;
+      if (ans === BACK) {
+        await rollbackCurrentCredential();
+        continue outer;
+      }
       modelId = ans;
+      modelVerification = 'unverified';
     }
   } else {
     const spinner = display.startSpinner(`Fetching available models for ${provider.shortLabel}…`);
@@ -1113,6 +1216,10 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
       display.write(
         `${kleur.dim(`  Live from ${provider.shortLabel} API · ${fetchResult.models.length} model${fetchResult.models.length === 1 ? '' : 's'}`)}\n`,
       );
+    } else if (fetchResult.source === 'last-known-good') {
+      display.write(
+        `${kleur.dim(`  Last-known-good ${provider.shortLabel} catalogue · refresh unavailable`)}\n`,
+      );
     }
 
     if (fetchResult.models.length === 0) {
@@ -1121,32 +1228,94 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         const ans = await prompts.input('Ollama model id', {
           default: provider.defaultModel ?? 'llama3.1:8b',
         });
-        if (ans === BACK) continue outer;
+        if (ans === BACK) {
+          await rollbackCurrentCredential();
+          continue outer;
+        }
         modelId = ans;
+        modelVerification = 'unverified';
       } else {
         const ans = await prompts.input('Model id', { default: provider.defaultModel ?? '' });
-        if (ans === BACK) continue outer;
+        if (ans === BACK) {
+          await rollbackCurrentCredential();
+          continue outer;
+        }
         modelId = ans;
+        modelVerification = 'unverified';
       }
-    } else if (fetchResult.models.length === 1) {
+    } else if (fetchResult.models.length === 1 && fetchResult.source === 'fallback') {
       modelId = fetchResult.models[0].id;
+      modelVerification = fetchResult.source === 'live'
+        ? 'live'
+        : fetchResult.source === 'last-known-good'
+          ? 'unverified'
+          : 'curated';
       display.write(`${kleur.dim(`  Only one model available — using ${modelId}.`)}\n`);
     } else {
-      // Render picker. modelFetch already sorts recommended first; we
-      // append a `· recommended` marker so the user spots them visually.
-      const labels = fetchResult.models.map((m) =>
-        m.recommended ? `${m.displayName} · recommended` : m.displayName,
-      );
-      const recIdx = fetchResult.models.findIndex((m) => m.recommended);
-      const defaultIdx = recIdx >= 0 ? recIdx + 1 : 1;
-      const labelsWithBack = [...labels, BACK_CHOICE];
-      const idx = await prompts.choose(
-        `Pick a model for ${provider.shortLabel}\n  ${modelMenuHint}`,
-        labelsWithBack,
-        defaultIdx,
-      );
-      if (idx === labelsWithBack.length) continue outer; // ← Back
-      modelId = fetchResult.models[idx - 1].id;
+      let pickerResult = fetchResult;
+      let showAll = false;
+      while (true) {
+        const labels = pickerResult.models.map((m) => {
+          const provenance = m.creator && m.hostedBy
+            ? ` · ${m.creator} open-weight model · hosted by ${m.hostedBy}`
+            : '';
+          const recommended = m.recommended ? ' · recommended' : '';
+          const incompatible = m.compatibleWithAgent === false
+            ? ` · incompatible: ${m.incompatibilityReason ?? 'agent capabilities unverified'}`
+            : '';
+          return `${m.displayName}${provenance}${recommended}${incompatible}`;
+        });
+        const actions = pickerResult.source === 'fallback'
+          ? ['Enter a model ID', BACK_CHOICE]
+          : showAll
+            ? ['Refresh live catalogue', 'Enter a model ID', BACK_CHOICE]
+            : ['Show all live models', 'Refresh live catalogue', 'Enter a model ID', BACK_CHOICE];
+        const choices = [...labels, ...actions];
+        const recIdx = pickerResult.models.findIndex((m) => m.recommended);
+        const idx = await prompts.choose(
+          `Pick a model for ${provider.shortLabel}\n  ${modelMenuHint}`,
+          choices,
+          recIdx >= 0 ? recIdx + 1 : 1,
+        );
+        if (idx <= pickerResult.models.length) {
+          const selected = pickerResult.models[idx - 1];
+          modelId = selected.id;
+          modelVerification = pickerResult.source === 'live' && selected.compatibleWithAgent !== false
+            ? 'live'
+            : pickerResult.source === 'fallback'
+              ? 'curated'
+              : 'unverified';
+          break;
+        }
+
+        const action = actions[idx - pickerResult.models.length - 1];
+        if (action === BACK_CHOICE) {
+          await rollbackCurrentCredential();
+          continue outer;
+        }
+        if (action === 'Enter a model ID') {
+          const answer = await prompts.input('Model id', { default: modelId });
+          if (answer === BACK) continue;
+          modelId = answer;
+          modelVerification = 'unverified';
+          break;
+        }
+
+        const spinner = display.startSpinner(`Refreshing available models for ${provider.shortLabel}…`);
+        try {
+          showAll = action === 'Show all live models' ? true : showAll;
+          pickerResult = await fetchModels({
+            providerId: provider.id,
+            apiKey,
+            baseUrl,
+            fetchImpl,
+            includeIncompatible: showAll,
+            refresh: true,
+          });
+        } finally {
+          spinner.stop();
+        }
+      }
     }
   }
 
@@ -1156,9 +1325,10 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     const burl = await prompts.input('Base URL (e.g. https://api.example.com/v1)');
     if (burl === BACK) continue outer;
     baseUrl = burl;
-    const akey = await prompts.input('API key', { mask: true });
+    const akey = await collectRequiredCredential('API key');
     if (akey === BACK) continue outer;
     apiKey = akey;
+    await persistCurrentCredential();
   }
 
   // Step 3.5: validate the API key against the provider endpoint.
@@ -1169,6 +1339,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     !opts.skipValidation &&
     typeof apiKey === 'string' &&
     apiKey.length > 0;
+  let saveUnverified = !!opts.skipValidation || (!!opts.prompts && !opts.readinessVerifier);
 
   if (shouldValidate) {
     // ONB1-WIRE-2 Slice C — three-step probe replaces the legacy
@@ -1215,7 +1386,6 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     const maxAttempts = 3;
     let attempt = 1;
     let validated = false;
-    let skipValidationForSave = false;
 
     // Validation loop: at most 3 attempts before falling through to
     // the recovery menu. First attempt uses the already-collected key;
@@ -1283,6 +1453,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         //   [5] exit             → clean exit
         const choice = await runRecoveryMenu(provider, prompts, display);
         if (choice.kind === 'try-different') {
+          await rollbackCurrentCredential();
           continue outer;
         }
         if (choice.kind === 'get-key') {
@@ -1298,18 +1469,26 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
               'Base URL (e.g. https://api.example.com/v1)',
               { default: baseUrl },
             );
-            if (burl === BACK) continue outer;
+            if (burl === BACK) {
+              await rollbackCurrentCredential();
+              continue outer;
+            }
             baseUrl = burl;
-            const akey = await prompts.input('API key', { mask: true });
-            if (akey === BACK) continue outer;
+            const akey = await collectRequiredCredential('API key');
+            if (akey === BACK) {
+              await rollbackCurrentCredential();
+              continue outer;
+            }
             apiKey = akey;
+            await persistCurrentCredential();
           } else {
-            const akey = await prompts.input(
-              `API key for ${provider.shortLabel}`,
-              { mask: true },
-            );
-            if (akey === BACK) continue outer;
+            const akey = await collectRequiredCredential(`API key for ${provider.shortLabel}`);
+            if (akey === BACK) {
+              await rollbackCurrentCredential();
+              continue outer;
+            }
             apiKey = akey;
+            await persistCurrentCredential();
           }
           continue validation;
         }
@@ -1317,10 +1496,11 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
           display.write(
             `${kleur.yellow('Saving without validation. The key will be tested on your first chat.')}\n`,
           );
-          skipValidationForSave = true;
+          saveUnverified = true;
           break validation;
         }
         if (choice.kind === 'skip') {
+          await rollbackCurrentCredential();
           display.write('\nEntering explore mode — chat is disabled but slash commands work.\n');
           return {
             status: 'skipped',
@@ -1329,6 +1509,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
           };
         }
         // choice.kind === 'exit'
+        await rollbackCurrentCredential();
         display.write('\nExited. Run `aiden setup` to try again.\n');
         return { status: 'exited', ran: false, skipReason: 'recovery-exited' };
       }
@@ -1338,15 +1519,26 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         const burl = await prompts.input('Base URL (e.g. https://api.example.com/v1)', {
           default: baseUrl,
         });
-        if (burl === BACK) continue outer;
+        if (burl === BACK) {
+          await rollbackCurrentCredential();
+          continue outer;
+        }
         baseUrl = burl;
-        const akey = await prompts.input('API key', { mask: true });
-        if (akey === BACK) continue outer;
+        const akey = await collectRequiredCredential('API key');
+        if (akey === BACK) {
+          await rollbackCurrentCredential();
+          continue outer;
+        }
         apiKey = akey;
+        await persistCurrentCredential();
       } else {
-        const akey = await prompts.input(`API key for ${provider.shortLabel}`, { mask: true });
-        if (akey === BACK) continue outer;
+        const akey = await collectRequiredCredential(`API key for ${provider.shortLabel}`);
+        if (akey === BACK) {
+          await rollbackCurrentCredential();
+          continue outer;
+        }
         apiKey = akey;
+        await persistCurrentCredential();
       }
       attempt += 1;
     }
@@ -1357,7 +1549,6 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     // currently unused outside this block but documented for
     // post-save UX hooks.)
     void validated;
-    void skipValidationForSave;
   }
 
   // Step 4: terminal backend (basic — keeps wizard in scope for 14a).
@@ -1368,7 +1559,13 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   const config: AidenConfig = {
     ...DEFAULT_CONFIG,
     model: { provider: provider.id, modelId },
-    agent: { ...DEFAULT_CONFIG.agent, max_turns: DEFAULT_CONFIG.agent.max_turns },
+    agent: {
+      ...DEFAULT_CONFIG.agent,
+      max_turns: DEFAULT_CONFIG.agent.max_turns,
+      ...(PROVIDER_MODEL_POLICIES[provider.id]?.setupToolProfile
+        ? { tool_profile: PROVIDER_MODEL_POLICIES[provider.id].setupToolProfile }
+        : {}),
+    },
     display: { ...DEFAULT_CONFIG.display, skin: 'default' },
     memory: { ...DEFAULT_CONFIG.memory },
     providers: {
@@ -1376,6 +1573,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
       [provider.id]: {
         ...(baseUrl ? { baseUrl } : {}),
         ...(provider.envVar ? { apiKey: `\${${provider.envVar}}` } : {}),
+        modelVerification,
       },
     },
     terminal: { backend: terminalBackend },
@@ -1388,7 +1586,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
       display.write(`(would have written ${provider.envVar}=*** to ${paths.envFile})\n`);
     }
     if (baseUrl && provider.kind === 'custom') {
-      display.write(`(would have written CUSTOM_BASE_URL=${baseUrl} to ${paths.envFile})\n`);
+      display.write(`(would have saved the custom endpoint in ${paths.configYaml})\n`);
     }
     display.write('(no files written because --smoke-test was passed)\n');
     return {
@@ -1403,27 +1601,49 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   const cm = new ConfigManager(paths);
   await cm.save(config);
 
-  if (apiKey && provider.envVar) {
-    await upsertEnvVar(paths.envFile, provider.envVar, apiKey);
+  if (apiKey && provider.envVar && !persistedCredential) {
+    persistedCredential = await persistManagedCredential({
+      paths,
+      envVar: provider.envVar,
+      credential: apiKey,
+      env: opts.env ?? process.env,
+    });
   }
-  if (baseUrl && provider.kind === 'custom') {
-    await upsertEnvVar(paths.envFile, 'CUSTOM_BASE_URL', baseUrl);
-  }
+  await cm.load();
+  const verifyReadiness = opts.readinessVerifier ?? runRuntimeReadinessTransaction;
+  const readiness = saveUnverified
+    ? await markConfiguredUnverified(cm, initialReadiness(provider.id, modelId))
+    : await verifyReadiness({
+        paths,
+        config: cm,
+        resolver: new RuntimeResolver(new CredentialResolver(paths.authJson)),
+        providerId: provider.id,
+        modelId,
+        modelVerification,
+      });
 
   // Step 5: success — wizard drops straight into the REPL via the
   // outer boot path. No "Try: aiden" advice needed; the user is
   // already on their way to chat.
-  display.write(
-    `\n${kleur.green(`✓ ${provider.shortLabel}`)} configured with model ${kleur.cyan(modelId)}.\n`,
-  );
+  if (readiness.state === 'complete') {
+    display.write(
+      `\n${kleur.green(`✓ ${provider.shortLabel}`)} configured and verified with model ${kleur.cyan(modelId)}.\n`,
+    );
+  } else {
+    display.write(
+      `\n${kleur.yellow(`${provider.shortLabel} settings were saved, but runtime readiness did not complete.`)}\n`,
+    );
+  }
   // v4.9.5 Slice 1.5: curated-skills Step 4 — shared with the OAuth
   // branch via finalizeWithCuratedStep. Slice 1 inlined this here;
   // Slice 1.5 extracted it so subscription providers fire it too.
   await _finalizeImpl({ paths, display, prompts, opts, stepHeader });
   // ONB1 slice 8: success screen + REPL handoff.
-  renderSuccessScreen({ out: process.stdout });
+  if (readiness.state === 'complete' || opts.prompts) {
+    renderSuccessScreen({ out: process.stdout });
+  }
 
-  return { status: 'configured', ran: true, config, envFile: paths.envFile };
+  return { status: 'configured', ran: true, config, envFile: paths.envFile, readiness };
   } // end of outer: while (true) — every path inside either continues,
     // returns, or breaks. Reaching this `}` is impossible (guarded by
     // the no-constant-condition eslint comment above the outer label).

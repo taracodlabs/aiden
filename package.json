@@ -246,7 +246,7 @@
     "archiver": "^7.0.1",
     "axios": "^1.15.2",
     "bcrypt": "^6.0.0",
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "12.9.0",
     "blessed": "^0.1.81",
     "chalk": "^5.6.2",
     "chokidar": "^4.0.3",

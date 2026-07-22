@@ -97,7 +97,7 @@ async function spawnFrameAiden(busyTickMs = 300): Promise<AidenTerm> {
     [
       'model:',
       '  provider: groq',
-      '  modelId: llama-3.3-70b-versatile',
+      '  modelId: openai/gpt-oss-120b',
       'providers:',
       '  groq:',
       '    apiKey: ${GROQ_API_KEY}',

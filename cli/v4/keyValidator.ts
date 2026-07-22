@@ -16,6 +16,8 @@
  * passed through to the request only.
  */
 
+import { RequestLifecycle, requestDeadlines } from '../../providers/v4/requestLifecycle';
+
 export interface ValidationResult {
   valid: boolean;
   /** Human-readable reason. Never contains the apiKey value. */
@@ -152,7 +154,8 @@ function buildRequest(
         method: 'GET',
         headers: { Authorization: `Bearer ${apiKey}` },
       };
-    case 'custom': {
+    case 'custom':
+    case 'custom_openai': {
       const root = (baseUrl ?? '').replace(/\/+$/, '');
       if (!root) {
         // No baseUrl — can't validate. Caller should always provide one for custom.
@@ -215,20 +218,21 @@ export async function validateProviderKey(
     return { valid: false, reason: 'Network error: fetch is not available in this runtime' };
   }
 
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+  const lifecycle = new RequestLifecycle(providerId, requestDeadlines(TIMEOUT_MS));
 
   try {
-    const res = await f(spec.url, {
+    const res = await lifecycle.race(f(spec.url, {
       method: spec.method,
       headers: spec.headers,
       body: spec.body,
-      signal: ctrl.signal,
-    });
+      signal: lifecycle.signal,
+    }));
+    lifecycle.markHeaders();
+    await lifecycle.readText(res);
     return classifyStatus(res.status);
   } catch (err) {
-    return { valid: false, reason: networkErrorReason(err) };
+    return { valid: false, reason: networkErrorReason(lifecycle.classify(err)) };
   } finally {
-    clearTimeout(timer);
+    lifecycle.cleanup();
   }
 }

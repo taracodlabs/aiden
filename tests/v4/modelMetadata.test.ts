@@ -10,9 +10,9 @@ describe('ModelMetadata', () => {
   const md = new ModelMetadata();
 
   it('1. getLimits returns known catalog model', () => {
-    const limits = md.getLimits('groq', 'llama-3.1-8b-instant');
+    const limits = md.getLimits('groq', 'openai/gpt-oss-120b');
     expect(limits.contextLength).toBe(131_072);
-    expect(limits.maxOutputTokens).toBe(8_192);
+    expect(limits.maxOutputTokens).toBe(65_536);
     expect(limits.compressionThreshold).toBe(0.5);
   });
 

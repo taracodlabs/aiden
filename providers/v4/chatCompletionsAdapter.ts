@@ -57,8 +57,12 @@ import type {
 import {
   ProviderError,
   ProviderRateLimitError,
-  ProviderTimeoutError,
 } from './errors';
+import {
+  RequestLifecycle,
+  requestDeadlines,
+  type RequestDeadlines,
+} from './requestLifecycle';
 
 // ── Public options ──────────────────────────────────────────────────────
 
@@ -71,6 +75,10 @@ export interface ChatCompletionsAdapterOptions {
   providerName:   string;
   /** Per-request wall-clock. Default 120_000 ms. */
   timeoutMs?:     number;
+  connectionTimeoutMs?: number;
+  firstByteTimeoutMs?: number;
+  bodyIdleTimeoutMs?: number;
+  totalTimeoutMs?: number;
   /** Retries on 429/5xx/network. Default 2 (so 3 attempts total). */
   maxRetries?:    number;
   /** Header overrides — wins over computed headers. e.g. OpenRouter wants HTTP-Referer + X-Title. */
@@ -93,6 +101,11 @@ export interface ChatCompletionsAdapterOptions {
 
 const DEFAULT_TIMEOUT_MS  = 120_000;
 const DEFAULT_MAX_RETRIES = 2;
+
+interface ActiveDispatch {
+  response: Response;
+  lifecycle: RequestLifecycle;
+}
 const DEFAULT_MAX_TOKENS  = 4096;
 const BACKOFF_BASE_MS     = 1000;
 
@@ -106,12 +119,10 @@ const BACKOFF_BASE_MS     = 1000;
  * `prompt_tokens + max_tokens` — i.e. the *reserved* output budget
  * is billed up front whether the model uses it or not.
  *
- * On the 12K free tier this turns into a fixed 4K/call tax that
- * pushes a bare `"hi"` over the cap even on the `standard` tool
- * profile. Capping Groq at 2048 frees ~2K TPM headroom per request
- * without truncating realistic responses (most turns reply in
- * under 1K tokens; the few that need more can be served by a
- * different provider).
+ * Fresh on-demand accounts can expose a tight TPM limit. Setup pairs
+ * this provider with the minimal tool profile so the reserved budget
+ * remains useful without making the first request exceed that limit.
+ * Explicit per-call budgets still win for accounts with higher limits.
  *
  * Keyed by lowercase provider name (matches
  * `ChatCompletionsAdapterOptions.providerName` after normalisation).
@@ -201,6 +212,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
   private readonly model:        string;
   private readonly providerName: string;
   private readonly timeoutMs:    number;
+  private readonly deadlines:    RequestDeadlines;
   private readonly maxRetries:   number;
   private readonly extraHeaders: Record<string, string>;
   /** Phase v4.1.2-deepseek: model-mandated body fields merged on every call. */
@@ -213,6 +225,12 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     this.model            = opts.model;
     this.providerName     = opts.providerName;
     this.timeoutMs        = opts.timeoutMs  ?? DEFAULT_TIMEOUT_MS;
+    this.deadlines        = requestDeadlines(this.timeoutMs, {
+      connectionMs: opts.connectionTimeoutMs,
+      firstByteMs: opts.firstByteTimeoutMs,
+      bodyIdleMs: opts.bodyIdleTimeoutMs,
+      totalMs: opts.totalTimeoutMs,
+    });
     this.maxRetries       = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.extraHeaders     = opts.extraHeaders ?? {};
     this.defaultExtraBody = opts.defaultExtraBody;
@@ -222,8 +240,15 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input, /* streaming */ false);
-    const reply = await this.dispatch(body, /* streaming */ false, input.signal);
-    const text  = await reply.text();
+    const active = await this.dispatch(body, /* streaming */ false, input.signal);
+    let text: string;
+    try {
+      text = await active.lifecycle.readText(active.response);
+    } catch (error) {
+      throw active.lifecycle.classify(error);
+    } finally {
+      active.lifecycle.cleanup();
+    }
     let parsed: WireResponse;
     try {
       parsed = JSON.parse(text) as WireResponse;
@@ -231,7 +256,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       throw new ProviderError(
         `Provider ${this.providerName} returned non-JSON body`,
         this.providerName,
-        reply.status,
+        active.response.status,
         text,
         false,
       );
@@ -247,7 +272,8 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
 
   async *callStream(input: ProviderCallInput): AsyncGenerator<StreamEvent, void, void> {
     const body  = this.buildBody(input, /* streaming */ true);
-    const reply = await this.dispatch(body, /* streaming */ true, input.signal);
+    const active = await this.dispatch(body, /* streaming */ true, input.signal);
+    const reply = active.response;
     if (!reply.body) {
       yield {
         type: 'done',
@@ -258,10 +284,17 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
           usage:        { inputTokens: 0, outputTokens: 0 },
         },
       };
+      active.lifecycle.cleanup();
       return;
     }
     const knownToolNames = collectKnownToolNames(input);
-    yield* decodeStream(reply.body, this.providerName, knownToolNames);
+    try {
+      yield* decodeStream(reply.body, this.providerName, knownToolNames, active.lifecycle);
+    } catch (error) {
+      throw active.lifecycle.classify(error);
+    } finally {
+      active.lifecycle.cleanup();
+    }
   }
 
   // ── Body assembly ────────────────────────────────────────────────────
@@ -311,7 +344,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     body: WireRequestBody,
     streaming: boolean,
     externalSignal?: AbortSignal,
-  ): Promise<Response> {
+  ): Promise<ActiveDispatch> {
     const headers    = this.buildHeaders(streaming);
     const serialised = JSON.stringify(body);
     const totalTries = this.maxRetries + 1;
@@ -319,40 +352,24 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     let lastErr: unknown = null;
 
     for (let attempt = 0; attempt < totalTries; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-      // v4.6 prep — forward external abort into the internal controller.
-      // External aborts surface as raw AbortError so AidenAgent routes
-      // them as 'interrupted' rather than retrying as ProviderTimeoutError.
-      let externalAbortHandler: (() => void) | null = null;
-      if (externalSignal) {
-        if (externalSignal.aborted) {
-          controller.abort();
-        } else {
-          externalAbortHandler = () => controller.abort();
-          externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
-        }
-      }
-
+      const lifecycle = new RequestLifecycle(this.providerName, this.deadlines, externalSignal);
       let response: Response;
       try {
-        response = await fetch(this.endpoint, {
+        response = await lifecycle.race(fetch(this.endpoint, {
           method:  'POST',
           headers,
           body:    serialised,
-          signal:  controller.signal,
-        });
+          signal:  lifecycle.signal,
+        }));
+        lifecycle.markHeaders();
       } catch (err: any) {
-        clearTimeout(timer);
-        if (externalAbortHandler && externalSignal) {
-          externalSignal.removeEventListener('abort', externalAbortHandler);
+        const classified = lifecycle.classify(err);
+        lifecycle.cleanup();
+        if (classified instanceof Error && classified.name === 'AbortError') {
+          throw classified;
         }
-        if (err?.name === 'AbortError') {
-          // v4.6 prep — external abort takes priority over internal timeout.
-          if (externalSignal?.aborted) {
-            throw err;
-          }
-          lastErr = new ProviderTimeoutError(this.providerName, this.timeoutMs);
+        if (classified instanceof Error && classified.name === 'ProviderPhaseTimeoutError') {
+          lastErr = classified;
         } else {
           lastErr = new ProviderError(
             `Network failure calling ${this.providerName}: ${err?.message ?? err}`,
@@ -363,19 +380,24 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
           );
         }
         if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt));
+          await sleep(backoffMs(attempt), externalSignal);
           continue;
         }
         throw lastErr;
       }
-      clearTimeout(timer);
-      if (externalAbortHandler && externalSignal) {
-        externalSignal.removeEventListener('abort', externalAbortHandler);
-      }
 
-      if (response.ok) return response;
+      if (response.ok) return { response, lifecycle };
 
       const status = response.status;
+      const retryAfter = response.headers.get('retry-after');
+      let responseText: string;
+      try {
+        responseText = await lifecycle.readText(response);
+      } catch (error) {
+        const classified = lifecycle.classify(error);
+        lifecycle.cleanup();
+        throw classified;
+      }
 
       // Groq's `tool_use_failed` 400 sometimes carries the model's tool
       // call inline in `failed_generation`. Recover it into a synthetic
@@ -383,25 +405,30 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       // non-streaming path reaches here with a body — the streaming
       // path's 4xx already failed before the body would be relevant.
       if (status === 400 && !streaming) {
-        const recoveredBody = await response.text();
-        const recovered = tryRecoverLegacyToolCall(recoveredBody);
+        const recovered = tryRecoverLegacyToolCall(responseText);
         if (recovered) {
-          return synthesiseRecoveredResponse(recovered);
+          lifecycle.markHeaders();
+          return { response: synthesiseRecoveredResponse(recovered), lifecycle };
         }
+        lifecycle.cleanup();
         throw new ProviderError(
           `Provider ${this.providerName} returned 400 Bad Request`,
           this.providerName,
           400,
-          tryParseJson(recoveredBody),
+          tryParseJson(responseText),
           false,
         );
       }
 
-      const raw = await safeReadBody(response);
+      const raw = tryParseJson(responseText);
+      lifecycle.cleanup();
 
       if (status === 429) {
         if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt));
+          await sleep(
+            Math.max(backoffMs(attempt), retryAfterMs(retryAfter)),
+            externalSignal,
+          );
           continue;
         }
         throw new ProviderRateLimitError(this.providerName, raw);
@@ -409,7 +436,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
 
       if (status >= 500 && status < 600) {
         if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt));
+          await sleep(backoffMs(attempt), externalSignal);
           continue;
         }
         throw new ProviderError(
@@ -638,6 +665,7 @@ function parseToolArgs(s: string): Record<string, unknown> {
  */
 export async function* parseSseStream(
   body: ReadableStream<Uint8Array>,
+  lifecycle?: RequestLifecycle,
 ): AsyncGenerator<string, void, void> {
   const reader  = body.getReader();
   const decoder = new TextDecoder('utf-8');
@@ -645,7 +673,9 @@ export async function* parseSseStream(
 
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      const { value, done } = lifecycle
+        ? await lifecycle.readChunk(reader)
+        : await reader.read();
       if (value) buffer += decoder.decode(value, { stream: true });
       if (done) {
         buffer += decoder.decode();   // flush any pending bytes
@@ -709,6 +739,7 @@ async function* decodeStream(
   body:           ReadableStream<Uint8Array>,
   providerName:   string,
   knownToolNames?: ReadonlySet<string>,
+  lifecycle?: RequestLifecycle,
 ): AsyncGenerator<StreamEvent, void, void> {
   const tools:     Map<number, StreamingTool> = new Map();
   let textBuffer:  string                = '';
@@ -716,7 +747,7 @@ async function* decodeStream(
   let usage:       WireResponse['usage'] = undefined;
   let toolMode     = false;
 
-  for await (const payload of parseSseStream(body)) {
+  for await (const payload of parseSseStream(body, lifecycle)) {
     if (!payload || payload === '[DONE]') continue;
     let chunk: any;
     try { chunk = JSON.parse(payload); }
@@ -1267,17 +1298,36 @@ function backoffMs(attempt: number): number {
   return base + jitter;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function retryAfterMs(value: string | null): number {
+  if (!value) return 0;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(60_000, Math.ceil(seconds * 1_000));
+  }
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.min(60_000, Math.max(0, at - Date.now())) : 0;
 }
 
-async function safeReadBody(r: Response): Promise<unknown> {
-  try {
-    const text = await r.text();
-    return tryParseJson(text);
-  } catch {
-    return null;
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    const error = new Error('The provider retry wait was cancelled.');
+    error.name = 'AbortError';
+    return Promise.reject(error);
   }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      const error = new Error('The provider retry wait was cancelled.');
+      error.name = 'AbortError';
+      reject(error);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 function tryParseJson(text: string): unknown {

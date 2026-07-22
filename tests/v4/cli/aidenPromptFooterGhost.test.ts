@@ -89,7 +89,7 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
       [
         'model:',
         '  provider: groq',
-        '  modelId: llama-3.3-70b-versatile',
+        '  modelId: openai/gpt-oss-120b',
         'providers:',
         '  groq:',
         '    apiKey: ${GROQ_API_KEY}',

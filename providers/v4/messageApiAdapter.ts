@@ -38,8 +38,8 @@ import { parseSseStream } from './chatCompletionsAdapter';
 import {
   ProviderError,
   ProviderRateLimitError,
-  ProviderTimeoutError,
 } from './errors';
+import { RequestLifecycle, requestDeadlines, type RequestDeadlines } from './requestLifecycle';
 import { VERSION } from '../../core/version';
 
 // ── Public options ──────────────────────────────────────────────────────────
@@ -55,6 +55,10 @@ export interface MessageApiAdapterOptions {
   providerName: string;
   /** Per-request wall clock. Default 120_000 ms. */
   timeoutMs?: number;
+  connectionTimeoutMs?: number;
+  firstByteTimeoutMs?: number;
+  bodyIdleTimeoutMs?: number;
+  totalTimeoutMs?: number;
   /** Retries on 429 / 5xx / network errors. Default 2 (3 attempts total). */
   maxRetries?: number;
   /** Header overrides (escape hatch — wins over computed headers). */
@@ -103,6 +107,11 @@ const DEFAULT_MAX_TOKENS  = 4096;
 const MESSAGE_API_VERSION = '2023-06-01';
 const BACKOFF_BASE_MS     = 1000;
 
+interface ActiveDispatch {
+  response: Response;
+  lifecycle: RequestLifecycle;
+}
+
 // ── Adapter ────────────────────────────────────────────────────────────────
 
 export class MessageApiAdapter implements ProviderAdapter {
@@ -113,6 +122,7 @@ export class MessageApiAdapter implements ProviderAdapter {
   private readonly model:        string;
   private readonly providerName: string;
   private readonly timeoutMs:    number;
+  private readonly deadlines:    RequestDeadlines;
   private readonly maxRetries:   number;
   private readonly extraHeaders: Record<string, string>;
 
@@ -123,6 +133,12 @@ export class MessageApiAdapter implements ProviderAdapter {
     this.model        = opts.model;
     this.providerName = opts.providerName;
     this.timeoutMs    = opts.timeoutMs  ?? DEFAULT_TIMEOUT_MS;
+    this.deadlines    = requestDeadlines(this.timeoutMs, {
+      connectionMs: opts.connectionTimeoutMs,
+      firstByteMs: opts.firstByteTimeoutMs,
+      bodyIdleMs: opts.bodyIdleTimeoutMs,
+      totalMs: opts.totalTimeoutMs,
+    });
     this.maxRetries   = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
     this.extraHeaders = opts.extraHeaders ?? {};
   }
@@ -131,8 +147,16 @@ export class MessageApiAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input, /* streaming */ false);
-    const reply = await this.dispatch(body, /* streaming */ false, input.signal, input.headers);
-    const json  = (await reply.json()) as WireMessageBody;
+    const active = await this.dispatch(body, /* streaming */ false, input.signal, input.headers);
+    let text: string;
+    try {
+      text = await active.lifecycle.readText(active.response);
+    } catch (error) {
+      throw active.lifecycle.classify(error);
+    } finally {
+      active.lifecycle.cleanup();
+    }
+    const json = JSON.parse(text) as WireMessageBody;
     return decodeResponse(json);
   }
 
@@ -140,7 +164,8 @@ export class MessageApiAdapter implements ProviderAdapter {
 
   async *callStream(input: ProviderCallInput): AsyncGenerator<StreamEvent, void, void> {
     const body = this.buildBody(input, /* streaming */ true);
-    const reply = await this.dispatch(body, /* streaming */ true, input.signal, input.headers);
+    const active = await this.dispatch(body, /* streaming */ true, input.signal, input.headers);
+    const reply = active.response;
     if (!reply.body) {
       // Server promised SSE but gave us nothing — fall through to a synthetic
       // empty done event so the agent loop terminates rather than hangs.
@@ -153,9 +178,16 @@ export class MessageApiAdapter implements ProviderAdapter {
           usage:        { inputTokens: 0, outputTokens: 0 },
         },
       };
+      active.lifecycle.cleanup();
       return;
     }
-    yield* decodeStream(reply.body, input.maxTokens ?? DEFAULT_MAX_TOKENS);
+    try {
+      yield* decodeStream(reply.body, input.maxTokens ?? DEFAULT_MAX_TOKENS, active.lifecycle);
+    } catch (error) {
+      throw active.lifecycle.classify(error);
+    } finally {
+      active.lifecycle.cleanup();
+    }
   }
 
   // ── Request body assembly ────────────────────────────────────────────────
@@ -199,7 +231,7 @@ export class MessageApiAdapter implements ProviderAdapter {
     streaming: boolean,
     externalSignal?: AbortSignal,
     outboundHeaders?: Record<string, string>,
-  ): Promise<Response> {
+  ): Promise<ActiveDispatch> {
     // v4.9.0 Slice 7 — merge caller-supplied outbound headers (e.g.
     // `traceparent`, `X-Aiden-Run-Id`) below the adapter's defaults so
     // they can't override `x-api-key` / `anthropic-version` etc.,
@@ -213,47 +245,35 @@ export class MessageApiAdapter implements ProviderAdapter {
     let lastErr: unknown = null;
 
     for (let attempt = 0; attempt < totalTries; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+      const lifecycle = new RequestLifecycle(this.providerName, this.deadlines, externalSignal);
       // v4.6 prep — forward an external AbortSignal into this attempt's
       // internal controller so a parent agent that aborts mid-flight
       // cancels the in-flight fetch. External aborts surface as a raw
       // AbortError (NOT ProviderTimeoutError) so AidenAgent can route
       // them as `finishReason: 'interrupted'` instead of treating them
       // as a retryable timeout.
-      let externalAbortHandler: (() => void) | null = null;
-      if (externalSignal) {
-        if (externalSignal.aborted) {
-          controller.abort();
-        } else {
-          externalAbortHandler = () => controller.abort();
-          externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
-        }
-      }
-
       let response: Response;
       try {
-        response = await fetch(this.endpoint, {
+        response = await lifecycle.race(fetch(this.endpoint, {
           method:  'POST',
           headers,
           body:    serialised,
-          signal:  controller.signal,
-        });
+          signal:  lifecycle.signal,
+        }));
+        lifecycle.markHeaders();
       } catch (err: any) {
-        clearTimeout(timer);
-        if (externalAbortHandler && externalSignal) {
-          externalSignal.removeEventListener('abort', externalAbortHandler);
-        }
-        if (err?.name === 'AbortError') {
+        const classified = lifecycle.classify(err);
+        lifecycle.cleanup();
+        if (classified instanceof Error && classified.name === 'AbortError') {
           // v4.6 prep — external abort takes priority over internal
           // timeout. Surface the raw AbortError immediately (no retry)
           // so AidenAgent's catch routes it as 'interrupted'.
           if (externalSignal?.aborted) {
-            throw err;
+            throw classified;
           }
-          // Treat timeout as retryable; only surface ProviderTimeoutError if
-          // we've burned the last attempt.
-          lastErr = new ProviderTimeoutError(this.providerName, this.timeoutMs);
+          lastErr = classified;
+        } else if (classified instanceof Error && classified.name === 'ProviderPhaseTimeoutError') {
+          lastErr = classified;
         } else {
           lastErr = new ProviderError(
             `Network failure calling ${this.providerName}: ${err?.message ?? err}`,
@@ -269,20 +289,14 @@ export class MessageApiAdapter implements ProviderAdapter {
         }
         throw lastErr;
       }
-      clearTimeout(timer);
-      if (externalAbortHandler && externalSignal) {
-        externalSignal.removeEventListener('abort', externalAbortHandler);
-      }
+      if (response.ok) return { response, lifecycle };
 
-      if (response.ok) return response;
-
-      // Phase 25.1.5d diagnostic: gated dump of request + response so we
-      // can see exactly what Anthropic objected to. Cloned response so the
-      // existing safeReadBody call below still gets a readable body.
+      // Gated request diagnostic. Do not clone or consume the response here:
+      // the lifecycle below must remain the sole body reader so its first-byte,
+      // idle, total, and caller-cancellation deadlines cover every byte.
       // Sensitive headers are redacted before printing.
       if (process.env.AIDEN_DEBUG_ANTHROPIC === '1') {
         try {
-          const debugBody = await response.clone().text();
           const safeHeaders = redactHeaders(headers);
           // eslint-disable-next-line no-console
           console.error(`[anthropic-debug] status: ${response.status} ${response.statusText}`);
@@ -292,8 +306,6 @@ export class MessageApiAdapter implements ProviderAdapter {
           console.error(`[anthropic-debug] req headers: ${JSON.stringify(safeHeaders, null, 2)}`);
           // eslint-disable-next-line no-console
           console.error(`[anthropic-debug] req body (first 500 chars): ${serialised.slice(0, 500)}`);
-          // eslint-disable-next-line no-console
-          console.error(`[anthropic-debug] resp body: ${debugBody}`);
         } catch {
           /* diagnostic best-effort; never block the real error path */
         }
@@ -301,7 +313,16 @@ export class MessageApiAdapter implements ProviderAdapter {
 
       // Non-2xx: classify and decide whether to retry.
       const status = response.status;
-      const raw    = await safeReadBody(response);
+      let responseText: string;
+      try {
+        responseText = await lifecycle.readText(response);
+      } catch (error) {
+        const classified = lifecycle.classify(error);
+        lifecycle.cleanup();
+        throw classified;
+      }
+      const raw = tryParseJson(responseText);
+      lifecycle.cleanup();
 
       if (status === 429) {
         if (attempt < totalTries - 1) {
@@ -516,6 +537,7 @@ interface BlockState {
 async function* decodeStream(
   body: ReadableStream<Uint8Array>,
   maxTokens: number,
+  lifecycle?: RequestLifecycle,
 ): AsyncGenerator<StreamEvent, void, void> {
   const blocks  = new Map<number, BlockState>();
   const toolCalls: ToolCallRequest[] = [];
@@ -531,7 +553,7 @@ async function* decodeStream(
   // proportional to real progress.
   let lastProgressEmitted = -1;
 
-  for await (const payload of parseSseStream(body)) {
+  for await (const payload of parseSseStream(body, lifecycle)) {
     if (!payload || payload === '[DONE]') continue;
     let evt: any;
     try { evt = JSON.parse(payload); }
@@ -679,11 +701,6 @@ function redactValue(v: string): string {
   return `${v.slice(0, 6)}…${v.slice(-4)} (len=${v.length})`;
 }
 
-async function safeReadBody(r: Response): Promise<unknown> {
-  try {
-    const text = await r.text();
-    try { return JSON.parse(text); } catch { return text; }
-  } catch {
-    return null;
-  }
+function tryParseJson(text: string): unknown {
+  try { return JSON.parse(text); } catch { return text; }
 }

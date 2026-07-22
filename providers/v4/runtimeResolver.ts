@@ -39,7 +39,6 @@ import {
 import {
   MODEL_CATALOG,
   ModelEntry,
-  findModel,
   listModelsForProvider,
 } from './modelCatalog';
 import { CredentialResolver } from './credentialResolver';
@@ -48,6 +47,11 @@ import { MessageApiAdapter } from './messageApiAdapter';
 import { ResponseStreamAdapter } from './responseStreamAdapter';
 import { LocalPromptToolsAdapter } from './localPromptToolsAdapter';
 import { getModelDefaults } from './modelDefaults';
+import {
+  modelDeprecation,
+  resolveModelSelection,
+  type ModelVerification,
+} from './providerModelAuthority';
 // v4.14.x — every adapter the factory hands out is wrapped so a shared message
 // preflight runs before ANY provider call. The single seam; no caller can skip it.
 import { withMessagePreflight } from './preflightAdapter';
@@ -57,6 +61,11 @@ import {
   PREFLIGHT_REFRESH_WINDOW_MS,
 } from '../../core/v4/auth/tokenStore';
 import type { AidenPaths } from '../../core/v4/paths';
+import {
+  credentialFingerprint,
+  resolveApiCredential,
+  type EffectiveCredentialResolution,
+} from './credentialAuthority';
 
 /**
  * Minimal interface RuntimeResolver consumes from the config layer. The
@@ -65,6 +74,7 @@ import type { AidenPaths } from '../../core/v4/paths';
  */
 export interface ConfigProvider {
   get(key: string): string | undefined;
+  getRaw?(key: string): string | undefined;
 }
 
 export interface ResolveOptions {
@@ -78,6 +88,9 @@ export interface ResolveOptions {
   credentialSourceHint?: 'cli' | 'config' | 'env' | 'auth.json' | 'default';
   /** Optional config provider — typically a Phase 6 `ConfigManager`. */
   config?: ConfigProvider;
+  liveModelIds?: readonly string[];
+  allowUnverifiedModel?: boolean;
+  modelVerification?: ModelVerification;
   /**
    * Phase 18: Aiden user-data paths. When present and the resolved provider
    * has `oauth: { providerId }` in the registry, the credential chain
@@ -94,6 +107,8 @@ interface ResolvedCredentials {
   apiKey: string | null;
   source: RuntimeResolution['source'];
   oauthRefreshable?: boolean;
+  endpoint: string;
+  effective: EffectiveCredentialResolution;
 }
 
 /**
@@ -115,6 +130,10 @@ const DEPRECATED_MODELS: Readonly<Record<string, { date: string; replacement: st
  * `console.warn`; callers/tests can also consume the string directly.
  */
 export function deprecationNotice(providerId: string, modelId: string): string | null {
+  const shared = modelDeprecation(providerId, modelId);
+  if (shared) {
+    return `${providerId}:${modelId} stops working on ${shared.shutdownDate}; switch to ${shared.replacements.join(' or ')}.`;
+  }
   const d = DEPRECATED_MODELS[`${providerId}:${modelId}`];
   if (!d) return null;
   return `${providerId}:${modelId} is deprecated and stops working on ${d.date} — switch to ${d.replacement}.`;
@@ -205,6 +224,7 @@ export class RuntimeResolver {
       apiKey: credentials.apiKey,
       oauthRefreshable: credentials.oauthRefreshable,
       source: credentials.source,
+      effectiveCredential: credentials.effective,
     };
   }
 
@@ -235,8 +255,16 @@ export class RuntimeResolver {
       );
     }
 
-    const model = findModel(entry.id, options.modelId);
-    if (!model) {
+    const persistedVerification = options.modelVerification
+      ?? options.config?.get(`providers.${entry.id}.modelVerification`) as ModelVerification | undefined;
+    const selection = resolveModelSelection({
+      providerId: entry.id,
+      modelId: options.modelId,
+      verification: persistedVerification,
+      liveModelIds: options.liveModelIds,
+      allowUnverified: options.allowUnverifiedModel,
+    });
+    if (!selection) {
       const available = listModelsForProvider(entry.id)
         .map((m) => m.id)
         .join(', ');
@@ -247,8 +275,9 @@ export class RuntimeResolver {
       );
     }
 
-    const baseUrl = (options.baseUrlOverride ?? entry.baseUrl).replace(/\/+$/, '');
+    const model = selection.model;
     const credentials = await this.resolveCredentials(entry, options);
+    const baseUrl = credentials.endpoint;
     return { entry, model, baseUrl, credentials };
   }
 
@@ -256,9 +285,22 @@ export class RuntimeResolver {
     entry: ProviderRegistryEntry,
     options: ResolveOptions,
   ): Promise<ResolvedCredentials> {
-    // 1. CLI override.
-    if (options.apiKeyOverride && options.apiKeyOverride.length > 0) {
-      return { apiKey: options.apiKeyOverride, source: 'cli' };
+    const direct = await resolveApiCredential({
+      providerId: entry.id,
+      envVar: entry.apiKeyEnvVar,
+      registryEndpoint: entry.baseUrl,
+      override: options.apiKeyOverride,
+      endpointOverride: options.baseUrlOverride,
+      config: options.config,
+      paths: options.paths,
+    });
+    if (direct.apiKey && direct.effective.credentialSource === 'explicit_override') {
+      return {
+        apiKey: direct.apiKey,
+        source: 'cli',
+        endpoint: direct.endpoint,
+        effective: direct.effective,
+      };
     }
 
     // 1b. Phase 18: OAuth bearer from tokenStore. Wins over config/env so
@@ -279,6 +321,13 @@ export class RuntimeResolver {
           apiKey: tokens.accessToken,
           source: 'auth.json',
           oauthRefreshable: !!tokens.refreshToken,
+          endpoint: direct.endpoint,
+          effective: {
+            ...direct.effective,
+            credentialSource: 'oauth_store',
+            credentialFingerprint: credentialFingerprint(tokens.accessToken),
+            configured: true,
+          },
         };
       }
       // No tokens for an OAuth-only provider — surface the clearest error.
@@ -290,20 +339,14 @@ export class RuntimeResolver {
       }
     }
 
-    // 2. Config provider (Phase 6 ConfigManager or test stub).
-    if (options.config) {
-      const fromConfig = options.config.get(`providers.${entry.id}.apiKey`);
-      if (fromConfig && fromConfig.length > 0) {
-        return { apiKey: fromConfig, source: 'config' };
-      }
-    }
-
-    // 3. Env var.
-    if (entry.apiKeyEnvVar) {
-      const fromEnv = process.env[entry.apiKeyEnvVar];
-      if (fromEnv && fromEnv.length > 0) {
-        return { apiKey: fromEnv, source: 'env' };
-      }
+    if (direct.apiKey) {
+      const source = direct.effective.credentialSource === 'inline_config' ? 'config' : 'env';
+      return {
+        apiKey: direct.apiKey,
+        source,
+        endpoint: direct.endpoint,
+        effective: direct.effective,
+      };
     }
 
     // 4. OAuth via credentialResolver.
@@ -320,6 +363,13 @@ export class RuntimeResolver {
             apiKey: token,
             source: 'auth.json',
             oauthRefreshable: refreshed.oauthRefreshable,
+            endpoint: direct.endpoint,
+            effective: {
+              ...direct.effective,
+              credentialSource: 'legacy_store',
+              credentialFingerprint: credentialFingerprint(token),
+              configured: true,
+            },
           };
         }
       } catch (err) {
@@ -346,10 +396,24 @@ export class RuntimeResolver {
 
     // 5. Local providers — no credentials required.
     if (entry.apiMode === 'ollama_prompt_tools') {
-      return { apiKey: null, source: 'default' };
+      return {
+        apiKey: null,
+        source: 'default',
+        endpoint: direct.endpoint,
+        effective: {
+          ...direct.effective,
+          credentialSource: 'local_runtime',
+          configured: true,
+        },
+      };
     }
 
-    return { apiKey: null, source: 'default' };
+    return {
+      apiKey: null,
+      source: 'default',
+      endpoint: direct.endpoint,
+      effective: direct.effective,
+    };
   }
 }
 

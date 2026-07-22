@@ -52,7 +52,7 @@ describe('RuntimeResolver.resolve', () => {
     process.env.GROQ_API_KEY = 'gsk-test-123';
     const adapter = await makeResolver().resolve({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
     });
     expect(wrapped(adapter)).toBe(true);
     expect(adapter.apiMode).toBe('chat_completions');
@@ -104,7 +104,7 @@ describe('RuntimeResolver.resolve', () => {
     await expect(
       makeResolver().resolve({
         providerId: 'groq',
-        modelId: 'llama-3.3-70b-versatile',
+        modelId: 'openai/gpt-oss-120b',
       }),
     ).rejects.toThrow(/No API key found for groq.*GROQ_API_KEY/);
   });
@@ -113,7 +113,7 @@ describe('RuntimeResolver.resolve', () => {
     process.env.GROQ_API_KEY = 'gsk-from-env';
     const resolution = await makeResolver().describe({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
       apiKeyOverride: 'gsk-from-cli',
     });
     expect(resolution.apiKey).toBe('gsk-from-cli');
@@ -128,7 +128,7 @@ describe('RuntimeResolver.resolve', () => {
     };
     const resolution = await makeResolver().describe({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
       config,
     });
     expect(resolution.apiKey).toBe('gsk-from-config');
@@ -208,7 +208,7 @@ describe('RuntimeResolver.resolve', () => {
     process.env.GROQ_API_KEY = 'gsk-test';
     const resolution = await makeResolver().describe({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
     });
     expect(resolution.provider).toBe('groq');
     expect(resolution.apiMode).toBe('chat_completions');
@@ -237,5 +237,30 @@ describe('RuntimeResolver.resolve', () => {
       baseUrlOverride: 'http://my-host:9000/v1',
     });
     expect(resolution.baseUrl).toBe('http://my-host:9000/v1');
+  });
+
+  it('17. resolves a provider-confirmed model absent from the curated catalog', async () => {
+    process.env.GROQ_API_KEY = 'gsk-test';
+    const adapter = await makeResolver().resolve({
+      providerId: 'groq',
+      modelId: 'provider/new-live-model',
+      liveModelIds: ['provider/new-live-model'],
+    });
+    expect(adapter.apiMode).toBe('chat_completions');
+  });
+
+  it('18. resolves a persisted explicitly-unverified model after restart', async () => {
+    process.env.GROQ_API_KEY = 'gsk-test';
+    const config = {
+      get(key: string): string | undefined {
+        return key === 'providers.groq.modelVerification' ? 'unverified' : undefined;
+      },
+    };
+    const adapter = await makeResolver().resolve({
+      providerId: 'groq',
+      modelId: 'private/gated-model',
+      config,
+    });
+    expect(adapter.apiMode).toBe('chat_completions');
   });
 });

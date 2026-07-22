@@ -56,6 +56,7 @@ export interface RuntimeResolution {
   apiKey: string | null;
   oauthRefreshable?: boolean;
   source: 'cli' | 'config' | 'env' | 'auth.json' | 'default';
+  effectiveCredential?: import('./credentialAuthority').EffectiveCredentialResolution;
 }
 
 /**
@@ -71,6 +72,7 @@ export interface ToolSchema {
     type: 'object';
     properties: Record<string, unknown>;
     required?: string[];
+    additionalProperties?: boolean;
   };
 }
 
