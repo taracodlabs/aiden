@@ -152,6 +152,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         CUSTOM_OPENAI_API_KEY: 'decision-key',
         AIDEN_NO_UPDATE_CHECK: '1',
         AIDEN_TEST_COMPOSER_READY: '1',
+        AIDEN_SANDBOX: '0',
         TELEGRAM_BOT_TOKEN: '',
         FORCE_COLOR: '0',
         NO_COLOR: '1',

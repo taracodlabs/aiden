@@ -50,6 +50,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Prepare terminal test helper
+        if: runner.os == 'macOS'
+        shell: bash
+        run: chmod +x node_modules/node-pty/prebuilds/darwin-*/spawn-helper
+
       - name: TypeScript type check
         run: npx tsc --noEmit -p tsconfig.json
 

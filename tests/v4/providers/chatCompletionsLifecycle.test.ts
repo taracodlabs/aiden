@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
+import { performance } from 'node:perf_hooks';
 
 import { ChatCompletionsAdapter } from '../../../providers/v4/chatCompletionsAdapter';
 import { ProviderPhaseTimeoutError } from '../../../providers/v4/errors';
@@ -139,9 +140,9 @@ describe('ChatCompletionsAdapter request lifecycle', () => {
 
   it('honours Retry-After before retrying a pre-body rate limit', async () => {
     const fixture = await startServer('rate_limit_once');
-    const started = Date.now();
+    const started = performance.now();
     await expect(consume(adapter(fixture.baseUrl, 1))).resolves.toBe('ok');
-    expect(Date.now() - started).toBeGreaterThanOrEqual(1_900);
+    expect(performance.now() - started).toBeGreaterThanOrEqual(1_900);
     expect(fixture.requests()).toBe(2);
   });
 

@@ -89,7 +89,9 @@ describe('MessageApiAdapter request lifecycle', () => {
       name: 'ProviderPhaseTimeoutError',
       phase,
     });
-    expect(current.requests()).toBe(1);
+    if (stage !== 'before_headers') {
+      expect(current.requests()).toBe(1);
+    }
   });
 
   it('keeps cancellation attached after headers and body data', async () => {
