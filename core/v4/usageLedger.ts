@@ -535,7 +535,10 @@ function buildQuery(query: ProviderAttemptQuery): { sql: string; params: unknown
   const limit = Math.max(1, Math.min(query.limit ?? 10_000, 100_000));
   params.push(limit);
   return {
-    sql: `SELECT * FROM provider_attempts${where} ORDER BY started_at, call_id LIMIT ?`,
+    // Millisecond timestamps can tie across sequential retries or fallbacks.
+    // SQLite rowid preserves their physical append order without changing the
+    // persisted record schema or requiring existing ledgers to migrate.
+    sql: `SELECT * FROM provider_attempts${where} ORDER BY started_at, rowid LIMIT ?`,
     params,
   };
 }

@@ -154,6 +154,39 @@ describe('ProviderAttemptLedger', () => {
     expect(ledger.query({ status: 'timeout' })).toHaveLength(1);
   });
 
+  it('preserves physical insertion order when attempt timestamps are identical', () => {
+    ledger.append(attempt({
+      callId: 'z-primary-failure',
+      parentCallId: 'logical-fallback-call',
+      status: 'provider_error',
+      startedAt: 2_000,
+      completedAt: 2_000,
+    }));
+    ledger.append(attempt({
+      callId: 'a-fallback-success',
+      parentCallId: 'logical-fallback-call',
+      purpose: 'fallback',
+      providerActual: 'fallback-provider',
+      modelActual: 'model-b',
+      fallbackIndex: 1,
+      status: 'success',
+      startedAt: 2_000,
+      completedAt: 2_000,
+    }));
+
+    ledger.close();
+    ledger = new ProviderAttemptLedger(dbPath);
+    const records = ledger.query({ parentCallId: 'logical-fallback-call' });
+    expect(records.map((record) => ({
+      callId: record.callId,
+      fallbackIndex: record.fallbackIndex,
+      status: record.status,
+    }))).toEqual([
+      { callId: 'z-primary-failure', fallbackIndex: 0, status: 'provider_error' },
+      { callId: 'a-fallback-success', fallbackIndex: 1, status: 'success' },
+    ]);
+  });
+
   it('projects provider totals without mixing setup/readiness into task totals', () => {
     ledger.append(attempt());
     ledger.append(attempt({
