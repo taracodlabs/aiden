@@ -80,6 +80,11 @@ import os from 'node:os';
 import { daemonDbPath } from '../../core/v4/daemon/daemonConfig';
 import { openDaemonDb } from '../../core/v4/daemon/db/connection';
 import { createRunStore } from '../../core/v4/daemon/runStore';
+import { createJobEngine } from '../../core/v4/daemon/jobEngine';
+import type { JobEngine } from '../../core/v4/daemon/jobEngine';
+import { executeDurableJob } from '../../core/v4/daemon/jobLifecycle';
+import { computeTaskFinalization } from '../../core/v4/taskVerification';
+import { runWithProviderUsageContext } from '../../providers/v4/providerAttemptAccounting';
 // v4.10 Slice 10.2b — shared event taxonomy. Tool name → (category, kind).
 import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { makeSpawnSubAgentTool } from '../../tools/v4/subagent/spawnSubAgentTool';
@@ -507,43 +512,33 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { openBrowser }          = await import('../../core/v4/workbench/openBrowser');
       const { createSessionLister }  = await import('../../core/v4/workbench/sessionList');
       const { createTriggerBus }     = await import('../../core/v4/daemon/triggerBus');
-      const { randomBytes, randomUUID } = await import('node:crypto');
+      const { createWorkbenchJobCommands } = await import('../../core/v4/workbench/jobCommands');
+      const { randomBytes } = await import('node:crypto');
       const paths    = resolveAidenPaths();
       const dbPath   = daemonDbPath(paths.root);
       const db       = openDaemonDb(dbPath);
       const runStore = createRunStore({ db });
+      const jobEngine = createJobEngine({ db });
+      const workbenchInstanceId = `workbench_${process.pid}`;
+      const workbenchStartedAt = Date.now();
+      db.prepare(
+        `INSERT OR IGNORE INTO daemon_instances
+           (instance_id, pid, hostname, started_at, last_heartbeat, version)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(workbenchInstanceId, process.pid, os.hostname(), workbenchStartedAt, workbenchStartedAt, VERSION);
       const sessions = createSessionLister(new SessionStore(paths.sessionsDb));
       // WRITE path: a per-launch token gates it, and the task is only ENQUEUED
       // onto the daemon's safe job path (manual trigger → dispatcher runs it
       // under the default safe-only policy: risky/mutating tools auto-denied).
       const triggerBus = createTriggerBus({ db });
       const token = randomBytes(24).toString('hex');
-      const enqueue = {
-        enqueue(task: { message: string; sessionId?: string }): { accepted: boolean; triggerEventId?: number; duplicate?: boolean } {
-          const r = triggerBus.insert({
-            source:         'manual',
-            sourceKey:      'workbench-web',
-            idempotencyKey: randomUUID(),
-            payload:        { body: { prompt: task.message, source: 'workbench-web' }, sessionId: task.sessionId },
-          });
-          return { accepted: true, triggerEventId: r.id, duplicate: !r.inserted };
-        },
-      };
+      const { enqueue, cancel } = createWorkbenchJobCommands({
+        db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId,
+      });
       // STEER path: the stop button cancels a running job by run id. We record
       // the stop durably — mark the run `cancelled` (so the dispatcher won't
       // dispatch it again) and emit a `task_cancelled` event so it shows in the
       // feed. We never abort the agent in-process from here.
-      const FINAL_RUN = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
-      const cancel = {
-        cancel(runId: number): { accepted: boolean; runId: number; alreadyFinal?: boolean } {
-          const run = runStore.get(runId);
-          if (!run) return { accepted: false, runId };
-          if (FINAL_RUN.has(String(run.status))) return { accepted: true, runId, alreadyFinal: true };
-          runStore.setStatus(runId, 'cancelled', { finishReason: 'stopped from workbench web' });
-          runStore.emitEvent(runId, 'task_cancelled', { source: 'workbench-web', reason: 'stopped from dashboard' });
-          return { accepted: true, runId };
-        },
-      };
       // Primary UI: the built React dashboard (dashboard-next/out) if present;
       // otherwise the built-in page (still reachable at /plain either way).
       const nodePath = await import('node:path');
@@ -1204,6 +1199,7 @@ export async function buildAgentRuntime(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
+  const jobEngine = createJobEngine({ db: replDb });
   // v4.10 Slice 10.8 — durable Task-lite store. Shares the daemon.db
   // handle with replRunStore so /tasks listing + /adjust mutations
   // see the same WAL view chatSession's runAgentTurn writes through.
@@ -2932,6 +2928,7 @@ export async function buildAgentRuntime(
       resolveUiOnly,
       resolveToolInteraction,
       runStore:            replRunStore,
+      jobEngine,
       instanceId:          replInstanceId,
       logger:              bootLogger.child('subagent'),
       // v4.11 toolset grouping — children inherit the parent's
@@ -3108,12 +3105,57 @@ export async function buildAgentRuntime(
       const history: import('../../providers/v4/types').Message[] = [...past, userTurn];
 
       // 3. Run one agent turn.
-      const result = await agent.runConversation(history, {
-        sessionId: storeSid,
-        runId: `gateway-${randomUUID()}`,
-        entryPoint: 'gateway',
-        purpose: 'primary',
+      const gatewayKey = message.replyTo ?? `${message.timestamp}`;
+      const execution = await executeDurableJob({
+        engine: jobEngine,
+        ownerId: replInstanceId,
+        admission: {
+          entryPoint: 'gateway',
+          source: message.channel,
+          sessionId: storeSid,
+          workspaceId: process.cwd(),
+          principalId: message.userId,
+          instanceId: replInstanceId,
+          idempotencyNamespace: `gateway:${message.channel}:${message.channelId}`,
+          idempotencyKey: gatewayKey,
+          goal: message.text,
+          title: message.text,
+          channelId: message.channelId,
+        },
+        execute: (handle) => runWithProviderUsageContext({
+          sessionId: storeSid,
+          taskId: handle.jobId,
+          runId: handle.runId,
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          attemptGeneration: handle.generation,
+          entryPoint: 'gateway',
+          purpose: 'primary',
+        }, () => agent.runConversation(history, {
+          sessionId: storeSid,
+          taskId: handle.jobId,
+          runId: handle.runId,
+          entryPoint: 'gateway',
+          purpose: 'primary',
+          signal: handle.signal,
+        })),
+        finalize: (value) => {
+          const fin = computeTaskFinalization({
+            finishReason: value.finishReason,
+            toolCallTrace: value.toolCallTrace,
+          });
+          return {
+            status: value.finishReason === 'interrupted'
+              ? 'cancelled'
+              : fin.status === 'completed' || fin.status === 'completed_unverified' ? 'completed' : 'failed',
+            outcome: fin.status,
+            finishReason: value.finishReason,
+            evidence: fin.evidence,
+            jobCard: fin.jobCard,
+          };
+        },
       });
+      const result = execution.value;
 
       // 4. Persist the new tail (everything past the loaded history) so
       //    the next inbound resumes seamlessly. Mirror chatSession's
@@ -3449,7 +3491,20 @@ export async function buildAgentRuntime(
           ctx.display.warn(`Task ${taskId} is ${existing.status}; marking cancelled anyway.`);
         }
         try {
-          replTaskStore.setStatus(taskId, 'cancelled');
+          const durable = jobEngine.getJob(taskId);
+          if (durable) {
+            const cancelled = jobEngine.cancelJob({
+              jobId: taskId,
+              reason: 'cancelled from /adjust',
+              producer: 'repl',
+              eventIdempotencyKey: `adjust-cancel:${taskId}`,
+            });
+            if (!cancelled.applied && !cancelled.duplicate) {
+              throw new Error(`durable cancellation rejected: ${cancelled.conflict ?? 'unknown'}`);
+            }
+          } else {
+            replTaskStore.setStatus(taskId, 'cancelled');
+          }
           ctx.display.success(`Task ${taskId} cancelled.`);
           ctx.display.dim(
             '  Note: this records intent. Any in-flight agent turn keeps running — mid-turn abort is a future capability.',
@@ -3628,6 +3683,7 @@ export async function buildAgentRuntime(
     daemonAgentBuilder,
     // v4.6 Phase 2Q-B — REPL parent-run wiring.
     replRunStore,
+    jobEngine,
     replInstanceId,
     replParentRunRef,
     // v4.10 Slice 10.8 — durable Task-lite store.
@@ -3739,6 +3795,7 @@ export interface AgentRuntime {
    * children link via `spawned_from_run_id`.
    */
   replRunStore:     import('../../core/v4/daemon/runStore').RunStore;
+  jobEngine:        import('../../core/v4/daemon/jobEngine').JobEngine;
   replInstanceId:   string;
   /**
    * v4.10 Slice 10.8 — durable Task-lite store. Mirrors replRunStore's
@@ -3780,7 +3837,13 @@ export interface AgentRuntime {
 interface OneShotAgent {
   runConversation(
     history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
-    options?: { sessionId?: string; runId?: string; entryPoint?: string; purpose?: 'primary' },
+    options?: {
+      sessionId?: string;
+      runId?: string | number;
+      entryPoint?: string;
+      purpose?: 'primary';
+      signal?: AbortSignal;
+    },
   ): Promise<{
     finalContent?:  string;
     finishReason?:  string;
@@ -3802,6 +3865,12 @@ export interface OneShotDeps {
   paths?:    AidenPaths;
   /** Working dir for path minimization + the on-disk artifact check. */
   cwd?:      string;
+  /** Production durable authority. Tests may omit it for compatibility. */
+  jobEngine?: JobEngine;
+  /** Required with jobEngine; owns the Attempt lease. */
+  instanceId?: string;
+  /** Optional stable session identity; otherwise the one-shot ID is used. */
+  sessionId?: string;
 }
 
 /**
@@ -3817,10 +3886,71 @@ export async function executeOneShotTurn(deps: OneShotDeps): Promise<number> {
   let code = 0;
   try {
     const oneShotId = `oneshot-${randomUUID()}`;
-    const result = await deps.agent.runConversation(
+    const sessionId = deps.sessionId ?? oneShotId;
+    if (deps.jobEngine && !deps.instanceId) {
+      throw new Error('Durable one-shot execution requires an instance identity');
+    }
+    const runAgent = () => deps.agent.runConversation(
       [{ role: 'user', content: deps.prompt }],
-      { sessionId: oneShotId, runId: oneShotId, entryPoint: 'oneshot', purpose: 'primary' },
+      { sessionId, runId: oneShotId, entryPoint: 'oneshot', purpose: 'primary' },
     );
+    const result = deps.jobEngine
+      ? (await executeDurableJob({
+          engine: deps.jobEngine,
+          ownerId: deps.instanceId!,
+          admission: {
+            entryPoint: 'oneshot',
+            source: 'cli',
+            sessionId,
+            workspaceId: deps.cwd ?? process.cwd(),
+            instanceId: deps.instanceId!,
+            idempotencyNamespace: `oneshot:${sessionId}`,
+            goal: deps.prompt,
+            title: deps.prompt,
+          },
+          execute: (handle) => runWithProviderUsageContext({
+            sessionId,
+            taskId: handle.jobId,
+            runId: handle.runId,
+            jobId: handle.jobId,
+            attemptId: handle.attemptId,
+            attemptGeneration: handle.generation,
+            entryPoint: 'oneshot',
+            purpose: 'primary',
+          }, () => deps.agent.runConversation(
+            [{ role: 'user', content: deps.prompt }],
+            {
+              sessionId,
+              runId: String(handle.runId),
+              entryPoint: 'oneshot',
+              purpose: 'primary',
+              signal: handle.signal,
+            },
+          )),
+          finalize: (value) => {
+            const fin = computeTaskFinalization({
+              finishReason: value.finishReason ?? 'stop',
+              toolCallTrace: value.toolCallTrace,
+            }, {
+              fileExists: (candidate) => {
+                try {
+                  const cwd = deps.cwd ?? process.cwd();
+                  return existsSync(path.isAbsolute(candidate) ? candidate : path.resolve(cwd, candidate));
+                } catch { return false; }
+              },
+            });
+            return {
+              status: value.finishReason === 'interrupted'
+                ? 'cancelled'
+                : fin.status === 'completed' || fin.status === 'completed_unverified' ? 'completed' : 'failed',
+              outcome: fin.status,
+              finishReason: value.finishReason ?? 'stop',
+              evidence: fin.evidence,
+              jobCard: fin.jobCard,
+            };
+          },
+        })).value
+      : await runAgent();
     const answer = result.finalContent ?? '';
     // stdout carries ONLY the answer (newline-terminated for pipe hygiene).
     out(answer.endsWith('\n') ? answer : `${answer}\n`);
@@ -3902,6 +4032,8 @@ export async function runQuery(
   return executeOneShotTurn({
     agent:  runtime.agent as unknown as OneShotAgent,
     prompt,
+    jobEngine: runtime.jobEngine,
+    instanceId: runtime.replInstanceId,
     // Dual-run Slice 1 — enable the shadow divergence audit on the headless
     // seam (the interactive REPL wires it via ChatSession). Same local JSONL.
     paths:  runtime.paths,
@@ -4015,6 +4147,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // ref via their `resolveParentRunId` / `resolveParentSessionId`
     // callbacks so children get `spawned_from_run_id` populated.
     replRunStore:     runtime.replRunStore,
+    jobEngine:        runtime.jobEngine,
     replInstanceId:   runtime.replInstanceId,
     replParentRunRef: runtime.replParentRunRef,
     // v4.10 Slice 10.8 — durable Task-lite store. ChatSession's

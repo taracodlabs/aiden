@@ -67,6 +67,9 @@ export interface EnqueueResult {
   accepted:        boolean;
   triggerEventId?: number;
   duplicate?:      boolean;
+  jobId?:          string;
+  attemptId?:      string;
+  runId?:          number;
 }
 
 /** Optional WRITE port — enqueues a task onto the daemon's safe job path. The
@@ -430,7 +433,14 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;
       try {
         const result = opts.enqueue.enqueue({ message, sessionId });
-        sendJson(res, 202, { accepted: result.accepted, triggerEventId: result.triggerEventId, duplicate: result.duplicate ?? false });
+        sendJson(res, 202, {
+          accepted: result.accepted,
+          triggerEventId: result.triggerEventId,
+          duplicate: result.duplicate ?? false,
+          job_id: result.jobId,
+          attempt_id: result.attemptId,
+          run_id: result.runId,
+        });
       } catch (e) {
         log(`enqueue failed: ${(e as Error).message}`);
         sendJson(res, 500, { error: 'enqueue failed' });

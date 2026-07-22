@@ -10,6 +10,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../../../../core/v4/daemon/db/migrations';
 import { createTriggerBus } from '../../../../core/v4/daemon/triggerBus';
 import { createRunStore } from '../../../../core/v4/daemon/runStore';
+import { createJobEngine } from '../../../../core/v4/daemon/jobEngine';
 import {
   createDispatcher,
   makeRunner,
@@ -81,5 +82,31 @@ describe('dispatcher — deliver_only stub', () => {
     const parsed = JSON.parse(ev.payload);
     expect(parsed.deliverOnly).toBe(true);
     expect(parsed.messageBytes).toBeGreaterThan(0);
+  });
+
+  it('uses one authoritative Job and Attempt when the durable authority is available', async () => {
+    const bus = createTriggerBus({ db });
+    const runStore = createRunStore({ db });
+    const jobEngine = createJobEngine({ db });
+    db.prepare(`INSERT INTO triggers (id, source, name, spec_json, enabled, prompt_template, deliver_only, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+      .run('t3', 'manual', 'durable-notify', '{}', 1, 'Durable delivery', 1, Date.now(), Date.now());
+    const trigger = bus.insert({ source: 'manual', sourceKey: 't3', idempotencyKey: 'durable', payload: {} });
+    const dispatcher = createDispatcher({
+      triggerBus: bus, runStore, jobEngine, db,
+      ownerId: 'inst-1', instanceId: 'inst-1', workerCount: 1,
+      runnerFactory: () => makeRunner(async () => ({ runId: 0, finishReason: 'stop' })),
+    });
+
+    await dispatcher._pumpOnce();
+
+    const row = bus.get(trigger.id)!;
+    const jobs = jobEngine.listJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]).toMatchObject({ status: 'completed', terminalOutcome: 'delivered' });
+    expect(jobEngine.listAttempts(jobs[0]!.id)).toEqual([
+      expect.objectContaining({ rowId: row.runId, status: 'succeeded' }),
+    ]);
+    expect(db.prepare('SELECT COUNT(*) AS count FROM runs').get()).toEqual({ count: 1 });
   });
 });

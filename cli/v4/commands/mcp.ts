@@ -78,6 +78,9 @@ import {
   createRunStore,
 } from '../../../core/v4/daemon';
 import { VERSION as AIDEN_VERSION } from '../../../core/version';
+import { createJobEngine, type JobEngine } from '../../../core/v4/daemon/jobEngine';
+import type { RunStore } from '../../../core/v4/daemon/runStore';
+import type { Db } from '../../../core/v4/daemon/db/connection';
 // v4.6 Phase 3A — operator kill-switch. Initialised here so
 // MCP-side `subagent_fanout` (and any future MCP-side
 // `spawn_sub_agent` exposure) reads from the same marker file the
@@ -162,6 +165,16 @@ async function buildMcpRuntime(opts: RunMcpOptions = {}) {
 
   const processes = new ProcessRegistry();
 
+  const mcpInstanceId = `mcp-${randomUUID().slice(0, 8)}`;
+  const mcpDb = openDaemonDb(daemonDbPath(paths.root));
+  mcpDb.prepare(
+    `INSERT OR IGNORE INTO daemon_instances
+       (instance_id, pid, hostname, started_at, last_heartbeat, version)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(mcpInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), AIDEN_VERSION);
+  const mcpRunStore = createRunStore({ db: mcpDb });
+  const mcpJobEngine = createJobEngine({ db: mcpDb });
+
   const toolContext = {
     cwd: process.cwd(),
     paths,
@@ -201,9 +214,16 @@ async function buildMcpRuntime(opts: RunMcpOptions = {}) {
     memoryManager: memory,
     skillLoader,
     logger: logger.child('subagent'),
+    db: mcpDb,
+    runStore: mcpRunStore,
+    jobEngine: mcpJobEngine,
+    instanceId: mcpInstanceId,
   });
 
-  return { paths, registry, skillLoader, toolContext, logger };
+  return {
+    paths, registry, skillLoader, toolContext, logger,
+    jobAuthority: { engine: mcpJobEngine, instanceId: mcpInstanceId },
+  };
 }
 
 /** Mirror of `buildAgentFallbackSlots` (cli/v4/aidenCLI.ts) inlined
@@ -243,6 +263,10 @@ interface WireOptions {
   memoryManager: MemoryManager;
   skillLoader: SkillLoader;
   logger: import('../../../core/v4/logger/logger').Logger;
+  db: Db;
+  runStore: RunStore;
+  jobEngine: JobEngine;
+  instanceId: string;
 }
 
 /** Resolve adapter + wire `subagent_fanout` into the MCP registry.
@@ -298,14 +322,9 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
   // REPL writes to. Operators can then see MCP-side fanout
   // activity under `aiden runs list --include-children`. Same
   // WAL-coexistence model as REPL — connection.ts caches per-path.
-  const mcpInstanceId = `mcp-${randomUUID().slice(0, 8)}`;
-  const mcpDb         = openDaemonDb(daemonDbPath(opts.paths.root));
-  mcpDb.prepare(
-    `INSERT OR IGNORE INTO daemon_instances
-       (instance_id, pid, hostname, started_at, last_heartbeat, version)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run(mcpInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), AIDEN_VERSION);
-  const mcpRunStore = createRunStore({ db: mcpDb });
+  const mcpInstanceId = opts.instanceId;
+  const mcpDb = opts.db;
+  const mcpRunStore = opts.runStore;
 
   // v4.6 Phase 3b — self-improvement loop singleton against the
   // same daemon.db. MCP-side spawn_sub_agent / subagent_fanout
@@ -369,6 +388,7 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
       parentProviderId: providerId,
       parentModelId:    modelId,
       runStore:         mcpRunStore,
+      jobEngine:        opts.jobEngine,
       instanceId:       mcpInstanceId,
       logger:           opts.logger,
     },
@@ -470,7 +490,7 @@ export async function runMcpSubcommand(
         }
       }
 
-      const { registry, skillLoader, toolContext, logger } =
+      const { registry, skillLoader, toolContext, logger, jobAuthority } =
         await buildMcpRuntime(opts);
 
       await startStdioMcpServer({
@@ -478,6 +498,7 @@ export async function runMcpSubcommand(
         skillLoader,
         toolContext,
         logger,
+        jobAuthority,
       });
 
       // Block forever — parent closes stdio when the client disconnects,

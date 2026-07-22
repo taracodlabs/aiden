@@ -48,6 +48,7 @@ import type { TriggerBus } from '../triggerBus';
 import type { RunStore } from '../runStore';
 import type { ClaimedEvent, TriggerSource } from '../types';
 import type { Db } from '../db/connection';
+import type { JobEngine } from '../jobEngine';
 import type { TriggerRowSql } from '../db/schema/v1.spec';
 import {
   buildTriggerSessionId,
@@ -87,6 +88,7 @@ export interface CreateDispatcherOptions {
   runStore:      RunStore;
   /** SQLite db handle — used to read `triggers` table for spec lookup. */
   db:            Db;
+  jobEngine?:    JobEngine;
   /** Owner id stamped on each claim (typically the instanceId). */
   ownerId:       string;
   /** Instance id stamped on `runs.instance_id`. */
@@ -99,6 +101,8 @@ export interface CreateDispatcherOptions {
    * provider + toolExecutor.
    */
   runnerFactory: () => DaemonAgentRunner;
+  /** Classification of the runner returned by runnerFactory. */
+  initialRunnerKind?: 'placeholder' | 'real';
   workerCount?:  number;
   leaseMs?:     number;
   renewMs?:     number;
@@ -332,6 +336,26 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
               attempt: typeof resumeRaw.attempt === 'number' ? resumeRaw.attempt : 1,
             }
           : undefined;
+      const durable = (event.payload as {
+        durable_job?: { job_id?: unknown; attempt_id?: unknown; run_id?: unknown };
+      } | null)?.durable_job;
+      const existingAdmission = durable
+        && typeof durable.job_id === 'string'
+        && typeof durable.attempt_id === 'string'
+        && typeof durable.run_id === 'number'
+          ? { jobId: durable.job_id, attemptId: durable.attempt_id, runId: durable.run_id }
+          : undefined;
+      const admission = existingAdmission ?? opts.jobEngine?.submitJob({
+        entryPoint: 'daemon_trigger',
+        source: event.source,
+        sessionId,
+        instanceId: opts.instanceId,
+        idempotencyNamespace: `trigger:${event.source}:${event.sourceKey}`,
+        idempotencyKey: String(event.id),
+        requestFingerprint: event.idempotencyKey ?? String(event.id),
+        goal: message,
+        triggerEventId: event.id,
+      });
       const input: DaemonAgentInput = {
         sessionId,
         instanceId:     opts.instanceId,
@@ -339,12 +363,13 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         triggerContext: context,
         initialMessage: message,
         deliverOnly,
+        ...(admission ? { admission } : {}),
         ...(resume ? { resume } : {}),
       };
 
       let result: DaemonAgentResult;
       if (deliverOnly) {
-        result = deliverOnlyStub(input, opts.runStore);
+        result = deliverOnlyStub(input, opts.runStore, opts.jobEngine);
         _stats.deliverOnly += 1;
       } else {
         if (!runner) {
@@ -439,12 +464,8 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       if (_started) return;
       _started = true;
       runner = opts.runnerFactory();
-      // Initial runner from the factory is the placeholder unless the
-      // factory itself returned a real runner. The CLI's two-phase
-      // bootstrap (Phase 7c) starts with a placeholder factory and
-      // calls `installRunner` later with the real one.
-      _runnerKind = 'placeholder';
-      log('info', `[dispatcher] starting workerCount=${workerCount} leaseMs=${leaseMs} runner=placeholder`);
+      _runnerKind = opts.initialRunnerKind ?? 'placeholder';
+      log('info', `[dispatcher] starting workerCount=${workerCount} leaseMs=${leaseMs} runner=${_runnerKind}`);
       _schedulePoll();
     },
     installRunner(next: DaemonAgentRunner) {

@@ -80,6 +80,7 @@ import type { SkillLoader } from '../../core/v4/skillLoader';
 import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import type { ConfigManager } from '../../core/v4/config';
 import type { PersonalityManager } from '../../core/v4/personality';
+import { runWithJobExecutionContext } from '../../core/v4/daemon/jobExecutionContext';
 import type { PluginLoader } from '../../core/v4/plugins/pluginLoader';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
 import type { Message } from '../../providers/v4/types';
@@ -447,6 +448,8 @@ export interface ChatSessionOptions {
    * the REPL continues — never blocks user-facing turns.
    */
   replRunStore?:    import('../../core/v4/daemon/runStore').RunStore;
+  /** Authoritative durable Job/Attempt admission and transition service. */
+  jobEngine?:       import('../../core/v4/daemon/jobEngine').JobEngine;
   replInstanceId?:  string;
   /**
    * v4.10 Slice 10.8 — durable Task-lite store. Optional for tests +
@@ -1819,10 +1822,102 @@ export class ChatSession implements ChatSessionLike {
     // wrapped in try/catch and reduces to a logged warning. The
     // user-facing turn still runs.
     let replRunId: number | null = null;
+    let replTaskId: string | null = null;
     const replRunStore       = this.opts.replRunStore;
     const replInstanceId     = this.opts.replInstanceId;
     const replParentRunRef   = this.opts.replParentRunRef;
-    if (replRunStore && replInstanceId && this.sessionId) {
+    const jobEngine          = this.opts.jobEngine;
+    let jobAttemptId: string | null = null;
+    let jobGeneration: number | null = null;
+    let jobFenceToken: string | null = null;
+    let jobStateVersion = 0;
+    let attemptStateVersion = 0;
+    let jobLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
+    const stopJobLeaseHeartbeat = (): void => {
+      if (jobLeaseHeartbeat !== null) {
+        clearInterval(jobLeaseHeartbeat);
+        jobLeaseHeartbeat = null;
+      }
+    };
+
+    if (jobEngine) {
+      if (!replInstanceId || !this.sessionId) {
+        throw new Error('Durable Job admission requires an instance and session identity');
+      }
+      const admitted = jobEngine.submitJob({
+        entryPoint: 'interactive',
+        source: 'repl',
+        sessionId: this.sessionId,
+        workspaceId: process.cwd(),
+        instanceId: replInstanceId,
+        idempotencyNamespace: `interactive:${this.sessionId}`,
+        goal: userInput,
+        title: userInput,
+        channelId: 'repl',
+      });
+      replRunId = admitted.runId;
+      replTaskId = admitted.jobId;
+      jobAttemptId = admitted.attemptId;
+      if (replParentRunRef) {
+        replParentRunRef.runId = replRunId;
+        replParentRunRef.sessionId = this.sessionId;
+      }
+      const lease = jobEngine.claimAttempt({
+        attemptId: admitted.attemptId,
+        ownerId: replInstanceId,
+        ttlMs: 45_000,
+      });
+      if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
+        throw new Error(`Durable Attempt lease unavailable: ${lease.conflict ?? 'unknown'}`);
+      }
+      jobFenceToken = lease.fenceToken;
+      jobGeneration = lease.generation;
+      attemptStateVersion = lease.stateVersion;
+      const attemptRunning = jobEngine.transitionAttempt({
+        attemptId: admitted.attemptId,
+        expectedStateVersion: attemptStateVersion,
+        generation: jobGeneration,
+        fenceToken: jobFenceToken,
+        to: 'running',
+        eventIdempotencyKey: `attempt-running:${admitted.attemptId}:${jobGeneration}`,
+        producer: 'repl',
+      });
+      if (!attemptRunning.applied || attemptRunning.stateVersion === undefined) {
+        throw new Error(`Durable Attempt start rejected: ${attemptRunning.conflict ?? 'unknown'}`);
+      }
+      attemptStateVersion = attemptRunning.stateVersion;
+      const jobRunning = jobEngine.transitionJob({
+        jobId: admitted.jobId,
+        attemptId: admitted.attemptId,
+        generation: jobGeneration,
+        fenceToken: jobFenceToken,
+        expectedStateVersion: jobStateVersion,
+        to: 'running',
+        eventIdempotencyKey: `job-running:${admitted.jobId}:${jobGeneration}`,
+        producer: 'repl',
+      });
+      if (!jobRunning.applied || jobRunning.stateVersion === undefined) {
+        throw new Error(`Durable Job start rejected: ${jobRunning.conflict ?? 'unknown'}`);
+      }
+      jobStateVersion = jobRunning.stateVersion;
+      jobLeaseHeartbeat = setInterval(() => {
+        if (!jobAttemptId || jobGeneration === null || !jobFenceToken || turnAbort.signal.aborted) return;
+        const renewed = jobEngine.renewAttemptLease({
+          attemptId: jobAttemptId,
+          ownerId: replInstanceId,
+          generation: jobGeneration,
+          fenceToken: jobFenceToken,
+          ttlMs: 45_000,
+        });
+        if (!renewed.applied || renewed.stateVersion === undefined) {
+          stopJobLeaseHeartbeat();
+          turnAbort.abort(new Error(`Durable Attempt lease renewal failed: ${renewed.conflict ?? 'unknown'}`));
+          return;
+        }
+        attemptStateVersion = renewed.stateVersion;
+      }, 15_000);
+      jobLeaseHeartbeat.unref?.();
+    } else if (replRunStore && replInstanceId && this.sessionId) {
       try {
         replRunId = replRunStore.create({
           sessionId:  this.sessionId,
@@ -1884,13 +1979,12 @@ export class ChatSession implements ChatSessionLike {
     // future tools (/adjust, future Memory promotion) can read the
     // original intent without parsing UI display rows. Best-effort —
     // any write failure logs once and the turn proceeds.
-    let replTaskId: string | null = null;
     // v4.13 Gap 1 — last ui_task_done payload the model emitted this
     // turn (collected via the onUiEvent handler). Read by the verify-
     // before-done gate: a declared failure finalizes honestly as failed.
     let declaredTaskDone: Record<string, unknown> | null = null;
     const replTaskStore = this.opts.replTaskStore;
-    if (replTaskStore && this.sessionId) {
+    if (!jobEngine && replTaskStore && this.sessionId) {
       try {
         replTaskId = replTaskStore.create({
           title:     userInput,
@@ -2174,10 +2268,13 @@ export class ChatSession implements ChatSessionLike {
         aborted: turnAbort.signal.aborted,
         pendingPromises: ['agent.runConversation'],
       });
-      const result = await runWithProviderUsageContext({
+      const runAgent = () => runWithProviderUsageContext({
         sessionId: this.sessionId,
         taskId: replTaskId,
         runId: replRunId,
+        jobId: replTaskId,
+        attemptId: jobAttemptId,
+        attemptGeneration: jobGeneration,
         entryPoint: 'cli',
         selectedMode,
         selectedProfile,
@@ -2331,6 +2428,27 @@ export class ChatSession implements ChatSessionLike {
             })
           : undefined,
       }));
+      const result = await (
+        jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && jobFenceToken
+          ? runWithJobExecutionContext({
+              engine: jobEngine,
+              jobId: replTaskId,
+              attemptId: jobAttemptId,
+              generation: jobGeneration,
+              fenceToken: jobFenceToken,
+              producer: 'repl',
+            }, runAgent)
+          : runAgent()
+      );
+      if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && replRunId !== null) {
+        currentProviderAttemptLedger()?.reconcileJobLinkage({
+          taskId: replTaskId,
+          runId: replRunId,
+          jobId: replTaskId,
+          attemptId: jobAttemptId,
+          attemptGeneration: jobGeneration,
+        });
+      }
       emitP2aDiag('turn.agent_run.complete', {
         aborted: turnAbort.signal.aborted,
         finishReason: result.finishReason,
@@ -2400,7 +2518,7 @@ export class ChatSession implements ChatSessionLike {
       // surface as 'interrupted' so it's visible in `runs list`;
       // `budget_exhausted` / `error` → failed. Wrapped in try/catch
       // so even a runStore write failure here can't crash the REPL.
-      if (replRunStore && replRunId !== null) {
+      if (!jobEngine && replRunStore && replRunId !== null) {
         try {
           const dbStatus =
             result.finishReason === 'stop'        ? 'completed'  :
@@ -2472,7 +2590,51 @@ export class ChatSession implements ChatSessionLike {
           err instanceof Error ? err.message : String(err));
       }
 
-      if (replTaskStore && replTaskId !== null && _fin) {
+      if (jobEngine && replTaskId !== null && jobAttemptId && jobGeneration !== null && jobFenceToken && _fin) {
+        stopJobLeaseHeartbeat();
+        const attemptTerminal =
+          result.finishReason === 'stop' ? 'succeeded' :
+          result.finishReason === 'interrupted' ? 'cancelled' :
+          'failed';
+        const attemptFinal = jobEngine.transitionAttempt({
+          attemptId: jobAttemptId,
+          expectedStateVersion: attemptStateVersion,
+          generation: jobGeneration,
+          fenceToken: jobFenceToken,
+          to: attemptTerminal,
+          eventIdempotencyKey: `attempt-final:${jobAttemptId}:${jobGeneration}`,
+          producer: 'repl',
+          finishReason: result.finishReason,
+        });
+        if (!attemptFinal.applied || attemptFinal.stateVersion === undefined) {
+          throw new Error(`Durable Attempt finalization rejected: ${attemptFinal.conflict ?? 'unknown'}`);
+        }
+        attemptStateVersion = attemptFinal.stateVersion;
+        const jobStatus =
+          result.finishReason === 'interrupted' ? 'cancelled' :
+          _fin.status === 'completed' || _fin.status === 'completed_unverified' ? 'completed' :
+          'failed';
+        const jobFinal = jobEngine.finalizeJob({
+          jobId: replTaskId,
+          attemptId: jobAttemptId,
+          generation: jobGeneration,
+          fenceToken: jobFenceToken,
+          expectedStateVersion: jobStateVersion,
+          status: jobStatus,
+          outcome: _fin.status,
+          finishReason: result.finishReason,
+          evidence: _fin.evidence,
+          jobCard: _fin.jobCard,
+          eventIdempotencyKey: `job-final:${replTaskId}:${jobGeneration}`,
+          producer: 'repl',
+        });
+        if (!jobFinal.applied || jobFinal.stateVersion === undefined) {
+          throw new Error(`Durable Job finalization rejected: ${jobFinal.conflict ?? 'unknown'}`);
+        }
+        jobStateVersion = jobFinal.stateVersion;
+      }
+
+      if (!jobEngine && replTaskStore && replTaskId !== null && _fin) {
         const fin = _fin;
         try {
           // v4.14 Pillar 5 Slice C — artifact_verified: the Pillar-3 verdict +
@@ -2749,6 +2911,7 @@ export class ChatSession implements ChatSessionLike {
         (err instanceof Error && err.name === 'AbortError') ||
         turnAbort.signal.aborted;
       if (_abortHit) {
+        stopJobLeaseHeartbeat();
         // v4.11 regression patch — stop the indicator BEFORE printing
         // the dim line so the setInterval can't paint a stray
         // "calling provider… (Ns)" line on top of our cancel
@@ -2764,7 +2927,37 @@ export class ChatSession implements ChatSessionLike {
           replParentRunRef.runId     = null;
           replParentRunRef.sessionId = null;
         }
-        if (replRunStore && replRunId !== null) {
+        if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && jobFenceToken) {
+          const attemptCancelled = jobEngine.transitionAttempt({
+            attemptId: jobAttemptId,
+            expectedStateVersion: attemptStateVersion,
+            generation: jobGeneration,
+            fenceToken: jobFenceToken,
+            to: 'cancelled',
+            eventIdempotencyKey: `attempt-cancelled:${jobAttemptId}:${jobGeneration}`,
+            producer: 'repl',
+            finishReason: 'interrupted',
+          });
+          if (attemptCancelled.applied && attemptCancelled.stateVersion !== undefined) {
+            attemptStateVersion = attemptCancelled.stateVersion;
+          }
+          const jobCancelled = jobEngine.transitionJob({
+            jobId: replTaskId,
+            attemptId: jobAttemptId,
+            generation: jobGeneration,
+            fenceToken: jobFenceToken,
+            expectedStateVersion: jobStateVersion,
+            to: 'cancelled',
+            eventIdempotencyKey: `job-cancelled:${replTaskId}:${jobGeneration}`,
+            producer: 'repl',
+            finishReason: 'interrupted',
+            terminalOutcome: 'cancelled',
+          });
+          if (jobCancelled.applied && jobCancelled.stateVersion !== undefined) {
+            jobStateVersion = jobCancelled.stateVersion;
+          }
+        }
+        if (!jobEngine && replRunStore && replRunId !== null) {
           try {
             replRunStore.setStatus(replRunId, 'interrupted', {
               finishReason: 'interrupted',
@@ -2772,7 +2965,7 @@ export class ChatSession implements ChatSessionLike {
             });
           } catch { /* persistence faults must not crash REPL */ }
         }
-        if (replTaskStore && replTaskId !== null) {
+        if (!jobEngine && replTaskStore && replTaskId !== null) {
           try { replTaskStore.setStatus(replTaskId, 'cancelled'); }
           catch { /* persistence faults must not crash REPL */ }
         }
@@ -2788,7 +2981,38 @@ export class ChatSession implements ChatSessionLike {
       // Visible in `aiden runs list` as a failed top-level row so
       // operators can correlate a chat error with whatever children
       // it had already kicked off this turn.
-      if (replRunStore && replRunId !== null) {
+      stopJobLeaseHeartbeat();
+      if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && jobFenceToken) {
+        const attemptFailed = jobEngine.transitionAttempt({
+          attemptId: jobAttemptId,
+          expectedStateVersion: attemptStateVersion,
+          generation: jobGeneration,
+          fenceToken: jobFenceToken,
+          to: 'failed',
+          eventIdempotencyKey: `attempt-failed:${jobAttemptId}:${jobGeneration}`,
+          producer: 'repl',
+          finishReason: 'error',
+        });
+        if (attemptFailed.applied && attemptFailed.stateVersion !== undefined) {
+          attemptStateVersion = attemptFailed.stateVersion;
+        }
+        const jobFailed = jobEngine.transitionJob({
+          jobId: replTaskId,
+          attemptId: jobAttemptId,
+          generation: jobGeneration,
+          fenceToken: jobFenceToken,
+          expectedStateVersion: jobStateVersion,
+          to: 'failed',
+          eventIdempotencyKey: `job-failed:${replTaskId}:${jobGeneration}`,
+          producer: 'repl',
+          finishReason: 'error',
+          terminalOutcome: 'failed',
+        });
+        if (jobFailed.applied && jobFailed.stateVersion !== undefined) {
+          jobStateVersion = jobFailed.stateVersion;
+        }
+      }
+      if (!jobEngine && replRunStore && replRunId !== null) {
         try {
           replRunStore.setStatus(replRunId, 'failed', {
             finishReason: 'error',
@@ -2804,7 +3028,7 @@ export class ChatSession implements ChatSessionLike {
       // Thrown errors out of runConversation → task status='failed'.
       // /tasks listing surfaces this so the user can re-issue the
       // prompt with a fresh task or /adjust the goal.
-      if (replTaskStore && replTaskId !== null) {
+      if (!jobEngine && replTaskStore && replTaskId !== null) {
         try {
           replTaskStore.setStatus(replTaskId, 'failed');
         } catch (e3) {
@@ -2873,6 +3097,7 @@ export class ChatSession implements ChatSessionLike {
         }
       } catch { /* defensive */ }
     } finally {
+      stopJobLeaseHeartbeat();
       if (p2aHeartbeat) clearInterval(p2aHeartbeat);
       emitP2aDiag('turn.finally.start', {
         aborted: turnAbort.signal.aborted,

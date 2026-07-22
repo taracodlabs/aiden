@@ -63,6 +63,7 @@ import {
   readSkillResource,
 } from './skillBridge';
 import { AIDEN_MCP_BUILD, collectMcpDiagnostics } from './diagnostics';
+import type { JobEngine } from '../../daemon/jobEngine';
 
 export { AIDEN_MCP_BUILD } from './diagnostics';
 
@@ -82,6 +83,7 @@ export interface StdioServerOptions {
   logger?: Logger;
   /** Override env reads — tests inject fake env without mutating process.env. */
   env?: ToolBridgeEnv;
+  jobAuthority?: { engine: JobEngine; instanceId: string };
 }
 
 export interface StdioServerHandle {
@@ -112,6 +114,7 @@ export async function startStdioMcpServer(
     opts.toolContext,
     env,
     logger,
+    opts.jobAuthority,
   );
 
   // ── tools/list ──────────────────────────────────────────────
