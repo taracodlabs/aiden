@@ -36,6 +36,12 @@ export type ProbeCategory =
   | 'network'
   | 'unknown';
 
+import {
+  beginPhysicalProviderAttempt,
+  byteLength,
+  createLogicalProviderCallId,
+} from '../../../providers/v4/providerAttemptAccounting';
+
 export interface ProbeStepResult {
   step: 'auth' | 'model' | 'tools';
   ok: boolean;
@@ -212,6 +218,28 @@ async function runRequest(req: ProbeRequest, o: ProbeOptions): Promise<{ status:
   const fetchImpl = o.fetchImpl ?? fetch;
   const timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const lifecycle = new RequestLifecycle(o.providerId, requestDeadlines(timeoutMs));
+  const logicalCallId = createLogicalProviderCallId();
+  const attempt = beginPhysicalProviderAttempt({
+    messages: [],
+    tools: [],
+    maxTokens: 1,
+    usageContext: {
+      logicalCallId,
+      entryPoint: 'setup',
+      purpose: 'readiness',
+      providerConfigured: o.providerId,
+      modelConfigured: o.modelId,
+      credentialLabelRedacted: 'setup-managed',
+    },
+  }, {
+    providerActual: o.providerId,
+    modelActual: o.modelId,
+    apiMode: 'chat_completions',
+    transport: new URL(req.url).protocol.replace(':', ''),
+    attemptIndex: 0,
+    logicalCallId,
+    requestBytes: byteLength(req.body ?? ''),
+  });
   try {
     const res = await lifecycle.race(fetchImpl(req.url, {
       method: req.method,
@@ -222,9 +250,16 @@ async function runRequest(req: ProbeRequest, o: ProbeOptions): Promise<{ status:
     lifecycle.markHeaders();
     const retryAfter = res.headers.get('retry-after');
     const bodyText = await lifecycle.readText(res);
+    if (res.ok) {
+      attempt.success({ content: '', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 0, outputTokens: 0 } }, byteLength(bodyText));
+    } else {
+      attempt.failure(new Error(`HTTP ${res.status}`), { sent: true, status: 'provider_error', responseBytes: byteLength(bodyText) });
+    }
     return { status: res.status, bodyText, retryAfter };
   } catch (error) {
-    throw lifecycle.classify(error);
+    const classified = lifecycle.classify(error);
+    attempt.failure(classified, { sent: true });
+    throw classified;
   } finally {
     lifecycle.cleanup();
   }

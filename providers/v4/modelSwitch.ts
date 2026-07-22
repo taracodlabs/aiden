@@ -137,7 +137,14 @@ export class ModelSwitcher {
         providerId: parsed.providerId,
         modelId: parsed.modelId,
         allowUnverified: true,
-      })!.model;
+      })?.model
+      ?? this.resolver.listModels(parsed.providerId).find((model) => model.id === parsed.modelId);
+    if (!newModel) {
+      throw new ProviderError(
+        `Model '${parsed.modelId}' resolved but its metadata is unavailable.`,
+        parsed.providerId,
+      );
+    }
 
     const changed =
       req.currentProviderId !== parsed.providerId ||

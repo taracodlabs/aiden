@@ -20,6 +20,7 @@ import { save } from './save';
 import { title } from './title';
 import { compress } from './compress';
 import { usage } from './usage';
+import { estimate } from './estimate';
 import { undo } from './undo';
 import { retry } from './retry';
 import { yolo } from './yolo';
@@ -91,6 +92,7 @@ export {
   title,
   compress,
   usage,
+  estimate,
   undo,
   retry,
   yolo,
@@ -163,6 +165,7 @@ export const allCommands: SlashCommand[] = [
   title,
   compress,
   usage,
+  estimate,
   undo,
   retry,
   yolo,

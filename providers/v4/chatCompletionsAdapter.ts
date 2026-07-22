@@ -63,6 +63,12 @@ import {
   requestDeadlines,
   type RequestDeadlines,
 } from './requestLifecycle';
+import {
+  beginPhysicalProviderAttempt,
+  byteLength,
+  createLogicalProviderCallId,
+  type PhysicalAttemptLifecycle,
+} from './providerAttemptAccounting';
 
 // ── Public options ──────────────────────────────────────────────────────
 
@@ -105,6 +111,7 @@ const DEFAULT_MAX_RETRIES = 2;
 interface ActiveDispatch {
   response: Response;
   lifecycle: RequestLifecycle;
+  attempt: PhysicalAttemptLifecycle;
 }
 const DEFAULT_MAX_TOKENS  = 4096;
 const BACKOFF_BASE_MS     = 1000;
@@ -187,6 +194,8 @@ interface WireResponse {
     /** Anthropic-style cache fields some OAI-compat providers include. */
     cache_read_input_tokens?:     number;
     cache_creation_input_tokens?: number;
+    prompt_tokens_details?:       { cached_tokens?: number };
+    completion_tokens_details?:   { reasoning_tokens?: number };
   };
 }
 
@@ -240,12 +249,14 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input, /* streaming */ false);
-    const active = await this.dispatch(body, /* streaming */ false, input.signal);
+    const active = await this.dispatch(body, /* streaming */ false, input);
     let text: string;
     try {
       text = await active.lifecycle.readText(active.response);
     } catch (error) {
-      throw active.lifecycle.classify(error);
+      const classified = active.lifecycle.classify(error);
+      active.attempt.failure(classified, { sent: true });
+      throw classified;
     } finally {
       active.lifecycle.cleanup();
     }
@@ -253,28 +264,40 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     try {
       parsed = JSON.parse(text) as WireResponse;
     } catch {
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} returned non-JSON body`,
         this.providerName,
         active.response.status,
         text,
         false,
       );
+      active.attempt.failure(error, {
+        sent: true,
+        responseBytes: byteLength(text),
+        status: 'validation_error',
+      });
+      throw error;
     }
     // Phase 28.2 — pass the request's tool-name set so the bare-JSON
     // inline-tool-call detector can validate names against the schemas
     // the provider was actually offered.
     const knownToolNames = collectKnownToolNames(input);
-    return decodeChoice(parsed, knownToolNames);
+    const output = decodeChoice(parsed, knownToolNames);
+    active.attempt.success(output, byteLength(text));
+    return output;
   }
 
   // ── Streaming ────────────────────────────────────────────────────────
 
   async *callStream(input: ProviderCallInput): AsyncGenerator<StreamEvent, void, void> {
     const body  = this.buildBody(input, /* streaming */ true);
-    const active = await this.dispatch(body, /* streaming */ true, input.signal);
+    const active = await this.dispatch(body, /* streaming */ true, input);
     const reply = active.response;
     if (!reply.body) {
+      active.attempt.failure(
+        new Error('Provider returned an empty stream.'),
+        { sent: true, status: 'validation_error' },
+      );
       yield {
         type: 'done',
         output: {
@@ -288,10 +311,29 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       return;
     }
     const knownToolNames = collectKnownToolNames(input);
+    let finalOutput: ProviderCallOutput | null = null;
     try {
-      yield* decodeStream(reply.body, this.providerName, knownToolNames, active.lifecycle);
+      for await (const event of decodeStream(reply.body, this.providerName, knownToolNames, active.lifecycle)) {
+        if (event.type === 'done') finalOutput = event.output;
+        yield event;
+      }
+      if (finalOutput) {
+        active.attempt.success(finalOutput);
+      } else {
+        active.attempt.failure(
+          new Error('Provider stream completed without a terminal event.'),
+          { sent: true, status: 'validation_error' },
+        );
+      }
     } catch (error) {
-      throw active.lifecycle.classify(error);
+      const classified = active.lifecycle.classify(error);
+      active.attempt.failure(classified, {
+        sent: true,
+        ...(classified instanceof Error && classified.name === 'AbortError'
+          ? { status: 'interrupted' as const }
+          : {}),
+      });
+      throw classified;
     } finally {
       active.lifecycle.cleanup();
     }
@@ -343,15 +385,43 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
   private async dispatch(
     body: WireRequestBody,
     streaming: boolean,
-    externalSignal?: AbortSignal,
+    input: ProviderCallInput,
   ): Promise<ActiveDispatch> {
     const headers    = this.buildHeaders(streaming);
-    const serialised = JSON.stringify(body);
     const totalTries = this.maxRetries + 1;
+    const externalSignal = input.signal;
+    const logicalCallId = input.usageContext?.logicalCallId ?? createLogicalProviderCallId();
+    let serialised: string;
+    try {
+      serialised = JSON.stringify(body);
+    } catch (error) {
+      const accounting = beginPhysicalProviderAttempt(input, {
+        providerActual: this.providerName,
+        modelActual: this.model,
+        apiMode: this.apiMode,
+        transport: this.endpoint.startsWith('https:') ? 'https' : 'http',
+        attemptIndex: 0,
+        fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+        logicalCallId,
+        requestBytes: null,
+      });
+      accounting.failure(error, { sent: false });
+      throw error;
+    }
 
     let lastErr: unknown = null;
 
     for (let attempt = 0; attempt < totalTries; attempt++) {
+      const accounting = beginPhysicalProviderAttempt(input, {
+        providerActual: this.providerName,
+        modelActual: this.model,
+        apiMode: this.apiMode,
+        transport: this.endpoint.startsWith('https:') ? 'https' : 'http',
+        attemptIndex: attempt,
+        fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+        logicalCallId,
+        requestBytes: byteLength(serialised),
+      });
       const lifecycle = new RequestLifecycle(this.providerName, this.deadlines, externalSignal);
       let response: Response;
       try {
@@ -366,6 +436,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         const classified = lifecycle.classify(err);
         lifecycle.cleanup();
         if (classified instanceof Error && classified.name === 'AbortError') {
+          accounting.failure(classified, { sent: true, status: 'interrupted' });
           throw classified;
         }
         if (classified instanceof Error && classified.name === 'ProviderPhaseTimeoutError') {
@@ -379,6 +450,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
             true,
           );
         }
+        accounting.failure(lastErr, { sent: true });
         if (attempt < totalTries - 1) {
           await sleep(backoffMs(attempt), externalSignal);
           continue;
@@ -386,7 +458,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         throw lastErr;
       }
 
-      if (response.ok) return { response, lifecycle };
+      if (response.ok) return { response, lifecycle, attempt: accounting };
 
       const status = response.status;
       const retryAfter = response.headers.get('retry-after');
@@ -396,6 +468,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       } catch (error) {
         const classified = lifecycle.classify(error);
         lifecycle.cleanup();
+        accounting.failure(classified, { sent: true });
         throw classified;
       }
 
@@ -408,22 +481,26 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         const recovered = tryRecoverLegacyToolCall(responseText);
         if (recovered) {
           lifecycle.markHeaders();
-          return { response: synthesiseRecoveredResponse(recovered), lifecycle };
+          return { response: synthesiseRecoveredResponse(recovered), lifecycle, attempt: accounting };
         }
         lifecycle.cleanup();
-        throw new ProviderError(
+        const error = new ProviderError(
           `Provider ${this.providerName} returned 400 Bad Request`,
           this.providerName,
           400,
           tryParseJson(responseText),
           false,
         );
+        accounting.failure(error, { sent: true, responseBytes: byteLength(responseText) });
+        throw error;
       }
 
       const raw = tryParseJson(responseText);
       lifecycle.cleanup();
 
       if (status === 429) {
+        const error = new ProviderRateLimitError(this.providerName, raw);
+        accounting.failure(error, { sent: true, responseBytes: encodedByteLength(raw) });
         if (attempt < totalTries - 1) {
           await sleep(
             Math.max(backoffMs(attempt), retryAfterMs(retryAfter)),
@@ -431,30 +508,34 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
           );
           continue;
         }
-        throw new ProviderRateLimitError(this.providerName, raw);
+        throw error;
       }
 
       if (status >= 500 && status < 600) {
-        if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt), externalSignal);
-          continue;
-        }
-        throw new ProviderError(
+        const error = new ProviderError(
           `Provider ${this.providerName} server error ${status}`,
           this.providerName,
           status,
           raw,
           true,
         );
+        accounting.failure(error, { sent: true, responseBytes: encodedByteLength(raw) });
+        if (attempt < totalTries - 1) {
+          await sleep(backoffMs(attempt), externalSignal);
+          continue;
+        }
+        throw error;
       }
 
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} request failed (${status})`,
         this.providerName,
         status,
         raw,
         false,
       );
+      accounting.failure(error, { sent: true, responseBytes: encodedByteLength(raw) });
+      throw error;
     }
 
     throw lastErr instanceof Error
@@ -600,7 +681,19 @@ function decodeUsage(u: WireResponse['usage']): ProviderCallOutput['usage'] {
   if (typeof u?.cache_creation_input_tokens === 'number') {
     out.cacheWriteTokens = u.cache_creation_input_tokens;
   }
+  if (typeof u?.prompt_tokens_details?.cached_tokens === 'number') {
+    out.cacheReadTokens = u.prompt_tokens_details.cached_tokens;
+  }
+  if (typeof u?.completion_tokens_details?.reasoning_tokens === 'number') {
+    out.reasoningTokens = u.completion_tokens_details.reasoning_tokens;
+  }
   return out;
+}
+
+function encodedByteLength(value: unknown): number {
+  if (typeof value === 'string') return byteLength(value);
+  try { return byteLength(JSON.stringify(value) ?? ''); }
+  catch { return 0; }
 }
 
 function mapFinishReason(

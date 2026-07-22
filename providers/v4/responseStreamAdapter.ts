@@ -50,6 +50,12 @@ import {
   ProviderRateLimitError,
   ProviderTimeoutError,
 } from './errors';
+import {
+  beginPhysicalProviderAttempt,
+  byteLength,
+  createLogicalProviderCallId,
+  type PhysicalAttemptLifecycle,
+} from './providerAttemptAccounting';
 
 // ── Public surface ──────────────────────────────────────────────────────
 
@@ -175,6 +181,7 @@ interface WireResponseShape {
     output_tokens?:          number;
     cached_tokens?:          number;
     input_tokens_details?:   { cached_tokens?: number };
+    output_tokens_details?:  { reasoning_tokens?: number };
   };
 }
 
@@ -193,6 +200,7 @@ interface WireRequestBody {
 
 interface ActiveDispatch {
   response: Response;
+  attempt: PhysicalAttemptLifecycle;
   cleanup(): void;
   classifyError(error: unknown): unknown;
 }
@@ -239,7 +247,7 @@ export class ResponseStreamAdapter implements ProviderAdapter {
       aborted: input.signal?.aborted === true,
     });
     const body   = this.buildBody(input);
-    const active = await this.dispatch(body, input.signal, diagCallId);
+    const active = await this.dispatch(body, input, diagCallId);
     const reply  = active.response;
 
     // The subscription backend always streams; aggregate SSE frames into the
@@ -256,7 +264,9 @@ export class ResponseStreamAdapter implements ProviderAdapter {
         ? await aggregateSseEvents(reply)
         : await readJsonBody(reply, this.providerName);
     } catch (error) {
-      throw active.classifyError(error);
+      const classified = active.classifyError(error);
+      active.attempt.failure(classified, { sent: true });
+      throw classified;
     } finally {
       active.cleanup();
     }
@@ -267,6 +277,7 @@ export class ResponseStreamAdapter implements ProviderAdapter {
     });
 
     const decoded = decodeWireResponse(wire, this.providerName);
+    active.attempt.success(decoded, responseShapeBytes(wire));
     p2aDiag('response.call.complete', {
       diagCallId, finishReason: decoded.finishReason,
       toolCalls: decoded.toolCalls.map((call) => ({ id: call.id, name: call.name })),
@@ -344,16 +355,28 @@ export class ResponseStreamAdapter implements ProviderAdapter {
 
   private async dispatch(
     body: WireRequestBody,
-    externalSignal?: AbortSignal,
+    input: ProviderCallInput,
     diagCallId?: number,
   ): Promise<ActiveDispatch> {
     const headers    = this.buildHeaders();
     const serialised = JSON.stringify(body);
     const totalTries = this.maxRetries + 1;
+    const externalSignal = input.signal;
+    const logicalCallId = input.usageContext?.logicalCallId ?? createLogicalProviderCallId();
 
     let lastErr: unknown = null;
 
     for (let attempt = 0; attempt < totalTries; attempt++) {
+      const accounting = beginPhysicalProviderAttempt(input, {
+        providerActual: this.providerName,
+        modelActual: this.model,
+        apiMode: this.apiMode,
+        transport: this.endpoint.startsWith('https:') ? 'https' : 'http',
+        attemptIndex: attempt,
+        fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+        logicalCallId,
+        requestBytes: byteLength(serialised),
+      });
       const controller = new AbortController();
       let abortCause: 'timeout' | 'external' | null = null;
       let cleaned = false;
@@ -417,8 +440,10 @@ export class ResponseStreamAdapter implements ProviderAdapter {
         const classified = classifyError(err);
         cleanup();
         if ((classified as { name?: unknown })?.name === 'AbortError') {
+          accounting.failure(classified, { sent: true, status: 'interrupted' });
           throw classified;
         }
+        accounting.failure(lastErr, { sent: true });
         if (classified instanceof ProviderTimeoutError) {
           lastErr = classified;
         } else {
@@ -436,7 +461,7 @@ export class ResponseStreamAdapter implements ProviderAdapter {
         }
         throw lastErr;
       }
-      if (response.ok) return { response, cleanup, classifyError };
+      if (response.ok) return { response, attempt: accounting, cleanup, classifyError };
 
       const status = response.status;
       let raw: unknown;
@@ -449,35 +474,41 @@ export class ResponseStreamAdapter implements ProviderAdapter {
       }
 
       if (status === 429) {
+        const error = new ProviderRateLimitError(this.providerName, raw);
+        accounting.failure(error, { sent: true, responseBytes: responseShapeBytes(raw) });
         if (attempt < totalTries - 1) {
           await sleep(backoffMs(attempt));
           continue;
         }
-        throw new ProviderRateLimitError(this.providerName, raw);
+        throw error;
       }
 
       if (status >= 500 && status < 600) {
-        if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt));
-          continue;
-        }
-        throw new ProviderError(
+        const error = new ProviderError(
           `Provider ${this.providerName} server error ${status}`,
           this.providerName,
           status,
           raw,
           true,
         );
+        accounting.failure(error, { sent: true, responseBytes: responseShapeBytes(raw) });
+        if (attempt < totalTries - 1) {
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw error;
       }
 
       // 4xx (auth, content policy, malformed) — fail fast.
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} request failed (${status})`,
         this.providerName,
         status,
         raw,
         false,
       );
+      accounting.failure(error, { sent: true, responseBytes: responseShapeBytes(raw) });
+      throw error;
     }
 
     throw lastErr instanceof Error
@@ -667,7 +698,16 @@ function decodeUsage(u: WireResponseShape['usage']): ProviderCallOutput['usage']
   if (typeof cached === 'number') {
     out.cacheReadTokens = cached;
   }
+  if (typeof u?.output_tokens_details?.reasoning_tokens === 'number') {
+    out.reasoningTokens = u.output_tokens_details.reasoning_tokens;
+  }
   return out;
+}
+
+function responseShapeBytes(value: unknown): number {
+  if (typeof value === 'string') return byteLength(value);
+  try { return byteLength(JSON.stringify(value) ?? ''); }
+  catch { return 0; }
 }
 
 function parseToolArgs(s: string): Record<string, unknown> {

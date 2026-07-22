@@ -303,8 +303,35 @@ describe('classifyProviderError', () => {
     expect(classifyProviderError(new ProviderTimeoutError('groq', 5000))).toBe('transport');
   });
 
-  it('classifies statusCode 413 as context_overflow', () => {
-    const err = new ProviderError('payload', 'groq', 413);
+  it('classifies an unqualified statusCode 413 as a request-size limit', () => {
+    const err = new ProviderError('payload too large', 'groq', 413);
+    expect(classifyProviderError(err)).toBe('request_size_limit');
+  });
+
+  it('classifies Groq 413 TPM detail as rate_limit and preserves throughput guidance', () => {
+    const err = new ProviderError(
+      'Provider groq request failed',
+      'groq',
+      413,
+      { error: { message: 'TPM limit: 12,000 Requested: 13,705' } },
+    );
+
+    expect(classifyProviderError(err)).toBe('rate_limit');
+    const suggestion = suggestForErrorClass('rate_limit', 'groq', err);
+    expect(suggestion).toContain('13,705');
+    expect(suggestion).toContain('12,000');
+    expect(suggestion).toContain('/mode economy');
+    expect(suggestion).toMatch(/throughput/i);
+    expect(suggestion).not.toMatch(/context window|context too large/i);
+  });
+
+  it('keeps explicit model context-window failures separate from HTTP request size', () => {
+    const err = new ProviderError(
+      'Provider request failed',
+      'groq',
+      413,
+      { error: { message: 'maximum context length is 8192 tokens; requested 9000' } },
+    );
     expect(classifyProviderError(err)).toBe('context_overflow');
   });
 
@@ -318,9 +345,12 @@ describe('classifyProviderError', () => {
     expect(classifyProviderError(new ProviderError('x', 'p', 403))).toBe('auth');
   });
 
-  it('falls back to message scan for context_overflow ("too large" / "413" / "context_length_exceeded")', () => {
-    expect(classifyProviderError(new Error('Request payload too large'))).toBe('context_overflow');
-    expect(classifyProviderError(new Error('HTTP 413 Payload Too Large'))).toBe('context_overflow');
+  it('falls back to message scan for request-size limits', () => {
+    expect(classifyProviderError(new Error('Request payload too large'))).toBe('request_size_limit');
+    expect(classifyProviderError(new Error('HTTP 413 Payload Too Large'))).toBe('request_size_limit');
+  });
+
+  it('falls back to message scan for model context-window overflow', () => {
     expect(classifyProviderError(new Error('context_length_exceeded: 50000 > 32768')))
       .toBe('context_overflow');
     expect(classifyProviderError(new Error('exceeds maximum context length')))
@@ -353,11 +383,9 @@ describe('classifyProviderError', () => {
     expect(classifyProviderError(undefined)).toBe('other');
   });
 
-  it('prefers statusCode over message scan when both signals disagree', () => {
-    // statusCode says 413; message contains "rate limit". Structured
-    // signal wins.
+  it('uses semantic TPM detail to refine an overloaded HTTP 413 status', () => {
     const err = new ProviderError('rate limit hit', 'groq', 413);
-    expect(classifyProviderError(err)).toBe('context_overflow');
+    expect(classifyProviderError(err)).toBe('rate_limit');
   });
 });
 
@@ -368,10 +396,9 @@ describe('suggestForErrorClass', () => {
     const s = suggestForErrorClass('context_overflow', 'groq');
     expect(s).toBeTruthy();
     expect(s!).toContain('groq');
-    expect(s!).toContain('413');
+    expect(s!).toMatch(/context window/i);
     expect(s!).toContain('/model');
-    // Names larger-context alternatives.
-    expect(s!).toContain('chatgpt-plus');
+    expect(s!).toMatch(/larger context/i);
   });
 
   it('rate_limit suggestion names the provider and gives a wait-or-switch option', () => {
@@ -379,6 +406,12 @@ describe('suggestForErrorClass', () => {
     expect(s).toContain('groq');
     expect(s).toMatch(/rate.?limit/i);
     expect(s).toContain('/model');
+  });
+
+  it('request-size suggestion does not claim model context overflow', () => {
+    const s = suggestForErrorClass('request_size_limit', 'groq');
+    expect(s).toMatch(/request.*size/i);
+    expect(s).not.toMatch(/context window/i);
   });
 
   it('auth suggestion points at /auth status + /auth login', () => {

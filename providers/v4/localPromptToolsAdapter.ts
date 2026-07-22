@@ -45,6 +45,11 @@ import {
 } from './types';
 import { ProviderError, ProviderPhaseTimeoutError } from './errors';
 import { RequestLifecycle, requestDeadlines, type RequestDeadlines } from './requestLifecycle';
+import {
+  beginPhysicalProviderAttempt,
+  byteLength,
+  createLogicalProviderCallId,
+} from './providerAttemptAccounting';
 
 export interface LocalPromptToolsAdapterOptions {
   /** Default 'http://localhost:11434'. No trailing slash. */
@@ -138,8 +143,20 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
 
     const totalAttempts = this.maxRetries + 1;
     let lastError: ProviderError | null = null;
+    const serialised = JSON.stringify(body);
+    const logicalCallId = input.usageContext?.logicalCallId ?? createLogicalProviderCallId();
 
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      const accounting = beginPhysicalProviderAttempt(input, {
+        providerActual: this.providerName,
+        modelActual: this.model,
+        apiMode: this.apiMode,
+        transport: this.baseUrl.startsWith('https:') ? 'https' : 'http',
+        attemptIndex: attempt - 1,
+        fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+        logicalCallId,
+        requestBytes: byteLength(serialised),
+      });
       try {
         const active = await this.fetchWithLifecycle(url, headers, body, input.signal);
         const response = active.response;
@@ -152,8 +169,19 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
           active.lifecycle.cleanup();
         }
         if (response.ok) {
-          const json = JSON.parse(rawText) as OllamaChatResponse;
-          return this.parseResponse(json);
+          try {
+            const json = JSON.parse(rawText) as OllamaChatResponse;
+            const output = this.parseResponse(json);
+            accounting.success(output, byteLength(rawText));
+            return output;
+          } catch (error) {
+            accounting.failure(error, {
+              sent: true,
+              responseBytes: byteLength(rawText),
+              status: 'validation_error',
+            });
+            throw error;
+          }
         }
         const status = response.status;
         const retryable = status >= 500 || status === 429;
@@ -169,13 +197,18 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
           rawText,
           retryable,
         );
+        accounting.failure(err, { sent: true, responseBytes: byteLength(rawText) });
         if (!retryable || attempt >= totalAttempts) throw err;
         lastError = err;
         await this.sleep(this.backoffMs(attempt));
       } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') throw err;
+        if (err instanceof Error && err.name === 'AbortError') {
+          accounting.failure(err, { sent: true, status: 'interrupted' });
+          throw err;
+        }
         if (err instanceof ProviderError && !err.retryable) throw err;
         if (err instanceof ProviderPhaseTimeoutError) {
+          accounting.failure(err, { sent: true });
           lastError = err;
           if (attempt < totalAttempts) {
             await this.sleep(this.backoffMs(attempt));
@@ -184,6 +217,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
           throw err;
         }
         if (err instanceof ProviderError) {
+          accounting.failure(err, { sent: true });
           lastError = err;
           if (attempt < totalAttempts) {
             await this.sleep(this.backoffMs(attempt));
@@ -199,6 +233,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
           err,
           true,
         );
+        accounting.failure(wrapped, { sent: true });
         if (attempt < totalAttempts) {
           lastError = wrapped;
           await this.sleep(this.backoffMs(attempt));
@@ -235,24 +270,39 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
     const body = { ...baseBody, stream: true };
     const url = `${this.baseUrl}/api/chat`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const serialised = JSON.stringify(body);
+    const accounting = beginPhysicalProviderAttempt(input, {
+      providerActual: this.providerName,
+      modelActual: this.model,
+      apiMode: this.apiMode,
+      transport: this.baseUrl.startsWith('https:') ? 'https' : 'http',
+      attemptIndex: 0,
+      fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+      logicalCallId: input.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+      requestBytes: byteLength(serialised),
+    });
 
     let active: ActiveDispatch;
     try {
       active = await this.fetchWithLifecycle(url, headers, body, input.signal);
     } catch (err) {
       if (err instanceof Error && err.name === 'AbortError') {
+        accounting.failure(err, { sent: true, status: 'interrupted' });
         throw err;
       }
       if (err instanceof Error && err.name === 'ProviderPhaseTimeoutError') {
+        accounting.failure(err, { sent: true });
         throw err;
       }
-      throw new ProviderError(
+      const error = new ProviderError(
         `Ollama not reachable at ${this.baseUrl}: ${err instanceof Error ? err.message : String(err)}`,
         this.providerName,
         undefined,
         err,
         true,
       );
+      accounting.failure(error, { sent: true });
+      throw error;
     }
     const response = active.response;
 
@@ -262,26 +312,32 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
       try {
         rawText = await active.lifecycle.readText(response);
       } catch (error) {
-        throw active.lifecycle.classify(error);
+        const classified = active.lifecycle.classify(error);
+        accounting.failure(classified, { sent: true });
+        throw classified;
       } finally {
         active.lifecycle.cleanup();
       }
       // Phase v4.1.1-oauth-fix Phase 5: composeMessage handles body
       // rendering centrally; inlining it here would duplicate.
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} returned ${status}`,
         this.providerName,
         status,
         rawText,
         status >= 500,
       );
+      accounting.failure(error, { sent: true, responseBytes: byteLength(rawText) });
+      throw error;
     }
     if (!response.body) {
       active.lifecycle.cleanup();
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} returned an empty stream body`,
         this.providerName,
       );
+      accounting.failure(error, { sent: true, status: 'validation_error' });
+      throw error;
     }
     // Response is good; the stream consumer will run for a while. The
     // controller stays armed (with `externalSignal` still listening) so
@@ -347,15 +403,21 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
       const classified = active.lifecycle.classify(err);
       if (classified instanceof Error &&
           (classified.name === 'AbortError' || classified.name === 'ProviderPhaseTimeoutError')) {
+        accounting.failure(classified, {
+          sent: true,
+          ...(classified.name === 'AbortError' ? { status: 'interrupted' as const } : {}),
+        });
         throw classified;
       }
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} stream interrupted: ${err instanceof Error ? err.message : String(err)}`,
         this.providerName,
         undefined,
         err,
         true,
       );
+      accounting.failure(error, { sent: true });
+      throw error;
     } finally {
       active.lifecycle.cleanup();
       try {
@@ -398,6 +460,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
         outputTokens: evalCount,
       },
     };
+    accounting.success(output);
     yield { type: 'done', output };
   }
 

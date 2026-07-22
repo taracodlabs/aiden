@@ -100,6 +100,13 @@ export interface AidenConfig {
   memory: {
     provider: string;
   };
+  usage?: {
+    mode?: 'balanced' | 'economy';
+  };
+  budget?: {
+    session_token_cap?: number;
+    session_cost_cap_usd?: number;
+  };
   /**
    * Forward-compatibility bucket: any unknown top-level keys land here so
    * round-trip save() doesn't drop user-managed fields.
@@ -147,6 +154,9 @@ const KNOWN_KEYS = new Set([
   'display',
   'providers',
   'memory',
+  // Token-efficiency controls are persisted by /mode and /budget.
+  'usage',
+  'budget',
   // Phase 10 introduced the terminal toolset — its config block lands
   // under the top-level `terminal` key (e.g. terminal.backend = 'auto').
   'terminal',

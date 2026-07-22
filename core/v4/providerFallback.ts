@@ -480,15 +480,29 @@ export class FallbackAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     let pendingFromId: string | null = null;
+    let fallbackIndex = -1;
 
     const result = await runFallbackChain(
       this.slots,
       async (adapter, slot) => {
+        fallbackIndex += 1;
         if (pendingFromId !== null && pendingFromId !== slot.id) {
           this.onFallback?.(pendingFromId, slot.id);
         }
         pendingFromId = slot.id;
-        return adapter.call(input);
+        return adapter.call({
+          ...input,
+          usageContext: {
+            ...input.usageContext,
+            providerConfigured: input.usageContext?.providerConfigured
+              ?? this.slots[0]?.providerId
+              ?? slot.providerId,
+            modelConfigured: input.usageContext?.modelConfigured
+              ?? this.slots[0]?.modelId
+              ?? slot.modelId,
+            fallbackIndex,
+          },
+        });
       },
       {
         onRateLimit: (slotId, err) => this.recordRateLimit(slotId, err),
@@ -531,6 +545,19 @@ export class FallbackAdapter implements ProviderAdapter {
 
       bumpCount(cooldown, slot.id);
       tried.push(slot.id);
+      const slotInput: ProviderCallInput = {
+        ...input,
+        usageContext: {
+          ...input.usageContext,
+          providerConfigured: input.usageContext?.providerConfigured
+            ?? this.slots[0]?.providerId
+            ?? slot.providerId,
+          modelConfigured: input.usageContext?.modelConfigured
+            ?? this.slots[0]?.modelId
+            ?? slot.modelId,
+          fallbackIndex: tried.length - 1,
+        },
+      };
 
       if (prevSlotId !== null && prevSlotId !== slot.id) {
         this.onFallback?.(prevSlotId, slot.id);
@@ -540,7 +567,7 @@ export class FallbackAdapter implements ProviderAdapter {
       let yielded = false;
       try {
         if (typeof adapter.callStream === 'function') {
-          for await (const evt of adapter.callStream(input)) {
+          for await (const evt of adapter.callStream(slotInput)) {
             yielded = true;
             yield evt;
           }
@@ -548,7 +575,7 @@ export class FallbackAdapter implements ProviderAdapter {
           // Adapter doesn't speak SSE — fall back to a single-shot call
           // and synthesise a terminal `done` event so consumers see the
           // same event shape regardless of which slot won.
-          const out = await adapter.call(input);
+          const out = await adapter.call(slotInput);
           yielded = true;
           yield { type: 'done', output: out };
         }

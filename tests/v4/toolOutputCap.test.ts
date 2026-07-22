@@ -132,6 +132,20 @@ describe('file_read pagination + repeated-read stub', () => {
     expect(r.content).toBe('tiny');
     expect(r.truncated).toBe(false);
   });
+
+  it('centrally clamps a caller-selected page limit', async () => {
+    const r = await fileReadTool.execute!({ path: fp, limit: 999_999 }, ctx) as any;
+    expect(r.content.length).toBe(5000);
+    expect(r.full_output_ref).toMatchObject({ offset: 5000, limit: 5000 });
+  });
+
+  it('does not suppress an identical read in a different session', async () => {
+    const first = await fileReadTool.execute!({ path: fp }, { ...ctx, sessionId: 'session-a' } as never) as any;
+    const second = await fileReadTool.execute!({ path: fp }, { ...ctx, sessionId: 'session-b' } as never) as any;
+    expect(first.content).toBeDefined();
+    expect(second.content).toBeDefined();
+    expect(second.stub).toBeUndefined();
+  });
 });
 
 describe('DEFAULT_OUTPUT_CAP sanity', () => {

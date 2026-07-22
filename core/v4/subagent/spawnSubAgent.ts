@@ -41,6 +41,7 @@ import { currentContext, runWithContext, childSpan } from '../identity';
 import type { RunStore } from '../daemon/runStore';
 import type { Logger } from '../logger/logger';
 import { noopLogger } from '../logger/factory';
+import type { ProviderAttemptBudget } from '../../../providers/v4/types';
 
 // ── Public types (per design doc §3) ─────────────────────────────────────
 
@@ -71,6 +72,8 @@ export interface SubAgentSpec {
    * the rotation layer needs explicit provider selection per child.
    */
   provider?: string;
+  /** Runtime-only physical-attempt limits; never exposed in provider schemas. */
+  providerAttemptBudgets?: ProviderAttemptBudget[];
 }
 
 /** Result envelope per design doc §3, §8. */
@@ -388,6 +391,11 @@ export async function spawnSubAgent(
       agentBundle.history,
       {
         signal:    childCtrl.signal,
+        sessionId: childSessionId,
+        runId: childRunId,
+        entryPoint: 'subagent',
+        purpose: 'subagent',
+        providerAttemptBudgets: spec.providerAttemptBudgets,
         // v4.8.0 Phase 2.2 — uiOnly events from a subagent are
         // dropped. Subagents have no chat surface; the parent
         // assembles their summary. Stub stays a no-op forever.

@@ -13,6 +13,9 @@ import {
   title,
   compress,
   usage,
+  estimate,
+  budget,
+  mode,
   undo,
   retry,
   yolo,
@@ -96,9 +99,9 @@ describe('barrel exports', () => {
     // v4.12.1 Pillar 4 Slice 2b added /redirect (55 → 56).
     // v4.14 added /auto (one-command Partner opt-in) (56 → 57).
     // v4.14 added /mode (friendly trust-level viewer/switcher) (57 → 58).
-    expect(allCommands.length).toBe(58);
+    expect(allCommands.length).toBe(59);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(58);
+    expect(names.size).toBe(59);
   });
 
   it('every command exposes name, description, category', () => {
@@ -169,6 +172,29 @@ describe('/model', () => {
     await model.handler(ctx as any);
     expect(setProvider).toHaveBeenCalledWith('anthropic', 'claude-opus-4-7');
     expect(output()).toMatch(/Now using anthropic/);
+  });
+
+  it('preserves all colons in an explicit live Ollama model tag', async () => {
+    const setProvider = vi.fn(async () => {});
+    const fakeResolver = { listProviders: () => [], listModels: () => [] };
+    const session = {
+      history: [],
+      setHistory: () => {},
+      clearHistory: () => {},
+      getCurrentProvider: () => 'groq',
+      getCurrentModel: () => 'old-model',
+      setProvider,
+    };
+    const { ctx } = makeCtx({
+      resolver: fakeResolver,
+      session,
+      args: ['ollama:gemma4:e4b-32k'],
+      rawArgs: 'ollama:gemma4:e4b-32k',
+    });
+
+    await model.handler(ctx as any);
+
+    expect(setProvider).toHaveBeenCalledWith('ollama', 'gemma4:e4b-32k');
   });
 
   it('errors gracefully on invalid spec', async () => {
@@ -339,6 +365,36 @@ describe('/compress', () => {
     expect(setHistory).toHaveBeenCalledWith(compressed);
     expect(output()).toMatch(/Compressed/);
   });
+
+  it('reports an auxiliary failure instead of calling it a short conversation', async () => {
+    const compressor = {
+      forceCompress: vi.fn(async () => ({
+        compressedMessages: [],
+        removedMessageCount: 0,
+        summaryTokens: 0,
+        preservedRecentCount: 10,
+        refused: true,
+        error: true,
+        errorMessage: 'Auxiliary summarizer returned empty content — context unchanged.',
+      })),
+    };
+    const setHistory = vi.fn();
+    const session = {
+      history: Array(10).fill({ role: 'user', content: 'x' }),
+      setHistory,
+      clearHistory: () => {},
+      getCurrentProvider: () => 'custom_openai',
+      getCurrentModel: () => 'custom-default',
+      setProvider: async () => {},
+    };
+    const { ctx, output } = makeCtx({ compressor, session });
+
+    await compress.handler(ctx as any);
+
+    expect(output()).toMatch(/Compression failed safely/);
+    expect(output()).not.toMatch(/too short/i);
+    expect(setHistory).not.toHaveBeenCalled();
+  });
 });
 
 describe('/undo', () => {
@@ -444,6 +500,58 @@ describe('/usage', () => {
     await usage.handler(ctx as any);
     expect(output()).toMatch(/pricing unknown/i);
     expect(output()).not.toMatch(/Estimated cost/);
+  });
+});
+
+describe('/estimate, /budget, and token-usage /mode', () => {
+  it('estimates locally and emits machine-readable output without a provider call', async () => {
+    const providerCall = vi.fn();
+    const { ctx, output } = makeCtx({
+      args: ['--json', 'inspect', 'one', 'file'],
+      rawArgs: '--json inspect one file',
+      config: {
+        getValue: (key: string, fallback: unknown) => key === 'usage.mode' ? 'economy' : fallback,
+      },
+      session: {
+        history: [{ role: 'user', content: 'inspect one file' }],
+        getCurrentProvider: () => 'unknown-provider',
+        getCurrentModel: () => 'unknown-model',
+        getTotalUsage: () => ({ inputTokens: 0, outputTokens: 0 }),
+        providerCall,
+      },
+      toolRegistry: { getSchemas: () => [] },
+    });
+    await estimate.handler(ctx as any);
+    const parsed = JSON.parse(output().trim());
+    expect(parsed.selectedMode).toBe('economy');
+    expect(parsed.costStatus).toBe('unknown');
+    expect(parsed.estimatedTokenHigh).toBeGreaterThan(parsed.estimatedTokenLow);
+    expect(providerCall).not.toHaveBeenCalled();
+  });
+
+  it('persists usage mode without requiring an approval engine', async () => {
+    const set = vi.fn();
+    const save = vi.fn(async () => {});
+    const { ctx, output } = makeCtx({
+      args: ['economy'],
+      config: { getValue: () => 'balanced', set, save },
+    });
+    await mode.handler(ctx as any);
+    expect(set).toHaveBeenCalledWith('usage.mode', 'economy');
+    expect(save).toHaveBeenCalledOnce();
+    expect(output()).toMatch(/Usage mode: economy/);
+  });
+
+  it('persists an estimated-cost cap independently from the token cap', async () => {
+    const set = vi.fn();
+    const save = vi.fn(async () => {});
+    const { ctx } = makeCtx({
+      args: ['cost', '1.25'],
+      config: { getValue: () => 0, set, save },
+    });
+    await budget.handler(ctx as any);
+    expect(set).toHaveBeenCalledWith('budget.session_cost_cap_usd', 1.25);
+    expect(save).toHaveBeenCalledOnce();
   });
 });
 

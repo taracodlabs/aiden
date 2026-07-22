@@ -90,6 +90,7 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   // v4.12.1 Pillar 4 Slice 2b — mid-turn redirect.
   redirect: 'System',
   usage: 'System',
+  estimate: 'System',
   cron: 'System',
   setup: 'System',
   channel: 'System',

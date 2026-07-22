@@ -101,6 +101,7 @@ import { deduplicateRuntimeSlots, providerRuntimeIdentity } from '../../provider
 // branch at aidenAgent.ts:754 stayed dead at runtime and `/compress`
 // reported "Compressor or session not wired."
 import { ContextCompressor } from '../../core/v4/contextCompressor';
+import { configureToolResultArtifactStore } from '../../core/v4/toolResultBoundary';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
 import { applyToolDeferral } from '../../core/v4/toolDeferral';
 import { MemoryManager } from '../../core/v4/memoryManager';
@@ -367,6 +368,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   // which is the only entry point that genuinely benefits from the
   // foundation (long-running session = useful daemon).
   const program = new Command();
+  let actionExitCode = 0;
 
   program
     .name('aiden')
@@ -412,10 +414,10 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       // long-lived machinery. Handle it BEFORE the daemon bootstrap below.
       const qOpts = program.opts() as { query?: string };
       if (qOpts.query != null) {
-        if (opts.runQueryHook) {
-          process.exit(await opts.runQueryHook(program.opts()));
-        }
-        process.exit(await runQuery(qOpts.query, program.opts(), opts));
+        actionExitCode = opts.runQueryHook
+          ? await opts.runQueryHook(program.opts())
+          : await runQuery(qOpts.query, program.opts(), opts);
+        return;
       }
 
       // v4.5 Phase 1 — daemon foundation bootstrap. Lazy-imported so
@@ -483,12 +485,12 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const merged = { ...program.opts(), ...cmdOpts };
       if (merged.query == null) {
         process.stderr.write('usage: aiden chat -q "<prompt>"\n');
-        process.exit(2);
+        actionExitCode = 2;
+        return;
       }
-      if (opts.runQueryHook) {
-        process.exit(await opts.runQueryHook(merged));
-      }
-      process.exit(await runQuery(merged.query, merged, opts));
+      actionExitCode = opts.runQueryHook
+        ? await opts.runQueryHook(merged)
+        : await runQuery(merged.query, merged, opts);
     });
 
   // v4.14.6 — Aiden Workbench launcher. Serves a read-only live dashboard page
@@ -966,7 +968,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
 
   try {
     await program.parseAsync(argv);
-    return 0;
+    return actionExitCode;
   } catch (err) {
     const out = opts.writeOut ?? ((t) => process.stderr.write(t));
     out(`${(err as Error).message}\n`);
@@ -2463,6 +2465,9 @@ export async function buildAgentRuntime(
     /*compressionThreshold=*/ 0.5,
     compressionHealth,
   );
+  const toolResultArtifactStore = configureToolResultArtifactStore(
+    path.join(paths.root, 'tool-results'),
+  );
 
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
@@ -2471,6 +2476,7 @@ export async function buildAgentRuntime(
     // v4.11 preflight compression — wire the compressor so
     // runConversation step 7 actually runs at the 50% threshold.
     contextCompressor,
+    toolResultArtifactStore: toolResultArtifactStore ?? undefined,
     // v4.6 Phase 1 — 'repl' context filter excludes tools tagged
     // daemon-only (none today) and INCLUDES tools tagged repl-only
     // (e.g. spawn_sub_agent, registered after this line). Tools with
@@ -2507,6 +2513,7 @@ export async function buildAgentRuntime(
     maxTurns: config.getValue<number>('agent.max_turns', 90)!,
     // v4.12 BE.1 — per-session token cap (money-safety). 0/unset → no cap.
     sessionTokenCap: config.getValue<number>('budget.session_token_cap', 0)! || undefined,
+    sessionCostCap: config.getValue<number>('budget.session_cost_cap_usd', 0)! || undefined,
     auxiliaryClient,
     plannerGuard,
     honestyEnforcement,
@@ -2894,6 +2901,13 @@ export async function buildAgentRuntime(
   // resolvers, run store. No widening — the coordinator's API
   // accepts the existing SpawnSubAgentDeps verbatim.
   const subagentCoordinator = new SubagentCoordinator({
+    resolveResourceLimits: () => ({
+      estimatedTokensPerChild: config.getValue<number>('budget.subagent_estimated_tokens', 0),
+      providerCallsPerChild: config.getValue<number>('budget.subagent_provider_calls', 0),
+      aggregateEstimatedTokens: config.getValue<number>('budget.subagent_fanout_estimated_tokens', 0),
+      parentBudgetPercentage: config.getValue<number>('budget.subagent_parent_percentage', 0),
+      parentTokenBudget: config.getValue<number>('budget.session_token_cap', 0),
+    }),
     spawnDeps: {
       toolRegistry,
       parentToolContext: {
@@ -3094,7 +3108,12 @@ export async function buildAgentRuntime(
       const history: import('../../providers/v4/types').Message[] = [...past, userTurn];
 
       // 3. Run one agent turn.
-      const result = await agent.runConversation(history);
+      const result = await agent.runConversation(history, {
+        sessionId: storeSid,
+        runId: `gateway-${randomUUID()}`,
+        entryPoint: 'gateway',
+        purpose: 'primary',
+      });
 
       // 4. Persist the new tail (everything past the loaded history) so
       //    the next inbound resumes seamlessly. Mirror chatSession's
@@ -3759,7 +3778,10 @@ export interface AgentRuntime {
  *  `toolCallTrace` carries the REAL HonestyTraceEntry[] (previously under-typed
  *  to `{ error? }[]`) so the divergence audit can finalize + compare over it. */
 interface OneShotAgent {
-  runConversation(history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): Promise<{
+  runConversation(
+    history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    options?: { sessionId?: string; runId?: string; entryPoint?: string; purpose?: 'primary' },
+  ): Promise<{
     finalContent?:  string;
     finishReason?:  string;
     toolCallTrace?: HonestyTraceEntry[];
@@ -3794,7 +3816,11 @@ export async function executeOneShotTurn(deps: OneShotDeps): Promise<number> {
   const err = deps.writeErr ?? ((s: string) => { process.stderr.write(s); });
   let code = 0;
   try {
-    const result = await deps.agent.runConversation([{ role: 'user', content: deps.prompt }]);
+    const oneShotId = `oneshot-${randomUUID()}`;
+    const result = await deps.agent.runConversation(
+      [{ role: 'user', content: deps.prompt }],
+      { sessionId: oneShotId, runId: oneShotId, entryPoint: 'oneshot', purpose: 'primary' },
+    );
     const answer = result.finalContent ?? '';
     // stdout carries ONLY the answer (newline-terminated for pipe hygiene).
     out(answer.endsWith('\n') ? answer : `${answer}\n`);
@@ -3893,6 +3919,12 @@ export async function runQuery(
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
   const runtime = await buildAgentRuntime(cliOpts, opts);
+  const resumedActiveState = runtime.resumeSessionId
+    ? runtime.sessionManager.resumeActiveState(runtime.resumeSessionId)
+    : null;
+  const resumedHistory = runtime.resumeSessionId
+    ? resumedActiveState?.messages ?? runtime.sessionManager.loadHistory(runtime.resumeSessionId)
+    : undefined;
 
   // v4.5 Phase 7c — install the REAL agent runner now that the
   // REPL agent is built. The daemon foundation already came up
@@ -3945,6 +3977,10 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // pill ("persisted from prior session" / "auto-picked" / …).
     initialBootSource: runtime.bootSource,
     resumeSessionId: runtime.resumeSessionId,
+    resumeHistory: resumedHistory,
+    resumeUsage: resumedActiveState?.cumulativeUsage,
+    resumeCompressionCount: resumedActiveState?.compressionCount,
+    resumeBudgetState: resumedActiveState?.budgetState,
     yoloMode: !!cliOpts.yolo,
     fallbackAdapter: runtime.fallbackAdapter,
     paths: runtime.paths,
@@ -4230,7 +4266,7 @@ async function runSkillsSubcommand(
 if (require.main === module) {
   // eslint-disable-next-line @typescript-eslint/no-floating-promises
   main(process.argv).then((code) => {
-    if (code !== 0) process.exit(code);
+    process.exitCode = code;
   });
 }
 

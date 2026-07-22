@@ -35,6 +35,29 @@ async function mkPaths(): Promise<AidenPaths> {
 }
 
 describe('AidenAgent · system prompt cache (Phase 16b.4)', () => {
+  it('replaces a persisted active system prompt instead of duplicating it on resume', async () => {
+    const paths = await mkPaths();
+    const provider = new MockProviderAdapter([MockProviderAdapter.stop('resumed')]);
+    const agent = new AidenAgent({
+      provider,
+      tools: [],
+      toolExecutor: async () => ({ id: '1', name: 'noop', result: null }),
+      promptBuilder: new PromptBuilder(),
+      promptBuilderOptions: { paths, platform: 'linux' },
+    });
+    await agent.runConversation([
+      { role: 'system', content: 'persisted pre-restart system prompt' },
+      { role: 'assistant', content: 'compressed history summary' },
+      { role: 'user', content: 'latest instruction' },
+    ]);
+    const sent = provider.capturedInputs[0]!.messages;
+    expect(sent.filter((message) => message.role === 'system')).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ role: 'system' });
+    expect(sent[0]!.content).toContain('slot 1');
+    expect(sent.some((message) => message.content === 'persisted pre-restart system prompt')).toBe(false);
+    expect(sent.some((message) => message.content === 'latest instruction')).toBe(true);
+  });
+
   it('getSystemPromptForDebug returns the SOUL.md content', async () => {
     const paths = await mkPaths();
     const agent = new AidenAgent({

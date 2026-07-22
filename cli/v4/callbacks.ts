@@ -779,12 +779,14 @@ Reply with ONE word: safe, caution, or dangerous.`;
     level: 'caution' | 'warning',
     current: number,
     max: number,
-    kind: 'iterations' | 'tokens' = 'iterations',
+    kind: 'iterations' | 'tokens' | 'cost' = 'iterations',
   ): void => {
     // v4.12 BE.1 — token budget reports token counts; iterations report turns.
     const msg = kind === 'tokens'
       ? `Tokens ${current.toLocaleString()}/${max.toLocaleString()}`
-      : `Turn ${current}/${max}`;
+      : kind === 'cost'
+        ? `Estimated cost $${current.toFixed(4)}/$${max.toFixed(4)}`
+        : `Turn ${current}/${max}`;
     if (level === 'warning') {
       this.display.warn(`Budget: ${msg} — approaching the cap.`);
     } else if (isVerbose()) {

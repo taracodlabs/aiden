@@ -21,9 +21,10 @@
  *
  * Behaviour contract:
  *   - 5-second hard timeout per request (configurable).
- *   - On any failure (network, non-2xx, malformed body) we return the
- *     static fallback with `{ source: 'fallback', reason }` so the
- *     picker can show the muted "Couldn't reach API" hint.
+ *   - Hosted-provider failures return the static fallback with
+ *     `{ source: 'fallback', reason }` so the picker can show an offline hint.
+ *   - Ollama always returns its real installed inventory. Failure or an empty
+ *     inventory returns no models because the static catalog is not installed state.
  *   - Results are sorted with "recommended" / default models first,
  *     then by display name.
  *   - No client-side cost-tier annotation — the curated catalog owns
@@ -181,7 +182,16 @@ async function fetchJson(
     const response = await lifecycle.race(fetchImpl(url, { ...init, signal: lifecycle.signal }));
     lifecycle.markHeaders();
     const bodyText = await lifecycle.readText(response);
-    const body = bodyText.length > 0 ? JSON.parse(bodyText) : {};
+    let body: unknown = {};
+    if (bodyText.length > 0) {
+      try {
+        body = JSON.parse(bodyText);
+      } catch (error) {
+        // Callers classify non-success responses by status. A plain-text error
+        // body must not mask that status as a catalogue parsing failure.
+        if (response.ok) throw error;
+      }
+    }
     return { response, body };
   } catch (error) {
     throw lifecycle.classify(error);
@@ -323,16 +333,20 @@ async function fetchLocalRuntimeModels(baseUrl: string, o: Required<Pick<FetchOp
 }
 
 /**
- * Fetch available models for `providerId`, falling back to the
- * curated catalog when the live endpoint is unreachable, the key is
- * missing, or the response is malformed.
+ * Fetch available models for `providerId`. Hosted providers fall back to the
+ * curated catalog when discovery is unavailable. Ollama never substitutes
+ * catalog recommendations for the local runtime's installed inventory.
  */
 export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const fetchImpl = opts.fetchImpl ?? fetch;
   const apiKey = opts.apiKey ?? '';
   const cacheKey = discoveryCacheKey(opts);
-  const cached = discoveryCache.get(cacheKey);
+  // Local inventory is process state, not a provider catalogue. Its caller
+  // owns the short cache so fresh resolver instances cannot inherit stale
+  // installed-model results from an unrelated runtime.
+  const useDiscoveryCache = opts.providerId !== 'ollama';
+  const cached = useDiscoveryCache ? discoveryCache.get(cacheKey) : undefined;
   const cacheTtlMs = opts.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
   if (!opts.refresh && cached && Date.now() - cached.fetchedAt < cacheTtlMs) {
     return { models: cached.models, source: 'live', cacheStatus: 'cached' };
@@ -392,11 +406,19 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
         return fallbackFor(opts.providerId);
     }
     const models = normalise(opts.providerId, raws);
-    if (models.length === 0) return fallbackFor(opts.providerId, 'empty live response');
-    discoveryCache.set(cacheKey, { fetchedAt: Date.now(), models });
+    if (models.length === 0) {
+      if (opts.providerId === 'ollama') {
+        return { models: [], source: 'live', reason: 'no installed models' };
+      }
+      return fallbackFor(opts.providerId, 'empty live response');
+    }
+    if (useDiscoveryCache) discoveryCache.set(cacheKey, { fetchedAt: Date.now(), models });
     return { models, source: 'live', cacheStatus: 'fresh' };
   } catch (err) {
     const reason = safeDiscoveryReason(err);
+    // A static catalog is not a local inventory. Treating it as one makes
+    // uninstalled models look runnable and produces a later model-not-found.
+    if (opts.providerId === 'ollama') return { models: [], source: 'fallback', reason };
     if (cached) {
       return {
         models: cached.models,

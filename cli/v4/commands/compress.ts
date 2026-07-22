@@ -11,6 +11,7 @@
  * session's history and replaces it with the compressed version.
  */
 import type { SlashCommand } from '../commandRegistry';
+import { runWithProviderUsageContext } from '../../../providers/v4/providerAttemptAccounting';
 
 export const compress: SlashCommand = {
   name: 'compress',
@@ -28,10 +29,21 @@ export const compress: SlashCommand = {
     const spinner = ctx.display.startSpinner('Compressing context…');
     let result;
     try {
-      result = await ctx.compressor.forceCompress(
-        ctx.session.history,
-        providerId,
-        modelId,
+      const sessionId = ctx.session.getSessionId?.() ?? null;
+      result = await runWithProviderUsageContext(
+        {
+          sessionId,
+          runId: sessionId,
+          entryPoint: 'cli',
+          purpose: 'compression',
+          providerConfigured: providerId,
+          modelConfigured: modelId,
+        },
+        () => ctx.compressor!.forceCompress(
+          ctx.session!.history,
+          providerId,
+          modelId,
+        ),
       );
     } catch (err) {
       spinner.stop();
@@ -39,12 +51,14 @@ export const compress: SlashCommand = {
       return {};
     }
     spinner.stop();
-    if (result.refused) {
-      ctx.display.dim('Conversation too short — nothing compressed.');
+    if (result.error) {
+      ctx.display.warn(result.errorMessage
+        ? `Compression failed safely: ${result.errorMessage}`
+        : 'Compression auxiliary call failed; history unchanged.');
       return {};
     }
-    if (result.error) {
-      ctx.display.warn('Compression auxiliary call failed; history unchanged.');
+    if (result.refused) {
+      ctx.display.dim('Conversation too short — nothing compressed.');
       return {};
     }
     ctx.session.setHistory(result.compressedMessages);

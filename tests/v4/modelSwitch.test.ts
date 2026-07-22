@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -29,8 +29,8 @@ afterEach(async () => {
   }
 });
 
-function makeSwitcher(): ModelSwitcher {
-  return new ModelSwitcher(new RuntimeResolver(new CredentialResolver(authPath)));
+function makeSwitcher(fetchImpl?: typeof fetch): ModelSwitcher {
+  return new ModelSwitcher(new RuntimeResolver(new CredentialResolver(authPath), { fetchImpl }));
 }
 
 describe('ModelSwitcher.parse', () => {
@@ -78,6 +78,17 @@ describe('ModelSwitcher.parse', () => {
     expect(parsed.providerId).toBe('ollama');
     expect(parsed.modelId).toBe('qwen2.5:7b');
   });
+
+  it('preserves the complete live Ollama tag after the provider prefix', () => {
+    for (const modelId of [
+      'gemma4:e4b-32k',
+      'gemma4:e4b-16k',
+      'gemma4:e4b-8k',
+      'gemma4:e4b',
+    ]) {
+      expect(makeSwitcher().parse(`ollama:${modelId}`)).toEqual({ providerId: 'ollama', modelId });
+    }
+  });
 });
 
 describe('ModelSwitcher.switch', () => {
@@ -110,5 +121,24 @@ describe('ModelSwitcher.switch', () => {
       currentModelId: 'claude-opus-4-7',
     });
     expect(result.changed).toBe(true);
+  });
+
+  it('direct switching accepts an exact live Ollama tag outside the static catalog', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      models: [
+        { name: 'gemma4:e4b-32k' },
+        { name: 'gemma4:e4b-16k' },
+        { name: 'gemma4:e4b-8k' },
+        { name: 'gemma4:e4b' },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+    const result = await makeSwitcher(fetchImpl as typeof fetch).switch({
+      spec: 'ollama:gemma4:e4b-32k',
+    });
+
+    expect(result.newProvider.id).toBe('ollama');
+    expect(result.newModel.id).toBe('gemma4:e4b-32k');
+    expect(result.newAdapter.apiMode).toBe('ollama_prompt_tools');
   });
 });

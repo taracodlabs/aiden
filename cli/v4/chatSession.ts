@@ -67,6 +67,11 @@ import type { CliCallbacks } from './callbacks';
 import type { SessionManager } from '../../core/v4/sessionManager';
 import type { ContextCompressor } from '../../core/v4/contextCompressor';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
+import {
+  currentProviderAttemptLedger,
+  runWithProviderUsageContext,
+} from '../../providers/v4/providerAttemptAccounting';
+import { classifyBudgetState, parseUsageMode } from '../../core/v4/usagePolicy';
 import type { ApprovalEngine } from '../../moat/approvalEngine';
 import type { McpClient } from '../../core/v4/mcpClient';
 import type { SkinEngine } from './skinEngine';
@@ -364,6 +369,9 @@ export interface ChatSessionOptions {
   resumeSessionId?: string;
   /** Pre-loaded history when resuming. */
   resumeHistory?: Message[];
+  resumeUsage?: { inputTokens: number; outputTokens: number };
+  resumeCompressionCount?: number;
+  resumeBudgetState?: Record<string, unknown> | null;
 
   /** YOLO mode override — flips approvalEngine to 'off' at boot. */
   yoloMode?: boolean;
@@ -551,6 +559,8 @@ export class ChatSession implements ChatSessionLike {
   private currentProviderId: string;
   private currentModelId: string;
   private totalUsage = { inputTokens: 0, outputTokens: 0 };
+  private compressionCount = 0;
+  private budgetState: Record<string, unknown> | null = null;
   private startedAt = Date.now();
   private queuedSystemPrompts: string[] = [];
   private modelMetadata: ModelMetadata;
@@ -683,6 +693,10 @@ export class ChatSession implements ChatSessionLike {
     // still applies after the engine is frozen at boot.
     if (opts.yoloMode) opts.approvalEngine.setMode('off', { userInitiated: true });
     if (opts.resumeHistory) this.history = [...opts.resumeHistory];
+    if (opts.resumeUsage) this.totalUsage = { ...opts.resumeUsage };
+    this.compressionCount = Math.max(0, Math.floor(opts.resumeCompressionCount ?? 0));
+    this.budgetState = opts.resumeBudgetState ?? null;
+    opts.agent.restoreCompressionCount?.(this.compressionCount);
     // v4.14 — restore the persisted preferred busy-mode (agent.busyMode) so a
     // /busy choice survives a restart. Default 'queue' when unset/garbage.
     try { this.duringTurnInput.setMode(resolveConfiguredBusyMode(opts.config)); } catch { /* safe */ }
@@ -708,6 +722,15 @@ export class ChatSession implements ChatSessionLike {
   // ── ChatSessionLike API ────────────────────────────────────────────
   setHistory(messages: Message[]): void {
     this.history = messages;
+    this.compressionCount += 1;
+    if (this.sessionId) {
+      this.opts.sessionManager.persistActiveState(this.sessionId, {
+        messages: this.history,
+        compressionCount: this.compressionCount,
+        cumulativeUsage: this.totalUsage,
+        budgetState: this.budgetState,
+      });
+    }
   }
   clearHistory(): void {
     this.history = [];
@@ -1778,7 +1801,6 @@ export class ChatSession implements ChatSessionLike {
     }
     this.queuedSystemPrompts = [];
 
-    const turnStart = this.history.length;
     const baseHistory = newHistory.length > 0
       ? [...this.history, ...newHistory, userMsg]
       : [...this.history, userMsg];
@@ -2142,12 +2164,31 @@ export class ChatSession implements ChatSessionLike {
     p2aHeartbeat?.unref?.();
 
     try {
+      const selectedMode = typeof this.opts.config?.getValue === 'function'
+        ? parseUsageMode(this.opts.config.getValue<string>('usage.mode', 'balanced')) ?? 'balanced'
+        : 'balanced';
+      const selectedProfile = typeof this.opts.config?.getValue === 'function'
+        ? this.opts.config.getValue<string>('agent.tool_profile', 'standard') ?? 'standard'
+        : 'standard';
       emitP2aDiag('turn.agent_run.start', {
         aborted: turnAbort.signal.aborted,
         pendingPromises: ['agent.runConversation'],
       });
-      const result = await this.opts.agent.runConversation(baseHistory, {
+      const result = await runWithProviderUsageContext({
+        sessionId: this.sessionId,
+        taskId: replTaskId,
+        runId: replRunId,
+        entryPoint: 'cli',
+        selectedMode,
+        selectedProfile,
+      }, () => this.opts.agent.runConversation(baseHistory, {
         stream: streamingEnabled,
+        sessionId: this.sessionId,
+        taskId: replTaskId,
+        runId: replRunId,
+        entryPoint: 'cli',
+        selectedMode,
+        selectedProfile,
         // v4.12 BE.1 — seed the per-session token cap with tokens already spent
         // this session, so the cap enforces across turns (not just this run).
         sessionTokensSoFar: this.sessionId
@@ -2289,7 +2330,7 @@ export class ChatSession implements ChatSessionLike {
               progressBar.update(outputTokens, maxTokens);
             })
           : undefined,
-      });
+      }));
       emitP2aDiag('turn.agent_run.complete', {
         aborted: turnAbort.signal.aborted,
         finishReason: result.finishReason,
@@ -2304,6 +2345,7 @@ export class ChatSession implements ChatSessionLike {
       if (streamingActive) { flushStreamDeltas(); this.opts.display.streamComplete(); }
 
       this.history = result.messages;
+      this.compressionCount = result.compressionEvents;
       this.totalUsage.inputTokens += result.totalUsage.inputTokens;
       this.totalUsage.outputTokens += result.totalUsage.outputTokens;
       // v4.11 Slice 4 — roll subagent token spend into the parent
@@ -2318,6 +2360,29 @@ export class ChatSession implements ChatSessionLike {
         this.totalUsage.inputTokens  += turnContext.costAccumulator.inputTokens;
         this.totalUsage.outputTokens += turnContext.costAccumulator.outputTokens;
       }
+      const tokenBudget = typeof this.opts.config?.getValue === 'function'
+        ? this.opts.config.getValue<number>('budget.session_token_cap', 0) ?? 0
+        : 0;
+      const costBudget = typeof this.opts.config?.getValue === 'function'
+        ? this.opts.config.getValue<number>('budget.session_cost_cap_usd', 0) ?? 0
+        : 0;
+      const projection = this.sessionId
+        ? currentProviderAttemptLedger()?.project({ sessionId: this.sessionId }) ?? null
+        : null;
+      const usedTokens = projection
+        ? (projection.providerInputTokens + projection.providerOutputTokens
+          || projection.estimatedInputTokens + projection.estimatedOutputTokens)
+        : this.totalUsage.inputTokens + this.totalUsage.outputTokens;
+      this.budgetState = {
+        state: classifyBudgetState(usedTokens, tokenBudget),
+        usedTokens,
+        tokenBudget: tokenBudget || null,
+        knownEstimatedCost: projection?.knownCostAmount ?? null,
+        estimatedCostBudget: costBudget || null,
+        costState: projection && projection.unknownCostAttempts === 0
+          ? classifyBudgetState(projection.knownCostAmount, costBudget)
+          : 'unknown',
+      };
       // v4.14 Pillar 5 Slice C — cost_updated: the running token total (parent
       // + children) after the turn. One emit per turn (inherently ≤1/sec), so
       // no throttle needed here. emitPillarEvent never throws; wrapped anyway.
@@ -2560,6 +2625,25 @@ export class ChatSession implements ChatSessionLike {
         this.opts.display.taskOutcome(_taskOutcome);
       }
 
+      if (replRunId !== null) {
+        const turnUsage = currentProviderAttemptLedger()?.project({ runId: String(replRunId) });
+        if (turnUsage && turnUsage.physicalAttempts > 0) {
+          const reportedInput = turnUsage.providerInputTokens || turnUsage.estimatedInputTokens;
+          const reportedOutput = turnUsage.providerOutputTokens || turnUsage.estimatedOutputTokens;
+          const toolBytesSaved = Math.max(0, turnUsage.rawToolResultBytes - turnUsage.transmittedToolResultBytes);
+          const savings = [
+            toolBytesSaved > 0 ? `${toolBytesSaved.toLocaleString()} tool bytes externalized` : null,
+            turnUsage.deferredSchemaCount > 0 ? `${turnUsage.deferredSchemaCount} schemas deferred` : null,
+          ].filter((value): value is string => value !== null);
+          const cost = turnUsage.unknownCostAttempts > 0
+            ? 'cost unknown'
+            : `$${turnUsage.knownCostAmount.toFixed(4)} estimated`;
+          this.opts.display.dim(
+            `Usage: ${turnUsage.physicalAttempts} provider attempt${turnUsage.physicalAttempts === 1 ? '' : 's'} · ${reportedInput} in / ${reportedOutput} out · ${cost}${savings.length > 0 ? ` · ${savings.join(', ')}` : ''}`,
+          );
+        }
+      }
+
       // v4.1.6 Polish 2 — post-render skill-proposal handler.
       // The agent loop now SKIPS the inquirer prompt when a
       // prompt callback is wired, surfacing the SkillProposal
@@ -2593,11 +2677,18 @@ export class ChatSession implements ChatSessionLike {
 
       if (this.sessionId) {
         // Only persist the new tail of messages — what got added this turn.
-        const newSlice = this.history.slice(turnStart);
+        const newSlice = [...newHistory, userMsg, ...(result.turnMessages ?? [])];
         this.opts.sessionManager.recordTurn(
           this.sessionId,
           newSlice,
           result.totalUsage,
+          undefined,
+          {
+            messages: this.history,
+            compressionCount: this.compressionCount,
+            cumulativeUsage: this.totalUsage,
+            budgetState: this.budgetState,
+          },
         );
       }
 
@@ -2734,7 +2825,7 @@ export class ChatSession implements ChatSessionLike {
       // the user sees WHICH provider blew up (matters when fallback
       // adapters rotate slots mid-turn).
       const cls = classifyProviderError(err);
-      const tailored = suggestForErrorClass(cls, this.currentProviderId);
+      const tailored = suggestForErrorClass(cls, this.currentProviderId, err);
       // v4.1.3-essentials: on `auth` class errors we have enough state
       // (which provider, what to run) to render a capability card —
       // structured "what auth's missing, what you can still do, how to

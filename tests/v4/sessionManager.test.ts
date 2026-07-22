@@ -179,4 +179,37 @@ describe('SessionManager', () => {
     expect(hits.length).toBeGreaterThanOrEqual(1);
     expect(hits[0].sessionId).toBe(s.id);
   });
+
+  it('persists active compressed history and cumulative state across restart', () => {
+    const s = mgr.startSession({ providerId: 'p', modelId: 'm' });
+    const rawTurn: Message[] = [
+      { role: 'user', content: 'latest instruction' },
+      { role: 'assistant', content: 'done' },
+    ];
+    const active: Message[] = [
+      { role: 'system', content: 'active safety rules' },
+      { role: 'assistant', content: 'Summary of older history' },
+      ...rawTurn,
+    ];
+    mgr.recordTurn(s.id, rawTurn, { inputTokens: 21, outputTokens: 8 }, 3, {
+      messages: active,
+      compressionCount: 2,
+      cumulativeUsage: { inputTokens: 121, outputTokens: 48 },
+      budgetState: { state: 'running_yellow', tokenBudget: 200 },
+    });
+
+    store.close();
+    store = new SessionStore(path.join(tmpDir, 'sessions.db'));
+    mgr = new SessionManager(store);
+    expect(mgr.resumeActiveState(s.id)).toEqual({
+      messages: active,
+      compressionCount: 2,
+      cumulativeUsage: { inputTokens: 121, outputTokens: 48 },
+      budgetState: { state: 'running_yellow', tokenBudget: 200 },
+    });
+    expect(store.getMessages(s.id).map((m) => m.content)).toEqual([
+      'latest instruction',
+      'done',
+    ]);
+  });
 });

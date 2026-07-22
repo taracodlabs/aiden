@@ -86,6 +86,7 @@ import { appInputTool } from './system/appInput';
 // Phase v4.1.2-update — natural-language self-update entry point.
 // Routes through the same shared executeInstall executor as `/update install`.
 import { aidenSelfUpdateTool } from './system/aidenSelfUpdate';
+import { toolResultArtifactReadTool } from './system/toolResultArtifactRead';
 
 import { shellExecTool } from './terminal/shellExec';
 import { executeCodeTool } from './executeCode';
@@ -162,6 +163,7 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   register(systemInfoTool);
   register(nowPlayingTool);
   register(naturalEventsTool);
+  register(toolResultArtifactReadTool);
 
   // Phase v4.1.2-followup-3 — computer-control read-only tools.
   register(screenshotTool);
@@ -418,6 +420,7 @@ export { webFetchTool } from './web/webFetch';
 export { webPageTool } from './web/webPage';
 export { deepResearchTool } from './web/deepResearch';
 export { fileReadTool } from './files/fileRead';
+export { toolResultArtifactReadTool } from './system/toolResultArtifactRead';
 export { fileListTool } from './files/fileList';
 export { fileWriteTool } from './files/fileWrite';
 export { filePatchTool } from './files/filePatch';

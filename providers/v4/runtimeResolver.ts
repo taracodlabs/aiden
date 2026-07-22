@@ -39,6 +39,7 @@ import {
 import {
   MODEL_CATALOG,
   ModelEntry,
+  findModel,
   listModelsForProvider,
 } from './modelCatalog';
 import { CredentialResolver } from './credentialResolver';
@@ -66,6 +67,12 @@ import {
   resolveApiCredential,
   type EffectiveCredentialResolution,
 } from './credentialAuthority';
+import { configureProviderAttemptLedger } from './providerAttemptAccounting';
+import {
+  fetchModels,
+  type FetchModelsResult,
+  type FetchedModel,
+} from '../../core/v4/providers/modelFetch';
 
 /**
  * Minimal interface RuntimeResolver consumes from the config layer. The
@@ -101,6 +108,14 @@ export interface ResolveOptions {
    * inference is a v4.1 follow-up; v4.0 ships explicit /auth refresh.)
    */
   paths?: AidenPaths;
+  /** Test/local-runtime seam for live Ollama inventory discovery. */
+  fetchImpl?: typeof fetch;
+}
+
+export interface RuntimeResolverOptions {
+  fetchImpl?: typeof fetch;
+  /** Short cache used between picker discovery and adapter resolution. */
+  localModelCacheTtlMs?: number;
 }
 
 interface ResolvedCredentials {
@@ -139,14 +154,79 @@ export function deprecationNotice(providerId: string, modelId: string): string |
   return `${providerId}:${modelId} is deprecated and stops working on ${d.date} — switch to ${d.replacement}.`;
 }
 
+function inferLocalContextLength(modelId: string): number {
+  const suffix = /(?:^|[-:])(\d+)(k|m)$/i.exec(modelId);
+  if (!suffix) return 8_192;
+  const amount = Number.parseInt(suffix[1], 10);
+  if (!Number.isFinite(amount) || amount <= 0) return 8_192;
+  return amount * (suffix[2].toLowerCase() === 'm' ? 1_000_000 : 1_000);
+}
+
+function localModelEntry(model: FetchedModel): ModelEntry {
+  const catalog = findModel('ollama', model.id);
+  if (catalog) return catalog;
+  return {
+    id: model.id,
+    displayName: model.displayName || model.id,
+    providerId: 'ollama',
+    contextLength: model.contextLength ?? inferLocalContextLength(model.id),
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: false,
+    isDefault: false,
+    tier: 'standard',
+    notes: 'Installed local model discovered from the live runtime.',
+  };
+}
+
 export class RuntimeResolver {
-  constructor(private readonly credentialResolver: CredentialResolver) {}
+  private localModelCache: {
+    baseUrl: string;
+    expiresAt: number;
+    result: FetchModelsResult;
+  } | null = null;
+
+  constructor(
+    private readonly credentialResolver: CredentialResolver,
+    private readonly resolverOptions: RuntimeResolverOptions = {},
+  ) {}
+
+  /**
+   * Read the actual Ollama inventory. A forced read is used each time the
+   * model picker opens; the short cache then avoids a duplicate request when
+   * the selected model is immediately resolved into an adapter.
+   */
+  async getLocalModelInventory(options: {
+    baseUrl?: string;
+    fetchImpl?: typeof fetch;
+    forceRefresh?: boolean;
+  } = {}): Promise<FetchModelsResult> {
+    const baseUrl = (options.baseUrl ?? PROVIDER_REGISTRY.ollama.baseUrl).replace(/\/+$/, '');
+    const now = Date.now();
+    if (
+      !options.forceRefresh
+      && this.localModelCache?.baseUrl === baseUrl
+      && this.localModelCache.expiresAt > now
+    ) {
+      return this.localModelCache.result;
+    }
+
+    const result = await fetchModels({
+      providerId: 'ollama',
+      baseUrl,
+      fetchImpl: options.fetchImpl ?? this.resolverOptions.fetchImpl,
+    });
+    const ttlMs = Math.max(0, this.resolverOptions.localModelCacheTtlMs ?? 2_000);
+    this.localModelCache = { baseUrl, expiresAt: now + ttlMs, result };
+    return result;
+  }
 
   /**
    * Build a fully-wired adapter for `(providerId, modelId)`. Throws
    * `ProviderError` when the provider, model, or credentials are missing.
    */
   async resolve(options: ResolveOptions): Promise<ProviderAdapter> {
+    if (options.paths) configureProviderAttemptLedger(options.paths.sessionsDb);
     const { entry, model, baseUrl, credentials } = await this.describeInternal(options);
 
     // One-line heads-up when a session resolves a model with an announced EOL.
@@ -235,6 +315,9 @@ export class RuntimeResolver {
 
   /** All models for `providerId`. Empty when unknown — never throws. */
   listModels(providerId: string): ModelEntry[] {
+    if (providerId === 'ollama' && this.localModelCache) {
+      return this.localModelCache.result.models.map(localModelEntry);
+    }
     return listModelsForProvider(providerId);
   }
 
@@ -255,16 +338,47 @@ export class RuntimeResolver {
       );
     }
 
-    const persistedVerification = options.modelVerification
-      ?? options.config?.get(`providers.${entry.id}.modelVerification`) as ModelVerification | undefined;
-    const selection = resolveModelSelection({
-      providerId: entry.id,
-      modelId: options.modelId,
-      verification: persistedVerification,
-      liveModelIds: options.liveModelIds,
-      allowUnverified: options.allowUnverifiedModel,
-    });
-    if (!selection) {
+    const requestedBaseUrl = (options.baseUrlOverride ?? entry.baseUrl).replace(/\/+$/, '');
+    let model: ModelEntry | undefined;
+    if (entry.id === 'ollama') {
+      const inventory = await this.getLocalModelInventory({
+        baseUrl: requestedBaseUrl,
+        fetchImpl: options.fetchImpl,
+      });
+      if (inventory.source !== 'live') {
+        throw new ProviderError(
+          `Ollama is offline or unavailable at ${requestedBaseUrl}. Start Ollama, then reopen \`/model\`.`,
+          entry.id,
+        );
+      }
+      if (inventory.models.length === 0) {
+        throw new ProviderError(
+          `No Ollama models are installed. Run \`ollama pull ${options.modelId}\`, then reopen \`/model\`.`,
+          entry.id,
+        );
+      }
+      const installed = inventory.models.find((candidate) => candidate.id === options.modelId);
+      if (!installed) {
+        throw new ProviderError(
+          `Model '${options.modelId}' is not installed in Ollama. ` +
+          `Installed: ${inventory.models.map((candidate) => candidate.id).join(', ')}. ` +
+          `Run \`ollama pull ${options.modelId}\` explicitly if you want to install it.`,
+          entry.id,
+        );
+      }
+      model = localModelEntry(installed);
+    } else {
+      const persistedVerification = options.modelVerification
+        ?? options.config?.get(`providers.${entry.id}.modelVerification`) as ModelVerification | undefined;
+      model = resolveModelSelection({
+        providerId: entry.id,
+        modelId: options.modelId,
+        verification: persistedVerification,
+        liveModelIds: options.liveModelIds,
+        allowUnverified: options.allowUnverifiedModel,
+      })?.model;
+    }
+    if (!model) {
       const available = listModelsForProvider(entry.id)
         .map((m) => m.id)
         .join(', ');
@@ -275,7 +389,6 @@ export class RuntimeResolver {
       );
     }
 
-    const model = selection.model;
     const credentials = await this.resolveCredentials(entry, options);
     const baseUrl = credentials.endpoint;
     return { entry, model, baseUrl, credentials };

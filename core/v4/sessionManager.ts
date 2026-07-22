@@ -30,6 +30,7 @@ import type {
   SessionStore,
   SearchOptions,
   AppendMessageInput,
+  ActiveSessionState,
 } from './sessionStore';
 import type { Message } from '../../providers/v4/types';
 
@@ -148,13 +149,47 @@ export class SessionManager {
     messages: Message[],
     usage: RecordTurnUsage,
     turnNumber?: number,
+    activeState?: ActiveSessionState,
   ): void {
+    if (activeState) {
+      this.store.recordTurnWithActiveState(
+        sessionId,
+        messages.map((message) => messageToInput(message, turnNumber)),
+        usage,
+        activeState,
+      );
+      return;
+    }
     for (const m of messages) {
       this.store.appendMessage(sessionId, messageToInput(m, turnNumber));
     }
     if (usage.inputTokens > 0 || usage.outputTokens > 0) {
       this.store.addTokenUsage(sessionId, usage.inputTokens, usage.outputTokens);
     }
+  }
+
+  persistActiveState(sessionId: string, state: ActiveSessionState): void {
+    this.store.setActiveState(sessionId, state);
+  }
+
+  resumeActiveState(sessionId: string): ActiveSessionState | null {
+    return this.store.getActiveState(sessionId);
+  }
+
+  loadHistory(sessionId: string): Message[] {
+    return this.store.getMessages(sessionId).map((message): Message => {
+      if (message.role === 'assistant') {
+        return {
+          role: 'assistant',
+          content: message.content,
+          ...(message.toolCalls ? { toolCalls: message.toolCalls } : {}),
+        };
+      }
+      if (message.role === 'tool') {
+        return { role: 'tool', content: message.content, toolCallId: message.toolCallId ?? '' };
+      }
+      return { role: message.role, content: message.content };
+    });
   }
 
   search(query: string, opts?: SearchOptions | number): SessionSearchResult[] {

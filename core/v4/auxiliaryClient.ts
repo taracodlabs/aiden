@@ -113,6 +113,7 @@ export class AuxiliaryClient {
   private nextAttemptIndex = 0;
   private readonly usage = new Map<AuxiliaryPurpose, PurposeUsage>();
   private adapterUnavailable = false;
+  private resolvedAttempt: AuxiliaryAttempt | null = null;
 
   constructor(opts: AuxiliaryClientOptions) {
     this.opts = opts;
@@ -126,6 +127,10 @@ export class AuxiliaryClient {
   private async resolveOnce(): Promise<ProviderAdapter | null> {
     if (this.opts.adapter) {
       this.activeAttemptIndex = 0;
+      this.resolvedAttempt = {
+        providerId: this.opts.defaultProvider,
+        modelId: this.opts.defaultModel,
+      };
       return this.opts.adapter;
     }
     if (!this.opts.resolver) return null;
@@ -149,6 +154,7 @@ export class AuxiliaryClient {
         });
         this.activeAttemptIndex = index;
         this.nextAttemptIndex = index;
+        this.resolvedAttempt = att;
         this.warn(`auxiliary resolved via ${att.providerId}/${att.modelId}`);
         return adapter;
       } catch (err) {
@@ -187,6 +193,12 @@ export class AuxiliaryClient {
             messages,
             tools: [],
             maxTokens,
+            usageContext: {
+              entryPoint: 'auxiliary',
+              purpose: auxiliaryLedgerPurpose(opts.purpose),
+              providerConfigured: this.resolvedAttempt?.providerId ?? this.opts.defaultProvider,
+              modelConfigured: this.resolvedAttempt?.modelId ?? this.opts.defaultModel,
+            },
           }),
           timeoutMs,
         );
@@ -295,4 +307,12 @@ export class AuxiliaryClient {
       );
     });
   }
+}
+
+function auxiliaryLedgerPurpose(
+  purpose: AuxiliaryPurpose,
+): import('./usageLedger').ProviderAttemptPurpose {
+  if (purpose === 'compression') return 'compression';
+  if (purpose === 'session_summary') return 'distillation';
+  return 'auxiliary';
 }

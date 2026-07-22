@@ -305,6 +305,54 @@ export interface ProviderCallInput {
    * to "best-effort" for that provider.
    */
   headers?: Record<string, string>;
+  /**
+   * Normalized accounting context. Adapters use this only for durable
+   * measurements; it is never serialized into a provider request.
+   */
+  usageContext?: ProviderCallUsageContext;
+}
+
+export interface ProviderCallUsageContext {
+  logicalCallId?: string;
+  parentCallId?: string | null;
+  sessionId?: string | null;
+  taskId?: string | null;
+  runId?: string | number | null;
+  entryPoint?: string;
+  purpose?: import('../../core/v4/usageLedger').ProviderAttemptPurpose;
+  providerConfigured?: string | null;
+  modelConfigured?: string | null;
+  fallbackIndex?: number;
+  credentialLabelRedacted?: string | null;
+  contextSnapshotId?: string | null;
+  toolSchemaSnapshotId?: string | null;
+  coreSchemaCount?: number | null;
+  mcpSchemaCount?: number | null;
+  pluginSchemaCount?: number | null;
+  deferredSchemaCount?: number | null;
+  selectedProfile?: string | null;
+  selectedMode?: import('../../core/v4/usageLedger').UsageMode | null;
+  rawToolResultBytes?: number | null;
+  transmittedToolResultBytes?: number | null;
+  memoryTokens?: number | null;
+  userProfileTokens?: number | null;
+  projectMemoryTokens?: number | null;
+  skillIndexTokens?: number | null;
+  loadedSkillTokens?: number | null;
+  /**
+   * Internal, mutable attempt budgets. These objects never cross the wire.
+   * Leaf adapters claim them immediately before each physical attempt so
+   * retries and fallback consume the same limits as initial requests.
+   */
+  attemptBudgets?: ProviderAttemptBudget[];
+}
+
+export interface ProviderAttemptBudget {
+  label: string;
+  maxAttempts?: number;
+  maxEstimatedTokens?: number;
+  usedAttempts: number;
+  usedEstimatedTokens: number;
 }
 
 /**
@@ -331,6 +379,7 @@ export interface ProviderCallOutput {
     outputTokens: number;
     cacheReadTokens?: number;
     cacheWriteTokens?: number;
+    reasoningTokens?: number;
   };
   raw?: unknown;
 }

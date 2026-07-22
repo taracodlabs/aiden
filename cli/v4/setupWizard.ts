@@ -82,6 +82,7 @@ import {
   type ManagedCredentialFileSnapshot,
   type PersistedManagedCredential,
 } from '../../providers/v4/credentialAuthority';
+import { runWithProviderAttemptLedger } from '../../providers/v4/providerAttemptAccounting';
 
 export interface ProviderOption {
   id: string;
@@ -773,6 +774,14 @@ async function runRecoveryMenu(
  */
 export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResult> {
   const paths = opts.paths ?? resolveAidenPaths();
+  return runWithProviderAttemptLedger(
+    paths.sessionsDb,
+    () => runSetupWizardWithLedger({ ...opts, paths }),
+  );
+}
+
+async function runSetupWizardWithLedger(opts: SetupOptions): Promise<SetupResult> {
+  const paths = opts.paths ?? resolveAidenPaths();
   const display = opts.display ?? new Display();
   const prompts = opts.prompts ?? (await defaultPrompts());
   const fetchImpl = opts.fetchImpl ?? fetch;
@@ -1223,18 +1232,17 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     }
 
     if (fetchResult.models.length === 0) {
-      // No models from live or static catalog — fall back to a free-text input.
       if (provider.kind === 'local') {
-        const ans = await prompts.input('Ollama model id', {
-          default: provider.defaultModel ?? 'llama3.1:8b',
-        });
-        if (ans === BACK) {
-          await rollbackCurrentCredential();
-          continue outer;
-        }
-        modelId = ans;
-        modelVerification = 'unverified';
+        display.write(
+          display.error(
+            'No installed Ollama models were found.',
+            'Run `ollama pull <model>`, then reopen setup. A catalog model is not usable until it is installed.',
+          ),
+        );
+        continue outer;
       } else {
+        // Hosted providers may still accept a model id that their discovery
+        // endpoint omitted. Local inventory is handled above and never guesses.
         const ans = await prompts.input('Model id', { default: provider.defaultModel ?? '' });
         if (ans === BACK) {
           await rollbackCurrentCredential();
@@ -1250,12 +1258,17 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         : fetchResult.source === 'last-known-good'
           ? 'unverified'
           : 'curated';
-      display.write(`${kleur.dim(`  Only one model available — using ${modelId}.`)}\n`);
+      display.write(`${kleur.dim(
+        provider.kind === 'local'
+          ? `  One installed model found — using ${modelId}.`
+          : `  Only one model available — using ${modelId}.`,
+      )}\n`);
     } else {
       let pickerResult = fetchResult;
       let showAll = false;
       while (true) {
         const labels = pickerResult.models.map((m) => {
+          const installed = provider.kind === 'local' ? ' · installed' : '';
           const provenance = m.creator && m.hostedBy
             ? ` · ${m.creator} open-weight model · hosted by ${m.hostedBy}`
             : '';
@@ -1263,13 +1276,15 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
           const incompatible = m.compatibleWithAgent === false
             ? ` · incompatible: ${m.incompatibilityReason ?? 'agent capabilities unverified'}`
             : '';
-          return `${m.displayName}${provenance}${recommended}${incompatible}`;
+          return `${m.displayName}${installed}${provenance}${recommended}${incompatible}`;
         });
-        const actions = pickerResult.source === 'fallback'
-          ? ['Enter a model ID', BACK_CHOICE]
-          : showAll
-            ? ['Refresh live catalogue', 'Enter a model ID', BACK_CHOICE]
-            : ['Show all live models', 'Refresh live catalogue', 'Enter a model ID', BACK_CHOICE];
+        const actions = provider.kind === 'local'
+          ? ['Refresh live catalogue', BACK_CHOICE]
+          : pickerResult.source === 'fallback'
+            ? ['Enter a model ID', BACK_CHOICE]
+            : showAll
+              ? ['Refresh live catalogue', 'Enter a model ID', BACK_CHOICE]
+              : ['Show all live models', 'Refresh live catalogue', 'Enter a model ID', BACK_CHOICE];
         const choices = [...labels, ...actions];
         const recIdx = pickerResult.models.findIndex((m) => m.recommended);
         const idx = await prompts.choose(

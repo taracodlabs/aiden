@@ -31,6 +31,7 @@ import {
   type ProviderRegistryEntry,
 } from '../../../providers/v4/registry';
 import { listModelsForProvider } from '../../../providers/v4/modelCatalog';
+import type { FetchModelsResult } from '../../../core/v4/providers/modelFetch';
 import { termWidth } from '../../../core/v4/ui/theme';
 
 export type ProviderTier = 'pro' | 'free' | 'paid' | 'local' | 'subscription';
@@ -58,12 +59,22 @@ export interface ModelPickerOptions {
    * and the `aiden model` CLI path working without extra plumbing.
    */
   isProviderAuthed?: (providerId: string) => boolean;
+  /** Live local-inventory seam. Production uses global fetch. */
+  fetchImpl?: typeof fetch;
+  ollamaBaseUrl?: string;
+}
+
+interface PickerChoice {
+  name: string;
+  value: string;
+  description?: string;
+  disabled?: boolean | string;
 }
 
 export interface PickerPrompts {
   select(opts: {
     message: string;
-    choices: { name: string; value: string; description?: string }[];
+    choices: PickerChoice[];
   }): Promise<string>;
 }
 
@@ -77,6 +88,7 @@ const TIER_BADGE: Record<string, string> = {
 
 const BACK_VALUE = '__back__';
 const CANCEL_VALUE = '__cancel__';
+const OLLAMA_UNAVAILABLE_VALUE = '__ollama_unavailable__';
 
 /** Auth badge rendered into stage-1 provider rows. */
 function authBadge(entry: ProviderRegistryEntry, authed: boolean): string {
@@ -160,10 +172,18 @@ function modelChoice(
   providerId: string,
   isCurrent: boolean,
   layout: PickerLayout,
-): { name: string; value: string; description?: string } {
+  availability?: 'installed' | 'not_installed',
+): PickerChoice {
   const m = listModelsForProvider(providerId).find((x) => x.id === modelId);
   if (!m) {
-    return { name: modelId, value: modelId };
+    const flags = [
+      availability === 'installed' ? '✓ installed' : null,
+      isCurrent ? '← current' : null,
+    ].filter((flag): flag is string => flag !== null);
+    return {
+      name: flags.length > 0 ? `${modelId}  ${flags.join('  ')}` : modelId,
+      value: modelId,
+    };
   }
 
   // Strip "(deprecating <date>)" from the Name cell → trailing flag, so the
@@ -175,15 +195,25 @@ function modelChoice(
   if (depM)         flags.push(`⚠ deprecating ${depM[2]}`);
   // Phase 22 Task 3: ModelEntry.isDefault is the catalog's "recommended" signal.
   if (m.isDefault)  flags.push('⭐');
-  if (isCurrent)    flags.push('← current');
+  if (availability === 'installed') flags.push('✓ installed');
+  if (availability === 'not_installed') flags.push(`not installed · ollama pull ${m.id}`);
+  if (isCurrent && availability !== 'not_installed') flags.push('← current');
   const trail = flags.length ? `  ${flags.join('  ')}` : '';
+  const disabled = availability === 'not_installed'
+    ? `Run ollama pull ${m.id} first`
+    : undefined;
 
   if (layout.mode === 'plain') {
     // Narrow-terminal fallback — single-line concat (legacy shape) so a
     // tight terminal never wraps a padded table into a mess.
     const ctx = ` ${(m.contextLength / 1000).toFixed(0)}K ctx`;
     const pricing = m.pricing ? ` $${m.pricing.inputPerM}/$${m.pricing.outputPerM} per M` : '';
-    return { name: `${baseName}${ctx}${pricing}${trail}`, value: m.id, description: m.notes };
+    return {
+      name: `${baseName}${ctx}${pricing}${trail}`,
+      value: m.id,
+      description: m.notes,
+      disabled,
+    };
   }
 
   const name = truncate(baseName, layout.nameW).padEnd(layout.nameW);
@@ -198,7 +228,7 @@ function modelChoice(
   const row = layout.mode === 'full'
     ? `${name} ${ctx} ${(m.pricing ? `$${m.pricing.inputPerM}/$${m.pricing.outputPerM}` : '—').padEnd(PRICE_W)} ${tools}`
     : `${name} ${ctx} ${tools}`;
-  return { name: `${row}${trail}`, value: m.id, description: m.notes };
+  return { name: `${row}${trail}`, value: m.id, description: m.notes, disabled };
 }
 
 /** Resolve `@inquirer/prompts` lazily so unit tests can swap it out. */
@@ -231,6 +261,23 @@ export async function runModelPicker(
 
   const prompts = opts.promptModule ?? (await defaultPrompts());
   const isAuthed = opts.isProviderAuthed ?? (() => true);
+  // Injected prompts alone are the legacy unit-test seam and remain offline.
+  // Production and tests that explicitly inject fetch use the live local
+  // inventory so a curated catalog row is never mistaken for an installation.
+  const useLiveOllamaInventory = opts.promptModule === undefined || opts.fetchImpl !== undefined;
+  let ollamaInventory: FetchModelsResult | null = null;
+  const loadOllamaInventory = async (): Promise<FetchModelsResult | null> => {
+    if (!useLiveOllamaInventory) return null;
+    if (ollamaInventory) return ollamaInventory;
+    ollamaInventory = await resolver.getLocalModelInventory({
+      baseUrl: opts.ollamaBaseUrl,
+      fetchImpl: opts.fetchImpl,
+      forceRefresh: true,
+    });
+    return ollamaInventory;
+  };
+
+  if (currentProviderId === 'ollama') await loadOllamaInventory();
 
   const providerEntries = Object.values(PROVIDER_REGISTRY).filter(
     (e) => !tier || e.tier === tier,
@@ -244,21 +291,38 @@ export async function runModelPicker(
     // Stage 1 — provider picker.
     const hintParts: string[] = [];
     if (currentProviderId && currentModelId) {
-      hintParts.push(`Current: ${currentProviderId} on ${currentModelId}`);
+      if (currentProviderId === 'ollama' && ollamaInventory?.source !== 'live') {
+        hintParts.push(`Configured: ollama on ${currentModelId} (inventory unavailable)`);
+      } else {
+        const currentInstalled = currentProviderId !== 'ollama'
+          || ollamaInventory === null
+          || ollamaInventory.models.some((model) => model.id === currentModelId);
+        hintParts.push(currentInstalled
+          ? `Current: ${currentProviderId} on ${currentModelId}`
+          : `Configured: ollama on ${currentModelId} (not installed)`);
+      }
     }
     const stage1Message =
       hintParts.length > 0
         ? `⚙ Model Picker — Select Provider · ${hintParts.join(' · ')}`
         : '⚙ Model Picker — Select Provider';
 
-    const providerChoices = providerEntries.map((e) =>
-      providerChoice(
+    const providerChoices = providerEntries.map((e) => {
+      const localModels = e.id === 'ollama' && ollamaInventory
+        ? ollamaInventory.models
+        : null;
+      const currentInstalled = e.id !== 'ollama'
+        || localModels === null
+        || ollamaInventory?.source !== 'live'
+        || !currentModelId
+        || localModels.some((model) => model.id === currentModelId);
+      return providerChoice(
         e,
-        listModelsForProvider(e.id).length,
+        localModels?.length ?? listModelsForProvider(e.id).length,
         isAuthed(e.id),
-        e.id === currentProviderId,
-      ),
-    );
+        e.id === currentProviderId && currentInstalled,
+      );
+    });
     providerChoices.push({ name: 'Cancel', value: CANCEL_VALUE });
 
     let providerId: string;
@@ -272,8 +336,18 @@ export async function runModelPicker(
     }
     if (providerId === CANCEL_VALUE) return null;
 
-    const models = listModelsForProvider(providerId);
-    if (models.length === 0) return null;
+    const catalogModels = listModelsForProvider(providerId);
+    const liveOllama = providerId === 'ollama' ? await loadOllamaInventory() : null;
+    const inventoryAvailable = liveOllama?.source === 'live';
+    const installedModels = inventoryAvailable ? liveOllama.models : [];
+    const installedIds = inventoryAvailable
+      ? new Set(installedModels.map((model) => model.id))
+      : null;
+    const models = liveOllama ? installedModels : catalogModels;
+    const pullableModels = inventoryAvailable
+      ? catalogModels.filter((model) => !installedIds?.has(model.id))
+      : [];
+    if (!liveOllama && models.length === 0) return null;
 
     // Stage 2 — model picker with breadcrumb.
     const providerEntry = PROVIDER_REGISTRY[providerId];
@@ -282,9 +356,14 @@ export async function runModelPicker(
     // the same column widths; degrades by terminal width.
     const layout = pickerLayout(termWidth());
     const header = modelTableHeader(layout);
+    const availabilitySummary = liveOllama
+      ? inventoryAvailable
+        ? `${models.length} installed · ${pullableModels.length} available to pull`
+        : 'inventory unavailable · start Ollama and reopen /model'
+      : `${models.length} available`;
     const stage2Message = header
-      ? `⚙ Model Picker — ${breadcrumb} · Select a model (${models.length} available)\n${header}`
-      : `⚙ Model Picker — ${breadcrumb} · Select a model (${models.length} available)`;
+      ? `⚙ Model Picker — ${breadcrumb} · Select a model (${availabilitySummary})\n${header}`
+      : `⚙ Model Picker — ${breadcrumb} · Select a model (${availabilitySummary})`;
 
     const modelChoices = models.map((m) =>
       modelChoice(
@@ -292,8 +371,25 @@ export async function runModelPicker(
         providerId,
         providerId === currentProviderId && m.id === currentModelId,
         layout,
+        inventoryAvailable ? 'installed' : undefined,
       ),
     );
+    for (const model of pullableModels) {
+      modelChoices.push(modelChoice(
+        model.id,
+        providerId,
+        false,
+        layout,
+        'not_installed',
+      ));
+    }
+    if (liveOllama && !inventoryAvailable) {
+      modelChoices.push({
+        name: 'Ollama unavailable · start `ollama serve`, then reopen /model',
+        value: OLLAMA_UNAVAILABLE_VALUE,
+        disabled: 'Installed models cannot be verified while Ollama is offline',
+      });
+    }
     modelChoices.push({ name: '← Back', value: BACK_VALUE });
     modelChoices.push({ name: 'Cancel', value: CANCEL_VALUE });
 
@@ -308,6 +404,8 @@ export async function runModelPicker(
     }
     if (modelId === CANCEL_VALUE) return null;
     if (modelId === BACK_VALUE) continue; // re-prompt stage 1
+    if (modelId === OLLAMA_UNAVAILABLE_VALUE) continue;
+    if (installedIds && !installedIds.has(modelId)) continue;
 
     return { providerId, modelId };
   }

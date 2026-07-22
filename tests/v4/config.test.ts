@@ -213,4 +213,30 @@ describe('ConfigManager', () => {
     expect(warns.some((w) => w.includes("Unknown top-level key 'terminal'"))).toBe(false);
     expect(((cfg as any).terminal as { backend: string }).backend).toBe('auto');
   });
+
+  it('13. token-efficiency settings are recognized top-level keys', async () => {
+    const warns: string[] = [];
+    const spy = vi
+      .spyOn(console, 'warn')
+      .mockImplementation((msg) => warns.push(String(msg)));
+    await fs.writeFile(
+      configPath,
+      [
+        'usage:',
+        '  mode: economy',
+        'budget:',
+        '  session_token_cap: 12000',
+        '  session_cost_cap_usd: 1.25',
+      ].join('\n'),
+      'utf8',
+    );
+
+    const cfg = await mgr.load();
+    spy.mockRestore();
+
+    expect(warns.some((warning) => /Unknown top-level key '(usage|budget)'/.test(warning))).toBe(false);
+    expect(cfg.usage?.mode).toBe('economy');
+    expect(cfg.budget?.session_token_cap).toBe(12_000);
+    expect(cfg.budget?.session_cost_cap_usd).toBe(1.25);
+  });
 });

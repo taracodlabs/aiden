@@ -30,6 +30,7 @@
  */
 
 import type { Db } from '../db/connection';
+import type { ProviderAttemptLedger } from '../../usageLedger';
 
 const BUDGET_SCOPE = 'daemon_budget';
 const ROW_TTL_DAYS = 7;
@@ -152,6 +153,70 @@ export function createDailyBudgetTracker(
       const now = opts2.now ?? Date.now();
       const date = utcDateKey(now);
       writeRow(date, 0, now);
+    },
+  };
+}
+
+/**
+ * Read-only daily-budget projection over the provider-attempt ledger. Physical
+ * attempts have already been appended by the time post-turn accounting runs,
+ * so addAndCheck must not duplicate them in a second counter.
+ */
+export function createLedgerDailyBudgetTracker(options: {
+  ledger: ProviderAttemptLedger;
+  budget?: number | null;
+  entryPoint?: string;
+}): DailyBudgetTracker {
+  const configuredBudget = options.budget ?? null;
+  const entryPoint = options.entryPoint ?? 'daemon';
+
+  const snapshot = (now: number, budget: number | null): DailyBudgetSnapshot => {
+    const day = new Date(now);
+    day.setUTCHours(0, 0, 0, 0);
+    const records = options.ledger.query({ since: day.getTime(), until: now });
+    const used = records
+      .filter((record) => record.entryPoint === entryPoint)
+      .reduce((total, record) => total
+        + (record.providerInputTokens ?? record.estimatedInputTokens ?? 0)
+        + (record.providerOutputTokens ?? record.estimatedOutputTokens ?? 0), 0);
+    return {
+      date: utcDateKey(now),
+      used,
+      budget,
+      remaining: budget !== null && budget > 0
+        ? Math.max(0, budget - used)
+        : Number.POSITIVE_INFINITY,
+      exhausted: budget !== null && budget > 0 && used >= budget,
+    };
+  };
+
+  return {
+    addAndCheck(tokens, opts = {}) {
+      const budget = opts.budget !== undefined ? opts.budget : configuredBudget;
+      const current = snapshot(opts.now ?? Date.now(), budget);
+      if (current.exhausted) {
+        return {
+          allowed: false,
+          snapshot: current,
+          reason: `daily_budget_exhausted: ${current.used}/${budget} tokens used today (${current.date})`,
+        };
+      }
+      if (budget !== null && budget > 0 && current.used + Math.max(0, tokens) > budget) {
+        return {
+          allowed: false,
+          snapshot: current,
+          reason: `daily_budget_would_exceed: ${tokens} > remaining ${current.remaining}`,
+        };
+      }
+      return { allowed: true, snapshot: current };
+    },
+    peek(opts = {}) {
+      const budget = opts.budget !== undefined ? opts.budget : configuredBudget;
+      return snapshot(opts.now ?? Date.now(), budget);
+    },
+    reset() {
+      // The immutable ledger is authoritative and cannot be reset. Test/admin
+      // reset remains available only on the legacy compatibility tracker.
     },
   };
 }

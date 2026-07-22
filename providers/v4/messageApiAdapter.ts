@@ -41,6 +41,12 @@ import {
 } from './errors';
 import { RequestLifecycle, requestDeadlines, type RequestDeadlines } from './requestLifecycle';
 import { VERSION } from '../../core/version';
+import {
+  beginPhysicalProviderAttempt,
+  byteLength,
+  createLogicalProviderCallId,
+  type PhysicalAttemptLifecycle,
+} from './providerAttemptAccounting';
 
 // ── Public options ──────────────────────────────────────────────────────────
 
@@ -89,7 +95,11 @@ interface WireRequestBody {
   model:        string;
   /** Flat system-prompt string (Anthropic also accepts a typed-block array,
    *  but Aiden only sends the string form). */
-  system?:      string;
+  system?:      string | Array<{
+    type: 'text';
+    text: string;
+    cache_control?: { type: 'ephemeral' };
+  }>;
   messages:     unknown[];
   tools?:       Array<{ name: string; description: string; input_schema: ToolSchema['inputSchema'] }>;
   tool_choice?: { type: 'auto' };
@@ -110,6 +120,7 @@ const BACKOFF_BASE_MS     = 1000;
 interface ActiveDispatch {
   response: Response;
   lifecycle: RequestLifecycle;
+  attempt: PhysicalAttemptLifecycle;
 }
 
 // ── Adapter ────────────────────────────────────────────────────────────────
@@ -147,26 +158,43 @@ export class MessageApiAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     const body  = this.buildBody(input, /* streaming */ false);
-    const active = await this.dispatch(body, /* streaming */ false, input.signal, input.headers);
+    const active = await this.dispatch(body, /* streaming */ false, input);
     let text: string;
     try {
       text = await active.lifecycle.readText(active.response);
     } catch (error) {
-      throw active.lifecycle.classify(error);
+      const classified = active.lifecycle.classify(error);
+      active.attempt.failure(classified, { sent: true });
+      throw classified;
     } finally {
       active.lifecycle.cleanup();
     }
-    const json = JSON.parse(text) as WireMessageBody;
-    return decodeResponse(json);
+    try {
+      const json = JSON.parse(text) as WireMessageBody;
+      const output = decodeResponse(json);
+      active.attempt.success(output, byteLength(text));
+      return output;
+    } catch (error) {
+      active.attempt.failure(error, {
+        sent: true,
+        responseBytes: byteLength(text),
+        status: 'validation_error',
+      });
+      throw error;
+    }
   }
 
   // ── Public: streaming ────────────────────────────────────────────────────
 
   async *callStream(input: ProviderCallInput): AsyncGenerator<StreamEvent, void, void> {
     const body = this.buildBody(input, /* streaming */ true);
-    const active = await this.dispatch(body, /* streaming */ true, input.signal, input.headers);
+    const active = await this.dispatch(body, /* streaming */ true, input);
     const reply = active.response;
     if (!reply.body) {
+      active.attempt.failure(new Error('Provider returned an empty stream.'), {
+        sent: true,
+        status: 'validation_error',
+      });
       // Server promised SSE but gave us nothing — fall through to a synthetic
       // empty done event so the agent loop terminates rather than hangs.
       yield {
@@ -181,10 +209,26 @@ export class MessageApiAdapter implements ProviderAdapter {
       active.lifecycle.cleanup();
       return;
     }
+    let finalOutput: ProviderCallOutput | null = null;
     try {
-      yield* decodeStream(reply.body, input.maxTokens ?? DEFAULT_MAX_TOKENS, active.lifecycle);
+      for await (const event of decodeStream(reply.body, input.maxTokens ?? DEFAULT_MAX_TOKENS, active.lifecycle)) {
+        if (event.type === 'done') finalOutput = event.output;
+        yield event;
+      }
+      if (finalOutput) active.attempt.success(finalOutput);
+      else active.attempt.failure(new Error('Provider stream ended without done.'), {
+        sent: true,
+        status: 'validation_error',
+      });
     } catch (error) {
-      throw active.lifecycle.classify(error);
+      const classified = active.lifecycle.classify(error);
+      active.attempt.failure(classified, {
+        sent: true,
+        ...(classified instanceof Error && classified.name === 'AbortError'
+          ? { status: 'interrupted' as const }
+          : {}),
+      });
+      throw classified;
     } finally {
       active.lifecycle.cleanup();
     }
@@ -229,8 +273,7 @@ export class MessageApiAdapter implements ProviderAdapter {
   private async dispatch(
     body: WireRequestBody,
     streaming: boolean,
-    externalSignal?: AbortSignal,
-    outboundHeaders?: Record<string, string>,
+    input: ProviderCallInput,
   ): Promise<ActiveDispatch> {
     // v4.9.0 Slice 7 — merge caller-supplied outbound headers (e.g.
     // `traceparent`, `X-Aiden-Run-Id`) below the adapter's defaults so
@@ -238,13 +281,25 @@ export class MessageApiAdapter implements ProviderAdapter {
     // but above `extraHeaders` so a deliberate per-deployment override
     // still wins.
     const base = this.buildHeaders(streaming);
-    const headers = outboundHeaders ? { ...outboundHeaders, ...base } : base;
+    const headers = input.headers ? { ...input.headers, ...base } : base;
     const serialised  = JSON.stringify(body);
     const totalTries  = this.maxRetries + 1;
+    const externalSignal = input.signal;
+    const logicalCallId = input.usageContext?.logicalCallId ?? createLogicalProviderCallId();
 
     let lastErr: unknown = null;
 
     for (let attempt = 0; attempt < totalTries; attempt++) {
+      const accounting = beginPhysicalProviderAttempt(input, {
+        providerActual: this.providerName,
+        modelActual: this.model,
+        apiMode: this.apiMode,
+        transport: this.endpoint.startsWith('https:') ? 'https' : 'http',
+        attemptIndex: attempt,
+        fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+        logicalCallId,
+        requestBytes: byteLength(serialised),
+      });
       const lifecycle = new RequestLifecycle(this.providerName, this.deadlines, externalSignal);
       // v4.6 prep — forward an external AbortSignal into this attempt's
       // internal controller so a parent agent that aborts mid-flight
@@ -269,6 +324,7 @@ export class MessageApiAdapter implements ProviderAdapter {
           // timeout. Surface the raw AbortError immediately (no retry)
           // so AidenAgent's catch routes it as 'interrupted'.
           if (externalSignal?.aborted) {
+            accounting.failure(classified, { sent: true, status: 'interrupted' });
             throw classified;
           }
           lastErr = classified;
@@ -283,13 +339,14 @@ export class MessageApiAdapter implements ProviderAdapter {
             true,
           );
         }
+        accounting.failure(lastErr, { sent: true });
         if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt));
+          await sleep(backoffMs(attempt), externalSignal);
           continue;
         }
         throw lastErr;
       }
-      if (response.ok) return { response, lifecycle };
+      if (response.ok) return { response, lifecycle, attempt: accounting };
 
       // Gated request diagnostic. Do not clone or consume the response here:
       // the lifecycle below must remain the sole body reader so its first-byte,
@@ -319,41 +376,48 @@ export class MessageApiAdapter implements ProviderAdapter {
       } catch (error) {
         const classified = lifecycle.classify(error);
         lifecycle.cleanup();
+        accounting.failure(classified, { sent: true });
         throw classified;
       }
       const raw = tryParseJson(responseText);
       lifecycle.cleanup();
 
       if (status === 429) {
+        const error = new ProviderRateLimitError(this.providerName, raw);
+        accounting.failure(error, { sent: true, responseBytes: wireByteLength(raw) });
         if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt));
+          await sleep(backoffMs(attempt), externalSignal);
           continue;
         }
-        throw new ProviderRateLimitError(this.providerName, raw);
+        throw error;
       }
 
       if (status >= 500 && status < 600) {
-        if (attempt < totalTries - 1) {
-          await sleep(backoffMs(attempt));
-          continue;
-        }
-        throw new ProviderError(
+        const error = new ProviderError(
           `Provider ${this.providerName} server error ${status}`,
           this.providerName,
           status,
           raw,
           true,
         );
+        accounting.failure(error, { sent: true, responseBytes: wireByteLength(raw) });
+        if (attempt < totalTries - 1) {
+          await sleep(backoffMs(attempt), externalSignal);
+          continue;
+        }
+        throw error;
       }
 
       // 4xx (auth, bad request, content policy, …) — fail fast, do not retry.
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} request failed (${status})`,
         this.providerName,
         status,
         raw,
         false,
       );
+      accounting.failure(error, { sent: true, responseBytes: wireByteLength(raw) });
+      throw error;
     }
 
     // Unreachable in practice — the loop either returns or throws.
@@ -390,13 +454,29 @@ function parseImageDataUrl(dataUrl: string): { mediaType: string; data: string }
 
 function encodeMessages(
   messages: Message[],
-): { system: string | undefined; wireMessages: unknown[] } {
+): {
+  system: WireRequestBody['system'] | undefined;
+  wireMessages: unknown[];
+} {
   const sysParts: string[]    = [];
+  const sysBlocks: Array<{
+    type: 'text';
+    text: string;
+    cache_control?: { type: 'ephemeral' };
+  }> = [];
   const wireMessages: unknown[] = [];
 
   for (const msg of messages) {
     if (msg.role === 'system') {
       sysParts.push(msg.content);
+      const marker = (msg as Message & {
+        cache_control?: { type: 'ephemeral' };
+      }).cache_control;
+      sysBlocks.push({
+        type: 'text',
+        text: msg.content,
+        ...(marker?.type === 'ephemeral' ? { cache_control: marker } : {}),
+      });
       continue;
     }
 
@@ -450,7 +530,11 @@ function encodeMessages(
   }
 
   const joined = sysParts.join('\n\n').trim();
-  return { system: joined || undefined, wireMessages };
+  const hasCacheMarker = sysBlocks.some((block) => block.cache_control !== undefined);
+  return {
+    system: hasCacheMarker ? sysBlocks : (joined || undefined),
+    wireMessages,
+  };
 }
 
 /** Anthropic stop_reason → Aiden finishReason. */
@@ -507,6 +591,12 @@ function decodeUsage(u: WireMessageBody['usage']): ProviderCallOutput['usage'] {
     out.cacheWriteTokens = u.cache_creation_input_tokens;
   }
   return out;
+}
+
+function wireByteLength(value: unknown): number {
+  if (typeof value === 'string') return byteLength(value);
+  try { return byteLength(JSON.stringify(value) ?? ''); }
+  catch { return 0; }
 }
 
 // ── Streaming decoder ───────────────────────────────────────────────────────
@@ -673,8 +763,26 @@ function backoffMs(attempt: number): number {
   return base + jitter;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) {
+    const error = new Error('The provider retry wait was cancelled.');
+    error.name = 'AbortError';
+    return Promise.reject(error);
+  }
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      const error = new Error('The provider retry wait was cancelled.');
+      error.name = 'AbortError';
+      reject(error);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 /**

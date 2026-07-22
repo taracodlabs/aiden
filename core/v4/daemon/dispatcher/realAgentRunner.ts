@@ -59,6 +59,10 @@ import type {
   AidenAgentResult,
 } from '../../aidenAgent';
 import type { Message, ToolCallRequest, ToolCallResult } from '../../../../providers/v4/types';
+import {
+  currentProviderAttemptLedger,
+  runWithProviderUsageContext,
+} from '../../../../providers/v4/providerAttemptAccounting';
 import type { Db } from '../db/connection';
 import type { RunStore } from '../runStore';
 // v4.10 Slice 10.2b — shared (category, kind) taxonomy.
@@ -87,6 +91,7 @@ import {
 import type { DaemonApprovalPolicy } from './daemonApproval';
 import {
   createDailyBudgetTracker,
+  createLedgerDailyBudgetTracker,
   type DailyBudgetTracker,
 } from './dailyBudgetTracker';
 import {
@@ -162,10 +167,15 @@ export function createRealAgentRunner(
 ): DaemonAgentRunner {
   const log = opts.log ?? (() => { /* silent */ });
   const now = opts.now ?? Date.now;
-  const tracker: DailyBudgetTracker = createDailyBudgetTracker({
-    db:     opts.db,
-    budget: opts.dailyBudget ?? readDailyBudgetFromEnv(),
-  });
+  const configuredBudget = opts.dailyBudget ?? readDailyBudgetFromEnv();
+  const usageLedger = currentProviderAttemptLedger();
+  const tracker: DailyBudgetTracker = usageLedger
+    ? createLedgerDailyBudgetTracker({
+        ledger: usageLedger,
+        budget: configuredBudget,
+        entryPoint: 'daemon',
+      })
+    : createDailyBudgetTracker({ db: opts.db, budget: configuredBudget });
 
   return {
     async invoke(input: DaemonAgentInput): Promise<DaemonAgentResult> {
@@ -349,7 +359,17 @@ export function createRealAgentRunner(
       // status) feeds the verify-before-done gate below, same as the REPL.
       let declaredTaskStatus: string | null = null;
       try {
-        result = await agent.runConversation(history, {
+        result = await runWithProviderUsageContext({
+          sessionId: input.sessionId,
+          taskId,
+          runId,
+          entryPoint: 'daemon',
+        }, () => agent.runConversation(history, {
+          sessionId: input.sessionId,
+          taskId,
+          runId,
+          entryPoint: 'daemon',
+          signal: perTurnWatcher.signal,
           // The agent honours its own abort signal via per-tool aborts;
           // tools that respect AbortSignal (shell_exec, fetch_*) will
           // bail when perTurnWatcher trips.
@@ -387,10 +407,10 @@ export function createRealAgentRunner(
               });
             } catch { /* persistence faults must never break dispatch */ }
           },
-        });
+        }));
         // Stamp the actual token usage onto the watcher for the
         // post-turn snapshot below.
-        const tokens = extractTokens(result);
+        const tokens = extractLedgerTokens(runId) ?? extractTokens(result);
         if (tokens > 0) perTurnWatcher.tally(tokens);
       } catch (e) {
         invocationError = e instanceof Error ? (e.stack ?? e.message) : String(e);
@@ -640,8 +660,21 @@ function safeShortJson(value: unknown, maxBytes: number): string {
  */
 function extractTokens(result: AidenAgentResult | null): number {
   if (!result) return 0;
-  const r = result as unknown as { usage?: { totalTokens?: number; total?: number } };
-  return r.usage?.totalTokens ?? r.usage?.total ?? 0;
+  const totalUsage = (result as Partial<AidenAgentResult>).totalUsage;
+  if (totalUsage) return totalUsage.inputTokens + totalUsage.outputTokens;
+  // Compatibility for injected runners that still expose the earlier shape.
+  const legacy = result as unknown as { usage?: { totalTokens?: number; total?: number } };
+  return legacy.usage?.totalTokens ?? legacy.usage?.total ?? 0;
+}
+
+function extractLedgerTokens(runId: number): number | null {
+  const ledger = currentProviderAttemptLedger();
+  if (!ledger) return null;
+  const records = ledger.query({ runId: String(runId) });
+  if (records.length === 0) return null;
+  return records.reduce((total, record) => total
+    + (record.providerInputTokens ?? record.estimatedInputTokens ?? 0)
+    + (record.providerOutputTokens ?? record.estimatedOutputTokens ?? 0), 0);
 }
 
 /**
