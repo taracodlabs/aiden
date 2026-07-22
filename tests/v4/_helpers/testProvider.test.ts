@@ -42,7 +42,7 @@ describe('testProvider helper', () => {
     expect(p).not.toBeNull();
     expect(p!.source).toBe('groq');
     expect(p!.providerId).toBe('groq');
-    expect(p!.modelId).toBe('llama-3.3-70b-versatile');
+    expect(p!.modelId).toBe('openai/gpt-oss-120b');
   });
 
   it('returns groq2 when only GROQ_API_KEY_2 is set', async () => {

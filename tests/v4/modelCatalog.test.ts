@@ -30,9 +30,9 @@ describe('MODEL_CATALOG', () => {
   });
 
   it('findModel locates exact (providerId, modelId) pairs', () => {
-    expect(findModel('groq', 'llama-3.3-70b-versatile')?.isDefault).toBe(true);
+    expect(findModel('groq', 'openai/gpt-oss-120b')?.isDefault).toBe(true);
     expect(findModel('groq', 'nope')).toBeUndefined();
-    expect(findModel('nope', 'llama-3.3-70b-versatile')).toBeUndefined();
+    expect(findModel('nope', 'openai/gpt-oss-120b')).toBeUndefined();
   });
 
   it('v4.11 — DeepSeek V4 Pro/Flash resolve via findModel (selectable in /model)', () => {
@@ -40,7 +40,7 @@ describe('MODEL_CATALOG', () => {
     expect(pro).toBeDefined();
     expect(pro!.displayName).toBe('DeepSeek V4 Pro');
     expect(pro!.supportsReasoning).toBe(true);
-    expect(pro!.isDefault).toBe(false);          // selectable, not default
+    expect(pro!.isDefault).toBe(true);
     const flash = findModel('deepseek', 'deepseek-v4-flash');
     expect(flash).toBeDefined();
     expect(flash!.supportsReasoning).toBe(true);
@@ -48,9 +48,9 @@ describe('MODEL_CATALOG', () => {
     // pricing omitted (unknown — not cited in-repo).
     expect(pro!.pricing).toBeUndefined();
     expect(flash!.pricing).toBeUndefined();
-    // default stays on deepseek-chat (unchanged), which now flags deprecation.
+    // The current Pro identifier replaces the imminently retired alias.
     const chat = findModel('deepseek', 'deepseek-chat');
-    expect(chat!.isDefault).toBe(true);
+    expect(chat!.isDefault).toBe(false);
     expect(chat!.displayName).toMatch(/deprecating 2026-07-24/);
     expect(findModel('deepseek', 'deepseek-reasoner')!.displayName).toMatch(/deprecating 2026-07-24/);
   });
@@ -65,8 +65,8 @@ describe('MODEL_CATALOG', () => {
     expect(providers.has('openai')).toBe(true);
 
     // A unique-to-one-provider model returns exactly one match.
-    const uniques = findProvidersForModelId('llama-3.3-70b-versatile');
+    const uniques = findProvidersForModelId('gemini-2.5-pro');
     expect(uniques.length).toBe(1);
-    expect(uniques[0].providerId).toBe('groq');
+    expect(uniques[0].providerId).toBe('gemini');
   });
 });

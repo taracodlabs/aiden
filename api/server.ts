@@ -45,6 +45,15 @@ import { pwClose } from '../core/playwrightBridge'
 // The shared `bootstrapDaemon` module handles every responsibility — db open,
 // runtime lock, crash recovery, health endpoints, signal handlers.
 import { bootstrapDaemon } from '../core/v4/daemon'
+import { resolveAidenPaths } from '../core/v4/paths'
+import { estimateCompatibilityUsage } from '../core/v4/compatibilityUsage'
+import {
+  beginPhysicalProviderAttempt,
+  byteLength as providerByteLength,
+  configureProviderAttemptLedger,
+  createLogicalProviderCallId,
+  currentProviderAttemptLedger,
+} from '../providers/v4/providerAttemptAccounting'
 import { getScreenSize, takeScreenshot as captureScreen } from '../core/computerControl'
 import { planWithLLM, executePlan, respondWithResults, callLLM, surfaceRelevantMemories, interruptCurrentCall, getBudgetState, setStatusEmitter } from '../core/agentLoop'
 import { getVerb } from '../core/statusVerbs'
@@ -481,6 +490,7 @@ const kbProgress = new Map<string, { status: 'processing' | 'done' | 'error'; pr
 // â”€â”€ App factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function createApiServer(): Express {
+  configureProviderAttemptLedger(resolveAidenPaths().sessionsDb)
   const app = express()
 
   // â”€â”€ Middleware â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -3830,8 +3840,35 @@ export function createApiServer(): Express {
       // ── Multi-day history (last 7 days from JSONL files) ──────
       const dailyHistory: Array<{ date: string; totalUSD: number; systemUSD: number; userUSD: number; totalTokens: number; calls: number }> = []
       const providerStats: Record<string, { calls: number; totalCost: number; inputTokens: number; outputTokens: number }> = {}
+      const usageLedger = currentProviderAttemptLedger()
+      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000
+      const ledgerRecords = usageLedger?.query({ since: sevenDaysAgo }) ?? []
 
-      if (fs.existsSync(costDir)) {
+      if (ledgerRecords.length > 0) {
+        const days = new Map<string, { totalUSD: number; systemUSD: number; userUSD: number; totalTokens: number; calls: number }>()
+        for (const record of ledgerRecords) {
+          const date = new Date(record.startedAt).toISOString().slice(0, 10)
+          const day = days.get(date) ?? { totalUSD: 0, systemUSD: 0, userUSD: 0, totalTokens: 0, calls: 0 }
+          const inputTokens = record.providerInputTokens ?? record.estimatedInputTokens ?? 0
+          const outputTokens = record.providerOutputTokens ?? record.estimatedOutputTokens ?? 0
+          const cost = record.costAmount ?? 0
+          day.totalUSD += cost
+          day.totalTokens += inputTokens + outputTokens
+          day.calls += 1
+          if (record.purpose === 'setup' || record.purpose === 'readiness') day.systemUSD += cost
+          else day.userUSD += cost
+          days.set(date, day)
+          const provider = record.providerActual ?? record.providerConfigured ?? 'unknown'
+          if (!providerStats[provider]) providerStats[provider] = { calls: 0, totalCost: 0, inputTokens: 0, outputTokens: 0 }
+          providerStats[provider].calls += 1
+          providerStats[provider].totalCost += cost
+          providerStats[provider].inputTokens += inputTokens
+          providerStats[provider].outputTokens += outputTokens
+        }
+        for (const [date, values] of [...days.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+          dailyHistory.push({ date, ...values })
+        }
+      } else if (fs.existsSync(costDir)) {
         const costFiles = fs.readdirSync(costDir)
           .filter(f => f.endsWith('.jsonl'))
           .sort()
@@ -3891,15 +3928,30 @@ export function createApiServer(): Express {
 
       // ── Today's live summary ───────────────────────────────────
       const today = costTracker.getDailySummary()
+      const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0)
+      const ledgerToday = usageLedger?.project({ since: todayStart.getTime(), includeSetup: true }) ?? null
+      const ledgerTodayRecords = usageLedger?.query({ since: todayStart.getTime() }) ?? []
+      const ledgerTodaySystemCost = ledgerTodayRecords.reduce((sum, record) =>
+        sum + ((record.purpose === 'setup' || record.purpose === 'readiness') ? record.costAmount ?? 0 : 0), 0)
+      const ledgerTodayUserCost = ledgerTodayRecords.reduce((sum, record) =>
+        sum + ((record.purpose !== 'setup' && record.purpose !== 'readiness') ? record.costAmount ?? 0 : 0), 0)
+      const ledgerTodayByProvider = ledgerTodayRecords.reduce<Record<string, number>>((totals, record) => {
+        const provider = record.providerActual ?? record.providerConfigured ?? 'unknown'
+        totals[provider] = (totals[provider] ?? 0) + (record.costAmount ?? 0)
+        return totals
+      }, {})
+      const hasLedgerToday = !!ledgerToday && ledgerToday.physicalAttempts > 0
 
       res.json({
         today: {
-          cost:         today.totalUSD,
-          userCost:     today.userUSD,
-          systemCost:   today.systemUSD,
-          byProvider:   today.byProvider,
+          cost:         hasLedgerToday ? ledgerToday.knownCostAmount : today.totalUSD,
+          userCost:     hasLedgerToday ? ledgerTodayUserCost : today.userUSD,
+          systemCost:   hasLedgerToday ? ledgerTodaySystemCost : today.systemUSD,
+          byProvider:   hasLedgerToday ? ledgerTodayByProvider : today.byProvider,
           currency:     'USD',
           budget:       costTracker.getDailyBudget(),
+          costStatus:   hasLedgerToday && ledgerToday.unknownCostAttempts > 0 ? 'partially_unknown' : 'estimated',
+          physicalAttempts: ledgerToday?.physicalAttempts ?? 0,
         },
         dailyHistory,
         toolStats: Object.entries(toolStats)
@@ -5271,6 +5323,31 @@ export function createApiServer(): Express {
     const created      = Math.floor(Date.now() / 1000)
     const modelName    = model || 'aiden-3.13'
     const port         = (req.socket as any)?.localPort ?? 4200
+    const normalizedUsageMessages = messages.map((message) => ({
+      role: message.role,
+      content: textOf(message.content),
+    }))
+    const requestForAccounting = {
+      messages: normalizedUsageMessages as import('../providers/v4/types').Message[],
+      tools: [],
+      usageContext: {
+        logicalCallId: createLogicalProviderCallId(),
+        sessionId,
+        entryPoint: 'compatibility_api',
+        purpose: 'legacy_api' as const,
+        providerConfigured: 'legacy-router',
+        modelConfigured: modelName,
+      },
+    }
+    const attempt = beginPhysicalProviderAttempt(requestForAccounting, {
+      providerActual: 'legacy-router',
+      modelActual: modelName,
+      apiMode: 'chat_completions',
+      transport: 'local-loopback-sse',
+      attemptIndex: 0,
+      logicalCallId: requestForAccounting.usageContext.logicalCallId,
+      requestBytes: providerByteLength(JSON.stringify(normalizedUsageMessages)),
+    })
 
     if (stream) {
       // ── Streaming: translate agent token events → OpenAI deltas ─
@@ -5288,14 +5365,24 @@ export function createApiServer(): Express {
       res.write(chunk({ role: 'assistant' }, null))
 
       try {
-        await _driveAgentSSE(userText, history, sessionId, port, (tok) => {
+        const fullText = await _driveAgentSSE(userText, history, sessionId, port, (tok) => {
           res.write(chunk({ content: tok }, null))
         })
+        const usage = estimateCompatibilityUsage(normalizedUsageMessages, fullText)
+        attempt.success({ content: fullText, toolCalls: [], finishReason: 'stop', usage: { inputTokens: 0, outputTokens: 0 } }, providerByteLength(fullText))
+        res.write(`data: ${JSON.stringify({
+          id: completionId,
+          object: 'chat.completion.chunk',
+          created,
+          model: modelName,
+          choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+          usage,
+        })}\n\n`)
       } catch (e: any) {
+        attempt.failure(e, { sent: true })
         res.write(`data: ${JSON.stringify({ error: e.message })}\n\n`)
       }
 
-      res.write(chunk({}, 'stop'))
       res.write('data: [DONE]\n\n')
       res.end()
 
@@ -5303,19 +5390,18 @@ export function createApiServer(): Express {
       // ── Non-streaming: collect full response, return as JSON ────
       try {
         const fullText = await _driveAgentSSE(userText, history, sessionId, port, () => {})
+        const usage = estimateCompatibilityUsage(normalizedUsageMessages, fullText)
+        attempt.success({ content: fullText, toolCalls: [], finishReason: 'stop', usage: { inputTokens: 0, outputTokens: 0 } }, providerByteLength(fullText))
         res.json({
           id:      completionId,
           object:  'chat.completion',
           created,
           model:   modelName,
           choices: [{ index: 0, message: { role: 'assistant', content: fullText }, finish_reason: 'stop' }],
-          usage: {
-            prompt_tokens:     Math.ceil(userText.length / 4),
-            completion_tokens: Math.ceil(fullText.length / 4),
-            total_tokens:      Math.ceil((userText.length + fullText.length) / 4),
-          },
+          usage,
         })
       } catch (e: any) {
+        attempt.failure(e, { sent: true })
         res.status(500).json({ error: { message: e.message, type: 'server_error' } })
       }
     }

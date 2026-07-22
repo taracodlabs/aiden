@@ -43,7 +43,13 @@ import {
   ToolCallRequest,
   ToolSchema,
 } from './types';
-import { ProviderError, ProviderTimeoutError } from './errors';
+import { ProviderError, ProviderPhaseTimeoutError } from './errors';
+import { RequestLifecycle, requestDeadlines, type RequestDeadlines } from './requestLifecycle';
+import {
+  beginPhysicalProviderAttempt,
+  byteLength,
+  createLogicalProviderCallId,
+} from './providerAttemptAccounting';
 
 export interface LocalPromptToolsAdapterOptions {
   /** Default 'http://localhost:11434'. No trailing slash. */
@@ -54,6 +60,10 @@ export interface LocalPromptToolsAdapterOptions {
   providerName: string;
   /** Per-request timeout. Default 120_000. */
   timeoutMs?: number;
+  connectionTimeoutMs?: number;
+  firstByteTimeoutMs?: number;
+  bodyIdleTimeoutMs?: number;
+  totalTimeoutMs?: number;
   /** Retries on transient failures. Default 0 — local server, fail fast. */
   maxRetries?: number;
 }
@@ -90,6 +100,11 @@ const DEFAULT_BASE_URL = 'http://localhost:11434';
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_RETRIES = 0;
 
+interface ActiveDispatch {
+  response: Response;
+  lifecycle: RequestLifecycle;
+}
+
 /**
  * Hermes-2-Pro / VLLM tool_call regex.
  * Matches both closed and unclosed tags (truncated generation):
@@ -104,6 +119,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
   private readonly model: string;
   private readonly providerName: string;
   private readonly timeoutMs: number;
+  private readonly deadlines: RequestDeadlines;
   private readonly maxRetries: number;
 
   constructor(options: LocalPromptToolsAdapterOptions) {
@@ -111,6 +127,12 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
     this.model = options.model;
     this.providerName = options.providerName;
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.deadlines = requestDeadlines(this.timeoutMs, {
+      connectionMs: options.connectionTimeoutMs,
+      firstByteMs: options.firstByteTimeoutMs,
+      bodyIdleMs: options.bodyIdleTimeoutMs,
+      totalMs: options.totalTimeoutMs,
+    });
     this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   }
 
@@ -121,16 +143,47 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
 
     const totalAttempts = this.maxRetries + 1;
     let lastError: ProviderError | null = null;
+    const serialised = JSON.stringify(body);
+    const logicalCallId = input.usageContext?.logicalCallId ?? createLogicalProviderCallId();
 
     for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      const accounting = beginPhysicalProviderAttempt(input, {
+        providerActual: this.providerName,
+        modelActual: this.model,
+        apiMode: this.apiMode,
+        transport: this.baseUrl.startsWith('https:') ? 'https' : 'http',
+        attemptIndex: attempt - 1,
+        fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+        logicalCallId,
+        requestBytes: byteLength(serialised),
+      });
       try {
-        const response = await this.fetchWithTimeout(url, headers, body, input.signal);
+        const active = await this.fetchWithLifecycle(url, headers, body, input.signal);
+        const response = active.response;
+        let rawText: string;
+        try {
+          rawText = await active.lifecycle.readText(response);
+        } catch (error) {
+          throw active.lifecycle.classify(error);
+        } finally {
+          active.lifecycle.cleanup();
+        }
         if (response.ok) {
-          const json = (await response.json()) as OllamaChatResponse;
-          return this.parseResponse(json);
+          try {
+            const json = JSON.parse(rawText) as OllamaChatResponse;
+            const output = this.parseResponse(json);
+            accounting.success(output, byteLength(rawText));
+            return output;
+          } catch (error) {
+            accounting.failure(error, {
+              sent: true,
+              responseBytes: byteLength(rawText),
+              status: 'validation_error',
+            });
+            throw error;
+          }
         }
         const status = response.status;
-        const rawText = await this.safeReadText(response);
         const retryable = status >= 500 || status === 429;
         // Phase v4.1.1-oauth-fix Phase 5: short message only. The raw
         // body flows via the .raw arg and composeMessage in errors.ts
@@ -144,12 +197,18 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
           rawText,
           retryable,
         );
+        accounting.failure(err, { sent: true, responseBytes: byteLength(rawText) });
         if (!retryable || attempt >= totalAttempts) throw err;
         lastError = err;
         await this.sleep(this.backoffMs(attempt));
       } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') {
+          accounting.failure(err, { sent: true, status: 'interrupted' });
+          throw err;
+        }
         if (err instanceof ProviderError && !err.retryable) throw err;
-        if (err instanceof ProviderTimeoutError) {
+        if (err instanceof ProviderPhaseTimeoutError) {
+          accounting.failure(err, { sent: true });
           lastError = err;
           if (attempt < totalAttempts) {
             await this.sleep(this.backoffMs(attempt));
@@ -158,6 +217,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
           throw err;
         }
         if (err instanceof ProviderError) {
+          accounting.failure(err, { sent: true });
           lastError = err;
           if (attempt < totalAttempts) {
             await this.sleep(this.backoffMs(attempt));
@@ -173,6 +233,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
           err,
           true,
         );
+        accounting.failure(wrapped, { sent: true });
         if (attempt < totalAttempts) {
           lastError = wrapped;
           await this.sleep(this.backoffMs(attempt));
@@ -209,74 +270,74 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
     const body = { ...baseBody, stream: true };
     const url = `${this.baseUrl}/api/chat`;
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const serialised = JSON.stringify(body);
+    const accounting = beginPhysicalProviderAttempt(input, {
+      providerActual: this.providerName,
+      modelActual: this.model,
+      apiMode: this.apiMode,
+      transport: this.baseUrl.startsWith('https:') ? 'https' : 'http',
+      attemptIndex: 0,
+      fallbackIndex: input.usageContext?.fallbackIndex ?? 0,
+      logicalCallId: input.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+      requestBytes: byteLength(serialised),
+    });
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    // v4.6 prep — forward external abort into the internal controller.
-    let externalAbortHandler: (() => void) | null = null;
-    if (input.signal) {
-      if (input.signal.aborted) {
-        controller.abort();
-      } else {
-        externalAbortHandler = () => controller.abort();
-        input.signal.addEventListener('abort', externalAbortHandler, { once: true });
-      }
-    }
-    let response: Response;
+    let active: ActiveDispatch;
     try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+      active = await this.fetchWithLifecycle(url, headers, body, input.signal);
     } catch (err) {
-      clearTimeout(timer);
-      if (externalAbortHandler && input.signal) {
-        input.signal.removeEventListener('abort', externalAbortHandler);
-      }
       if (err instanceof Error && err.name === 'AbortError') {
-        // v4.6 prep — external abort takes priority over internal timeout.
-        if (input.signal?.aborted) {
-          throw err;
-        }
-        throw new ProviderTimeoutError(this.providerName, this.timeoutMs);
+        accounting.failure(err, { sent: true, status: 'interrupted' });
+        throw err;
       }
-      throw new ProviderError(
+      if (err instanceof Error && err.name === 'ProviderPhaseTimeoutError') {
+        accounting.failure(err, { sent: true });
+        throw err;
+      }
+      const error = new ProviderError(
         `Ollama not reachable at ${this.baseUrl}: ${err instanceof Error ? err.message : String(err)}`,
         this.providerName,
         undefined,
         err,
         true,
       );
+      accounting.failure(error, { sent: true });
+      throw error;
     }
+    const response = active.response;
 
     if (!response.ok) {
-      clearTimeout(timer);
-      if (externalAbortHandler && input.signal) {
-        input.signal.removeEventListener('abort', externalAbortHandler);
-      }
       const status = response.status;
-      const rawText = await this.safeReadText(response);
+      let rawText: string;
+      try {
+        rawText = await active.lifecycle.readText(response);
+      } catch (error) {
+        const classified = active.lifecycle.classify(error);
+        accounting.failure(classified, { sent: true });
+        throw classified;
+      } finally {
+        active.lifecycle.cleanup();
+      }
       // Phase v4.1.1-oauth-fix Phase 5: composeMessage handles body
       // rendering centrally; inlining it here would duplicate.
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} returned ${status}`,
         this.providerName,
         status,
         rawText,
         status >= 500,
       );
+      accounting.failure(error, { sent: true, responseBytes: byteLength(rawText) });
+      throw error;
     }
     if (!response.body) {
-      clearTimeout(timer);
-      if (externalAbortHandler && input.signal) {
-        input.signal.removeEventListener('abort', externalAbortHandler);
-      }
-      throw new ProviderError(
+      active.lifecycle.cleanup();
+      const error = new ProviderError(
         `Provider ${this.providerName} returned an empty stream body`,
         this.providerName,
       );
+      accounting.failure(error, { sent: true, status: 'validation_error' });
+      throw error;
     }
     // Response is good; the stream consumer will run for a while. The
     // controller stays armed (with `externalSignal` still listening) so
@@ -294,7 +355,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
 
     try {
       while (true) {
-        const { value, done } = await reader.read();
+        const { value, done } = await active.lifecycle.readChunk(reader);
         if (done) break;
         lineBuffer += decoder.decode(value, { stream: true });
         let nl: number;
@@ -339,24 +400,26 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
         }
       }
     } catch (err) {
-      clearTimeout(timer);
-      // v4.6 prep — external abort during mid-stream read surfaces as
-      // AbortError; re-throw so AidenAgent routes it as 'interrupted'.
-      if (err instanceof Error && err.name === 'AbortError' && input.signal?.aborted) {
-        throw err;
+      const classified = active.lifecycle.classify(err);
+      if (classified instanceof Error &&
+          (classified.name === 'AbortError' || classified.name === 'ProviderPhaseTimeoutError')) {
+        accounting.failure(classified, {
+          sent: true,
+          ...(classified.name === 'AbortError' ? { status: 'interrupted' as const } : {}),
+        });
+        throw classified;
       }
-      throw new ProviderError(
+      const error = new ProviderError(
         `Provider ${this.providerName} stream interrupted: ${err instanceof Error ? err.message : String(err)}`,
         this.providerName,
         undefined,
         err,
         true,
       );
+      accounting.failure(error, { sent: true });
+      throw error;
     } finally {
-      clearTimeout(timer);
-      if (externalAbortHandler && input.signal) {
-        input.signal.removeEventListener('abort', externalAbortHandler);
-      }
+      active.lifecycle.cleanup();
       try {
         reader.releaseLock();
       } catch {
@@ -397,6 +460,7 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
         outputTokens: evalCount,
       },
     };
+    accounting.success(output);
     yield { type: 'done', output };
   }
 
@@ -575,54 +639,26 @@ export class LocalPromptToolsAdapter implements ProviderAdapter {
     return { textBefore, toolCalls };
   }
 
-  private async fetchWithTimeout(
+  private async fetchWithLifecycle(
     url: string,
     headers: Record<string, string>,
-    body: OllamaChatRequest,
+    body: OllamaChatRequest | (Omit<OllamaChatRequest, 'stream'> & { stream: true }),
     externalSignal?: AbortSignal,
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    // v4.6 prep — forward external abort into the internal controller.
-    let externalAbortHandler: (() => void) | null = null;
-    if (externalSignal) {
-      if (externalSignal.aborted) {
-        controller.abort();
-      } else {
-        externalAbortHandler = () => controller.abort();
-        externalSignal.addEventListener('abort', externalAbortHandler, { once: true });
-      }
-    }
+  ): Promise<ActiveDispatch> {
+    const lifecycle = new RequestLifecycle(this.providerName, this.deadlines, externalSignal);
     try {
-      return await fetch(url, {
+      const response = await lifecycle.race(fetch(url, {
         method: 'POST',
         headers,
         body: JSON.stringify(body),
-        signal: controller.signal,
-      });
+        signal: lifecycle.signal,
+      }));
+      lifecycle.markHeaders();
+      return { response, lifecycle };
     } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        // v4.6 prep — external abort takes priority over internal timeout.
-        // Surface the raw AbortError so AidenAgent routes it as 'interrupted'.
-        if (externalSignal?.aborted) {
-          throw err;
-        }
-        throw new ProviderTimeoutError(this.providerName, this.timeoutMs);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-      if (externalAbortHandler && externalSignal) {
-        externalSignal.removeEventListener('abort', externalAbortHandler);
-      }
-    }
-  }
-
-  private async safeReadText(response: Response): Promise<string> {
-    try {
-      return await response.text();
-    } catch {
-      return '';
+      const classified = lifecycle.classify(err);
+      lifecycle.cleanup();
+      throw classified;
     }
   }
 

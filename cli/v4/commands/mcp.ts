@@ -62,6 +62,7 @@ import {
 } from '../envSources';
 import { CredentialResolver } from '../../../providers/v4/credentialResolver';
 import { RuntimeResolver } from '../../../providers/v4/runtimeResolver';
+import { providerMainDefault } from '../../../providers/v4/providerModelAuthority';
 import type { ProviderAdapter } from '../../../providers/v4/types';
 import type { ProviderOption } from '../../../core/v4/subagent/providerRotation';
 // v4.6 Phase 2R — MCP-mode subagent_fanout now routes children
@@ -254,7 +255,7 @@ async function wireSubagentFanout(opts: WireOptions): Promise<void> {
   }
 
   const providerId = config.getValue<string>('model.provider', 'groq')!;
-  const modelId    = config.getValue<string>('model.modelId', 'llama-3.3-70b-versatile')!;
+  const modelId    = config.getValue<string>('model.modelId', providerMainDefault(providerId) ?? '')!;
 
   const credentialResolver = new CredentialResolver(opts.paths.authJson);
   const resolver           = new RuntimeResolver(credentialResolver);

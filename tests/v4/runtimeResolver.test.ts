@@ -3,7 +3,11 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { RuntimeResolver, type ConfigProvider } from '../../providers/v4/runtimeResolver';
+import {
+  RuntimeResolver,
+  type ConfigProvider,
+  type RuntimeResolverOptions,
+} from '../../providers/v4/runtimeResolver';
 import { CredentialResolver } from '../../providers/v4/credentialResolver';
 import { ProviderError } from '../../providers/v4/errors';
 // Phase 5 — resolve() now returns a preflight-WRAPPED adapter (the single
@@ -43,8 +47,21 @@ afterEach(async () => {
   }
 });
 
-function makeResolver(): RuntimeResolver {
-  return new RuntimeResolver(new CredentialResolver(authPath));
+const INSTALLED_OLLAMA_MODELS = [
+  'gemma4:e4b-32k',
+  'gemma4:e4b-16k',
+  'gemma4:e4b-8k',
+  'gemma4:e4b',
+] as const;
+
+function ollamaFetch(models: readonly string[] = INSTALLED_OLLAMA_MODELS) {
+  return vi.fn(async () => new Response(JSON.stringify({
+    models: models.map((name) => ({ name })),
+  }), { status: 200, headers: { 'content-type': 'application/json' } }));
+}
+
+function makeResolver(options?: RuntimeResolverOptions): RuntimeResolver {
+  return new RuntimeResolver(new CredentialResolver(authPath), options);
 }
 
 describe('RuntimeResolver.resolve', () => {
@@ -52,7 +69,7 @@ describe('RuntimeResolver.resolve', () => {
     process.env.GROQ_API_KEY = 'gsk-test-123';
     const adapter = await makeResolver().resolve({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
     });
     expect(wrapped(adapter)).toBe(true);
     expect(adapter.apiMode).toBe('chat_completions');
@@ -79,12 +96,42 @@ describe('RuntimeResolver.resolve', () => {
   });
 
   it('4. resolves local prompt-tools mode to LocalPromptToolsAdapter (no creds needed)', async () => {
-    const adapter = await makeResolver().resolve({
+    const adapter = await makeResolver({ fetchImpl: ollamaFetch(['llama3.2']) }).resolve({
       providerId: 'ollama',
       modelId: 'llama3.2',
     });
     expect(wrapped(adapter)).toBe(true);
     expect(adapter.apiMode).toBe('ollama_prompt_tools');
+  });
+
+  it('accepts every exact model tag reported by the live Ollama inventory', async () => {
+    const fetchImpl = ollamaFetch();
+    const resolver = makeResolver({ fetchImpl });
+
+    for (const modelId of INSTALLED_OLLAMA_MODELS) {
+      const adapter = await resolver.resolve({ providerId: 'ollama', modelId });
+      expect(adapter.apiMode).toBe('ollama_prompt_tools');
+    }
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(new Set(resolver.listModels('ollama').map((model) => model.id)))
+      .toEqual(new Set(INSTALLED_OLLAMA_MODELS));
+  });
+
+  it('rejects catalog recommendations that are not installed without pulling them', async () => {
+    const fetchImpl = ollamaFetch();
+    await expect(makeResolver({ fetchImpl }).resolve({
+      providerId: 'ollama',
+      modelId: 'llama3.2',
+    })).rejects.toThrow(/not installed.*ollama pull llama3\.2/i);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an offline Ollama runtime without substituting the static catalog', async () => {
+    const fetchImpl = vi.fn(async () => { throw new Error('connect ECONNREFUSED'); });
+    await expect(makeResolver({ fetchImpl: fetchImpl as typeof fetch }).resolve({
+      providerId: 'ollama',
+      modelId: 'gemma4:e4b-32k',
+    })).rejects.toThrow(/Ollama is offline or unavailable.*reopen.*model/i);
   });
 
   it('5. throws clear error for unknown model', async () => {
@@ -104,7 +151,7 @@ describe('RuntimeResolver.resolve', () => {
     await expect(
       makeResolver().resolve({
         providerId: 'groq',
-        modelId: 'llama-3.3-70b-versatile',
+        modelId: 'openai/gpt-oss-120b',
       }),
     ).rejects.toThrow(/No API key found for groq.*GROQ_API_KEY/);
   });
@@ -113,7 +160,7 @@ describe('RuntimeResolver.resolve', () => {
     process.env.GROQ_API_KEY = 'gsk-from-env';
     const resolution = await makeResolver().describe({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
       apiKeyOverride: 'gsk-from-cli',
     });
     expect(resolution.apiKey).toBe('gsk-from-cli');
@@ -128,7 +175,7 @@ describe('RuntimeResolver.resolve', () => {
     };
     const resolution = await makeResolver().describe({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
       config,
     });
     expect(resolution.apiKey).toBe('gsk-from-config');
@@ -208,7 +255,7 @@ describe('RuntimeResolver.resolve', () => {
     process.env.GROQ_API_KEY = 'gsk-test';
     const resolution = await makeResolver().describe({
       providerId: 'groq',
-      modelId: 'llama-3.3-70b-versatile',
+      modelId: 'openai/gpt-oss-120b',
     });
     expect(resolution.provider).toBe('groq');
     expect(resolution.apiMode).toBe('chat_completions');
@@ -237,5 +284,30 @@ describe('RuntimeResolver.resolve', () => {
       baseUrlOverride: 'http://my-host:9000/v1',
     });
     expect(resolution.baseUrl).toBe('http://my-host:9000/v1');
+  });
+
+  it('17. resolves a provider-confirmed model absent from the curated catalog', async () => {
+    process.env.GROQ_API_KEY = 'gsk-test';
+    const adapter = await makeResolver().resolve({
+      providerId: 'groq',
+      modelId: 'provider/new-live-model',
+      liveModelIds: ['provider/new-live-model'],
+    });
+    expect(adapter.apiMode).toBe('chat_completions');
+  });
+
+  it('18. resolves a persisted explicitly-unverified model after restart', async () => {
+    process.env.GROQ_API_KEY = 'gsk-test';
+    const config = {
+      get(key: string): string | undefined {
+        return key === 'providers.groq.modelVerification' ? 'unverified' : undefined;
+      },
+    };
+    const adapter = await makeResolver().resolve({
+      providerId: 'groq',
+      modelId: 'private/gated-model',
+      config,
+    });
+    expect(adapter.apiMode).toBe('chat_completions');
   });
 });

@@ -1,3 +1,26 @@
+## v4.15.1 — 2026-07-22
+
+### Provider reliability
+
+- Managed credentials entered during setup are persisted, reloaded, and verified before setup completes.
+- Provider discovery, request cancellation, streaming, structured tool calls, and restart behavior are more reliable.
+- Ollama model selection uses the live installed-model inventory, accepts exact tags, and never pulls a model without approval.
+- Groq throughput limits, context-window limits, and request-size limits now produce distinct guidance.
+
+### Token efficiency
+
+- Economy, Balanced, and Thorough modes provide explicit context and output-budget controls.
+- Provider attempts, retries, fallbacks, auxiliary work, subagents, aggregation, compression, cache usage, and reasoning usage are recorded consistently.
+- Repeated file and tool results consume less context, while compression and usage state survive restart.
+- New `/usage`, `/usage details`, `/usage --json`, `/estimate`, and `/budget` controls expose session usage without treating unknown cost as zero.
+
+### Packaging and compatibility
+
+- Human-readable usage output remains bounded on narrow terminals while machine-readable JSON stays stable.
+- Packaged global and package-runner installations exercise setup, provider calls, tools, usage, compression, and restart behavior.
+
+---
+
 ## v4.14.8 — 2026-07-11
 
 - **Removed the subscription-OAuth impersonation path.** Aiden previously routed a Claude Pro/Max subscription through Anthropic's billing by impersonating a different vendor's CLI — a spoofed client identity in the system prompt, a foreign `user-agent`, an `x-app: cli` header, and OAuth beta-flag headers. That path is gone end to end. The Anthropic **API-key** provider is unchanged.

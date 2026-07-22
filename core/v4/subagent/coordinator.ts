@@ -48,6 +48,7 @@ import { recordChildUsage } from '../turnRuntimeContext';
 import type { TraceEvent } from './traceEvents';
 import type { Logger } from '../logger/logger';
 import { noopLogger } from '../logger/factory';
+import type { ProviderAttemptBudget } from '../../../providers/v4/types';
 
 // ── Public types ─────────────────────────────────────────────────────────
 
@@ -206,6 +207,16 @@ export interface SubagentCoordinatorOptions {
    * surface pass undefined and the emission is silently dropped.
    */
   onUiEvent?: (name: string, args: Record<string, unknown>) => void;
+  /** Optional operator limits, resolved for each batch so config changes apply live. */
+  resolveResourceLimits?: () => SubagentResourceLimits;
+}
+
+export interface SubagentResourceLimits {
+  estimatedTokensPerChild?: number;
+  providerCallsPerChild?: number;
+  aggregateEstimatedTokens?: number;
+  parentBudgetPercentage?: number;
+  parentTokenBudget?: number;
 }
 
 // ── Defaults ─────────────────────────────────────────────────────────────
@@ -234,6 +245,7 @@ export class SubagentCoordinator {
   private readonly logger:               Logger;
   /** v4.11 regression patch — display sink for per-child UI events. */
   private readonly onUiEvent?:           (name: string, args: Record<string, unknown>) => void;
+  private readonly resolveResourceLimits?: () => SubagentResourceLimits;
 
   /**
    * Process-wide registry — keyed by subagentRunId. Survives across
@@ -251,6 +263,7 @@ export class SubagentCoordinator {
     );
     this.logger = opts.logger ?? noopLogger();
     this.onUiEvent = opts.onUiEvent;
+    this.resolveResourceLimits = opts.resolveResourceLimits;
   }
 
   /**
@@ -328,6 +341,21 @@ export class SubagentCoordinator {
 
     // Mint per-task subagentRunIds up-front so trace events can carry
     // a stable id from `spawned` onward.
+    const limits = normalizeResourceLimits(this.resolveResourceLimits?.());
+    const aggregateLimit = minimumPositive(
+      limits.aggregateEstimatedTokens,
+      limits.parentTokenBudget && limits.parentBudgetPercentage
+        ? Math.floor(limits.parentTokenBudget * limits.parentBudgetPercentage / 100)
+        : undefined,
+    );
+    const fanoutBudget: ProviderAttemptBudget | undefined = aggregateLimit
+      ? {
+          label: 'subagent fanout',
+          maxEstimatedTokens: aggregateLimit,
+          usedAttempts: 0,
+          usedEstimatedTokens: 0,
+        }
+      : undefined;
     const taskRecords = tasks.map((task, taskIndex) => ({
       // v4.11 regression patch — normalise the task's effective
       // timeoutMs in-place so the registry / spawn primitive both
@@ -336,6 +364,18 @@ export class SubagentCoordinator {
       taskIndex,
       subagentRunId: makeSubagentRunId(fanoutId, taskIndex),
       conversationId: randomUUID(),
+      providerAttemptBudgets: [
+        (limits.estimatedTokensPerChild || limits.providerCallsPerChild)
+          ? {
+              label: `subagent child ${taskIndex + 1}`,
+              maxAttempts: limits.providerCallsPerChild,
+              maxEstimatedTokens: limits.estimatedTokensPerChild,
+              usedAttempts: 0,
+              usedEstimatedTokens: 0,
+            } satisfies ProviderAttemptBudget
+          : undefined,
+        fanoutBudget,
+      ].filter((budget): budget is ProviderAttemptBudget => budget !== undefined),
     }));
 
     // Emit `spawned` events up-front so trace consumers can see the
@@ -442,6 +482,7 @@ export class SubagentCoordinator {
       taskIndex:      number;
       subagentRunId:  string;
       conversationId: string;
+      providerAttemptBudgets: ProviderAttemptBudget[];
     },
   ): Promise<SubagentResultEnvelope> {
     const startedAt = Date.now();
@@ -563,6 +604,7 @@ export class SubagentCoordinator {
           maxIterations: record.task.maxIterations,
           timeoutMs:     record.task.timeoutMs,
           provider:      record.task.provider,
+          providerAttemptBudgets: record.providerAttemptBudgets,
         },
         this.spawnDeps,
         {
@@ -830,6 +872,27 @@ function classifyBatchStatus(results: SubagentResultEnvelope[]): FanoutResult['s
 
 function zeroUsage(): SubagentResultEnvelope['usage'] {
   return { inputTokens: 0, outputTokens: 0, totalTokens: 0, estimatedCostUSD: 0 };
+}
+
+function normalizeResourceLimits(limits: SubagentResourceLimits | undefined): SubagentResourceLimits {
+  const positive = (value: number | undefined): number | undefined => (
+    typeof value === 'number' && Number.isFinite(value) && value > 0
+      ? Math.floor(value)
+      : undefined
+  );
+  const percentage = positive(limits?.parentBudgetPercentage);
+  return {
+    estimatedTokensPerChild: positive(limits?.estimatedTokensPerChild),
+    providerCallsPerChild: positive(limits?.providerCallsPerChild),
+    aggregateEstimatedTokens: positive(limits?.aggregateEstimatedTokens),
+    parentBudgetPercentage: percentage === undefined ? undefined : Math.min(100, percentage),
+    parentTokenBudget: positive(limits?.parentTokenBudget),
+  };
+}
+
+function minimumPositive(...values: Array<number | undefined>): number | undefined {
+  const positive = values.filter((value): value is number => value !== undefined && value > 0);
+  return positive.length > 0 ? Math.min(...positive) : undefined;
 }
 
 /** `f-<8char>`. Random short id for trace grouping. */

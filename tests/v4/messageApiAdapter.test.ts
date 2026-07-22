@@ -119,6 +119,29 @@ describe('MessageApiAdapter', () => {
     expect(body.system).toBe('be brief');
   });
 
+  it('4a. preserves an ephemeral cache marker in the final wire request', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new MessageApiAdapter(apiKeyOptions).call({
+      messages: [
+        {
+          role: 'system',
+          content: 'stable prefix',
+          cache_control: { type: 'ephemeral' },
+        } as unknown as Message,
+        userMsg('hi'),
+      ],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.system).toEqual([{
+      type: 'text',
+      text: 'stable prefix',
+      cache_control: { type: 'ephemeral' },
+    }]);
+  });
+
   it('4b. does NOT rewrite Aiden/Taracod identity in the system prompt', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),

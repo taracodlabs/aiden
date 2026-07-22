@@ -22,6 +22,7 @@
 import type { SlashCommand } from '../commandRegistry';
 import { type AutonomyLevel, AUTONOMY_LEVELS } from '../../../moat/autonomy';
 import { applyAndPersistAutonomy } from './autonomy';
+import { parseUsageMode } from '../../../core/v4/usagePolicy';
 
 /** Friendly aliases → the canonical dial level. */
 const ALIASES: Readonly<Record<string, AutonomyLevel>> = {
@@ -45,18 +46,32 @@ export function modeStatusLine(level: AutonomyLevel): string {
 
 export const mode: SlashCommand = {
   name: 'mode',
-  description: 'Show or set the trust level: safe (default) | auto | observer. Persists.',
+  description: 'Show or set trust or token-usage behavior. Persists.',
   category: 'system',
   icon: '🎚️',
   handler: async (ctx) => {
+    const arg = (ctx.args[0] ?? '').trim().toLowerCase();
+    const usageMode = parseUsageMode(ctx.config?.getValue<string>('usage.mode', 'balanced')) ?? 'balanced';
+    const requestedUsageMode = parseUsageMode(arg);
+    if (requestedUsageMode) {
+      try {
+        ctx.config?.set('usage.mode', requestedUsageMode);
+        await ctx.config?.save();
+      } catch {
+        ctx.display.warn('Usage mode could not be persisted.');
+        return {};
+      }
+      ctx.display.success(`Usage mode: ${requestedUsageMode} (applies on the next provider request).`);
+      return {};
+    }
+
     const engine = ctx.approvalEngine;
     if (!engine) { ctx.display.warn('Approval engine not wired in this context.'); return {}; }
     const current = engine.getAutonomyPolicy()?.level ?? 'Assistant';
-
-    const arg = (ctx.args[0] ?? '').trim().toLowerCase();
     if (!arg) {
       // View: current + all options, active one marked, in plain language.
       ctx.display.info(modeStatusLine(current));
+      ctx.display.info(`Usage: ${usageMode} (economy | balanced | thorough).`);
       for (const lvl of AUTONOMY_LEVELS) {
         ctx.display.dim(`  ${lvl === current ? '●' : '○'} ${lvl} — ${PLAIN[lvl]}`);
       }
@@ -66,7 +81,7 @@ export const mode: SlashCommand = {
 
     const level = ALIASES[arg] ?? AUTONOMY_LEVELS.find((l) => l.toLowerCase() === arg);
     if (!level) {
-      ctx.display.warn(`Unknown mode "${arg}". Try: safe | auto | observer.`);
+      ctx.display.warn(`Unknown mode "${arg}". Try: safe | auto | observer | economy | balanced | thorough.`);
       return {};
     }
 

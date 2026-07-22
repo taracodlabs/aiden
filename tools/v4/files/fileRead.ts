@@ -32,6 +32,7 @@ const MAX_OUTPUT = 5000;
 // the content hash last returned; a second identical read returns a lightweight
 // stub instead of re-sending the same bytes. Keyed by hash so a changed file
 // (different hash) re-sends. Module-scoped = per session/process.
+const MAX_SCOPED_READS = 1_000;
 const _lastReads = new Map<string, string>();
 /** Test seam — reset the repeated-read cache. */
 export function __resetFileReadCache(): void { _lastReads.clear(); }
@@ -113,32 +114,47 @@ export const fileReadTool: ToolHandler = {
     const resolved = policy.resolvedPath;
     // v4.12 TOC.1 — pagination: offset/limit page a large file (default page = MAX_OUTPUT).
     const offset = Math.max(0, typeof args.offset === 'number' ? Math.floor(args.offset) : 0);
-    const limit = Math.max(1, typeof args.limit === 'number' ? Math.floor(args.limit) : MAX_OUTPUT);
+    const limit = Math.max(1, Math.min(MAX_OUTPUT, typeof args.limit === 'number' ? Math.floor(args.limit) : MAX_OUTPUT));
     try {
-      const content = await fs.readFile(resolved, 'utf-8');
+      const canonicalPath = await fs.realpath(resolved);
+      const [content, fileStat] = await Promise.all([
+        fs.readFile(canonicalPath, 'utf-8'),
+        fs.stat(canonicalPath),
+      ]);
       const page = content.slice(offset, offset + limit);
       const more = offset + limit < content.length;
       // Repeated-identical-read stub: same (path|offset|limit) yielding the same
       // bytes twice → don't re-send the content.
-      const key = `${resolved}|${offset}|${limit}`;
+      const key = `${ctx.sessionId ?? 'default'}|${canonicalPath}|${offset}|${limit}`;
       const hash = crypto.createHash('sha256').update(page).digest('hex');
       if (_lastReads.get(key) === hash) {
         return {
           success: true,
-          path: resolved,
+          path: canonicalPath,
           stub: true,
           note: 'Identical to a prior read this session (same path + range + content) — content omitted to save context. Re-read a different range or re-run only if you expect it changed.',
           size: content.length,
+          mtime: fileStat.mtimeMs,
+          contentHash: hash,
+          offset,
+          limit,
         };
+      }
+      if (_lastReads.size >= MAX_SCOPED_READS) {
+        const oldest = _lastReads.keys().next().value as string | undefined;
+        if (oldest) _lastReads.delete(oldest);
       }
       _lastReads.set(key, hash);
       return {
         success: true,
-        path: resolved,
+        path: canonicalPath,
         content: page,
         offset,
+        limit,
         size: content.length,
-        ...(more ? fileReadHandle(resolved, offset + limit, limit, content.length) : { truncated: false }),
+        mtime: fileStat.mtimeMs,
+        contentHash: hash,
+        ...(more ? fileReadHandle(canonicalPath, offset + limit, limit, content.length) : { truncated: false }),
       };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);

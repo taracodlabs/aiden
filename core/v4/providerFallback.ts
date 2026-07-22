@@ -38,6 +38,10 @@ import type {
   ProviderCallOutput,
   StreamEvent,
 } from '../../providers/v4/types';
+import { providerMainDefault } from '../../providers/v4/providerModelAuthority';
+import { getProviderEntry } from '../../providers/v4/registry';
+import { credentialFingerprint, endpointFingerprint } from '../../providers/v4/credentialAuthority';
+import { providerRuntimeIdentity } from '../../providers/v4/providerIdentity';
 
 // ── Public types ────────────────────────────────────────────────────────
 
@@ -57,6 +61,7 @@ export interface ProviderSlot {
   keyPresent:  boolean;
   keyTail:     string | null;
   envVar?:     string;
+  identity?:   string;
   build():     ProviderAdapter | null;
 }
 
@@ -114,8 +119,8 @@ export const DEFAULT_SLOT_COOLDOWN_MS = 60_000;
 const COOLDOWN_ENV_VAR = 'AIDEN_SLOT_COOLDOWN_MS';
 
 const TOGETHER_BASE_URL       = 'https://api.together.xyz/v1';
-const GROQ_BASE_URL           = 'https://api.groq.com/openai/v1';
-const DEFAULT_GROQ_MODEL      = 'llama-3.3-70b-versatile';
+const GROQ_BASE_URL           = getProviderEntry('groq')!.baseUrl;
+const DEFAULT_GROQ_MODEL      = providerMainDefault('groq')!;
 const DEFAULT_TOGETHER_MODEL  = 'openai/gpt-oss-120b';
 const TOGETHER_FALLBACK_MODEL = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
 
@@ -361,6 +366,12 @@ export function buildDefaultSlots(opts: DefaultSlotsOptions): ProviderSlot[] {
       keyPresent: Boolean(togetherKey),
       keyTail:    togetherKey ? togetherKey.slice(-4) : null,
       envVar:     'TOGETHER_API_KEY',
+      identity: togetherKey ? providerRuntimeIdentity({
+        provider: 'together',
+        endpointFingerprint: endpointFingerprint(TOGETHER_BASE_URL),
+        credentialFingerprint: credentialFingerprint(togetherKey),
+        model,
+      }) : undefined,
       build: () =>
         togetherKey
           ? opts.adapterFactory({
@@ -382,6 +393,12 @@ export function buildDefaultSlots(opts: DefaultSlotsOptions): ProviderSlot[] {
       keyPresent: Boolean(key),
       keyTail:    key ? key.slice(-4) : null,
       envVar,
+      identity: key ? providerRuntimeIdentity({
+        provider: 'groq',
+        endpointFingerprint: endpointFingerprint(GROQ_BASE_URL),
+        credentialFingerprint: credentialFingerprint(key),
+        model: groqModel,
+      }) : undefined,
       build: () =>
         key
           ? opts.adapterFactory({
@@ -463,15 +480,29 @@ export class FallbackAdapter implements ProviderAdapter {
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
     let pendingFromId: string | null = null;
+    let fallbackIndex = -1;
 
     const result = await runFallbackChain(
       this.slots,
       async (adapter, slot) => {
+        fallbackIndex += 1;
         if (pendingFromId !== null && pendingFromId !== slot.id) {
           this.onFallback?.(pendingFromId, slot.id);
         }
         pendingFromId = slot.id;
-        return adapter.call(input);
+        return adapter.call({
+          ...input,
+          usageContext: {
+            ...input.usageContext,
+            providerConfigured: input.usageContext?.providerConfigured
+              ?? this.slots[0]?.providerId
+              ?? slot.providerId,
+            modelConfigured: input.usageContext?.modelConfigured
+              ?? this.slots[0]?.modelId
+              ?? slot.modelId,
+            fallbackIndex,
+          },
+        });
       },
       {
         onRateLimit: (slotId, err) => this.recordRateLimit(slotId, err),
@@ -514,6 +545,19 @@ export class FallbackAdapter implements ProviderAdapter {
 
       bumpCount(cooldown, slot.id);
       tried.push(slot.id);
+      const slotInput: ProviderCallInput = {
+        ...input,
+        usageContext: {
+          ...input.usageContext,
+          providerConfigured: input.usageContext?.providerConfigured
+            ?? this.slots[0]?.providerId
+            ?? slot.providerId,
+          modelConfigured: input.usageContext?.modelConfigured
+            ?? this.slots[0]?.modelId
+            ?? slot.modelId,
+          fallbackIndex: tried.length - 1,
+        },
+      };
 
       if (prevSlotId !== null && prevSlotId !== slot.id) {
         this.onFallback?.(prevSlotId, slot.id);
@@ -523,7 +567,7 @@ export class FallbackAdapter implements ProviderAdapter {
       let yielded = false;
       try {
         if (typeof adapter.callStream === 'function') {
-          for await (const evt of adapter.callStream(input)) {
+          for await (const evt of adapter.callStream(slotInput)) {
             yielded = true;
             yield evt;
           }
@@ -531,7 +575,7 @@ export class FallbackAdapter implements ProviderAdapter {
           // Adapter doesn't speak SSE — fall back to a single-shot call
           // and synthesise a terminal `done` event so consumers see the
           // same event shape regardless of which slot won.
-          const out = await adapter.call(input);
+          const out = await adapter.call(slotInput);
           yielded = true;
           yield { type: 'done', output: out };
         }

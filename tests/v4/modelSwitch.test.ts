@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -29,8 +29,8 @@ afterEach(async () => {
   }
 });
 
-function makeSwitcher(): ModelSwitcher {
-  return new ModelSwitcher(new RuntimeResolver(new CredentialResolver(authPath)));
+function makeSwitcher(fetchImpl?: typeof fetch): ModelSwitcher {
+  return new ModelSwitcher(new RuntimeResolver(new CredentialResolver(authPath), { fetchImpl }));
 }
 
 describe('ModelSwitcher.parse', () => {
@@ -41,9 +41,9 @@ describe('ModelSwitcher.parse', () => {
   });
 
   it('2. resolves bare model id to its provider via catalog walk', () => {
-    const parsed = makeSwitcher().parse('llama-3.3-70b-versatile');
-    expect(parsed.providerId).toBe('groq');
-    expect(parsed.modelId).toBe('llama-3.3-70b-versatile');
+    const parsed = makeSwitcher().parse('gemini-2.5-pro');
+    expect(parsed.providerId).toBe('gemini');
+    expect(parsed.modelId).toBe('gemini-2.5-pro');
   });
 
   it('3. throws on ambiguous bare model with options listed', () => {
@@ -78,26 +78,37 @@ describe('ModelSwitcher.parse', () => {
     expect(parsed.providerId).toBe('ollama');
     expect(parsed.modelId).toBe('qwen2.5:7b');
   });
+
+  it('preserves the complete live Ollama tag after the provider prefix', () => {
+    for (const modelId of [
+      'gemma4:e4b-32k',
+      'gemma4:e4b-16k',
+      'gemma4:e4b-8k',
+      'gemma4:e4b',
+    ]) {
+      expect(makeSwitcher().parse(`ollama:${modelId}`)).toEqual({ providerId: 'ollama', modelId });
+    }
+  });
 });
 
 describe('ModelSwitcher.switch', () => {
   it('8. instantiates a new adapter for a valid spec', async () => {
     process.env.GROQ_API_KEY = 'gsk-test';
     const result = await makeSwitcher().switch({
-      spec: 'groq:llama-3.3-70b-versatile',
+      spec: 'groq:openai/gpt-oss-120b',
     });
     expect(result.newAdapter).toBeDefined();
     expect(result.newProvider.id).toBe('groq');
-    expect(result.newModel.id).toBe('llama-3.3-70b-versatile');
+    expect(result.newModel.id).toBe('openai/gpt-oss-120b');
     expect(result.changed).toBe(true);
   });
 
   it('9. changed=false when current matches target', async () => {
     process.env.GROQ_API_KEY = 'gsk-test';
     const result = await makeSwitcher().switch({
-      spec: 'groq:llama-3.3-70b-versatile',
+      spec: 'groq:openai/gpt-oss-120b',
       currentProviderId: 'groq',
-      currentModelId: 'llama-3.3-70b-versatile',
+      currentModelId: 'openai/gpt-oss-120b',
     });
     expect(result.changed).toBe(false);
   });
@@ -105,10 +116,29 @@ describe('ModelSwitcher.switch', () => {
   it('10. changed=true when switching from anthropic to groq', async () => {
     process.env.GROQ_API_KEY = 'gsk-test';
     const result = await makeSwitcher().switch({
-      spec: 'groq:llama-3.3-70b-versatile',
+      spec: 'groq:openai/gpt-oss-120b',
       currentProviderId: 'anthropic',
       currentModelId: 'claude-opus-4-7',
     });
     expect(result.changed).toBe(true);
+  });
+
+  it('direct switching accepts an exact live Ollama tag outside the static catalog', async () => {
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      models: [
+        { name: 'gemma4:e4b-32k' },
+        { name: 'gemma4:e4b-16k' },
+        { name: 'gemma4:e4b-8k' },
+        { name: 'gemma4:e4b' },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+
+    const result = await makeSwitcher(fetchImpl as typeof fetch).switch({
+      spec: 'ollama:gemma4:e4b-32k',
+    });
+
+    expect(result.newProvider.id).toBe('ollama');
+    expect(result.newModel.id).toBe('gemma4:e4b-32k');
+    expect(result.newAdapter.apiMode).toBe('ollama_prompt_tools');
   });
 });

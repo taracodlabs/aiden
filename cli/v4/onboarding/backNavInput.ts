@@ -81,7 +81,14 @@ export const backNavInput = createPrompt<string | BackSentinel, BackNavInputConf
       if (status !== 'idle') return;
 
       if (isEnterKey(key)) {
-        const final = rl.line.length > 0 ? rl.line : (config.default ?? '');
+        // readline clears `rl.line` before the Enter callback on a real TTY.
+        // Keep submission tied to the last observed edit instead of that
+        // already-cleared transport buffer. This is especially important for
+        // masked credentials because the rendered value is intentionally not
+        // recoverable from the screen.
+        const final = prevLineRef.current.length > 0
+          ? prevLineRef.current
+          : (config.default ?? '');
         setValue(final);
         setStatus('done');
         done(final);

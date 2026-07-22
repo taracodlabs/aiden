@@ -48,6 +48,11 @@ import { MessageApiAdapter } from './messageApiAdapter';
 import { ResponseStreamAdapter } from './responseStreamAdapter';
 import { LocalPromptToolsAdapter } from './localPromptToolsAdapter';
 import { getModelDefaults } from './modelDefaults';
+import {
+  modelDeprecation,
+  resolveModelSelection,
+  type ModelVerification,
+} from './providerModelAuthority';
 // v4.14.x — every adapter the factory hands out is wrapped so a shared message
 // preflight runs before ANY provider call. The single seam; no caller can skip it.
 import { withMessagePreflight } from './preflightAdapter';
@@ -57,6 +62,17 @@ import {
   PREFLIGHT_REFRESH_WINDOW_MS,
 } from '../../core/v4/auth/tokenStore';
 import type { AidenPaths } from '../../core/v4/paths';
+import {
+  credentialFingerprint,
+  resolveApiCredential,
+  type EffectiveCredentialResolution,
+} from './credentialAuthority';
+import { configureProviderAttemptLedger } from './providerAttemptAccounting';
+import {
+  fetchModels,
+  type FetchModelsResult,
+  type FetchedModel,
+} from '../../core/v4/providers/modelFetch';
 
 /**
  * Minimal interface RuntimeResolver consumes from the config layer. The
@@ -65,6 +81,7 @@ import type { AidenPaths } from '../../core/v4/paths';
  */
 export interface ConfigProvider {
   get(key: string): string | undefined;
+  getRaw?(key: string): string | undefined;
 }
 
 export interface ResolveOptions {
@@ -78,6 +95,9 @@ export interface ResolveOptions {
   credentialSourceHint?: 'cli' | 'config' | 'env' | 'auth.json' | 'default';
   /** Optional config provider — typically a Phase 6 `ConfigManager`. */
   config?: ConfigProvider;
+  liveModelIds?: readonly string[];
+  allowUnverifiedModel?: boolean;
+  modelVerification?: ModelVerification;
   /**
    * Phase 18: Aiden user-data paths. When present and the resolved provider
    * has `oauth: { providerId }` in the registry, the credential chain
@@ -88,12 +108,22 @@ export interface ResolveOptions {
    * inference is a v4.1 follow-up; v4.0 ships explicit /auth refresh.)
    */
   paths?: AidenPaths;
+  /** Test/local-runtime seam for live Ollama inventory discovery. */
+  fetchImpl?: typeof fetch;
+}
+
+export interface RuntimeResolverOptions {
+  fetchImpl?: typeof fetch;
+  /** Short cache used between picker discovery and adapter resolution. */
+  localModelCacheTtlMs?: number;
 }
 
 interface ResolvedCredentials {
   apiKey: string | null;
   source: RuntimeResolution['source'];
   oauthRefreshable?: boolean;
+  endpoint: string;
+  effective: EffectiveCredentialResolution;
 }
 
 /**
@@ -115,19 +145,88 @@ const DEPRECATED_MODELS: Readonly<Record<string, { date: string; replacement: st
  * `console.warn`; callers/tests can also consume the string directly.
  */
 export function deprecationNotice(providerId: string, modelId: string): string | null {
+  const shared = modelDeprecation(providerId, modelId);
+  if (shared) {
+    return `${providerId}:${modelId} stops working on ${shared.shutdownDate}; switch to ${shared.replacements.join(' or ')}.`;
+  }
   const d = DEPRECATED_MODELS[`${providerId}:${modelId}`];
   if (!d) return null;
   return `${providerId}:${modelId} is deprecated and stops working on ${d.date} — switch to ${d.replacement}.`;
 }
 
+function inferLocalContextLength(modelId: string): number {
+  const suffix = /(?:^|[-:])(\d+)(k|m)$/i.exec(modelId);
+  if (!suffix) return 8_192;
+  const amount = Number.parseInt(suffix[1], 10);
+  if (!Number.isFinite(amount) || amount <= 0) return 8_192;
+  return amount * (suffix[2].toLowerCase() === 'm' ? 1_000_000 : 1_000);
+}
+
+function localModelEntry(model: FetchedModel): ModelEntry {
+  const catalog = findModel('ollama', model.id);
+  if (catalog) return catalog;
+  return {
+    id: model.id,
+    displayName: model.displayName || model.id,
+    providerId: 'ollama',
+    contextLength: model.contextLength ?? inferLocalContextLength(model.id),
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: false,
+    isDefault: false,
+    tier: 'standard',
+    notes: 'Installed local model discovered from the live runtime.',
+  };
+}
+
 export class RuntimeResolver {
-  constructor(private readonly credentialResolver: CredentialResolver) {}
+  private localModelCache: {
+    baseUrl: string;
+    expiresAt: number;
+    result: FetchModelsResult;
+  } | null = null;
+
+  constructor(
+    private readonly credentialResolver: CredentialResolver,
+    private readonly resolverOptions: RuntimeResolverOptions = {},
+  ) {}
+
+  /**
+   * Read the actual Ollama inventory. A forced read is used each time the
+   * model picker opens; the short cache then avoids a duplicate request when
+   * the selected model is immediately resolved into an adapter.
+   */
+  async getLocalModelInventory(options: {
+    baseUrl?: string;
+    fetchImpl?: typeof fetch;
+    forceRefresh?: boolean;
+  } = {}): Promise<FetchModelsResult> {
+    const baseUrl = (options.baseUrl ?? PROVIDER_REGISTRY.ollama.baseUrl).replace(/\/+$/, '');
+    const now = Date.now();
+    if (
+      !options.forceRefresh
+      && this.localModelCache?.baseUrl === baseUrl
+      && this.localModelCache.expiresAt > now
+    ) {
+      return this.localModelCache.result;
+    }
+
+    const result = await fetchModels({
+      providerId: 'ollama',
+      baseUrl,
+      fetchImpl: options.fetchImpl ?? this.resolverOptions.fetchImpl,
+    });
+    const ttlMs = Math.max(0, this.resolverOptions.localModelCacheTtlMs ?? 2_000);
+    this.localModelCache = { baseUrl, expiresAt: now + ttlMs, result };
+    return result;
+  }
 
   /**
    * Build a fully-wired adapter for `(providerId, modelId)`. Throws
    * `ProviderError` when the provider, model, or credentials are missing.
    */
   async resolve(options: ResolveOptions): Promise<ProviderAdapter> {
+    if (options.paths) configureProviderAttemptLedger(options.paths.sessionsDb);
     const { entry, model, baseUrl, credentials } = await this.describeInternal(options);
 
     // One-line heads-up when a session resolves a model with an announced EOL.
@@ -205,6 +304,7 @@ export class RuntimeResolver {
       apiKey: credentials.apiKey,
       oauthRefreshable: credentials.oauthRefreshable,
       source: credentials.source,
+      effectiveCredential: credentials.effective,
     };
   }
 
@@ -215,6 +315,9 @@ export class RuntimeResolver {
 
   /** All models for `providerId`. Empty when unknown — never throws. */
   listModels(providerId: string): ModelEntry[] {
+    if (providerId === 'ollama' && this.localModelCache) {
+      return this.localModelCache.result.models.map(localModelEntry);
+    }
     return listModelsForProvider(providerId);
   }
 
@@ -235,7 +338,46 @@ export class RuntimeResolver {
       );
     }
 
-    const model = findModel(entry.id, options.modelId);
+    const requestedBaseUrl = (options.baseUrlOverride ?? entry.baseUrl).replace(/\/+$/, '');
+    let model: ModelEntry | undefined;
+    if (entry.id === 'ollama') {
+      const inventory = await this.getLocalModelInventory({
+        baseUrl: requestedBaseUrl,
+        fetchImpl: options.fetchImpl,
+      });
+      if (inventory.source !== 'live') {
+        throw new ProviderError(
+          `Ollama is offline or unavailable at ${requestedBaseUrl}. Start Ollama, then reopen \`/model\`.`,
+          entry.id,
+        );
+      }
+      if (inventory.models.length === 0) {
+        throw new ProviderError(
+          `No Ollama models are installed. Run \`ollama pull ${options.modelId}\`, then reopen \`/model\`.`,
+          entry.id,
+        );
+      }
+      const installed = inventory.models.find((candidate) => candidate.id === options.modelId);
+      if (!installed) {
+        throw new ProviderError(
+          `Model '${options.modelId}' is not installed in Ollama. ` +
+          `Installed: ${inventory.models.map((candidate) => candidate.id).join(', ')}. ` +
+          `Run \`ollama pull ${options.modelId}\` explicitly if you want to install it.`,
+          entry.id,
+        );
+      }
+      model = localModelEntry(installed);
+    } else {
+      const persistedVerification = options.modelVerification
+        ?? options.config?.get(`providers.${entry.id}.modelVerification`) as ModelVerification | undefined;
+      model = resolveModelSelection({
+        providerId: entry.id,
+        modelId: options.modelId,
+        verification: persistedVerification,
+        liveModelIds: options.liveModelIds,
+        allowUnverified: options.allowUnverifiedModel,
+      })?.model;
+    }
     if (!model) {
       const available = listModelsForProvider(entry.id)
         .map((m) => m.id)
@@ -247,8 +389,8 @@ export class RuntimeResolver {
       );
     }
 
-    const baseUrl = (options.baseUrlOverride ?? entry.baseUrl).replace(/\/+$/, '');
     const credentials = await this.resolveCredentials(entry, options);
+    const baseUrl = credentials.endpoint;
     return { entry, model, baseUrl, credentials };
   }
 
@@ -256,9 +398,22 @@ export class RuntimeResolver {
     entry: ProviderRegistryEntry,
     options: ResolveOptions,
   ): Promise<ResolvedCredentials> {
-    // 1. CLI override.
-    if (options.apiKeyOverride && options.apiKeyOverride.length > 0) {
-      return { apiKey: options.apiKeyOverride, source: 'cli' };
+    const direct = await resolveApiCredential({
+      providerId: entry.id,
+      envVar: entry.apiKeyEnvVar,
+      registryEndpoint: entry.baseUrl,
+      override: options.apiKeyOverride,
+      endpointOverride: options.baseUrlOverride,
+      config: options.config,
+      paths: options.paths,
+    });
+    if (direct.apiKey && direct.effective.credentialSource === 'explicit_override') {
+      return {
+        apiKey: direct.apiKey,
+        source: 'cli',
+        endpoint: direct.endpoint,
+        effective: direct.effective,
+      };
     }
 
     // 1b. Phase 18: OAuth bearer from tokenStore. Wins over config/env so
@@ -279,6 +434,13 @@ export class RuntimeResolver {
           apiKey: tokens.accessToken,
           source: 'auth.json',
           oauthRefreshable: !!tokens.refreshToken,
+          endpoint: direct.endpoint,
+          effective: {
+            ...direct.effective,
+            credentialSource: 'oauth_store',
+            credentialFingerprint: credentialFingerprint(tokens.accessToken),
+            configured: true,
+          },
         };
       }
       // No tokens for an OAuth-only provider — surface the clearest error.
@@ -290,20 +452,14 @@ export class RuntimeResolver {
       }
     }
 
-    // 2. Config provider (Phase 6 ConfigManager or test stub).
-    if (options.config) {
-      const fromConfig = options.config.get(`providers.${entry.id}.apiKey`);
-      if (fromConfig && fromConfig.length > 0) {
-        return { apiKey: fromConfig, source: 'config' };
-      }
-    }
-
-    // 3. Env var.
-    if (entry.apiKeyEnvVar) {
-      const fromEnv = process.env[entry.apiKeyEnvVar];
-      if (fromEnv && fromEnv.length > 0) {
-        return { apiKey: fromEnv, source: 'env' };
-      }
+    if (direct.apiKey) {
+      const source = direct.effective.credentialSource === 'inline_config' ? 'config' : 'env';
+      return {
+        apiKey: direct.apiKey,
+        source,
+        endpoint: direct.endpoint,
+        effective: direct.effective,
+      };
     }
 
     // 4. OAuth via credentialResolver.
@@ -320,6 +476,13 @@ export class RuntimeResolver {
             apiKey: token,
             source: 'auth.json',
             oauthRefreshable: refreshed.oauthRefreshable,
+            endpoint: direct.endpoint,
+            effective: {
+              ...direct.effective,
+              credentialSource: 'legacy_store',
+              credentialFingerprint: credentialFingerprint(token),
+              configured: true,
+            },
           };
         }
       } catch (err) {
@@ -346,10 +509,24 @@ export class RuntimeResolver {
 
     // 5. Local providers — no credentials required.
     if (entry.apiMode === 'ollama_prompt_tools') {
-      return { apiKey: null, source: 'default' };
+      return {
+        apiKey: null,
+        source: 'default',
+        endpoint: direct.endpoint,
+        effective: {
+          ...direct.effective,
+          credentialSource: 'local_runtime',
+          configured: true,
+        },
+      };
     }
 
-    return { apiKey: null, source: 'default' };
+    return {
+      apiKey: null,
+      source: 'default',
+      endpoint: direct.endpoint,
+      effective: direct.effective,
+    };
   }
 }
 

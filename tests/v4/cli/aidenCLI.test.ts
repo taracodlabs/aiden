@@ -136,6 +136,32 @@ describe('aiden CLI', () => {
     expect(chat.mock.calls[0][0]).toMatchObject({ tui: true });
   });
 
+  it('returns the one-shot result without forcing process shutdown', async () => {
+    const runQueryHook = vi.fn(async () => 7);
+    const exitSpy = vi.spyOn(process, 'exit');
+    const { argv, hooks } = captureMain(['-q', 'hello'], { runQueryHook });
+
+    const code = await main(argv, hooks);
+
+    expect(code).toBe(7);
+    expect(runQueryHook).toHaveBeenCalledTimes(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+  });
+
+  it('returns the chat one-shot result without forcing process shutdown', async () => {
+    const runQueryHook = vi.fn(async () => 3);
+    const exitSpy = vi.spyOn(process, 'exit');
+    const { argv, hooks } = captureMain(['chat', '-q', 'hello'], { runQueryHook });
+
+    const code = await main(argv, hooks);
+
+    expect(code).toBe(3);
+    expect(runQueryHook).toHaveBeenCalledTimes(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+    exitSpy.mockRestore();
+  });
+
   it('aiden tui (subcommand) is no longer registered as a v4.1 placeholder', async () => {
     // commander with an unknown subcommand still parses successfully when
     // it falls through the default action (chat). To keep the contract

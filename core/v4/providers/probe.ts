@@ -4,6 +4,8 @@
  *
  * Aiden — local-first agent.
  */
+
+import { RequestLifecycle, requestDeadlines } from '../../../providers/v4/requestLifecycle';
 /**
  * core/v4/providers/probe.ts — ONB1 slice 7.
  *
@@ -34,6 +36,12 @@ export type ProbeCategory =
   | 'network'
   | 'unknown';
 
+import {
+  beginPhysicalProviderAttempt,
+  byteLength,
+  createLogicalProviderCallId,
+} from '../../../providers/v4/providerAttemptAccounting';
+
 export interface ProbeStepResult {
   step: 'auth' | 'model' | 'tools';
   ok: boolean;
@@ -62,13 +70,6 @@ export interface ProbeResult {
 }
 
 const DEFAULT_TIMEOUT_MS = 8000;
-
-function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const t = setTimeout(() => reject(Object.assign(new Error(`timed out after ${ms}ms`), { code: 'TIMEOUT' })), ms);
-    p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
-  });
-}
 
 function classifyStatus(status: number, retryAfter?: string | null): { category: ProbeCategory; reason: string; retryAfterSec?: number } {
   if (status === 401 || status === 403) return { category: 'auth', reason: 'API key rejected' };
@@ -128,7 +129,7 @@ function buildAuthRequest(o: ProbeOptions): ProbeRequest | null {
       const root = (o.baseUrl ?? 'http://localhost:11434').replace(/\/+$/, '');
       return { url: `${root}/api/tags`, method: 'GET', headers: {} };
     }
-    case 'custom': {
+    case 'custom_openai': {
       const root = (o.baseUrl ?? '').replace(/\/+$/, '');
       if (!root) return null;
       return { url: `${root}/models`, method: 'GET', headers: { Authorization: `Bearer ${apiKey}` } };
@@ -184,6 +185,8 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
     case 'openrouter':
     case 'together':
     case 'nvidia':
+    case 'custom':
+    case 'custom_openai':
       return {
         url: o.providerId === 'openai'
           ? 'https://api.openai.com/v1/chat/completions'
@@ -193,7 +196,9 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
               ? 'https://openrouter.ai/api/v1/chat/completions'
               : o.providerId === 'together'
                 ? 'https://api.together.xyz/v1/chat/completions'
-                : 'https://integrate.api.nvidia.com/v1/chat/completions',
+                : o.providerId === 'custom_openai' || o.providerId === 'custom'
+                  ? `${(o.baseUrl ?? '').replace(/\/+$/, '')}/chat/completions`
+                  : 'https://integrate.api.nvidia.com/v1/chat/completions',
         method: 'POST',
         headers: { Authorization: `Bearer ${o.apiKey}`, 'content-type': 'application/json' },
         body: JSON.stringify({
@@ -212,14 +217,52 @@ function buildToolCheckRequest(o: ProbeOptions): ProbeRequest | null {
 async function runRequest(req: ProbeRequest, o: ProbeOptions): Promise<{ status: number; bodyText: string; retryAfter: string | null }> {
   const fetchImpl = o.fetchImpl ?? fetch;
   const timeoutMs = o.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-  const res = await withTimeout(fetchImpl(req.url, {
-    method: req.method,
-    headers: req.headers,
-    body: req.body,
-  }), timeoutMs);
-  const retryAfter = res.headers.get('retry-after');
-  const bodyText = await res.text().catch(() => '');
-  return { status: res.status, bodyText, retryAfter };
+  const lifecycle = new RequestLifecycle(o.providerId, requestDeadlines(timeoutMs));
+  const logicalCallId = createLogicalProviderCallId();
+  const attempt = beginPhysicalProviderAttempt({
+    messages: [],
+    tools: [],
+    maxTokens: 1,
+    usageContext: {
+      logicalCallId,
+      entryPoint: 'setup',
+      purpose: 'readiness',
+      providerConfigured: o.providerId,
+      modelConfigured: o.modelId,
+      credentialLabelRedacted: 'setup-managed',
+    },
+  }, {
+    providerActual: o.providerId,
+    modelActual: o.modelId,
+    apiMode: 'chat_completions',
+    transport: new URL(req.url).protocol.replace(':', ''),
+    attemptIndex: 0,
+    logicalCallId,
+    requestBytes: byteLength(req.body ?? ''),
+  });
+  try {
+    const res = await lifecycle.race(fetchImpl(req.url, {
+      method: req.method,
+      headers: req.headers,
+      body: req.body,
+      signal: lifecycle.signal,
+    }));
+    lifecycle.markHeaders();
+    const retryAfter = res.headers.get('retry-after');
+    const bodyText = await lifecycle.readText(res);
+    if (res.ok) {
+      attempt.success({ content: '', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 0, outputTokens: 0 } }, byteLength(bodyText));
+    } else {
+      attempt.failure(new Error(`HTTP ${res.status}`), { sent: true, status: 'provider_error', responseBytes: byteLength(bodyText) });
+    }
+    return { status: res.status, bodyText, retryAfter };
+  } catch (error) {
+    const classified = lifecycle.classify(error);
+    attempt.failure(classified, { sent: true });
+    throw classified;
+  } finally {
+    lifecycle.cleanup();
+  }
 }
 
 /**

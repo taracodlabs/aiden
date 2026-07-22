@@ -127,7 +127,7 @@ describe('AuxiliaryClient', () => {
     expect(u.honesty_classify.calls).toBe(1);
   });
 
-  it('7. resolves adapter once at construction', async () => {
+  it('7. resolves the adapter lazily and only once', async () => {
     const adapter = new StubAdapter();
     const resolver = makeResolver(adapter);
     const c = new AuxiliaryClient({
@@ -136,6 +136,7 @@ describe('AuxiliaryClient', () => {
       resolver,
       warn: () => {},
     });
+    expect(c._resolveCallCount()).toBe(0);
     await c.call({ purpose: 'compression', prompt: 'a' });
     await c.call({ purpose: 'compression', prompt: 'b' });
     await c.call({ purpose: 'compression', prompt: 'c' });
@@ -239,6 +240,70 @@ describe('AuxiliaryClient', () => {
     expect(combined).toBeDefined();
     expect(combined).toContain('groq/m');
     expect(combined).toContain('p2/m2');
+  });
+
+  it('falls back to the parent after the configured auxiliary fails a real call', async () => {
+    const auxiliary = new StubAdapter(undefined, 'throw');
+    const parent = new StubAdapter({
+      content: 'parent result',
+      toolCalls: [],
+      finishReason: 'stop',
+      usage: { inputTokens: 2, outputTokens: 3 },
+    });
+    const c = new AuxiliaryClient({
+      defaultProvider: 'auxiliary',
+      defaultModel: 'small',
+      fallbacks: [{ providerId: 'parent', modelId: 'selected' }],
+      resolver: {
+        resolve: async ({ providerId }) => providerId === 'auxiliary' ? auxiliary : parent,
+      },
+      warn: () => {},
+    });
+
+    const result = await c.call({ purpose: 'compression', prompt: 'summarize' });
+
+    expect(result.content).toBe('parent result');
+    expect(auxiliary.calls).toHaveLength(1);
+    expect(parent.calls).toHaveLength(1);
+    expect(c._resolveCallCount()).toBe(2);
+    expect(c.isUnavailable()).toBe(false);
+  });
+
+  it('disables the optional operation when auxiliary and parent both fail calls', async () => {
+    const c = new AuxiliaryClient({
+      defaultProvider: 'auxiliary',
+      defaultModel: 'small',
+      fallbacks: [{ providerId: 'parent', modelId: 'selected' }],
+      resolver: { resolve: async () => new StubAdapter(undefined, 'throw') },
+      warn: () => {},
+    });
+
+    const result = await c.call({ purpose: 'honesty_classify', prompt: 'classify' });
+
+    expect(result.content).toBe('');
+    expect(c._resolveCallCount()).toBe(2);
+    expect(c.isUnavailable()).toBe(true);
+  });
+
+  it('keeps the selected parent cached after it proves live', async () => {
+    const auxiliary = new StubAdapter(undefined, 'throw');
+    const parent = new StubAdapter();
+    const c = new AuxiliaryClient({
+      defaultProvider: 'auxiliary',
+      defaultModel: 'small',
+      fallbacks: [{ providerId: 'parent', modelId: 'selected' }],
+      resolver: {
+        resolve: async ({ providerId }) => providerId === 'auxiliary' ? auxiliary : parent,
+      },
+      warn: () => {},
+    });
+
+    await c.call({ purpose: 'compression', prompt: 'first' });
+    await c.call({ purpose: 'compression', prompt: 'second' });
+
+    expect(auxiliary.calls).toHaveLength(1);
+    expect(parent.calls).toHaveLength(2);
+    expect(c._resolveCallCount()).toBe(2);
   });
 
   it('10. concurrent calls record usage independently (no race-bleed)', async () => {

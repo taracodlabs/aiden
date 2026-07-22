@@ -53,9 +53,9 @@ describe('runModelPicker', () => {
   it('parses bare unique model', async () => {
     const result = await runModelPicker({
       resolver: realResolver(),
-      spec: 'llama-3.3-70b-versatile',
+      spec: 'gemini-2.5-pro',
     });
-    expect(result).toEqual({ providerId: 'groq', modelId: 'llama-3.3-70b-versatile' });
+    expect(result).toEqual({ providerId: 'gemini', modelId: 'gemini-2.5-pro' });
   });
 
   it('returns null on ambiguous bare model', async () => {
@@ -142,6 +142,109 @@ describe('runModelPicker', () => {
     const local = modelChoices.find((c) => c.value === 'llama3.2');
     expect(local.name).not.toMatch(/\$/);
     expect(local.name).toMatch(/131K/);
+  });
+
+  it('queries Ollama inventory and disables catalog models that are not installed', async () => {
+    let modelChoices: any[] = [];
+    let providerChoices: any[] = [];
+    let providerMessage = '';
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      models: [
+        { name: 'gemma4:e4b-32k' },
+        { name: 'gemma4:e4b-16k' },
+        { name: 'gemma4:e4b-8k' },
+        { name: 'gemma4:e4b' },
+      ],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) {
+        providerChoices = opts.choices;
+        providerMessage = opts.message;
+        return 'ollama';
+      }
+      modelChoices = opts.choices;
+      return 'gemma4:e4b-32k';
+    });
+
+    const result = await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+      fetchImpl: fetchImpl as typeof fetch,
+      currentProviderId: 'ollama',
+      currentModelId: 'llama3.2',
+    });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'http://localhost:11434/api/tags',
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+    expect(result).toEqual({ providerId: 'ollama', modelId: 'gemma4:e4b-32k' });
+    expect(providerMessage).toMatch(/configured: ollama.*llama3\.2.*not installed/i);
+    expect(providerChoices.find((choice) => choice.value === 'ollama').name)
+      .not.toMatch(/current/i);
+    for (const modelId of [
+      'gemma4:e4b-32k',
+      'gemma4:e4b-16k',
+      'gemma4:e4b-8k',
+      'gemma4:e4b',
+    ]) {
+      const installed = modelChoices.find((choice) => choice.value === modelId);
+      expect(installed.name).toMatch(/installed/i);
+      expect(installed.disabled).toBeFalsy();
+    }
+    for (const modelId of ['llama3.2', 'qwen2.5:7b', 'gemma2:2b']) {
+      const unavailable = modelChoices.find((choice) => choice.value === modelId);
+      expect(unavailable.name).toMatch(/not installed/i);
+      expect(String(unavailable.disabled)).toContain(`ollama pull ${modelId}`);
+      expect(unavailable.name).not.toMatch(/← current/);
+    }
+  });
+
+  it('forces a fresh Ollama inventory read each time the picker opens', async () => {
+    const resolver = realResolver();
+    const fetchImpl = vi.fn(async () => new Response(JSON.stringify({
+      models: [{ name: 'gemma4:e4b-32k' }],
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const prompts = {
+      select: vi.fn(async (opts: any) => isStage1(opts.message) ? 'ollama' : 'gemma4:e4b-32k'),
+    };
+
+    await runModelPicker({ resolver, promptModule: prompts, fetchImpl: fetchImpl as typeof fetch });
+    await runModelPicker({ resolver, promptModule: prompts, fetchImpl: fetchImpl as typeof fetch });
+
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not claim catalog recommendations are uninstalled when Ollama is offline', async () => {
+    let stage1Message = '';
+    let stage2Message = '';
+    let modelChoices: any[] = [];
+    const fetchImpl = vi.fn(async () => { throw new Error('connect ECONNREFUSED'); });
+    const select = vi.fn(async (opts: any) => {
+      if (isStage1(opts.message)) {
+        stage1Message = opts.message;
+        return 'ollama';
+      }
+      stage2Message = opts.message;
+      modelChoices = opts.choices;
+      return '__cancel__';
+    });
+
+    const result = await runModelPicker({
+      resolver: realResolver(),
+      promptModule: { select },
+      fetchImpl: fetchImpl as typeof fetch,
+      currentProviderId: 'ollama',
+      currentModelId: 'gemma4:e4b-32k',
+    });
+
+    expect(result).toBeNull();
+    expect(stage1Message).toMatch(/inventory unavailable/i);
+    expect(stage1Message).not.toMatch(/not installed/i);
+    expect(stage2Message).toMatch(/inventory unavailable.*start Ollama/i);
+    expect(modelChoices.some((choice) => choice.value === 'llama3.2')).toBe(false);
+    const unavailable = modelChoices.find((choice) => choice.value === '__ollama_unavailable__');
+    expect(unavailable.disabled).toBeTruthy();
   });
 
   it('returns null when user cancels provider prompt via Ctrl+C', async () => {

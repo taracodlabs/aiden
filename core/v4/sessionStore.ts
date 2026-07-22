@@ -32,7 +32,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
-import type { ToolCallRequest } from '../../providers/v4/types';
+import type { Message, ToolCallRequest } from '../../providers/v4/types';
 
 export type MessageRole = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -87,6 +87,13 @@ export interface SessionSearchResult {
   score: number;
 }
 
+export interface ActiveSessionState {
+  messages: Message[];
+  compressionCount: number;
+  cumulativeUsage: { inputTokens: number; outputTokens: number };
+  budgetState: Record<string, unknown> | null;
+}
+
 /** v4.12 CS.1 — session_search options. */
 export interface SearchOptions {
   limit?: number;
@@ -132,6 +139,16 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_sessions_updated ON sessions(updated_at DESC);
 CREATE INDEX IF NOT EXISTS idx_sessions_created ON sessions(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS session_active_state (
+  session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+  messages_json TEXT NOT NULL,
+  compression_count INTEGER NOT NULL DEFAULT 0,
+  cumulative_input_tokens INTEGER NOT NULL DEFAULT 0,
+  cumulative_output_tokens INTEGER NOT NULL DEFAULT 0,
+  budget_state_json TEXT,
+  updated_at INTEGER NOT NULL
+);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
   content,
@@ -412,6 +429,76 @@ export class SessionStore {
   getMessages(sessionId: string): MessageRecord[] {
     const rows = this.listMessagesStmt.all(sessionId) as MessageRow[];
     return rows.map(rowToMessage);
+  }
+
+  setActiveState(sessionId: string, state: ActiveSessionState): void {
+    this.db.prepare(
+      `INSERT INTO session_active_state (
+         session_id, messages_json, compression_count,
+         cumulative_input_tokens, cumulative_output_tokens,
+         budget_state_json, updated_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(session_id) DO UPDATE SET
+         messages_json = excluded.messages_json,
+         compression_count = excluded.compression_count,
+         cumulative_input_tokens = excluded.cumulative_input_tokens,
+         cumulative_output_tokens = excluded.cumulative_output_tokens,
+         budget_state_json = excluded.budget_state_json,
+         updated_at = excluded.updated_at`,
+    ).run(
+      sessionId,
+      JSON.stringify(state.messages),
+      Math.max(0, Math.floor(state.compressionCount)),
+      Math.max(0, Math.floor(state.cumulativeUsage.inputTokens)),
+      Math.max(0, Math.floor(state.cumulativeUsage.outputTokens)),
+      state.budgetState ? JSON.stringify(state.budgetState) : null,
+      Date.now(),
+    );
+  }
+
+  getActiveState(sessionId: string): ActiveSessionState | null {
+    const row = this.db.prepare(
+      `SELECT messages_json, compression_count, cumulative_input_tokens,
+              cumulative_output_tokens, budget_state_json
+       FROM session_active_state WHERE session_id = ?`,
+    ).get(sessionId) as {
+      messages_json: string;
+      compression_count: number;
+      cumulative_input_tokens: number;
+      cumulative_output_tokens: number;
+      budget_state_json: string | null;
+    } | undefined;
+    if (!row) return null;
+    try {
+      return {
+        messages: JSON.parse(row.messages_json) as Message[],
+        compressionCount: row.compression_count,
+        cumulativeUsage: {
+          inputTokens: row.cumulative_input_tokens,
+          outputTokens: row.cumulative_output_tokens,
+        },
+        budgetState: row.budget_state_json
+          ? JSON.parse(row.budget_state_json) as Record<string, unknown>
+          : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  recordTurnWithActiveState(
+    sessionId: string,
+    messages: AppendMessageInput[],
+    usage: { inputTokens: number; outputTokens: number },
+    activeState: ActiveSessionState,
+  ): void {
+    this.db.transaction(() => {
+      for (const message of messages) this.appendMessage(sessionId, message);
+      if (usage.inputTokens > 0 || usage.outputTokens > 0) {
+        this.addTokenUsage(sessionId, usage.inputTokens, usage.outputTokens);
+      }
+      this.setActiveState(sessionId, activeState);
+    })();
   }
 
   // ── Search ───────────────────────────────────────────────────────────

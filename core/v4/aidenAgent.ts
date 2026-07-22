@@ -50,6 +50,16 @@ import type {
   ProviderAdapter,
   ProviderCallOutput,
 } from '../../providers/v4/types';
+import {
+  serializeToolResultForModel,
+  type ToolResultArtifactStore,
+} from './toolResultBoundary';
+import { selectEconomyTools } from './usagePolicy';
+import {
+  createLogicalProviderCallId,
+  currentProviderAttemptLedger,
+} from '../../providers/v4/providerAttemptAccounting';
+import { findModel } from '../../providers/v4/modelCatalog';
 import type {
   PlannerGuard,
   PlannerGuardDecision,
@@ -268,6 +278,8 @@ export interface AidenAgentOptions {
   provider:                ProviderAdapter;
   toolExecutor:            ToolExecutor;
   tools:                   ToolSchema[];
+  /** Optional local store for sanitized tool-result bodies externalized at the model boundary. */
+  toolResultArtifactStore?: ToolResultArtifactStore;
   /**
    * v4.9.4 Slice 1 — test seam. Override TurnState construction so
    * regression tests can drive deterministic surface / cooldown /
@@ -299,6 +311,8 @@ export interface AidenAgentOptions {
    * behaviour, byte-identical.
    */
   sessionTokenCap?:        number;
+  /** Optional estimated USD cap. Unknown pricing is reported but never treated as zero. */
+  sessionCostCap?:         number;
   fallback?:               FallbackStrategy;
   /**
    * Phase v4.1.2-slice3 telemetry. Optional aggregator the caller
@@ -334,7 +348,7 @@ export interface AidenAgentOptions {
     level:   'caution' | 'warning',
     current: number,
     max:     number,
-    kind?:   'iterations' | 'tokens',
+    kind?:   'iterations' | 'tokens' | 'cost',
   ) => void;
   // ── Moat ─────────────────────────────────────────────────────────────
   plannerGuard?:           PlannerGuard;
@@ -429,6 +443,8 @@ export interface AidenAgentOptions {
 export interface AidenAgentResult {
   finalContent:        string;
   messages:            Message[];
+  /** Messages appended by the provider/tool loop, excluding the input history. */
+  turnMessages?:       Message[];
   turnCount:           number;
   toolCallCount:       number;
   fallbackActivated:   boolean;
@@ -489,6 +505,16 @@ export interface AidenAgentResult {
 
 export interface RunConversationOptions {
   stream?:           boolean;
+  sessionId?:        string | null;
+  taskId?:           string | null;
+  runId?:            string | number | null;
+  entryPoint?:       string;
+  purpose?:          import('./usageLedger').ProviderAttemptPurpose;
+  selectedMode?:     import('./usageLedger').UsageMode;
+  selectedProfile?:  string;
+  deferredSchemaCount?: number;
+  economySchemaSavings?: number;
+  providerAttemptBudgets?: import('../../providers/v4/types').ProviderAttemptBudget[];
   /**
    * v4.12 BE.1 — tokens already spent in THIS session before this run (from
    * sessionStore totals). The per-session token cap enforces on
@@ -601,10 +627,12 @@ export class AidenAgent {
 
   private readonly toolExecutor:                ToolExecutor;
   private readonly tools:                       ToolSchema[];
+  private readonly toolResultArtifactStore?:    ToolResultArtifactStore;
   // v4.9.4 Slice 1 — TurnState test seam (undefined in production).
   private readonly turnStateFactory?:           () => TurnState;
   private readonly maxTurns:                    number;
   private readonly sessionTokenCap?:            number;
+  private readonly sessionCostCap?:             number;
   // v4.12 BE.1 — stateless token estimator for the budget check (getLimits +
   // estimateMessageTokens/estimateToolTokens). No per-model state carried.
   private readonly modelMetadata = new ModelMetadata();
@@ -702,6 +730,7 @@ export class AidenAgent {
     this.provider                 = opts.provider;
     this.toolExecutor             = opts.toolExecutor;
     this.tools                    = opts.tools;
+    this.toolResultArtifactStore  = opts.toolResultArtifactStore;
     this.turnStateFactory         = opts.turnStateFactory;
     // Iterations get their own field, one meaning. A maxTurns of 0 (or unset /
     // negative) must NOT mean "run zero iterations" — it means "use the sane
@@ -712,6 +741,7 @@ export class AidenAgent {
       ? opts.maxTurns
       : DEFAULT_MAX_TURNS;
     this.sessionTokenCap          = opts.sessionTokenCap;
+    this.sessionCostCap           = opts.sessionCostCap;
     this.fallback                 = opts.fallback;
     this.onToolCall               = opts.onToolCall;
     this.onToolActivity           = opts.onToolActivity;
@@ -893,6 +923,10 @@ export class AidenAgent {
     return this._currentSignal;
   }
 
+  restoreCompressionCount(count: number): void {
+    this.compressionEvents = Math.max(0, Math.floor(count));
+  }
+
   /**
    * v4.11 Slice 4 — return the live TurnRuntimeContext for the active
    * turn (or `undefined` if the agent is between turns / the caller
@@ -927,7 +961,18 @@ export class AidenAgent {
     ) {
       this.pendingRequiredClarification = null;
     }
-    const narrowedTools   = await this.narrowTools(lastUserContent, history);
+    const profiledTools = await this.narrowTools(lastUserContent, history);
+    const economySelection = selectEconomyTools(profiledTools, lastUserContent);
+    const selectedMode = options.selectedMode ?? 'balanced';
+    const narrowedTools = selectedMode === 'economy'
+      ? economySelection.selected
+      : profiledTools;
+    const effectiveOptions: RunConversationOptions = {
+      ...options,
+      selectedMode,
+      deferredSchemaCount: economySelection.deferredCount,
+      economySchemaSavings: economySelection.estimatedSchemaSavings,
+    };
 
     // 4. Build per-call trackers, then Stage-0 intent pre-arm.
     //    The tracker's preArm() bumps `preArmed` itself; the loop just
@@ -944,8 +989,11 @@ export class AidenAgent {
     }
 
     // 5. Compose initial conversation, prepending the system prompt.
+    const activeHistory = systemPrompt && history[0]?.role === 'system'
+      ? history.slice(1)
+      : history;
     let messages: Message[] = systemPrompt
-      ? [{ role: 'system', content: systemPrompt }, ...history]
+      ? [{ role: 'system', content: systemPrompt }, ...activeHistory]
       : [...history];
 
     // 6. Apply prompt-caching markers (helper no-ops for non-Anthropic).
@@ -1010,7 +1058,7 @@ export class AidenAgent {
       messages,
       narrowedTools,
       trackers,
-      options,
+      effectiveOptions,
     );
 
     // 9. Honesty post-loop scan (only if loop ended with a normal stop).
@@ -1139,6 +1187,7 @@ export class AidenAgent {
     return {
       finalContent,
       messages:           resultMessages,
+      turnMessages:       loopResult.turnMessages,
       turnCount:          loopResult.turnCount,
       toolCallCount:      loopResult.toolCallCount,
       fallbackActivated:  loopResult.fallbackActivated,
@@ -1274,6 +1323,7 @@ export class AidenAgent {
   ): Promise<{
     finalContent:       string;
     messages:           Message[];
+    turnMessages:       Message[];
     turnCount:          number;
     toolCallCount:      number;
     fallbackActivated:  boolean;
@@ -1338,7 +1388,10 @@ export class AidenAgent {
     let   warningFired      = false;
     let   tokenCautionFired = false; // v4.12 BE.1 — token warn-ladder (80/90%)
     let   tokenWarningFired = false;
+    let   costCautionFired  = false;
+    let   costWarningFired  = false;
     let   emptyRetriesUsed  = 0;
+    const toolResultMetrics = { rawBytes: 0, transmittedBytes: 0 };
     let   finishReason: 'stop' | 'budget_exhausted' | 'error' | 'tool_loop' | 'interrupted' = 'stop';
     let   finalContent      = '';
     let   resumeHandoff: AidenAgentResult['resumeHandoff'];
@@ -1472,6 +1525,40 @@ export class AidenAgent {
         }
       }
 
+      // Estimated-cost cap uses the same durable physical-attempt ledger as
+      // reporting. When catalog pricing is unavailable the amount remains
+      // unknown and is never coerced to zero or used to block execution.
+      if (this.sessionCostCap && this.sessionCostCap > 0 && runOptions.sessionId) {
+        const ledger = currentProviderAttemptLedger();
+        const pricing = findModel(this.providerId ?? '', this.modelId ?? '')?.pricing;
+        if (ledger && pricing) {
+          const spent = ledger.project({ sessionId: runOptions.sessionId }).knownCostAmount;
+          if (!costCautionFired && spent >= this.sessionCostCap * 0.8) {
+            costCautionFired = true;
+            this.onBudgetWarning?.('caution', spent, this.sessionCostCap, 'cost');
+          }
+          if (!costWarningFired && spent >= this.sessionCostCap) {
+            costWarningFired = true;
+            this.onBudgetWarning?.('warning', spent, this.sessionCostCap, 'cost');
+          }
+          const limits = this.modelMetadata.getLimits(this.providerId ?? '', this.modelId ?? '');
+          const estimatedInput = this.modelMetadata.estimateMessageTokens(messages)
+            + this.modelMetadata.estimateToolTokens(effectiveTools);
+          const estimatedNext = (estimatedInput * pricing.inputPerM
+            + limits.maxOutputTokens * pricing.outputPerM) / 1_000_000;
+          if (spent >= this.sessionCostCap || spent + estimatedNext > this.sessionCostCap) {
+            finishReason = 'budget_exhausted';
+            finalContent = 'Work paused — the estimated session cost budget was reached before another provider request could start.';
+            resumeHandoff = {
+              partial_work: finalContent,
+              next_steps: 'Task incomplete — no additional provider request was started after the estimated cost boundary.',
+              resume: 'Raise budget.session_cost_cap_usd (or use /budget cost), then re-send the request to continue.',
+            };
+            break;
+          }
+        }
+      }
+
       let output: ProviderCallOutput;
       // Once this turn has authoritative approval facts, hold subsequent
       // streamed prose until the provider segment completes. Contradictory
@@ -1503,7 +1590,7 @@ export class AidenAgent {
             shim.db,
             { model: this.modelId ?? 'unknown', provider: this.providerId ?? 'unknown' },
             async (_ctx, patchAttrs) => {
-              const out = await this.callProvider(messages, effectiveTools, providerRunOptions);
+              const out = await this.callProvider(messages, effectiveTools, providerRunOptions, toolResultMetrics);
               patchAttrs({
                 input_tokens:        out.usage?.inputTokens ?? 0,
                 output_tokens:       out.usage?.outputTokens ?? 0,
@@ -1516,7 +1603,7 @@ export class AidenAgent {
             },
           );
         } else {
-          output = await this.callProvider(messages, effectiveTools, providerRunOptions);
+          output = await this.callProvider(messages, effectiveTools, providerRunOptions, toolResultMetrics);
         }
         if (deferApprovalStream && output.content) {
           const safeContent = stripLeakedUiMarkup(output.content);
@@ -2194,9 +2281,18 @@ export class AidenAgent {
           _finalOk ? null : finalPolicyDecision,
           _finalOk,
         );
-        const _baseContent = result.error
+        const _rawContent = result.error
           ? `[error] ${result.error}`
           : stringifyToolResult(result.result);
+        const _bounded = await serializeToolResultForModel(_rawContent, {
+          toolName: call.name,
+          toolCallId: call.id,
+          capBytes: runOptions.selectedMode === 'economy' ? 8_000 : 12_000,
+          artifactStore: this.toolResultArtifactStore,
+        });
+        toolResultMetrics.rawBytes += _bounded.metadata.rawSize;
+        toolResultMetrics.transmittedBytes += _bounded.metadata.transmittedSize;
+        const _baseContent = _bounded.content;
         turnToolMessages.push({
           role:        'tool',
           toolCallId:  call.id,
@@ -2439,6 +2535,7 @@ export class AidenAgent {
     return {
       finalContent,
       messages,
+      turnMessages: messages.slice(initialMessages.length),
       turnCount,
       toolCallCount,
       fallbackActivated,
@@ -2489,6 +2586,7 @@ export class AidenAgent {
     messages:    Message[],
     tools:       ToolSchema[],
     runOptions:  RunConversationOptions,
+    toolResultMetrics: { rawBytes: number; transmittedBytes: number } = { rawBytes: 0, transmittedBytes: 0 },
   ): Promise<ProviderCallOutput> {
     // Phase 5 — unified provider preflight. Every assistant toolCalls[]
     // entry must have a matching {role:'tool', toolCallId} BEFORE shipping
@@ -2522,10 +2620,52 @@ export class AidenAgent {
     // override security-relevant fields. No-context: headers omitted.
     const ambient = _llmCurrentContext();
     const outboundHeaders = ambient ? _injectContextHeaders(ambient) : undefined;
+    const schemaCounts = tools.reduce((counts, tool) => {
+      const toolset = this.resolveToolset?.(tool.name);
+      if (toolset === 'mcp') counts.mcp += 1;
+      else if (toolset === 'plugin') counts.plugin += 1;
+      else counts.core += 1;
+      return counts;
+    }, { core: 0, mcp: 0, plugin: 0 });
+    const promptComponents = measurePromptComponents(this.promptBuilderOptions, messages);
+    const usageContext = {
+      logicalCallId: createLogicalProviderCallId(),
+      sessionId: runOptions.sessionId ?? null,
+      taskId: runOptions.taskId ?? null,
+      runId: runOptions.runId ?? null,
+      entryPoint: runOptions.entryPoint ?? 'core',
+      purpose: runOptions.purpose ?? 'primary' as const,
+      providerConfigured: this.providerId ?? null,
+      modelConfigured: this.modelId ?? null,
+      selectedMode: runOptions.selectedMode ?? 'balanced' as const,
+      selectedProfile: runOptions.selectedProfile ?? null,
+      contextSnapshotId: createLogicalProviderCallId(),
+      toolSchemaSnapshotId: createLogicalProviderCallId(),
+      coreSchemaCount: schemaCounts.core,
+      mcpSchemaCount: schemaCounts.mcp,
+      pluginSchemaCount: schemaCounts.plugin,
+      deferredSchemaCount: runOptions.deferredSchemaCount ?? null,
+      rawToolResultBytes: toolResultMetrics.rawBytes,
+      transmittedToolResultBytes: toolResultMetrics.transmittedBytes,
+      memoryTokens: promptComponents.memory,
+      userProfileTokens: promptComponents.userProfile,
+      projectMemoryTokens: promptComponents.projectMemory,
+      skillIndexTokens: promptComponents.skillIndex,
+      loadedSkillTokens: promptComponents.loadedSkills,
+      ...(runOptions.providerAttemptBudgets
+        ? { attemptBudgets: runOptions.providerAttemptBudgets }
+        : {}),
+    };
     if (!wantStream) {
       // v4.6 prep — forward the abort signal into the provider call so
       // an in-flight HTTP request can be cancelled mid-flight.
-      return this.provider.call({ messages, tools, signal: runOptions.signal, headers: outboundHeaders });
+      return this.provider.call({
+        messages,
+        tools,
+        signal: runOptions.signal,
+        headers: outboundHeaders,
+        usageContext,
+      });
     }
 
     let firstDeltaFired = false;
@@ -2548,6 +2688,7 @@ export class AidenAgent {
       // aborts cancel the underlying SSE read via the same signal.
       signal: runOptions.signal,
       headers: outboundHeaders,
+      usageContext,
     });
     for await (const evt of stream) {
       if (evt.type === 'delta') {
@@ -2673,6 +2814,40 @@ function stringifyToolResult(result: unknown): string {
   } catch {
     return String(result);
   }
+}
+
+function measurePromptComponents(
+  options: PromptBuilderOptions | undefined,
+  messages: readonly Message[],
+): {
+  memory: number;
+  userProfile: number;
+  projectMemory: number;
+  skillIndex: number;
+  loadedSkills: number;
+} {
+  const snapshot = options?.memorySnapshot;
+  const toolNames = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== 'assistant') continue;
+    for (const call of message.toolCalls ?? []) toolNames.set(call.id, call.name);
+  }
+  const loadedSkillBodies = new Set<string>();
+  for (const message of messages) {
+    if (message.role !== 'tool' || toolNames.get(message.toolCallId) !== 'skill_view') continue;
+    loadedSkillBodies.add(message.content);
+  }
+  return {
+    memory: approximateTokens(snapshot?.memoryMd ?? ''),
+    userProfile: approximateTokens(snapshot?.userMd ?? ''),
+    projectMemory: approximateTokens(snapshot?.files?.project?.content ?? ''),
+    skillIndex: approximateTokens(JSON.stringify(options?.skillsList ?? [])),
+    loadedSkills: [...loadedSkillBodies].reduce((sum, content) => sum + approximateTokens(content), 0),
+  };
+}
+
+function approximateTokens(value: string): number {
+  return value ? Math.ceil(Buffer.byteLength(value, 'utf8') / 4) : 0;
 }
 
 // v4.9.0 Slice 6 — static imports for the LLM span bridge. Same

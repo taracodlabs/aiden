@@ -1,6 +1,6 @@
 {
   "name": "aiden-runtime",
-  "version": "4.15.0",
+  "version": "4.15.1",
   "publishConfig": {
     "access": "public"
   },
@@ -80,6 +80,7 @@
     "build:win": "npm run dist",
     "dist:linux": "node scripts/prepare-electron.js && electron-builder --linux --x64 --publish never && node -e \"const fs=require('fs');const p=JSON.parse(fs.readFileSync('package.json','utf8'));p.main='./dist/index.js';fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');console.log('  main restored')\"",
     "test": "vitest run",
+    "benchmark:token-efficiency": "ts-node scripts/benchmark-token-efficiency.ts",
     "test:ui": "vitest --ui",
     "eval": "ts-node evals/cli.ts",
     "eval:honesty": "ts-node evals/cli.ts --suite honesty",
@@ -246,7 +247,7 @@
     "archiver": "^7.0.1",
     "axios": "^1.15.2",
     "bcrypt": "^6.0.0",
-    "better-sqlite3": "^12.9.0",
+    "better-sqlite3": "12.9.0",
     "blessed": "^0.1.81",
     "chalk": "^5.6.2",
     "chokidar": "^4.0.3",

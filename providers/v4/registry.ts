@@ -25,6 +25,7 @@
 
 import { ApiMode } from './types';
 import type { BillingTier, PaidFallbackConsent } from '../../core/v4/billingGuard';
+import { PROVIDER_MODEL_POLICIES } from './providerPolicies';
 
 export interface ProviderRegistryEntry {
   /** Stable identifier, e.g. 'anthropic', 'groq', 'together'. */
@@ -191,7 +192,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     hasFreeTier: true,
     docsUrl: 'https://console.groq.com/docs/',
     supportsToolCalling: true,
-    modelIds: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+    modelIds: [...PROVIDER_MODEL_POLICIES.groq.curatedModels],
   },
   gemini: {
     id: 'gemini',
@@ -225,15 +226,15 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     id: 'huggingface',
     displayName: 'Hugging Face',
     apiMode: 'chat_completions',
-    baseUrl: 'https://api-inference.huggingface.co/v1',
+    baseUrl: 'https://router.huggingface.co/v1',
     apiKeyEnvVar: 'HF_TOKEN',
-    description: 'Hugging Face Inference API — free tier on most open-weight models.',
+    description: 'Hugging Face Inference Providers — one token with automatic backend routing.',
     tier: 'free',
     billingTier: 'free',
     hasFreeTier: true,
     docsUrl: 'https://huggingface.co/docs/api-inference/',
     supportsToolCalling: true,
-    modelIds: ['meta-llama/Llama-3.3-70B-Instruct', 'Qwen/Qwen2.5-72B-Instruct'],
+    modelIds: [...PROVIDER_MODEL_POLICIES.huggingface.curatedModels],
   },
 
   // ─── Aggregators / paid APIs ─────────────────────────────────────────────
@@ -275,12 +276,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     hasFreeTier: false,
     docsUrl: 'https://docs.together.ai/',
     supportsToolCalling: true,
-    modelIds: [
-      'meta-llama/Llama-3.3-70B-Instruct-Turbo',
-      'meta-llama/Llama-3.1-8B-Instruct-Turbo',
-      'deepseek-ai/DeepSeek-V3',
-      'deepseek-ai/DeepSeek-R1',
-    ],
+    modelIds: [...PROVIDER_MODEL_POLICIES.together.curatedModels],
   },
   deepseek: {
     id: 'deepseek',
@@ -301,7 +297,7 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     // flash family per DeepSeek docs; deprecated-but-live). Removal
     // is its own deprecation slice. Per-call thinking + reasoning
     // _effort defaults for v4-pro live in providers/v4/modelDefaults.ts.
-    modelIds: ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
+    modelIds: [...PROVIDER_MODEL_POLICIES.deepseek.curatedModels],
   },
   mistral: {
     id: 'mistral',

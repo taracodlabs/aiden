@@ -51,6 +51,10 @@ export interface ModelEntry {
   tier: 'flagship' | 'standard' | 'small' | 'free';
   /** Optional notes for menu (e.g. "preview", "deprecated soon"). */
   notes?: string;
+  /** Organization that created the model, when distinct from its host. */
+  creator?: string;
+  /** Inference provider serving the model. */
+  hostedBy?: string;
 }
 
 export const MODEL_CATALOG: ModelEntry[] = [
@@ -352,42 +356,34 @@ export const MODEL_CATALOG: ModelEntry[] = [
 
   // ─── groq ────────────────────────────────────────────────────────────────
   {
-    id: 'llama-3.3-70b-versatile',
-    displayName: 'Llama 3.3 70B Versatile',
+    id: 'openai/gpt-oss-120b',
+    displayName: 'GPT-OSS 120B',
     providerId: 'groq',
     contextLength: 131_072,
-    maxOutputTokens: 32_768,
+    maxOutputTokens: 65_536,
     supportsToolCalling: true,
     supportsVision: false,
-    supportsReasoning: false,
-    pricing: { inputPerM: 0.59, outputPerM: 0.79 },
+    supportsReasoning: true,
+    pricing: { inputPerM: 0.15, outputPerM: 0.60 },
     isDefault: true,
     tier: 'flagship',
+    creator: 'OpenAI',
+    hostedBy: 'Groq',
   },
   {
-    id: 'llama-3.1-8b-instant',
-    displayName: 'Llama 3.1 8B Instant',
+    id: 'openai/gpt-oss-20b',
+    displayName: 'GPT-OSS 20B',
     providerId: 'groq',
     contextLength: 131_072,
-    maxOutputTokens: 8_192,
+    maxOutputTokens: 65_536,
     supportsToolCalling: true,
     supportsVision: false,
-    supportsReasoning: false,
+    supportsReasoning: true,
     pricing: { inputPerM: 0.05, outputPerM: 0.08 },
     isDefault: false,
     tier: 'small',
-  },
-  {
-    id: 'mixtral-8x7b-32768',
-    displayName: 'Mixtral 8x7B',
-    providerId: 'groq',
-    contextLength: 32_768,
-    supportsToolCalling: true,
-    supportsVision: false,
-    supportsReasoning: false,
-    pricing: { inputPerM: 0.24, outputPerM: 0.24 },
-    isDefault: false,
-    tier: 'standard',
+    creator: 'OpenAI',
+    hostedBy: 'Groq',
   },
 
   // ─── gemini ──────────────────────────────────────────────────────────────
@@ -456,6 +452,48 @@ export const MODEL_CATALOG: ModelEntry[] = [
 
   // ─── huggingface ─────────────────────────────────────────────────────────
   {
+    id: 'openai/gpt-oss-120b',
+    displayName: 'GPT-OSS 120B',
+    providerId: 'huggingface',
+    contextLength: 131_072,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: true,
+    isDefault: true,
+    tier: 'flagship',
+    creator: 'OpenAI',
+    hostedBy: 'Hugging Face',
+    notes: 'Automatic inference-provider routing; verify the selected route during setup.',
+  },
+  {
+    id: 'openai/gpt-oss-20b',
+    displayName: 'GPT-OSS 20B',
+    providerId: 'huggingface',
+    contextLength: 131_072,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: true,
+    isDefault: false,
+    tier: 'small',
+    creator: 'OpenAI',
+    hostedBy: 'Hugging Face',
+    notes: 'Automatic inference-provider routing; verify the selected route during setup.',
+  },
+  {
+    id: 'Qwen/Qwen3-Coder-480B-A35B-Instruct',
+    displayName: 'Qwen3 Coder 480B A35B Instruct',
+    providerId: 'huggingface',
+    contextLength: 262_144,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: true,
+    isDefault: false,
+    tier: 'flagship',
+    creator: 'Qwen',
+    hostedBy: 'Hugging Face',
+    notes: 'Automatic inference-provider routing; verify the selected route during setup.',
+  },
+  {
     id: 'meta-llama/Llama-3.3-70B-Instruct',
     displayName: 'Llama 3.3 70B Instruct',
     providerId: 'huggingface',
@@ -463,7 +501,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
     supportsToolCalling: true,
     supportsVision: false,
     supportsReasoning: false,
-    isDefault: true,
+    isDefault: false,
     tier: 'flagship',
   },
   {
@@ -577,6 +615,8 @@ export const MODEL_CATALOG: ModelEntry[] = [
     isDefault: true,
     tier: 'flagship',
     notes: 'Tool-calling capable. Available at Build Tier 0.',
+    creator: 'OpenAI',
+    hostedBy: 'Together AI',
   },
   {
     id: 'openai/gpt-oss-20b',
@@ -590,6 +630,8 @@ export const MODEL_CATALOG: ModelEntry[] = [
     isDefault: false,
     tier: 'small',
     notes: 'Smaller/cheaper tool-calling option. Tier-0 accessible.',
+    creator: 'OpenAI',
+    hostedBy: 'Together AI',
   },
   {
     id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
@@ -650,8 +692,8 @@ export const MODEL_CATALOG: ModelEntry[] = [
   // so maxOutputTokens is omitted rather than asserted. pricing is omitted
   // (unknown — no DeepSeek-direct price is cited anywhere in-repo; per the
   // header rule we leave `pricing` undefined rather than invent numbers).
-  // isDefault stays FALSE — selectable, not automatic; the default + the
-  // registry auto-pick wait on live tool-calling verification.
+  // The current direct-API primary is the default. Readiness still determines
+  // whether a configured account/model combination is usable at runtime.
   {
     id: 'deepseek-v4-pro',
     displayName: 'DeepSeek V4 Pro',
@@ -667,7 +709,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
     supportsVision: false,
     supportsReasoning: true,         // mandatory thinking + reasoning_effort
     // pricing omitted — unknown, not cited in-repo.
-    isDefault: false,
+    isDefault: true,
     tier: 'flagship',
   },
   {
@@ -696,7 +738,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
     supportsVision: false,
     supportsReasoning: false,
     pricing: { inputPerM: 0.27, outputPerM: 1.1 },
-    isDefault: true,
+    isDefault: false,
     tier: 'flagship',
   },
   {

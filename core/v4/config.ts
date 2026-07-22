@@ -100,6 +100,13 @@ export interface AidenConfig {
   memory: {
     provider: string;
   };
+  usage?: {
+    mode?: 'balanced' | 'economy';
+  };
+  budget?: {
+    session_token_cap?: number;
+    session_cost_cap_usd?: number;
+  };
   /**
    * Forward-compatibility bucket: any unknown top-level keys land here so
    * round-trip save() doesn't drop user-managed fields.
@@ -147,6 +154,9 @@ const KNOWN_KEYS = new Set([
   'display',
   'providers',
   'memory',
+  // Token-efficiency controls are persisted by /mode and /budget.
+  'usage',
+  'budget',
   // Phase 10 introduced the terminal toolset — its config block lands
   // under the top-level `terminal` key (e.g. terminal.backend = 'auto').
   'terminal',
@@ -244,6 +254,12 @@ export class ConfigManager implements ConfigProvider {
 
   constructor(private readonly paths: AidenPaths) {}
 
+  /** Prevent setup/runtime transactions from crossing isolated Aiden homes. */
+  usesPaths(paths: AidenPaths): boolean {
+    return path.resolve(this.paths.root) === path.resolve(paths.root)
+      && path.resolve(this.paths.configYaml) === path.resolve(paths.configYaml);
+  }
+
   /** Read config.yaml from disk and merge over the defaults. */
   async load(): Promise<AidenConfig> {
     let raw: string;
@@ -293,7 +309,14 @@ export class ConfigManager implements ConfigProvider {
     if (config) this.cfg = config;
     await fs.mkdir(path.dirname(this.paths.configYaml), { recursive: true });
     const dumped = yaml.dump(this.cfg, { lineWidth: 120, noRefs: true });
-    await fs.writeFile(this.paths.configYaml, dumped, 'utf8');
+    const temporary = `${this.paths.configYaml}.${process.pid}.${Date.now()}.tmp`;
+    await fs.writeFile(temporary, dumped, 'utf8');
+    try {
+      await fs.rename(temporary, this.paths.configYaml);
+    } catch (error) {
+      await fs.rm(temporary, { force: true }).catch(() => undefined);
+      throw error;
+    }
     this.rawText = dumped;
   }
 
@@ -310,6 +333,12 @@ export class ConfigManager implements ConfigProvider {
       return typeof expanded === 'string' ? expanded : undefined;
     }
     return undefined;
+  }
+
+  /** Return the configured string without environment interpolation. */
+  getRaw(key: string): string | undefined {
+    const value = getDotted(this.cfg, key);
+    return typeof value === 'string' ? value : undefined;
   }
 
   /** Typed getter with default fallback. */

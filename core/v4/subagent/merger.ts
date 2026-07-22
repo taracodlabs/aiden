@@ -30,6 +30,7 @@
  * with a strategy-specific system prompt.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { Message, ProviderAdapter } from '../../../providers/v4/types';
 import type { Logger } from '../logger/logger';
 import { noopLogger } from '../logger/factory';
@@ -169,6 +170,13 @@ export async function mergeResults(
       messages,
       tools: [],
       stream: false,
+      usageContext: {
+        logicalCallId: randomUUID(),
+        entryPoint: 'subagent_aggregation',
+        purpose: 'aggregation',
+        providerConfigured: opts.aggregatorModel.providerId,
+        modelConfigured: opts.aggregatorModel.modelId,
+      },
     });
     const text = extractFinalText(out);
     // Phase 7 (G4) — carry the trust verdict INTO the merged output. For a
