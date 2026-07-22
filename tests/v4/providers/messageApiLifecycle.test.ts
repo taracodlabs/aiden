@@ -52,16 +52,16 @@ async function fixture(stage: Stage) {
   return { baseUrl: `http://127.0.0.1:${port}`, ready, requests: () => requests };
 }
 
-function make(baseUrl: string): MessageApiAdapter {
+function make(baseUrl: string, stage: Stage): MessageApiAdapter {
   return new MessageApiAdapter({
     baseUrl,
     apiKey: 'fixture-key',
     model: 'fixture-model',
     providerName: 'fixture',
-    connectionTimeoutMs: 60,
-    firstByteTimeoutMs: 70,
+    connectionTimeoutMs: stage === 'before_headers' ? 60 : 5_000,
+    firstByteTimeoutMs: stage === 'after_headers' ? 70 : 5_000,
     bodyIdleTimeoutMs: 80,
-    totalTimeoutMs: 500,
+    totalTimeoutMs: 10_000,
     maxRetries: 0,
   });
 }
@@ -85,7 +85,9 @@ describe('MessageApiAdapter request lifecycle', () => {
     ['after_event', 'body_idle_timeout'],
   ] as const)('reports %s as %s', async (stage, phase) => {
     const current = await fixture(stage);
-    await expect(consume(make(current.baseUrl))).rejects.toMatchObject({
+    const pending = consume(make(current.baseUrl, stage));
+    if (stage !== 'before_headers') await current.ready;
+    await expect(pending).rejects.toMatchObject({
       name: 'ProviderPhaseTimeoutError',
       phase,
     });
@@ -97,7 +99,7 @@ describe('MessageApiAdapter request lifecycle', () => {
   it('keeps cancellation attached after headers and body data', async () => {
     const current = await fixture('after_event');
     const cancellation = new AbortController();
-    const pending = consume(make(current.baseUrl), cancellation.signal);
+    const pending = consume(make(current.baseUrl, 'after_event'), cancellation.signal);
     await current.ready;
     cancellation.abort();
     await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
@@ -105,6 +107,6 @@ describe('MessageApiAdapter request lifecycle', () => {
 
   it('completes a normal streamed response', async () => {
     const current = await fixture('complete');
-    await expect(consume(make(current.baseUrl))).resolves.toBe('ok');
+    await expect(consume(make(current.baseUrl, 'complete'))).resolves.toBe('ok');
   });
 });

@@ -98,29 +98,29 @@ describe.skipIf(process.platform !== 'win32')('built CLI token-efficiency accept
         if (state === 'boot' && ready >= 1) {
           state = 'estimate';
           submit(child!, '/estimate --json inspect one file');
-        } else if (state === 'estimate' && text.includes('"selectedMode":"balanced"')) {
+        } else if (state === 'estimate' && text.includes('"selectedMode":"balanced"') && ready >= 2) {
           expect(provider!.callCount()).toBe(0);
-          state = 'mode'; setTimeout(() => submit(child!, '/mode economy'), 1_000);
-        } else if (state === 'mode' && text.includes('Usage mode: economy')) {
-          state = 'budget'; setTimeout(() => submit(child!, '/budget 100000'), 1_000);
-        } else if (state === 'budget' && text.includes('Session token cap set')) {
-          state = 'turn'; setTimeout(() => submit(child!, 'reply with the acceptance phrase'), 1_000);
-        } else if (state === 'turn' && text.includes('TOKEN EFFICIENCY ACCEPTANCE') && ready >= 2) {
-          state = 'usage-json'; setTimeout(() => submit(child!, '/usage --json'), 1_000);
-        } else if (state === 'usage-json' && text.includes('"physicalAttempts":1')) {
-          state = 'usage-human'; setTimeout(() => submit(child!, '/usage'), 1_000);
-        } else if (state === 'usage-human' && text.includes('Usage — Current session')) {
+          state = 'mode'; submit(child!, '/mode economy');
+        } else if (state === 'mode' && text.includes('Usage mode: economy') && ready >= 3) {
+          state = 'budget'; submit(child!, '/budget 100000');
+        } else if (state === 'budget' && text.includes('Session token cap set') && ready >= 4) {
+          state = 'turn'; submit(child!, 'reply with the acceptance phrase');
+        } else if (state === 'turn' && text.includes('TOKEN EFFICIENCY ACCEPTANCE') && ready >= 5) {
+          state = 'usage-json'; submit(child!, '/usage --json');
+        } else if (state === 'usage-json' && text.includes('"physicalAttempts":1') && ready >= 6) {
+          state = 'usage-human'; submit(child!, '/usage');
+        } else if (state === 'usage-human' && text.includes('Usage — Current session') && ready >= 7) {
           expect(text).toContain('cumulative exposures');
           expect(text).not.toContain('Cost        0');
-          state = 'usage-details'; setTimeout(() => submit(child!, '/usage details'), 1_000);
-        } else if (state === 'usage-details' && text.includes('Usage details — Current session')) {
+          state = 'usage-details'; submit(child!, '/usage details');
+        } else if (state === 'usage-details' && text.includes('Usage details — Current session') && ready >= 8) {
           expect(text).toContain('Providers and models');
           expect(text).toContain('Purposes');
-          state = 'budget-json'; setTimeout(() => submit(child!, '/budget --json'), 1_000);
-        } else if (state === 'budget-json' && text.includes('"tokenBudget":100000')) {
-          state = 'queue'; setTimeout(() => submit(child!, '/queue'), 1_000);
-        } else if (state === 'queue' && /queue is empty/i.test(text)) {
-          state = 'quit'; setTimeout(() => submit(child!, '/quit'), 1_000);
+          state = 'budget-json'; submit(child!, '/budget --json');
+        } else if (state === 'budget-json' && text.includes('"tokenBudget":100000') && ready >= 9) {
+          state = 'queue'; submit(child!, '/queue');
+        } else if (state === 'queue' && /queue is empty/i.test(text) && ready >= 10) {
+          state = 'quit'; submit(child!, '/quit');
         }
       });
       child!.onExit(() => {

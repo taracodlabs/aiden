@@ -69,16 +69,25 @@ async function startServer(stage: ServerStage): Promise<{
   return { baseUrl: `http://127.0.0.1:${port}`, ready, requests: () => requestCount };
 }
 
-function adapter(baseUrl: string, maxRetries = 0): ChatCompletionsAdapter {
+function adapter(
+  baseUrl: string,
+  maxRetries = 0,
+  deadlines: Partial<{
+    connectionTimeoutMs: number;
+    firstByteTimeoutMs: number;
+    bodyIdleTimeoutMs: number;
+    totalTimeoutMs: number;
+  }> = {},
+): ChatCompletionsAdapter {
   return new ChatCompletionsAdapter({
     baseUrl,
     apiKey: 'fixture-key',
     model: 'fixture-model',
     providerName: 'fixture',
-    connectionTimeoutMs: 70,
-    firstByteTimeoutMs: 80,
-    bodyIdleTimeoutMs: 90,
-    totalTimeoutMs: 500,
+    connectionTimeoutMs: deadlines.connectionTimeoutMs ?? 70,
+    firstByteTimeoutMs: deadlines.firstByteTimeoutMs ?? 80,
+    bodyIdleTimeoutMs: deadlines.bodyIdleTimeoutMs ?? 90,
+    totalTimeoutMs: deadlines.totalTimeoutMs ?? 500,
     maxRetries,
   });
 }
@@ -102,7 +111,13 @@ describe('ChatCompletionsAdapter request lifecycle', () => {
     ['after_event', 'body_idle_timeout'],
   ] as const)('reports the exact phase when stalled at %s', async (stage, phase) => {
     const fixture = await startServer(stage);
-    await expect(consume(adapter(fixture.baseUrl))).rejects.toMatchObject({
+    const pending = consume(adapter(fixture.baseUrl, 0, {
+      connectionTimeoutMs: stage === 'before_headers' ? 70 : 5_000,
+      firstByteTimeoutMs: stage === 'after_headers' ? 80 : 5_000,
+      totalTimeoutMs: 10_000,
+    }));
+    if (stage !== 'before_headers') await fixture.ready;
+    await expect(pending).rejects.toMatchObject({
       name: 'ProviderPhaseTimeoutError',
       phase,
     });
