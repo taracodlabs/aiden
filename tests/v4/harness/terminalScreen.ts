@@ -120,6 +120,10 @@ export class TerminalScreen {
     return this.lines()[this.height - 1] ?? '';
   }
 
+  cursorPosition(): { row: number; col: number } {
+    return { row: this.row, col: this.col };
+  }
+
   snapshot(): string {
     const lines = this.lines();
     while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();

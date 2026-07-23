@@ -5,7 +5,7 @@
  * Aiden — local-first agent.
  */
 /**
- * The single-owner fixed two-row bottom region. Proves
+ * The single-owner variable-height boxed bottom region. Proves
  * the pure escape-sequence builders and the owner's lifecycle: reserving the
  * region protects composer and status rows, painting is cursor-safe + de-duplicated (no
  * flicker), resize re-anchors, teardown restores full-screen scrolling. The
@@ -80,11 +80,13 @@ describe('ComposerLane — lifecycle', () => {
     lane.activate('Enter → steer · /queue · Ctrl+C stop', 'provider · model · ctx · 1s');
     expect(lane.isActive()).toBe(true);
     const out = s.text();
-    expect(out).toContain(`${ESC}[1;22r`);
-    expect(out).toContain(`${ESC}[23;1H${ESC}[2KEnter → steer`);
+    expect(out).toContain(`${ESC}[1;20r`);
+    expect(out).toContain(`${ESC}[21;1H${ESC}[2K╭─ ▲ You`);
+    expect(out).toContain(`${ESC}[22;1H${ESC}[2K│ Enter → steer`);
+    expect(out).toContain(`${ESC}[23;1H${ESC}[2K╰`);
     expect(out).toContain(`${ESC}[24;1H${ESC}[2Kprovider`);
     // reserve happens before the first paint
-    expect(out.indexOf('[1;22r')).toBeLessThan(out.indexOf('[23;1H'));
+    expect(out.indexOf('[1;20r')).toBeLessThan(out.indexOf('[21;1H'));
   });
 
   it('keeps the status row inside the physical width budget', () => {
@@ -92,22 +94,22 @@ describe('ComposerLane — lifecycle', () => {
     const lane = new ComposerLane(s);
     lane.activate(
       'Type your message',
-      '  custom_openai:custom-default │ ctx0% │ ⌛ 0ms',
+      '◆ custom_openai:custom-default │ ◉ 0% │ ⧖ 0ms',
     );
     const painted = s.text()
       .split(`${ESC}[24;1H${ESC}[2K`).at(-1)!
-      .split(ESC + '8')[0]
+      .split(`${ESC}[22;`)[0]
       .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
-    expect(stringWidth(painted)).toBeLessThanOrEqual(46);
+    expect(stringWidth(painted)).toBeLessThanOrEqual(47);
   });
 
-  it('paint with the SAME text is a no-op — no flicker on redundant repaints', () => {
+  it('paint with the same text reasserts the cursor without duplicating the frame', () => {
     const s = mockSink();
     const lane = new ComposerLane(s);
     lane.activate('steer ▸ hi');
-    const before = s.text().length;
-    lane.paint('steer ▸ hi');   // identical
-    expect(s.text().length).toBe(before);   // nothing written
+    const before = s.text().split('╭─ ▲ You').length - 1;
+    lane.paint('steer ▸ hi');
+    expect(s.text().split('╭─ ▲ You').length - 1).toBe(before);
   });
 
   it('paint with NEW text repaints the lane (typed input updates in place)', () => {
@@ -118,16 +120,14 @@ describe('ComposerLane — lifecycle', () => {
     expect(s.text()).toContain('steer ▸ deploy');
   });
 
-  it('output written between paints never targets the lane row (region protects it)', () => {
-    // The owner only ever writes to the bottom row via paintSeq; assert every
-    // lane write is cursor-save-wrapped (so the flowing output cursor is intact).
+  it('routes transcript output through the saved scroll cursor and restores draft insertion', () => {
     const s = mockSink();
     const lane = new ComposerLane(s);
     lane.activate('Enter → steer');
-    lane.paint('steer ▸ x');
-    // Every paint is bracketed by save/restore → the output cursor is never lost.
-    const paints = s.text().split(`${ESC}7`).slice(1).filter((p) => p.includes(';1H'));
-    for (const p of paints) expect(p).toContain(ESC + '8');
+    lane.writeAbove('tool output\n');
+    const out = s.text();
+    expect(out).toContain(`${ESC}[utool output\n${ESC}[s`);
+    expect(out).toMatch(/\x1b\[22;\d+H\x1b\[\?25h$/);
   });
 
   it('resize re-reserves the region for the new height and repaints in place', () => {
@@ -136,8 +136,8 @@ describe('ComposerLane — lifecycle', () => {
     lane.activate('Enter → steer');
     (s as any).fireResize(30);   // terminal grew to 30 rows
     const out = s.text();
-    expect(out).toContain(`${ESC}[1;28r`);
-    expect(out).toContain(`${ESC}[29;1H`);
+    expect(out).toContain(`${ESC}[1;26r`);
+    expect(out).toContain(`${ESC}[27;1H`);
   });
 
   it('restores the full draft after a narrow-to-wide resize', () => {
@@ -164,9 +164,9 @@ describe('ComposerLane — lifecycle', () => {
     const s = mockSink();
     const lane = new ComposerLane(s);
     lane.activate('a');
-    const reserves1 = s.text().split('[1;22r').length - 1;
+    const reserves1 = s.text().split('[1;20r').length - 1;
     lane.activate('b');
-    const reserves2 = s.text().split('[1;22r').length - 1;
+    const reserves2 = s.text().split('[1;20r').length - 1;
     expect(reserves1).toBe(1);
     expect(reserves2).toBe(1);          // still one reserve
     expect(s.text()).toContain('b');    // repainted

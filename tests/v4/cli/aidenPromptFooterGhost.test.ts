@@ -5,43 +5,12 @@
  * Aiden — local-first agent.
  */
 /**
- * v4.10 Slice 10.5 — Bug D regression layer (PTY harness).
+ * Real-terminal regression for single ownership of the fixed composer.
+ * A partial slash command must remain inside the boxed Display-owned surface;
+ * Inquirer's prompt, helper, ghost, and dropdown output must stay suppressed.
  *
- * Two prior attempts at Bug D (cursor mis-positioning past ghost text
- * in the input prompt) shipped INERT:
- *   - v4.9.2 Slice 2 (commit 0d0668f1): inline cursorBackward escape.
- *     @inquirer/core's screen-manager.js absolute cursorTo() overrode
- *     it. Tests against the rendered string couldn't see the
- *     terminal-level effect.
- *   - v4.9.6: same shape, reframed with save/restore. Same outcome.
- *
- * Common cause of both inert ships: NO real-PTY regression layer.
- * Unit tests that inspect the returned line string can't observe what
- * the terminal actually paints because @inquirer/core mutates output
- * AFTER the prompt function returns. v4.9.1 mock-blindness pattern,
- * mirror class.
- *
- * This test fixes that gap. The Slice 10.4 node-pty harness
- * (tests/v4/harness/aidenTerm.ts) spawns a real Aiden under a real
- * pseudo-terminal and lets us observe the actual byte stream. We type
- * a partial slash command and assert two things about the rendered
- * frame:
- *
- *   1. The line containing `▲ /d` does NOT contain the ghost
- *      suggestion text (e.g. `aemon` — the tail of `/daemon`).
- *   2. The next line after the prompt line DOES contain that ghost
- *      suggestion, on its own line, dimmed.
- *
- * Path A fix (this slice): move the ghost from inline assembly into
- * the bottomContent tuple slot. Inquirer's screen-manager paints
- * bottomContent below the input line and walks the cursor back up
- * to the input line. With no embedded ghost, the cursor naturally
- * lands right after the typed value — correct by construction, no
- * library-internal coupling.
- *
- * CI cost: ~5s per run (PTY boot + Aiden init + Ctrl+C teardown).
- * Single test in this file — keep PTY tests serial; do NOT use
- * `it.concurrent`.
+ * The source-contract test at the end separately protects ghost placement on
+ * the compatibility path where Inquirer still renders the prompt.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
@@ -121,14 +90,17 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
     screen.write(term.raw());
     const lines = screen.lines();
 
-    const composerLine = lines.at(-2) ?? '';
+    const composerTop = lines.at(-4) ?? '';
+    const composerLine = lines.at(-3) ?? '';
+    const composerBottom = lines.at(-2) ?? '';
     const statusLine = lines.at(-1) ?? '';
-    expect(composerLine).toContain('▲');
+    expect(composerTop).toContain('▲ You');
     expect(composerLine).toContain('/d');
+    expect(composerBottom).toMatch(/^╰─/);
     expect(statusLine).toContain('groq');
-    expect(statusLine).toContain('ctx');
+    expect(statusLine).toContain('◉ context');
 
-    const rowsAboveFooter = lines.slice(0, -2);
+    const rowsAboveFooter = lines.slice(0, -4);
     expect(rowsAboveFooter.some((line) => line.trim() === '/d')).toBe(false);
     expect(rowsAboveFooter.some((line) => line.includes('Type your message'))).toBe(false);
     expect(rowsAboveFooter.some((line) => /aemon|octor/.test(line))).toBe(false);

@@ -51,6 +51,24 @@ function quotePowerShellLiteral(value: string): string {
   return `'${value.replace(/'/g, "''")}'`;
 }
 
+function bottomSurface(lines: string[]): {
+  top: number;
+  content: string[];
+  status: string;
+} | null {
+  const top = lines.findLastIndex((line) => line.startsWith('╭─ ▲ You'));
+  const bottom = lines.findLastIndex((line) => line.startsWith('╰─'));
+  if (top < 0 || bottom <= top || bottom !== lines.length - 2) return null;
+  return { top, content: lines.slice(top + 1, bottom), status: lines.at(-1) ?? '' };
+}
+
+function bottomDraft(content: string[]): string {
+  return content
+    .map((line) => line.replace(/^│ ?/u, '').replace(/ ?│$/u, '').trimEnd())
+    .join('\n')
+    .trim();
+}
+
 afterEach(async () => {
   if (child) {
     try { child.kill(); } catch { /* already exited */ }
@@ -69,6 +87,7 @@ afterEach(async () => {
 describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', () => {
   it.each([
     { label: 'normal width', columns: 100 },
+    { label: 'medium width', columns: 80 },
     { label: 'narrow width', columns: 44 },
   ])('keeps idle typing exclusively inside the fixed composer at $label', async ({ columns }) => {
     const repoRoot = path.resolve(__dirname, '../../..');
@@ -115,11 +134,15 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
       },
     });
 
-    const draft = 'POWERSHELL FIXED DRAFT';
+    const initialDraft = 'POWERSHELL FIXED DRAFT';
+    const draft = 'POWERSHELL FIXED XDRAFT';
+    const insertionIndex = initialDraft.length - 'DRAFT'.length + 1;
     let output = '';
     let state = 'boot';
     let typingFrame = '';
     let restoredFrame = '';
+    let typingCursor = { row: -1, col: -1 };
+    let restoredCursor = { row: -1, col: -1 };
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(
         `idle footer timeout (${state}):\n${screen.snapshot()}`,
@@ -131,20 +154,29 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
         if (state === 'boot' && readyCount >= 1) {
           state = 'typing';
-          typeLikeKeyboard(child!, draft, false);
+          typeLikeKeyboard(child!, initialDraft, false);
           setTimeout(() => {
-            typingFrame = screen.snapshot();
-            state = 'submitted';
-            child!.write('\r');
-          }, 750);
+            child!.write('\x1b[D'.repeat('DRAFT'.length));
+            child!.write('X');
+            setTimeout(() => {
+              typingFrame = screen.snapshot();
+              typingCursor = screen.cursorPosition();
+              state = 'submitted';
+              child!.write('\r');
+            }, 250);
+          }, 500);
         } else if (
           state === 'submitted'
           && rendered.includes('IDLE OWNER RESPONSE')
           && readyCount >= 2
         ) {
-          restoredFrame = rendered;
-          state = 'exiting';
-          typeLikeKeyboard(child!, '/exit');
+          state = 'restoring';
+          setTimeout(() => {
+            restoredFrame = screen.snapshot();
+            restoredCursor = screen.cursorPosition();
+            state = 'exiting';
+            typeLikeKeyboard(child!, '/exit');
+          }, 250);
         }
       });
       child!.onExit(({ exitCode }) => {
@@ -161,17 +193,32 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
       ['restored', restoredFrame, 'Type your message'],
     ] as const) {
       const lines = frame.split('\n');
-      expect(lines.at(-2), name).toContain(composerNeedle);
-      expect(lines.at(-1), name).toContain('custom_openai');
-      expect(lines.at(-1), name).toContain('ctx');
-      const rowsAboveFooter = lines.slice(0, -2);
+      const surface = bottomSurface(lines);
+      expect(surface, `${name}\n${frame}`).not.toBeNull();
+      if (!surface) continue;
+      if (name === 'typing') {
+        expect(surface.content.join(' '), name).toContain(composerNeedle);
+        expect(typingCursor, name).toEqual({
+          row: surface.top + surface.content.length,
+          col: 2 + insertionIndex,
+        });
+      } else {
+        expect(surface.content.join(''), name).not.toContain('Type your message');
+        expect(restoredCursor, `${name}\n${frame}`).toEqual({
+          row: surface.top + surface.content.length,
+          col: 2,
+        });
+      }
+      expect(surface.status, name).toContain('custom_openai');
+      expect(surface.status, name).toContain('◉');
+      const rowsAboveFooter = lines.slice(0, surface.top);
       expect(rowsAboveFooter.filter((line) => line.includes('Type your message')), name).toEqual([]);
-      const submittedRows = rowsAboveFooter.filter((line) => line.trimStart().startsWith('▲'));
+      const submittedRows = rowsAboveFooter.filter((line) => line.trimStart().startsWith('▲ You'));
       if (name === 'typing') {
         expect(submittedRows, name).toEqual([]);
         expect(rowsAboveFooter.filter((line) => line.includes(draft)), name).toEqual([]);
       } else {
-        expect(submittedRows, name).toHaveLength(1);
+        expect(submittedRows, `${name}\n${frame}`).toHaveLength(1);
         expect(submittedRows[0], name).toContain(draft);
       }
     }
@@ -179,6 +226,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
 
   it.each([
     { label: 'normal width', columns: 100 },
+    { label: 'medium width', columns: 80 },
     { label: 'narrow width', columns: 44 },
   ])('keeps the rendered bottom composer visible after two queued messages at $label', async ({ columns }) => {
     const repoRoot = path.resolve(__dirname, '../../..');
@@ -232,6 +280,8 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     let secondComposer = '';
     let firstStatus = '';
     let secondStatus = '';
+    let firstCursor = { row: -1, col: -1 };
+    let secondCursor = { row: -1, col: -1 };
     let providerCallsBeforeExit = 0;
     let queuedRequestContents: Array<string | undefined> = [];
     let finishPoll: ReturnType<typeof setInterval> | null = null;
@@ -252,6 +302,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         screen.write(chunk);
         const plain = stripAnsi(output);
         const rendered = screen.snapshot();
+        const surface = bottomSurface(screen.lines());
         const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
         const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
 
@@ -265,25 +316,32 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         } else if (
           state === 'tool'
           && /running[\s\S]*Start-Sleep/i.test(plain)
-          && screen.lines().at(-2)?.includes('Enter → queue')
-          && screen.bottomLine().includes('custom_openai')
+          && surface !== null
+          && screen.lines()[surface.top]?.includes('▲ You · queue mode')
+          && surface.status.includes('custom_openai')
         ) {
           state = 'queue-one';
           frames.toolRunning = screen.snapshot();
           typeLikeKeyboard(child!, 'QUEUE ONE');
         } else if (state === 'queue-one' && ids.length >= 1) {
           state = 'queue-one-reset';
-        } else if (state === 'queue-one-reset' && screen.lines().at(-2)?.includes('Enter → queue')) {
-          firstComposer = screen.lines().at(-2) ?? '';
-          firstStatus = screen.bottomLine();
+        } else if (state === 'queue-one-reset' && surface
+          && screen.lines()[surface.top]?.includes('▲ You · queue mode')
+          && bottomDraft(surface.content) === '') {
+          firstComposer = screen.lines()[surface.top] ?? '';
+          firstStatus = surface.status;
+          firstCursor = screen.cursorPosition();
           frames.firstQueue = screen.snapshot();
           state = 'queue-two';
           typeLikeKeyboard(child!, 'QUEUE TWO');
         } else if (state === 'queue-two' && ids.length >= 2) {
           state = 'queue-two-reset';
-        } else if (state === 'queue-two-reset' && screen.lines().at(-2)?.includes('Enter → queue')) {
-          secondComposer = screen.lines().at(-2) ?? '';
-          secondStatus = screen.bottomLine();
+        } else if (state === 'queue-two-reset' && surface
+          && screen.lines()[surface.top]?.includes('▲ You · queue mode')
+          && bottomDraft(surface.content) === '') {
+          secondComposer = screen.lines()[surface.top] ?? '';
+          secondStatus = surface.status;
+          secondCursor = screen.cursorPosition();
           frames.secondQueue = screen.snapshot();
           state = 'finishing';
           finishPoll = setInterval(() => {
@@ -313,22 +371,37 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
 
     const plain = stripAnsi(output);
     const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
-    expect(firstComposer).toContain('Enter → queue');
-    expect(secondComposer).toContain('Enter → queue');
+    expect(firstComposer).toContain('▲ You · queue mode');
+    expect(secondComposer).toContain('▲ You · queue mode');
     expect(firstStatus).toContain('custom_openai');
     expect(secondStatus).toContain('custom_openai');
-    expect(firstStatus).toContain('ctx');
-    expect(secondStatus).toContain('ctx');
+    expect(firstStatus).toContain('◉');
+    expect(secondStatus).toContain('◉');
     expect(firstStatus).toMatch(/\b(?:\d+ms|\d+s)\b/);
     expect(secondStatus).toMatch(/\b(?:\d+ms|\d+s)\b/);
-    expect(frames.toolRunning.split('\n').at(-2)).toContain('Enter → queue');
-    expect(frames.toolRunning.split('\n').at(-1)).toContain('custom_openai');
+    const firstSurface = bottomSurface(frames.firstQueue.split('\n'));
+    const secondSurface = bottomSurface(frames.secondQueue.split('\n'));
+    expect(firstCursor).toEqual({
+      row: firstSurface!.top + firstSurface!.content.length,
+      col: 2,
+    });
+    expect(secondCursor).toEqual({
+      row: secondSurface!.top + secondSurface!.content.length,
+      col: 2,
+    });
+    const runningSurface = bottomSurface(frames.toolRunning.split('\n'));
+    expect(runningSurface).not.toBeNull();
+    expect(frames.toolRunning.split('\n')[runningSurface!.top]).toContain('▲ You · queue mode');
+    expect(runningSurface!.status).toContain('custom_openai');
     expect(
       frames.toolRunning.split('\n').filter((line) => line.includes('run a slow safe tool')),
     ).toHaveLength(1);
     for (const frame of Object.values(frames)) {
       const lines = frame.split('\n');
-      expect(lines.slice(0, -1).filter((line) => line.includes('custom_openai'))).toHaveLength(0);
+      const surface = bottomSurface(lines);
+      if (surface) {
+        expect(lines.slice(0, surface.top).filter((line) => line.includes('custom_openai'))).toHaveLength(0);
+      }
     }
     expect(ids).toHaveLength(2);
     expect(ids[0]).not.toBe(ids[1]);

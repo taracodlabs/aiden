@@ -104,10 +104,10 @@ async function launch(columns: number, paused = false): Promise<{
 function dashboardLines(output: string): string[] {
   const lines = output.split(/\r?\n/);
   const start = lines.findIndex((line) => line.includes('█████╗') || /^\s*AIDEN\s*$/.test(line));
-  const end = lines.findIndex((line, index) => index >= start && /Type (?:your message|· \/help)/.test(line));
+  const end = lines.findIndex((line, index) => index >= start && line.startsWith('╭─ ▲ You'));
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
-  return lines.slice(start, end + 1);
+  return lines.slice(start, end);
 }
 
 afterEach(async () => {
@@ -158,7 +158,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     expect(medium.plain()).toContain('Environment');
     expect(medium.plain()).toContain('Capabilities');
     expect(medium.plain()).toContain('github.com/taracodlabs/aiden');
-    expect(medium.plain()).not.toContain('╭');
+    expect(dashboardLines(medium.plain()).join('\n')).not.toContain('╭');
     for (const line of dashboardLines(medium.plain())) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(78);
     }
@@ -170,15 +170,18 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     expect(narrowRendered).toMatch(/built solo/i);
     expect(narrowRendered).not.toContain('Environment');
     expect(narrowRendered).not.toContain('Capabilities');
-    expect(narrowRendered).not.toContain('╭');
+    expect(dashboardLines(narrowRendered).join('\n')).not.toContain('╭');
     for (const line of dashboardLines(narrowRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(46);
     }
     const narrowRows = narrowRendered.split('\n');
-    expect(narrowRows.at(-2)).toContain('Type your message');
-    expect(narrowRows.at(-1)).toContain('ctx');
-    expect(stringWidth(narrowRows.at(-2) ?? '')).toBeLessThanOrEqual(46);
+    expect(narrowRows.at(-4)).toContain('▲ You');
+    expect(narrowRows.at(-3)).toMatch(/^│\s+│$/);
+    expect(narrowRows.at(-2)).toMatch(/^╰─/);
+    expect(narrowRows.at(-1)).toContain('◉');
+    expect(stringWidth(narrowRows.at(-4) ?? '')).toBeLessThanOrEqual(47);
+    expect(stringWidth(narrowRows.at(-3) ?? '')).toBeLessThanOrEqual(47);
     expect(stringWidth(narrowRows.at(-1) ?? '')).toBeLessThanOrEqual(46);
-    expect(narrowRows.slice(0, -2).filter((line) => line.includes('Type your message'))).toEqual([]);
+    expect(narrowRows.slice(0, -4).filter((line) => line.includes('▲ You'))).toEqual([]);
   }, 75_000);
 });

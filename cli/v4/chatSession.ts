@@ -112,6 +112,7 @@ import {
 } from './promotionPrompt';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
+import { Writable } from 'node:stream';
 import {
   enableBracketedPaste,
   disableBracketedPaste,
@@ -135,6 +136,7 @@ import { DuringTurnInput, resolveConfiguredBusyMode, type BusyEnterMode } from '
 import { attachTurnInputListener } from './turnInputListener';
 import { InputAuthority } from './inputAuthority';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
+import { emitComposerReadyForTests } from './composerReadiness';
 import { requestTurnCancel } from './frame/interruptControls';
 import {
   renderStartupDashboard,
@@ -1008,7 +1010,7 @@ export class ChatSession implements ChatSessionLike {
       process.on('exit', exitHandler);
     }
 
-    // The interactive terminal owns a persistent two-row bottom region before
+    // The interactive terminal owns a persistent boxed bottom region before
     // the first composer mounts. Compatibility/non-TTY paths retain the
     // historical post-turn status output.
     if (this.usesFixedBottomRegion()) this.renderStatusLine();
@@ -1958,10 +1960,9 @@ export class ChatSession implements ChatSessionLike {
         },
       },
     });
-    // v4.14 BUG 2 — show the input lane the MOMENT the turn starts (a persistent
-    // plain-language hint), so the user sees they can type/steer/queue without
-    // having to type first. It rides the same owned bottom row (indicator / tool
-    // row) that already survives streaming, and is cleared at turn end below.
+    // Establish busy-mode ownership the moment the turn starts so the boxed
+    // composer is available for steering or queueing before any keystroke.
+    // The existing input buffer remains the sole queue owner.
     try { this.opts.display.setBusyHint(this.duringTurnInput.busyHint()); } catch { /* defensive */ }
     // Helper: wrap a callback so it only fires for the live turn.
     // R1 guard — late events from a cancelled turn early-return.
@@ -4197,23 +4198,33 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
         }
         const fixedBottomRegion = typeof opts.display?.fixedBottomRegionEnabled === 'function'
           && opts.display.fixedBottomRegionEnabled();
+        const promptOutput = fixedBottomRegion
+          ? new Writable({
+              write(_chunk, _encoding, done) {
+                done();
+              },
+            })
+          : undefined;
         const value = await aidenPrompt({
           message:  prompt,
           commands: opts.commands ?? [],
           history,
           theme:    promptTheme as never,
-          // v4.14 — persistent plain-language idle hint on the MAIN prompt (the
-          // "▲" line), so idle shows a neat bar with a hint, not a bare glyph.
+          // Compatibility hint for the non-fixed prompt path. The fixed path
+          // communicates readiness through its labeled composer surface.
           // Skipped on the "… " multi-line continuation.
           hint:     prompt.includes('▲') ? 'Type your message · /help · /mode' : undefined,
           fixedComposer: fixedBottomRegion
             ? {
-                update: (draft, hint) => {
-                  opts.display?.setIdleComposer(draft, hint);
+                update: (draft, hint, cursorIndex) => {
+                  opts.display?.setIdleComposer(draft, hint, cursorIndex);
+                },
+                ready: () => {
+                  emitComposerReadyForTests((marker) => opts.display?.writeAfterComposerCursor(marker));
                 },
               }
             : undefined,
-        });
+        }, { output: promptOutput });
         if (fixedBottomRegion && prompt.includes('▲')) {
           opts.display.submitIdleComposer(
             value ?? '',

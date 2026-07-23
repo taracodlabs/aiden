@@ -103,7 +103,7 @@ function renderPrompt(config: {
   commands:  Array<{ name: string; aliases?: string[]; description: string; hidden?: boolean }>;
   history:   string[];
   hint?: string;
-  fixedComposer?: { update: (value: string, hint: string) => void };
+  fixedComposer?: { update: (value: string, hint: string, cursorIndex: number) => void };
 }): PromptRunner {
   activeConfig = { message: '›', ...config };
   resetHookStores();
@@ -160,7 +160,7 @@ beforeEach(async () => {
 
 describe('aidenPrompt — Bug D fix via footer rendering (v4.10 Slice 10.5)', () => {
   it('renders no transient prompt rows when Display owns the fixed composer', () => {
-    const updates: Array<{ value: string; hint: string }> = [];
+    const updates: Array<{ value: string; hint: string; cursorIndex: number }> = [];
     const runner = renderPrompt({
       commands: [
         { name: 'daemon', description: 'Manage the Aiden daemon.' },
@@ -169,7 +169,9 @@ describe('aidenPrompt — Bug D fix via footer rendering (v4.10 Slice 10.5)', ()
       history: ['draft from history'],
       hint: 'Type your message · /help · /mode',
       fixedComposer: {
-        update: (value, hint) => { updates.push({ value, hint }); },
+        update: (value, hint, cursorIndex) => {
+          updates.push({ value, hint, cursorIndex });
+        },
       },
     });
 
@@ -179,7 +181,12 @@ describe('aidenPrompt — Bug D fix via footer rendering (v4.10 Slice 10.5)', ()
     expect(updates.at(-1)).toEqual({
       value: '/d',
       hint: 'Type your message · /help · /mode',
+      cursorIndex: 2,
     });
+
+    runner.state.rl.cursor = 1;
+    runner.keypress({ name: 'left' });
+    expect(updates.at(-1)?.cursorIndex).toBe(1);
   });
 
   it('ghost text renders in the footer slot, NOT inline in the prompt line', () => {

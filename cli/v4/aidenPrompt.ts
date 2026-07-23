@@ -72,10 +72,11 @@ export interface AidenPromptConfig {
   /** v4.14 — persistent plain-language idle hint shown in the footer when no
    *  ghost/dropdown is active (e.g. "Type your message · /help · /mode"). */
   hint?: string;
-  /** Route the main prompt through Display's fixed two-row terminal region.
-   * Dropdown/ghost content remains transient above that region. */
+  /** Route the main prompt through Display's fixed boxed terminal region.
+   * Inquirer remains input-only and its transient helper rows are suppressed. */
   fixedComposer?: {
-    update: (value: string, hint: string) => void;
+    update: (value: string, hint: string, cursorIndex: number) => void;
+    ready?: () => void;
   };
 }
 
@@ -169,6 +170,7 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [historyIdx, setHistoryIdx] = useState<number | null>(null);
+  const [cursorIndex, setCursorIndex] = useState(0);
   // Snapshot of the typed value when the user starts navigating
   // history — restored when they reach the bottom of the stack.
   const historyDraftRef = useRef('');
@@ -212,11 +214,14 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
         ? diagnosticReadline.isPaused()
         : undefined,
     });
-    emitComposerReadyForTests();
+    if (config.fixedComposer?.ready) config.fixedComposer.ready();
+    else emitComposerReadyForTests();
   }, []);
 
   useKeypress((key, rl) => {
     if (status !== 'idle') return;
+    const readlineCursor = (rl as { cursor?: number }).cursor ?? rl.line.length;
+    setCursorIndex(readlineCursor);
     turnIdleDiagnostic('composer.key', {
       generation: generationRef.current,
       key: key.name ?? null,
@@ -274,6 +279,7 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
         const accepted = value + ghost;
         rl.clearLine(0);
         rl.write(accepted);
+        setCursorIndex(accepted.length);
         rederive(accepted);
         return;
       }
@@ -299,24 +305,24 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
             historyDraftRef.current = value;
             setHistoryIdx(0);
             const next = config.history[0];
-            rl.clearLine(0); rl.write(next); rederive(next);
+            rl.clearLine(0); rl.write(next); setCursorIndex(next.length); rederive(next);
           } else if (historyIdx + 1 < config.history.length) {
             const ni = historyIdx + 1;
             setHistoryIdx(ni);
             const next = config.history[ni];
-            rl.clearLine(0); rl.write(next); rederive(next);
+            rl.clearLine(0); rl.write(next); setCursorIndex(next.length); rederive(next);
           }
         } else { // down
           if (historyIdx !== null) {
             if (historyIdx === 0) {
               setHistoryIdx(null);
               const draft = historyDraftRef.current;
-              rl.clearLine(0); rl.write(draft); rederive(draft);
+              rl.clearLine(0); rl.write(draft); setCursorIndex(draft.length); rederive(draft);
             } else {
               const ni = historyIdx - 1;
               setHistoryIdx(ni);
               const next = config.history[ni];
-              rl.clearLine(0); rl.write(next); rederive(next);
+              rl.clearLine(0); rl.write(next); setCursorIndex(next.length); rederive(next);
             }
           }
         }
@@ -418,10 +424,8 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
 
   const footerParts = [ghostLine, dropdownLines].filter((s): s is string => typeof s === 'string' && s.length > 0);
 
-  // v4.14 — persistent plain-language IDLE hint. When nothing else owns the
-  // footer (no ghost preview, no slash dropdown), show the calm hint so the
-  // idle bar is neat + informative every prompt, not a bare `▲`. Mirrors the
-  // busy bar's always-visible hint — one consistent, plain-language surface.
+  // Compatibility path: when Display does not own the fixed surface, show the
+  // idle hint only if no ghost preview or slash dropdown owns the footer.
   if (shouldShowIdleHint(footerParts.length > 0, config.hint, status)) {
     footerParts.push(`  ${dim(config.hint as string)}`);
   }
@@ -429,7 +433,9 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   const footer = footerParts.length > 0 ? footerParts.join('\n') : undefined;
 
   if (config.fixedComposer) {
-    if (status === 'idle') config.fixedComposer.update(value, config.hint ?? '');
+    if (status === 'idle') {
+      config.fixedComposer.update(value, config.hint ?? '', cursorIndex);
+    }
     // Display is the sole renderer while the fixed region is active. Returning
     // helper, ghost, dropdown, or answer content here would give Inquirer's
     // screen manager a second prompt row above the reserved composer.
