@@ -1,3 +1,5 @@
+import { appendFileSync } from 'node:fs';
+
 let composerGeneration = 0;
 
 export function nextComposerGeneration(): number {
@@ -10,7 +12,7 @@ export function turnIdleDiagnostic(event: string, data: Record<string, unknown> 
   try {
     const stdin = process.stdin;
     const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[turn-idle] ${JSON.stringify({
+    const line = `[turn-idle] ${JSON.stringify({
       monoMs,
       event,
       stdin: {
@@ -23,6 +25,12 @@ export function turnIdleDiagnostic(event: string, data: Record<string, unknown> 
       },
       sigintListeners: process.listenerCount('SIGINT'),
       ...data,
-    })}\n`);
+    })}\n`;
+    const diagnosticFile = process.env.AIDEN_TEST_TURN_IDLE_DIAG_FILE;
+    if (diagnosticFile) {
+      appendFileSync(diagnosticFile, line, 'utf8');
+    } else {
+      process.stderr.write(line);
+    }
   } catch { /* test diagnostics must not affect the terminal lifecycle */ }
 }
