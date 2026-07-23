@@ -5,8 +5,8 @@
  *   1. bootstrapDaemonFoundation boots without an agentBuilder
  *   2. installDaemonAgentBuilder swaps placeholder → real runner
  *   3. installDaemonAgentBuilder returns false when handle inactive
- *   4. Foundation can serve trigger claims with placeholder before
- *      real runner is installed (rails work without provider config)
+ *   4. Foundation admits work durably but cannot falsely complete it before
+ *      the real runner is installed
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import fs from 'node:fs';
@@ -116,8 +116,8 @@ describe('installDaemonAgentBuilder', () => {
   });
 });
 
-describe('foundation serves claims with placeholder before install', () => {
-  it('placeholder handles a claim end-to-end before installDaemonAgentBuilder is called', async () => {
+describe('foundation admission before runner install', () => {
+  it('placeholder leaves admitted work retryable instead of reporting false success', async () => {
     const handle = bootstrapDaemonFoundation();
     expect(handle.dispatcher!.runnerKind()).toBe('placeholder');
 
@@ -128,7 +128,7 @@ describe('foundation serves claims with placeholder before install', () => {
     });
     await handle.dispatcher!._pumpOnce();
     const ev = handle.triggerBus!.get(inserted.id);
-    expect(ev?.status).toBe('done');
-    expect(ev?.runId).not.toBeNull();
+    expect(ev?.status).toBe('pending');
+    expect(ev?.runId).toBeNull();
   });
 });

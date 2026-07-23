@@ -250,6 +250,8 @@ export class TelegramAdapter implements ChannelAdapter {
   private voiceTranscribedCount: number = 0
   /** Number of voice messages received (any outcome) since adapter start. */
   private voiceReceivedCount:    number = 0
+  /** Startup cache maintenance remains owned until shutdown has observed it. */
+  private cacheMaintenance:      Promise<void> | null = null
   // Phase v4.1-3.1 — idempotency guard for the defensive secondary
   // subscriptions. NTBA always fires 'message' AND the type-specific
   // event ('voice', 'audio') for media attachments; we subscribe to
@@ -463,7 +465,7 @@ export class TelegramAdapter implements ChannelAdapter {
     // Phase v4.1-3 — voice cache janitor runs once at adapter start.
     // No background timer (defer real TTL to v4.2). Best-effort: a
     // janitor failure must not block polling.
-    this.runVoiceCacheJanitor().catch((e: any) => {
+    this.cacheMaintenance = this.runVoiceCacheJanitor().catch((e: any) => {
       this.logWarn(`voice cache janitor failed: ${e?.message ?? String(e)}`)
     })
 
@@ -661,6 +663,9 @@ export class TelegramAdapter implements ChannelAdapter {
   async stop(): Promise<void> {
     this.healthy = false
     this.state   = 'inactive'
+
+    await this.cacheMaintenance
+    this.cacheMaintenance = null
 
     // Phase v4.1-2 — flush group state + dispose rate-limiter timers.
     // Best-effort; never let cleanup throw stop the shutdown chain.

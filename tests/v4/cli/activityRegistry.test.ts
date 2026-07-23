@@ -27,11 +27,16 @@ describe('ActivityRegistry', () => {
 
   it('pauses repainting for a modal and redraws once afterward', async () => {
     const row = handle();
+    const order: string[] = [];
+    row.resume.mockImplementation(() => { order.push('activity'); });
     const registry = new ActivityRegistry(() => row);
     registry.start('c1', 'clarify', {});
-    await registry.runModal(async () => undefined);
+    await registry.runModal(async () => undefined, {
+      beforeActivityResume: () => { order.push('footer'); },
+    });
     expect(row.pause).toHaveBeenCalledTimes(1);
     expect(row.resume).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['footer', 'activity']);
   });
 
   it('turn completion dismisses orphaned rows and empties timers', () => {

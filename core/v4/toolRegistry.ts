@@ -62,6 +62,16 @@ import { classifyBrowserAction } from './browserState';
 import { pwBrowserStatus, pwDialogPendingTier } from '../playwrightBridge';
 import type { SkillLoader } from './skillLoader';
 import type { BundledManifest } from './skillBundledManifest';
+import {
+  currentDurableToolCallId,
+  currentJobExecutionContext,
+  executeWithDurableToolCall,
+} from './daemon/jobExecutionContext';
+import {
+  normalizeExecutionPlan,
+  type ActionAuthority,
+  type PolicySnapshotInput,
+} from './actionAuthority';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -129,6 +139,10 @@ export interface ToolContext {
   /** Phase 9: approval engine. When present, every `mutates: true`
    *  handler is gated through it before `execute` runs. */
   approvalEngine?: ApprovalEngine;
+  /** Durable exact-action approval authority for an admitted Job. */
+  actionAuthority?: ActionAuthority;
+  /** Immutable inputs used to snapshot policy for each final action. */
+  policySnapshot?: PolicySnapshotInput;
   /** Phase 9: SSRF check for any tool whose category is `network`. */
   ssrfProtection?: SSRFProtection;
   /** Phase 9: content scanner. `shell_exec` runs commands through it
@@ -439,6 +453,13 @@ export class ToolRegistry {
         executionAttempts: [],
       };
       let approvalDecision: ToolApprovalDecision | undefined;
+      let durableApproval: {
+        approvalId: string;
+        toolCallId: string;
+        actionDigest: string;
+        policySnapshotId: string;
+        riskTier: string;
+      } | undefined;
       const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
         try { onActivity?.({ phase, at: Date.now(), attempt, timing }); } catch { /* observational */ }
       };
@@ -483,7 +504,7 @@ export class ToolRegistry {
         }, 'failed');
       }
 
-      const args = call.arguments ?? {};
+      let args = call.arguments ?? {};
 
       // ── Argument-shape guard — JSON that PARSES can still be garbage ───
       // A well-formed argument can carry prose where the schema declares a
@@ -500,6 +521,33 @@ export class ToolRegistry {
           error: `Invalid arguments for ${call.name}: ${argShapeError}`,
         }, 'failed');
       }
+
+      // Action-changing hooks run before policy evaluation and approval. The
+      // returned arguments become the sole frozen input for every later gate.
+      const preHookShim = sliceSpanShim();
+      const preHookContext = _identityCurrentContext();
+      if (preHookShim.db && preHookContext) {
+        try {
+          args = await preHookShim.runToolPreHooks({
+            db: preHookShim.db,
+            toolName: call.name,
+            toolCallId: call.id,
+            args,
+            ctx: {
+              runId: preHookContext.runId,
+              traceId: preHookContext.traceId,
+              spanId: preHookContext.spanId,
+              parentSpanId: preHookContext.parentSpanId,
+            },
+          });
+        } catch (error) {
+          const message = error instanceof HookBlockedError
+            ? (error.modelMessage ?? error.userMessage ?? error.message)
+            : error instanceof Error ? error.message : String(error);
+          return finish({ id: call.id, name: call.name, result: null, error: message }, 'blocked');
+        }
+      }
+      args = freezeToolArguments(args);
 
       // ── Gate 1 — approval engine for mutating tools (runs FIRST) ───
       // Fail-open ORDERING fix: approval MUST precede the SSRF check and the
@@ -521,7 +569,11 @@ export class ToolRegistry {
       // registered tool that never set it) is ASSUMED to mutate and is gated —
       // a forgotten declaration must not become a silent bypass.
       const assumeMutates = handler.mutates ?? true;
-      if (assumeMutates && context.approvalEngine && !readOnlyShell) {
+      const durableJobContext = currentJobExecutionContext();
+      if (
+        assumeMutates && !readOnlyShell &&
+        (context.approvalEngine || (context.actionAuthority && durableJobContext))
+      ) {
         // Pre-classify shell_exec commands so smart-mode has a tier.
         let riskTier: 'safe' | 'caution' | 'dangerous' | undefined;
         let reason: string | undefined;
@@ -590,6 +642,55 @@ export class ToolRegistry {
           // no extra line (graceful degradation).
           effects:  handler.effects,
         };
+        const jobContext = durableJobContext;
+        if (context.actionAuthority && jobContext) {
+          const normalized = normalizeExecutionPlan({
+            toolName: call.name,
+            args,
+            cwd: context.cwd ?? process.cwd(),
+            mutates: assumeMutates,
+            riskTier: effectiveTier ?? 'caution',
+            policy: context.policySnapshot ?? {
+              trustLevel: 'Assistant',
+              autonomyPolicy: 'ask_for_mutations',
+              approvalMode: 'smart',
+              toolMetadataVersion: 'runtime',
+              sandboxPolicy: { roots: [context.cwd ?? process.cwd()], deny: [] },
+              networkPolicy: {},
+              pluginGrants: [],
+              mcpGrants: [],
+              workspaceOverrides: {},
+              jobOverrides: {},
+            },
+          });
+          const persistedToolCallId = currentDurableToolCallId(call.id) ?? call.id;
+          const record = context.actionAuthority.request({
+            jobId: jobContext.jobId,
+            attemptId: jobContext.attemptId,
+            generation: jobContext.generation,
+            toolCallId: persistedToolCallId,
+            toolName: call.name,
+            riskTier: effectiveTier ?? 'caution',
+            riskReasons: reason ? [reason] : [],
+            normalized,
+          });
+          if (context.approvalEngine) context.actionAuthority.markDisplayed(record.approvalId);
+          durableApproval = {
+            approvalId: record.approvalId,
+            toolCallId: persistedToolCallId,
+            actionDigest: normalized.actionDigest,
+            policySnapshotId: normalized.policySnapshot.policySnapshotId,
+            riskTier: effectiveTier ?? 'caution',
+          };
+        }
+        if (!context.approvalEngine) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: `Approval required: ${durableApproval?.approvalId ?? 'interactive approval channel unavailable'}`,
+          }, 'blocked');
+        }
         timing.approvalStartedAt = Date.now();
         emit('awaiting_approval');
         let allowed: boolean;
@@ -611,12 +712,42 @@ export class ToolRegistry {
         } catch (error) {
           timing.approvalEndedAt = Date.now();
           const message = error instanceof Error ? error.message : String(error);
+          if (durableApproval && context.actionAuthority && jobContext) {
+            try {
+              context.actionAuthority.decide({
+                approvalId: durableApproval.approvalId,
+                jobId: jobContext.jobId,
+                attemptId: jobContext.attemptId,
+                generation: jobContext.generation,
+                actionDigest: durableApproval.actionDigest,
+                policySnapshotId: durableApproval.policySnapshotId,
+                decision: 'cancelled',
+                decidedBy: 'runtime',
+                decisionChannel: 'interactive',
+              });
+            } catch { /* the original prompt failure remains authoritative */ }
+          }
           const terminal = signal?.aborted
             ? 'cancelled'
             : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
           return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);
         }
         timing.approvalEndedAt = Date.now();
+        if (durableApproval && context.actionAuthority && jobContext) {
+          context.actionAuthority.decide({
+            approvalId: durableApproval.approvalId,
+            jobId: jobContext.jobId,
+            attemptId: jobContext.attemptId,
+            generation: jobContext.generation,
+            actionDigest: durableApproval.actionDigest,
+            policySnapshotId: durableApproval.policySnapshotId,
+            decision: allowed
+              ? 'approved'
+              : approvalDecision?.state === 'interrupted' ? 'cancelled' : 'denied',
+            decidedBy: 'user',
+            decisionChannel: 'interactive',
+          });
+        }
         if (!allowed) {
           if (approvalDecision?.state === 'interrupted') {
             return finish({
@@ -719,7 +850,14 @@ export class ToolRegistry {
       // only when a signal is present, so a normal call allocates nothing and a
       // child agent's own signal never leaks into the shared session context.
       const dispatch = async (a: Record<string, unknown>): Promise<unknown> =>
-        handler.execute(a, signal ? { ...context, signal } : context);
+        executeWithDurableToolCall({
+          toolCallId: call.id,
+          toolName: call.name,
+          args: a,
+          riskTier: handler.riskTier ?? (handler.mutates === false ? 'safe' : 'caution'),
+          mutates: handler.mutates ?? true,
+          execute: () => handler.execute(a, signal ? { ...context, signal } : context),
+        });
 
       // ── P1B-2B — FAIL-SAFE pre-state snapshot (shadow, non-authoritative) ──
       // Post-approval, pre-spawn. In its OWN try/catch, independent of the
@@ -738,6 +876,53 @@ export class ToolRegistry {
         }
       }
 
+      // Claim execution of the exact approved action immediately before the
+      // handler boundary. A changed digest, policy, Attempt, or ToolCall fails
+      // closed and invalidates the durable Approval.
+      if (durableApproval && context.actionAuthority) {
+        const jobContext = currentJobExecutionContext();
+        if (!jobContext) {
+          return finish({ id: call.id, name: call.name, result: null, error: 'Durable approval lost its Job context' }, 'blocked');
+        }
+        const current = normalizeExecutionPlan({
+          toolName: call.name,
+          args,
+          cwd: context.cwd ?? process.cwd(),
+          mutates: assumeMutates,
+          riskTier: durableApproval.riskTier,
+          policy: context.policySnapshot ?? {
+            trustLevel: 'Assistant',
+            autonomyPolicy: 'ask_for_mutations',
+            approvalMode: 'smart',
+            toolMetadataVersion: 'runtime',
+            sandboxPolicy: { roots: [context.cwd ?? process.cwd()], deny: [] },
+            networkPolicy: {},
+            pluginGrants: [],
+            mcpGrants: [],
+            workspaceOverrides: {},
+            jobOverrides: {},
+          },
+        });
+        const authorization = context.actionAuthority.authorizeExecution({
+          approvalId: durableApproval.approvalId,
+          jobId: jobContext.jobId,
+          attemptId: jobContext.attemptId,
+          generation: jobContext.generation,
+          fenceToken: jobContext.fenceToken,
+          toolCallId: durableApproval.toolCallId,
+          actionDigest: current.actionDigest,
+          policySnapshotId: current.policySnapshot.policySnapshotId,
+        });
+        if (!authorization.authorized) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: `Approved action rejected before execution: ${authorization.reason ?? 'binding conflict'}`,
+          }, 'blocked');
+        }
+      }
+
       let result: unknown;
       const executionAttempt = {
         attempt: context.attempt ?? 1,
@@ -753,8 +938,8 @@ export class ToolRegistry {
           result = await sliced.withToolSpan(
             sliced.db,
             { toolName: call.name, inputFingerprint: inputFp, sideEffectClass: sideEffect },
-            async (childCtx) => sliced.runToolWithHooks(
-              {
+            async (childCtx) => {
+              const hookOptions = {
                 db:         sliced.db,
                 toolName:   call.name,
                 toolCallId: call.id,
@@ -765,9 +950,10 @@ export class ToolRegistry {
                   spanId:       childCtx.spanId,
                   parentSpanId: childCtx.parentSpanId,
                 },
-              },
-              dispatch,
-            ),
+              };
+              const raw = await dispatch(args);
+              return sliced.runToolPostHooks(hookOptions, args, raw);
+            },
           );
         } else {
           result = await dispatch(args);
@@ -859,7 +1045,7 @@ export class ToolRegistry {
 import { getCurrentDaemonDb } from './daemon/bootstrap';
 import { withToolSpan, shortInputFingerprint } from './daemon/spans/spanHelpers';
 import { currentContext as _identityCurrentContext } from './identity';
-import { runToolWithHooks, HookBlockedError } from './hooks/toolHookGate';
+import { runToolPostHooks, runToolPreHooks, HookBlockedError } from './hooks/toolHookGate';
 
 function classifySideEffectForHandler(h: ToolHandler): 'read' | 'write' | 'mutating' | 'destructive' {
   if (h.riskTier === 'dangerous') return 'destructive';
@@ -871,13 +1057,25 @@ function classifySideEffectForHandler(h: ToolHandler): 'read' | 'write' | 'mutat
   return 'mutating';
 }
 
+function freezeToolArguments(args: Record<string, unknown>): Record<string, unknown> {
+  const copy = structuredClone(args);
+  const freeze = (value: unknown): void => {
+    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return;
+    Object.freeze(value);
+    for (const child of Object.values(value as Record<string, unknown>)) freeze(child);
+  };
+  freeze(copy);
+  return copy;
+}
+
 interface ToolSpanShim {
   db: import('./daemon/db/connection').Db | null;
   hasContext(): boolean;
   classifySideEffect(handler: ToolHandler): 'read' | 'write' | 'mutating' | 'destructive';
   fingerprint(args: Record<string, unknown>): string;
   withToolSpan: typeof withToolSpan;
-  runToolWithHooks: typeof runToolWithHooks;
+  runToolPostHooks: typeof runToolPostHooks;
+  runToolPreHooks: typeof runToolPreHooks;
 }
 const _toolSpanShim: ToolSpanShim = {
   get db()            { return getCurrentDaemonDb(); },
@@ -885,6 +1083,7 @@ const _toolSpanShim: ToolSpanShim = {
   classifySideEffect: classifySideEffectForHandler,
   fingerprint:        shortInputFingerprint,
   withToolSpan,
-  runToolWithHooks,
+  runToolPostHooks,
+  runToolPreHooks,
 };
 function sliceSpanShim(): ToolSpanShim { return _toolSpanShim; }

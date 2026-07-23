@@ -720,3 +720,89 @@ describe('ChatSession — v4.6 Phase 2Q-B REPL parent-run row', () => {
     expect(agent.runConversation).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('ChatSession durable Job admission', () => {
+  it('creates and leases the Job Attempt before the first provider call', async () => {
+    const order: string[] = [];
+    const { agent } = mkAgent({ finalContent: 'ok' });
+    agent.runConversation.mockImplementation(async () => {
+      order.push('provider');
+      return {
+        finalContent: 'ok', messages: [], turnCount: 1, toolCallCount: 0,
+        fallbackActivated: false, finishReason: 'stop',
+        totalUsage: { inputTokens: 0, outputTokens: 0 }, toolCallTrace: [],
+        compressionEvents: [], auxiliaryUsage: [],
+      } as never;
+    });
+    const jobEngine = {
+      submitJob: vi.fn(() => {
+        order.push('submit');
+        return { jobId: 'task_job', attemptId: 'attempt_job', runId: 41, reused: false };
+      }),
+      claimAttempt: vi.fn(() => {
+        order.push('claim');
+        return {
+          acquired: true, applied: true, leaseId: 'lease_job',
+          fenceToken: 'fence_job', generation: 1, stateVersion: 1,
+        };
+      }),
+      transitionAttempt: vi.fn((command: { to: string }) => {
+        order.push(`attempt:${command.to}`);
+        return { applied: true, stateVersion: command.to === 'running' ? 2 : 3 };
+      }),
+      transitionJob: vi.fn((command: { to: string }) => {
+        order.push(`job:${command.to}`);
+        return { applied: true, stateVersion: 1 };
+      }),
+      finalizeJob: vi.fn(() => {
+        order.push('job:finalized');
+        return { applied: true, stateVersion: 2 };
+      }),
+      renewAttemptLease: vi.fn(() => ({ applied: true, stateVersion: 3 })),
+    };
+    const ref: { runId: number | null; sessionId: string | null } = { runId: null, sessionId: null };
+    const session = new ChatSession(buildOpts({
+      agent: agent as never,
+      promptApi: mkPromptApi({ inputs: ['hello', '/quit'] }),
+      replInstanceId: 'instance_job',
+      replParentRunRef: ref,
+      jobEngine: jobEngine as never,
+    }));
+
+    await session.run();
+
+    expect(order.slice(0, 5)).toEqual([
+      'submit', 'claim', 'attempt:running', 'job:running', 'provider',
+    ]);
+    expect(jobEngine.submitJob).toHaveBeenCalledWith(expect.objectContaining({
+      entryPoint: 'interactive',
+      source: 'repl',
+      instanceId: 'instance_job',
+      goal: 'hello',
+    }));
+    expect(jobEngine.transitionAttempt).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId: 'attempt_job', generation: 1, fenceToken: 'fence_job',
+    }));
+    expect(jobEngine.finalizeJob).toHaveBeenCalledTimes(1);
+    expect(ref.runId).toBeNull();
+  });
+
+  it('does not call the provider when durable admission fails', async () => {
+    const { agent } = mkAgent({ finalContent: 'must not run' });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const jobEngine = {
+      submitJob: vi.fn(() => { throw new Error('durable admission unavailable'); }),
+    };
+    const session = new ChatSession(buildOpts({
+      agent: agent as never,
+      promptApi: mkPromptApi({ inputs: ['hello', '/quit'] }),
+      replInstanceId: 'instance_job',
+      jobEngine: jobEngine as never,
+    }));
+
+    await expect(session.run()).rejects.toThrow('durable admission unavailable');
+
+    expect(agent.runConversation).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+});

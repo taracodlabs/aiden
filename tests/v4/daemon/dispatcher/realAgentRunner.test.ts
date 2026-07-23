@@ -14,6 +14,8 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../../core/v4/daemon/runStore';
 import { createTaskStore } from '../../../../core/v4/daemon/taskStore';
+import { createJobEngine } from '../../../../core/v4/daemon/jobEngine';
+import { createJobControlAuthority } from '../../../../core/v4/daemon/jobControlAuthority';
 import {
   createRealAgentRunner,
 } from '../../../../core/v4/daemon/dispatcher/realAgentRunner';
@@ -82,6 +84,93 @@ function mkResult(over: Partial<{ finishReason: string; usage: { totalTokens: nu
     ...over,
   } as unknown as AidenAgentResult;
 }
+
+describe('createRealAgentRunner durable identity', () => {
+  it('creates and starts the Job and Attempt before invoking the agent', async () => {
+    const jobEngine = createJobEngine({ db });
+    const agent = stubAgent({
+      ...mkResult(), turnCount: 1, toolCallTrace: [],
+    } as AidenAgentResult);
+    const original = agent.runConversation.bind(agent);
+    agent.runConversation = async (...args: Parameters<AidenAgent['runConversation']>) => {
+      const jobs = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' });
+      expect(jobs).toHaveLength(1);
+      expect(jobs[0]).toMatchObject({ status: 'running' });
+      expect(jobEngine.listAttempts(jobs[0]!.id)[0]).toMatchObject({ status: 'running' });
+      return original(...args);
+    };
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine, taskStore: createTaskStore({ db }),
+      agentBuilder: () => agent, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput());
+
+    const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+    expect(result.runId).toBe(jobEngine.listAttempts(job.id)[0]!.rowId);
+    expect(job.status).toBe('completed');
+    expect(jobEngine.listAttempts(job.id)[0]!.status).toBe('succeeded');
+  });
+
+  it('applies durable pause only at the loop safe boundary without terminalizing the Job', async () => {
+    const jobEngine = createJobEngine({ db });
+    const controls = createJobControlAuthority({ db, jobEngine });
+    const agent = {
+      runConversation: async (
+        _history: unknown,
+        options: { waitForResumeIfPaused?: () => Promise<void> },
+      ) => {
+        const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+        const attempt = jobEngine.getAttempt(job.activeAttemptId!)!;
+        controls.commands.request({
+          jobId: job.id, attemptId: attempt.id, generation: attempt.generation,
+          kind: 'pause', source: 'api', idempotencyNamespace: 'test', idempotencyKey: 'pause-boundary',
+        });
+        await options.waitForResumeIfPaused?.();
+        throw new Error('pause boundary unexpectedly resumed');
+      },
+    } as unknown as AidenAgent;
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine, taskStore: createTaskStore({ db }),
+      agentBuilder: () => agent, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput());
+    const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+    expect(result).toMatchObject({ finishReason: 'interrupted', error: 'paused' });
+    expect(job.status).toBe('paused');
+    expect(jobEngine.getAttempt(job.activeAttemptId!)?.status).toBe('waiting');
+    expect(runStore.listEvents(result.runId).map((event) => event.name)).toContain('dispatcher:paused');
+  });
+
+  it('observes cross-process cancellation, aborts the active invocation, and rejects late finalization', async () => {
+    const jobEngine = createJobEngine({ db });
+    const controls = createJobControlAuthority({ db, jobEngine });
+    const agent = {
+      runConversation: async (_history: unknown, options: { signal?: AbortSignal }) => {
+        const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+        const attempt = jobEngine.getAttempt(job.activeAttemptId!)!;
+        controls.commands.request({
+          jobId: job.id, attemptId: attempt.id, generation: attempt.generation,
+          kind: 'cancel', source: 'workbench', idempotencyNamespace: 'test', idempotencyKey: 'cancel-active',
+        });
+        await new Promise<void>((resolve) => options.signal?.addEventListener('abort', () => resolve(), { once: true }));
+        throw options.signal?.reason ?? new Error('cancelled');
+      },
+    } as unknown as AidenAgent;
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine, taskStore: createTaskStore({ db }),
+      agentBuilder: () => agent, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput());
+    const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+    expect(result.finishReason).toBe('interrupted');
+    expect(job.status).toBe('cancelled');
+    expect(jobEngine.listAttempts(job.id)).toHaveLength(1);
+    expect(jobEngine.listEvents(job.id).filter((event) => event.type === 'job.cancelled')).toHaveLength(1);
+  });
+});
 
 describe('createRealAgentRunner — builder invocation', () => {
   it('calls builder with sessionId + resolvedModel + approvalPolicy', async () => {
@@ -252,6 +341,45 @@ describe('createRealAgentRunner — failure paths', () => {
     expect(result.error).toMatch(/cannot construct agent/);
     const events = runStore.listEvents(result.runId);
     expect(events.some((e) => e.name === 'dispatcher:builder_failed')).toBe(true);
+  });
+
+  it('treats an unknown agent finish reason as failure rather than success', async () => {
+    const jobEngine = createJobEngine({ db });
+    const builder: AgentBuilder = () => stubAgent({
+      finishReason: 'future_unhandled_reason',
+      turnCount: 1,
+      toolCallTrace: [],
+    } as unknown as AidenAgentResult);
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine, taskStore: createTaskStore({ db }),
+      agentBuilder: builder, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput());
+
+    expect(result.finishReason).toBe('error');
+    expect(runStore.get(result.runId)?.status).toBe('failed');
+    const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+    expect(job.status).toBe('failed');
+    expect(job.terminalOutcome).not.toBe('verified');
+  });
+
+  it('preserves an interrupted turn as cancellation instead of failure or success', async () => {
+    const jobEngine = createJobEngine({ db });
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine, taskStore: createTaskStore({ db }),
+      agentBuilder: () => stubAgent({
+        finishReason: 'interrupted', turnCount: 1, toolCallTrace: [],
+      } as unknown as AidenAgentResult),
+      persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput());
+
+    expect(result.finishReason).toBe('interrupted');
+    const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+    expect(job.status).toBe('cancelled');
+    expect(jobEngine.listAttempts(job.id)[0]?.status).toBe('cancelled');
   });
 
   it('a zero-iteration turn (turnCount 0) is NOT reported as verified-completed', async () => {

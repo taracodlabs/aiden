@@ -5,6 +5,7 @@ import path from 'node:path';
 import * as pty from 'node-pty';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 type RunningPty = ReturnType<typeof pty.spawn>;
 let child: RunningPty | null = null;
@@ -46,6 +47,28 @@ function pressDownThenEnter(terminal: RunningPty, count: number): void {
   next();
 }
 
+function quotePowerShellLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
+function bottomSurface(lines: string[]): {
+  top: number;
+  content: string[];
+  status: string;
+} | null {
+  const top = lines.findLastIndex((line) => line.startsWith('╭─ ▲ You'));
+  const bottom = lines.findLastIndex((line) => line.startsWith('╰─'));
+  if (top < 0 || bottom <= top || bottom !== lines.length - 2) return null;
+  return { top, content: lines.slice(top + 1, bottom), status: lines.at(-1) ?? '' };
+}
+
+function bottomDraft(content: string[]): string {
+  return content
+    .map((line) => line.replace(/^│ ?/u, '').replace(/ ?│$/u, '').trimEnd())
+    .join('\n')
+    .trim();
+}
+
 afterEach(async () => {
   if (child) {
     try { child.kill(); } catch { /* already exited */ }
@@ -62,6 +85,343 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', () => {
+  it.each([
+    { label: 'normal width', columns: 100 },
+    { label: 'medium width', columns: 80 },
+    { label: 'narrow width', columns: 44 },
+  ])('keeps idle typing exclusively inside the fixed composer at $label', async ({ columns }) => {
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-idle-footer-home-'));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-idle-footer-cwd-'));
+    cleanup.push(aidenHome, cwd);
+    provider = await startMockProvider({
+      modelId: 'custom-default',
+      script: [{ content: 'IDLE OWNER RESPONSE' }],
+    });
+    await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'idle-footer\n', 'utf8');
+    await fs.writeFile(path.join(aidenHome, 'config.yaml'), [
+      'model:', '  provider: custom_openai', '  modelId: custom-default',
+      'providers:', '  custom_openai:', '    apiKey: idle-footer-key',
+      'display:', '  streaming: true', '  renderer: legacy',
+    ].join('\n') + '\n', 'utf8');
+
+    const rows = 30;
+    const screen = new TerminalScreen(columns, rows);
+    const preloadPath = path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs');
+    const cliPath = path.join(repoRoot, 'dist/cli/v4/aidenCLI.js');
+    const powerShellCommand = [
+      '&',
+      quotePowerShellLiteral(process.execPath),
+      '-r',
+      quotePowerShellLiteral(preloadPath),
+      quotePowerShellLiteral(cliPath),
+    ].join(' ');
+    child = pty.spawn('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', powerShellCommand,
+    ], {
+      cwd, cols: columns, rows,
+      env: {
+        ...process.env,
+        AIDEN_HOME: aidenHome,
+        AIDEN_TEST_REPO_ROOT: repoRoot,
+        AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl,
+        CUSTOM_OPENAI_API_KEY: 'idle-footer-key',
+        AIDEN_NO_UPDATE_CHECK: '1',
+        AIDEN_TEST_COMPOSER_READY: '1',
+        TELEGRAM_BOT_TOKEN: '',
+        FORCE_COLOR: '0',
+        NO_COLOR: '1',
+      },
+    });
+
+    const initialDraft = 'POWERSHELL FIXED DRAFT';
+    const draft = 'POWERSHELL FIXED XDRAFT';
+    const insertionIndex = initialDraft.length - 'DRAFT'.length + 1;
+    let output = '';
+    let state = 'boot';
+    let typingFrame = '';
+    let restoredFrame = '';
+    let typingCursor = { row: -1, col: -1 };
+    let restoredCursor = { row: -1, col: -1 };
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(
+        `idle footer timeout (${state}):\n${screen.snapshot()}`,
+      )), 40_000);
+      child!.onData((chunk) => {
+        output += chunk;
+        screen.write(chunk);
+        const rendered = screen.snapshot();
+        const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
+        if (state === 'boot' && readyCount >= 1) {
+          state = 'typing';
+          typeLikeKeyboard(child!, initialDraft, false);
+          setTimeout(() => {
+            child!.write('\x1b[D'.repeat('DRAFT'.length));
+            child!.write('X');
+            setTimeout(() => {
+              typingFrame = screen.snapshot();
+              typingCursor = screen.cursorPosition();
+              state = 'submitted';
+              child!.write('\r');
+            }, 250);
+          }, 500);
+        } else if (
+          state === 'submitted'
+          && rendered.includes('IDLE OWNER RESPONSE')
+          && readyCount >= 2
+        ) {
+          state = 'restoring';
+          setTimeout(() => {
+            restoredFrame = screen.snapshot();
+            restoredCursor = screen.cursorPosition();
+            state = 'exiting';
+            typeLikeKeyboard(child!, '/exit');
+          }, 250);
+        }
+      });
+      child!.onExit(({ exitCode }) => {
+        if (state !== 'exiting') return;
+        clearTimeout(timeout);
+        child = null;
+        if (exitCode === 0) resolve();
+        else reject(new Error(`idle footer CLI exited with ${exitCode}`));
+      });
+    });
+
+    for (const [name, frame, composerNeedle] of [
+      ['typing', typingFrame, draft],
+      ['restored', restoredFrame, 'Type your message'],
+    ] as const) {
+      const lines = frame.split('\n');
+      const surface = bottomSurface(lines);
+      expect(surface, `${name}\n${frame}`).not.toBeNull();
+      if (!surface) continue;
+      if (name === 'typing') {
+        expect(surface.content.join(' '), name).toContain(composerNeedle);
+        expect(typingCursor, name).toEqual({
+          row: surface.top + surface.content.length,
+          col: 2 + insertionIndex,
+        });
+      } else {
+        expect(surface.content.join(''), name).not.toContain('Type your message');
+        expect(restoredCursor, `${name}\n${frame}`).toEqual({
+          row: surface.top + surface.content.length,
+          col: 2,
+        });
+      }
+      expect(surface.status, name).toContain('custom_openai');
+      expect(surface.status, name).toContain('◉');
+      const rowsAboveFooter = lines.slice(0, surface.top);
+      expect(rowsAboveFooter.filter((line) => line.includes('Type your message')), name).toEqual([]);
+      const submittedRows = rowsAboveFooter.filter((line) => line.trimStart().startsWith('▲ You'));
+      if (name === 'typing') {
+        expect(submittedRows, name).toEqual([]);
+        expect(rowsAboveFooter.filter((line) => line.includes(draft)), name).toEqual([]);
+      } else {
+        expect(submittedRows, `${name}\n${frame}`).toHaveLength(1);
+        expect(submittedRows[0], name).toContain(draft);
+      }
+    }
+  });
+
+  it.each([
+    { label: 'normal width', columns: 100 },
+    { label: 'medium width', columns: 80 },
+    { label: 'narrow width', columns: 44 },
+  ])('keeps the rendered bottom composer visible after two queued messages at $label', async ({ columns }) => {
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-pinned-queue-home-'));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-pinned-queue-cwd-'));
+    cleanup.push(aidenHome, cwd);
+    provider = await startMockProvider({
+      modelId: 'custom-default',
+      chunkDelayMs: 5,
+      script: [
+        { toolCalls: [{ id: 'slow-shell', name: 'shell_exec', arguments: {
+          command: 'Start-Sleep -Seconds 4; Write-Output TOOL-DONE',
+        } }] },
+        { content: 'ORIGINAL JOB COMPLETE' },
+        { content: 'QUEUE ONE COMPLETE' },
+        { content: 'QUEUE TWO COMPLETE' },
+      ],
+    });
+    await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'pinned-queue\n', 'utf8');
+    await fs.writeFile(path.join(aidenHome, 'config.yaml'), [
+      'model:', '  provider: custom_openai', '  modelId: custom-default',
+      'providers:', '  custom_openai:', '    apiKey: pinned-queue-key',
+      'display:', '  streaming: true', '  renderer: legacy',
+    ].join('\n') + '\n', 'utf8');
+
+    const rows = 30;
+    const screen = new TerminalScreen(columns, rows);
+    const frames: Record<string, string> = {};
+    const preloadPath = path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs');
+    const cliPath = path.join(repoRoot, 'dist/cli/v4/aidenCLI.js');
+    const powerShellCommand = [
+      '&',
+      quotePowerShellLiteral(process.execPath),
+      '-r',
+      quotePowerShellLiteral(preloadPath),
+      quotePowerShellLiteral(cliPath),
+    ].join(' ');
+    child = pty.spawn('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', powerShellCommand,
+    ], {
+      cwd, cols: columns, rows,
+      env: { ...process.env, AIDEN_HOME: aidenHome, AIDEN_TEST_REPO_ROOT: repoRoot,
+        AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl, CUSTOM_OPENAI_API_KEY: 'pinned-queue-key',
+        AIDEN_NO_UPDATE_CHECK: '1', AIDEN_TEST_COMPOSER_READY: '1', TELEGRAM_BOT_TOKEN: '',
+        AIDEN_SANDBOX: '0', FORCE_COLOR: '0', NO_COLOR: '1' },
+    });
+
+    let output = '';
+    let state = 'boot';
+    let firstComposer = '';
+    let secondComposer = '';
+    let firstStatus = '';
+    let secondStatus = '';
+    let firstCursor = { row: -1, col: -1 };
+    let secondCursor = { row: -1, col: -1 };
+    let providerCallsBeforeExit = 0;
+    let queuedRequestContents: Array<string | undefined> = [];
+    let finishPoll: ReturnType<typeof setInterval> | null = null;
+    const completion = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(
+        `pinned queue timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
+      )), 65_000);
+      child!.onExit(({ exitCode }) => {
+        if (state !== 'exiting') return;
+        clearTimeout(timeout);
+        if (finishPoll) clearInterval(finishPoll);
+        child = null;
+        if (exitCode === 0) resolve();
+        else reject(new Error(`pinned queue CLI exited with ${exitCode}`));
+      });
+      child!.onData((chunk) => {
+        output += chunk;
+        screen.write(chunk);
+        const plain = stripAnsi(output);
+        const rendered = screen.snapshot();
+        const surface = bottomSurface(screen.lines());
+        const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
+        const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
+
+        if (state === 'boot' && readyCount >= 1) {
+          state = 'approval';
+          typeLikeKeyboard(child!, 'run a slow safe tool');
+        } else if (state === 'approval' && plain.includes('Decision')) {
+          state = 'tool';
+          frames.approval = screen.snapshot();
+          setTimeout(() => child!.write('\r'), 250);
+        } else if (
+          state === 'tool'
+          && /running[\s\S]*Start-Sleep/i.test(plain)
+          && surface !== null
+          && screen.lines()[surface.top]?.includes('▲ You · queue mode')
+          && surface.status.includes('custom_openai')
+        ) {
+          state = 'queue-one';
+          frames.toolRunning = screen.snapshot();
+          typeLikeKeyboard(child!, 'QUEUE ONE');
+        } else if (state === 'queue-one' && ids.length >= 1) {
+          state = 'queue-one-reset';
+        } else if (state === 'queue-one-reset' && surface
+          && screen.lines()[surface.top]?.includes('▲ You · queue mode')
+          && bottomDraft(surface.content) === '') {
+          firstComposer = screen.lines()[surface.top] ?? '';
+          firstStatus = surface.status;
+          firstCursor = screen.cursorPosition();
+          frames.firstQueue = screen.snapshot();
+          state = 'queue-two';
+          typeLikeKeyboard(child!, 'QUEUE TWO');
+        } else if (state === 'queue-two' && ids.length >= 2) {
+          state = 'queue-two-reset';
+        } else if (state === 'queue-two-reset' && surface
+          && screen.lines()[surface.top]?.includes('▲ You · queue mode')
+          && bottomDraft(surface.content) === '') {
+          secondComposer = screen.lines()[surface.top] ?? '';
+          secondStatus = surface.status;
+          secondCursor = screen.cursorPosition();
+          frames.secondQueue = screen.snapshot();
+          state = 'finishing';
+          finishPoll = setInterval(() => {
+            if ((provider?.callCount() ?? 0) < 4) return;
+            if (finishPoll) clearInterval(finishPoll);
+            finishPoll = null;
+            providerCallsBeforeExit = provider!.callCount();
+            queuedRequestContents = (provider!.requests().slice(2, 4) as Array<{
+              messages?: Array<{ role?: string; content?: string }>;
+            }>).map((request) => (
+              request.messages?.filter((message) => message.role === 'user').at(-1)?.content
+            ));
+            state = 'queue-check-pending';
+            setTimeout(() => {
+              state = 'queue-check';
+              typeLikeKeyboard(child!, '/queue');
+            }, 250);
+          }, 25);
+        } else if (state === 'queue-check' && /queue is empty/i.test(rendered)) {
+          frames.queueEmpty = rendered;
+          state = 'exiting';
+          typeLikeKeyboard(child!, '/exit');
+        }
+      });
+    });
+    await completion;
+
+    const plain = stripAnsi(output);
+    const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
+    expect(firstComposer).toContain('▲ You · queue mode');
+    expect(secondComposer).toContain('▲ You · queue mode');
+    expect(firstStatus).toContain('custom_openai');
+    expect(secondStatus).toContain('custom_openai');
+    expect(firstStatus).toContain('◉');
+    expect(secondStatus).toContain('◉');
+    expect(firstStatus).toMatch(/\b(?:\d+ms|\d+s)\b/);
+    expect(secondStatus).toMatch(/\b(?:\d+ms|\d+s)\b/);
+    const firstSurface = bottomSurface(frames.firstQueue.split('\n'));
+    const secondSurface = bottomSurface(frames.secondQueue.split('\n'));
+    expect(firstCursor).toEqual({
+      row: firstSurface!.top + firstSurface!.content.length,
+      col: 2,
+    });
+    expect(secondCursor).toEqual({
+      row: secondSurface!.top + secondSurface!.content.length,
+      col: 2,
+    });
+    const runningSurface = bottomSurface(frames.toolRunning.split('\n'));
+    expect(runningSurface).not.toBeNull();
+    expect(frames.toolRunning.split('\n')[runningSurface!.top]).toContain('▲ You · queue mode');
+    expect(runningSurface!.status).toContain('custom_openai');
+    expect(
+      frames.toolRunning.split('\n').filter((line) => line.includes('run a slow safe tool')),
+    ).toHaveLength(1);
+    for (const frame of Object.values(frames)) {
+      const lines = frame.split('\n');
+      const surface = bottomSurface(lines);
+      if (surface) {
+        expect(lines.slice(0, surface.top).filter((line) => line.includes('custom_openai'))).toHaveLength(0);
+      }
+    }
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    const queuedRuns = plain.match(/running queued: QUEUE (?:ONE|TWO)/g) ?? [];
+    expect(queuedRuns).toEqual(['running queued: QUEUE ONE', 'running queued: QUEUE TWO']);
+    expect(queuedRequestContents).toEqual(['QUEUE ONE', 'QUEUE TWO']);
+    expect(providerCallsBeforeExit).toBe(4);
+    expect(frames.queueEmpty).toMatch(/queue is empty/i);
+
+    const evidenceDir = process.env.AIDEN_ACCEPTANCE_EVIDENCE_DIR;
+    if (evidenceDir) {
+      await fs.mkdir(evidenceDir, { recursive: true });
+      await fs.writeFile(
+        path.join(evidenceDir, `busy-queue-${columns}-columns.txt`),
+        Object.entries(frames).map(([name, frame]) => `--- ${name} ---\n${frame}`).join('\n\n'),
+        'utf8',
+      );
+    }
+  }, 75_000);
+
   it('preserves an exact multiline busy submission through resize and provider handoff', async () => {
     const repoRoot = path.resolve(__dirname, '../../..');
     const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-busy-queue-home-'));
@@ -113,7 +473,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           setTimeout(() => child!.resize(44, 40), 120);
           setTimeout(() => child!.resize(110, 40), 240);
           setTimeout(() => child!.write('\r'), 400);
-        } else if (state === 'queueing' && plain.includes('QUEUED TURN COMPLETE') && readyCount >= 2) {
+        } else if (state === 'queueing' && provider!.callCount() >= 2 && readyCount >= 2) {
           state = 'queue-check';
           typeLikeKeyboard(child!, '/queue');
         } else if (state === 'queue-check' && /queue is empty/i.test(plain)) {
@@ -272,7 +632,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         } else if (state === 'denying' && plain.includes('RESIZE APPROVAL COMPLETE') && readyCount >= 2) {
           state = 'normal';
           typeLikeKeyboard(child!, 'normal after resize');
-        } else if (state === 'normal' && plain.includes('NORMAL AFTER RESIZE') && readyCount >= 3) {
+        } else if (state === 'normal' && provider!.callCount() >= 3 && readyCount >= 3) {
           state = 'queue';
           typeLikeKeyboard(child!, '/queue');
         } else if (state === 'queue' && /queue is empty/i.test(plain)) {
@@ -355,6 +715,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     });
 
     let output = '';
+    const screen = new TerminalScreen(240, 40);
     let state = 'boot';
     let queueChecks = 0;
     let queueCommandSent = false;
@@ -365,21 +726,23 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
       )), 75_000);
       child!.onData((chunk) => {
         output += chunk;
+        screen.write(chunk);
         const plain = stripAnsi(output);
+        const rendered = screen.snapshot();
         const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
         if (state === 'boot' && readyCount >= 1) {
           state = 'first-select';
           setTimeout(() => typeLikeKeyboard(child!, 'Run consecutive clarification acceptance'), 500);
         }
-        if (state === 'first-select' && plain.includes('Which format?')) {
+        if (state === 'first-select' && rendered.includes('Which format?')) {
           state = 'second-text';
           setTimeout(() => pressDownThenEnter(child!, 1), 500);
         }
-        if (state === 'second-text' && plain.includes('What topic?')) {
+        if (state === 'second-text' && rendered.includes('What topic?')) {
           state = 'clarify-final';
           setTimeout(() => typeLikeKeyboard(child!, 'P2A terminal ownership'), secondPromptDelayMs);
         }
-        if (state === 'clarify-final' && plain.includes('clarifications complete: PDF | P2A terminal ownership')) {
+        if (state === 'clarify-final' && rendered.includes('clarifications complete: PDF | P2A terminal ownership')) {
           state = 'queue-ready';
         }
         if (state === 'queue-ready' && readyCount >= 2) {
@@ -387,7 +750,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           queueCommandSent = true;
           typeLikeKeyboard(child!, '/queue');
         }
-        const emptyQueueCount = plain.match(/queue is empty/gi)?.length ?? 0;
+        const emptyQueueCount = rendered.match(/queue is empty/gi)?.length ?? 0;
         if (state === 'queue-1' && emptyQueueCount >= 1) {
           queueChecks += 1;
           state = 'done';

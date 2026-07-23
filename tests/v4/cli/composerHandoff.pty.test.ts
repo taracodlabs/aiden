@@ -18,11 +18,13 @@ async function spawnBuiltCli(
 ): Promise<{
   terminal: RunningPty;
   output: () => string;
+  diagnostics: () => Promise<string>;
   cwd: string;
 }> {
   const repoRoot = path.resolve(__dirname, '../../..');
   const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-handoff-home-'));
   const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-handoff-cwd-'));
+  const diagnosticPath = path.join(aidenHome, 'turn-idle.jsonl');
   cleanup.push(aidenHome, cwd);
   provider = await startMockProvider({ modelId: 'custom-default', chunkDelayMs, headerDelayMs, script });
   await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'handoff\n', 'utf8');
@@ -53,6 +55,7 @@ async function spawnBuiltCli(
       AIDEN_NO_UPDATE_CHECK: '1',
       AIDEN_TEST_COMPOSER_READY: '1',
       AIDEN_TEST_TURN_IDLE_DIAG: '1',
+      AIDEN_TEST_TURN_IDLE_DIAG_FILE: diagnosticPath,
       TELEGRAM_BOT_TOKEN: '',
       FORCE_COLOR: '0',
       NO_COLOR: '1',
@@ -60,7 +63,12 @@ async function spawnBuiltCli(
   });
   let output = '';
   child.onData((chunk) => { output += chunk; });
-  return { terminal: child, output: () => output, cwd };
+  return {
+    terminal: child,
+    output: () => output,
+    diagnostics: () => fs.readFile(diagnosticPath, 'utf8'),
+    cwd,
+  };
 }
 
 function typeLikeKeyboard(terminal: RunningPty, text: string, submitDelayMs = 100): void {
@@ -176,14 +184,14 @@ describe.skipIf(process.platform !== 'win32')('built CLI turn-to-composer handof
     expect(plain).toContain('Reply with exactly: SECOND');
     expect(plain).toContain('Reply with exactly: THIRD');
     expect(plain).toMatch(/queue is empty/i);
-    const flattened = plain.replace(/\n/g, '');
-    const generations = [...flattened.matchAll(/"event":"composer\.ready".{0,700}?"generation":(\d+)/g)]
+    const diagnostics = await runtime.diagnostics();
+    const generations = [...diagnostics.matchAll(/"event":"composer\.ready".{0,700}?"generation":(\d+)/g)]
       .map((match) => Number(match[1]));
     expect(generations.length).toBeGreaterThanOrEqual(3);
     expect(new Set(generations).size).toBe(generations.length);
-    const thirdReadyAt = flattened.search(/"event":"composer\.ready".{0,700}"generation":3/);
-    const thirdKeyAt = flattened.indexOf('"generation":3,"key":"r"');
-    const thirdEnterAt = flattened.indexOf('"generation":3,"key":"enter"');
+    const thirdReadyAt = diagnostics.search(/"event":"composer\.ready".{0,700}"generation":3/);
+    const thirdKeyAt = diagnostics.indexOf('"generation":3,"key":"r"');
+    const thirdEnterAt = diagnostics.indexOf('"generation":3,"key":"enter"');
     expect(thirdReadyAt).toBeGreaterThanOrEqual(0);
     expect(thirdKeyAt).toBeGreaterThan(thirdReadyAt);
     expect(thirdEnterAt).toBeGreaterThan(thirdKeyAt);
@@ -256,7 +264,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI turn-to-composer handof
     });
 
     await completion;
-    const diagnosticOutput = stripAnsi(runtime.output()).replace(/\n/g, '');
+    const diagnosticOutput = await runtime.diagnostics();
     const finalReadyIndex = diagnosticOutput.lastIndexOf('"event":"composer.ready"');
     expect(finalReadyIndex).toBeGreaterThan(0);
     expect(diagnosticOutput.slice(finalReadyIndex).includes('"event":"activity.row.timer"')).toBe(false);

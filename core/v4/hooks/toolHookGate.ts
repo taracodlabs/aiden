@@ -55,6 +55,41 @@ export interface RunToolWithHooksOpts {
   ctx:          DispatchContext;
 }
 
+/** Resolve action-changing pre-hooks before policy or approval evaluation. */
+export async function runToolPreHooks(
+  opts: RunToolWithHooksOpts,
+): Promise<Record<string, unknown>> {
+  if (!opts.db) return opts.args;
+  const baseCtx: DispatchContext = { ...opts.ctx, toolName: opts.toolName, toolCallId: opts.toolCallId };
+  const pre = await dispatchHook(opts.db, 'tool.call.pre', opts.args, baseCtx);
+  if (pre.decision === 'block') {
+    throw new HookBlockedError(
+      pre.reason ?? 'tool call blocked by pre-hook',
+      pre.user_message,
+      pre.model_message,
+    );
+  }
+  return pre.payload as Record<string, unknown>;
+}
+
+/** Apply presentation-only post-hooks after the frozen action has executed. */
+export async function runToolPostHooks(
+  opts: RunToolWithHooksOpts,
+  finalArgs: Record<string, unknown>,
+  result: unknown,
+): Promise<unknown> {
+  if (!opts.db) return result;
+  const baseCtx: DispatchContext = { ...opts.ctx, toolName: opts.toolName, toolCallId: opts.toolCallId };
+  const post = await dispatchHook(
+    opts.db,
+    'tool.call.post',
+    { input: finalArgs, output: result },
+    baseCtx,
+  );
+  const patched = post.payload as Record<string, unknown>;
+  return ('output' in patched) ? patched.output : result;
+}
+
 /**
  * Wrap a tool handler call with pre/post hook dispatch. Returns
  * the (possibly transformed) handler result. Throws `HookBlockedError`

@@ -123,6 +123,16 @@ describe('Slice 7 inbound trace adoption + 7 captured smoke scenarios', () => {
     expect(r1.status).toBe(202);
     expect(String(r1.body.trace_id)).toMatch(/^trc_[0-9a-f]{32}$/);
     expect(r1.body.external_trace_id).toBeNull();
+    expect(String(r1.body.job_id)).toMatch(/^task_/);
+    expect(String(r1.body.attempt_id)).toMatch(/^attempt_/);
+    expect(typeof r1.body.run_id).toBe('number');
+    const db = getCurrentDaemonDb()!;
+    expect(db.prepare(
+      'SELECT task_id, attempt_id FROM runs WHERE id = ?',
+    ).get(r1.body.run_id)).toEqual({
+      task_id: r1.body.job_id,
+      attempt_id: r1.body.attempt_id,
+    });
 
     // smoke 2 — valid traceparent
     const r2 = await postJson(basePort, '/api/runs',
@@ -153,6 +163,28 @@ describe('Slice 7 inbound trace adoption + 7 captured smoke scenarios', () => {
       { body: { args: { p: 2 } }, headers: { 'x-request-id': garbage } });
     console.log(`[smoke 5] response: status=${r5.status} (8000-char X-Request-Id dropped, request still accepted)`);
     expect(r5.status).toBe(202);
+
+    const sameKeyHeaders = { 'idempotency-key': 'same-request-key' };
+    const firstKeyed = await postJson(basePort, '/api/runs', {
+      body: { prompt: 'first body' }, headers: sameKeyHeaders,
+    });
+    const duplicate = await postJson(basePort, '/api/runs', {
+      body: { prompt: 'first body' }, headers: sameKeyHeaders,
+    });
+    const conflicting = await postJson(basePort, '/api/runs', {
+      body: { prompt: 'different body' }, headers: sameKeyHeaders,
+    });
+    expect(firstKeyed.status).toBe(202);
+    expect(duplicate).toMatchObject({
+      status: 202,
+      body: {
+        job_id: firstKeyed.body.job_id,
+        attempt_id: firstKeyed.body.attempt_id,
+        run_id: firstKeyed.body.run_id,
+        duplicate: true,
+      },
+    });
+    expect(conflicting).toMatchObject({ status: 409, body: { error: 'idempotency_conflict' } });
   });
 
   it('smoke 6: spawn child process via shell-exec → child sees AIDEN_* env', async () => {
@@ -208,4 +240,5 @@ describe('Slice 7 inbound trace adoption + 7 captured smoke scenarios', () => {
     expect(headers['X-Aiden-Run-Id']).toBe(ctx.runId);
     expect(headers['User-Agent']).toBe('test/1.0');
   });
+
 });

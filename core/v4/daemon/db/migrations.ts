@@ -175,10 +175,11 @@ CREATE INDEX IF NOT EXISTS idx_file_obs_pending
   ON file_observations(watcher_id, last_status) WHERE last_status = 'pending';
 `;
 
-interface Migration {
+export interface Migration {
   version: number;
   name:    string;
-  sql:     string;
+  sql?:    string;
+  apply?:  (db: Database.Database) => void;
 }
 
 // v4.5 Phase 3 — webhook_deliveries log.
@@ -706,6 +707,361 @@ CREATE INDEX IF NOT EXISTS idx_side_effect_ledger_task
   ON side_effect_ledger(task_id, step);
 `;
 
+function tableColumns(db: Database.Database, table: string): Set<string> {
+  return new Set(
+    (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name),
+  );
+}
+
+function addMissingColumns(
+  db: Database.Database,
+  table: string,
+  definitions: ReadonlyArray<readonly [name: string, definition: string]>,
+): void {
+  const existing = tableColumns(db, table);
+  for (const [name, definition] of definitions) {
+    if (existing.has(name)) continue;
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    existing.add(name);
+  }
+}
+
+/** Promote the existing task/run/event records into the durable Job engine. */
+function applyV20(db: Database.Database): void {
+  addMissingColumns(db, 'tasks', [
+    ['state_version',          'INTEGER NOT NULL DEFAULT 0'],
+    ['active_attempt_id',      'TEXT'],
+    ['root_job_id',            'TEXT'],
+    ['idempotency_namespace',  'TEXT'],
+    ['idempotency_key',        'TEXT'],
+    ['request_fingerprint',    'TEXT'],
+    ['entry_point',            'TEXT'],
+    ['source',                 'TEXT'],
+    ['workspace_id',           'TEXT'],
+    ['principal_id',           'TEXT'],
+    ['terminal_at',            'INTEGER'],
+    ['terminal_outcome',       'TEXT'],
+    ['finish_reason',          'TEXT'],
+    ['recovery_state',         "TEXT NOT NULL DEFAULT 'none'"],
+    ['crash_count',            'INTEGER NOT NULL DEFAULT 0'],
+    ['next_event_sequence',    'INTEGER NOT NULL DEFAULT 1'],
+    ['policy_snapshot_id',     'TEXT'],
+  ]);
+
+  addMissingColumns(db, 'runs', [
+    ['attempt_id',             'TEXT'],
+    ['attempt_number',         'INTEGER NOT NULL DEFAULT 1'],
+    ['generation',             'INTEGER NOT NULL DEFAULT 1'],
+    ['state_version',          'INTEGER NOT NULL DEFAULT 0'],
+    ['lease_id',               'TEXT'],
+    ['lease_owner',            'TEXT'],
+    ['lease_expires_at',       'INTEGER'],
+    ['lease_heartbeat_at',     'INTEGER'],
+    ['fence_token',            'TEXT'],
+    ['recovery_of_attempt_id', 'TEXT'],
+    ['trigger_reason',         'TEXT'],
+    ['provider_route_snapshot','TEXT'],
+    ['budget_snapshot',        'TEXT'],
+    ['ended_at',               'INTEGER'],
+    ['next_event_sequence',    'INTEGER NOT NULL DEFAULT 1'],
+  ]);
+
+  addMissingColumns(db, 'run_events', [
+    ['job_id',          'TEXT'],
+    ['attempt_id',      'TEXT'],
+    ['job_sequence',    'INTEGER'],
+    ['producer',        'TEXT'],
+    ['generation',      'INTEGER'],
+    ['causation_id',    'TEXT'],
+    ['correlation_id',  'TEXT'],
+    ['idempotency_key', 'TEXT'],
+  ]);
+
+  addMissingColumns(db, 'side_effect_ledger', [
+    ['job_id',       'TEXT'],
+    ['attempt_id',   'TEXT'],
+    ['generation',   'INTEGER'],
+    ['tool_call_id', 'TEXT'],
+    ['effect_state', "TEXT NOT NULL DEFAULT 'none'"],
+  ]);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS tool_calls (
+      tool_call_id           TEXT PRIMARY KEY,
+      job_id                 TEXT NOT NULL,
+      attempt_id             TEXT NOT NULL,
+      generation             INTEGER NOT NULL,
+      model_call_id          TEXT,
+      tool_name              TEXT NOT NULL,
+      normalized_args_digest TEXT NOT NULL,
+      risk_tier              TEXT NOT NULL,
+      mutates                INTEGER NOT NULL,
+      state                  TEXT NOT NULL,
+      started_at             INTEGER,
+      ended_at               INTEGER,
+      result_ref             TEXT,
+      side_effect_id         TEXT,
+      verification_ref       TEXT,
+      created_at             INTEGER NOT NULL,
+      updated_at             INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_job
+      ON tool_calls(job_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_attempt
+      ON tool_calls(attempt_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_tool_calls_state
+      ON tool_calls(state, updated_at);
+  `);
+
+  db.exec(`
+    UPDATE runs
+       SET attempt_id = 'attempt_legacy_' || id
+     WHERE attempt_id IS NULL OR attempt_id = '';
+
+    WITH numbered AS (
+      SELECT id,
+             CASE
+               WHEN task_id IS NULL THEN 1
+               ELSE ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY id)
+             END AS ordinal
+        FROM runs
+    )
+    UPDATE runs
+       SET attempt_number = (SELECT ordinal FROM numbered WHERE numbered.id = runs.id);
+
+    UPDATE runs
+       SET ended_at = completed_at
+     WHERE ended_at IS NULL AND completed_at IS NOT NULL;
+
+    UPDATE runs
+       SET next_event_sequence = COALESCE(
+         (SELECT MAX(e.seq) + 1 FROM run_events e WHERE e.run_id = runs.id),
+         1
+       );
+
+    WITH RECURSIVE roots(id, root_id) AS (
+      SELECT t.id, t.id
+        FROM tasks t
+       WHERE t.parent_task_id IS NULL
+          OR NOT EXISTS (SELECT 1 FROM tasks parent WHERE parent.id = t.parent_task_id)
+      UNION ALL
+      SELECT child.id, roots.root_id
+        FROM tasks child
+        JOIN roots ON child.parent_task_id = roots.id
+    )
+    UPDATE tasks
+       SET root_job_id = COALESCE(
+         (SELECT root_id FROM roots WHERE roots.id = tasks.id),
+         id
+       )
+     WHERE root_job_id IS NULL OR root_job_id = '';
+
+    UPDATE tasks
+       SET active_attempt_id = (
+         SELECT r.attempt_id
+           FROM runs r
+          WHERE r.task_id = tasks.id
+            AND r.status IN ('queued', 'running', 'active', 'waiting')
+          ORDER BY r.id DESC
+          LIMIT 1
+       )
+     WHERE active_attempt_id IS NULL;
+
+    UPDATE run_events
+       SET job_id = (SELECT r.task_id FROM runs r WHERE r.id = run_events.run_id),
+           attempt_id = (SELECT r.attempt_id FROM runs r WHERE r.id = run_events.run_id),
+           generation = COALESCE(
+             (SELECT r.generation FROM runs r WHERE r.id = run_events.run_id),
+             1
+           )
+     WHERE job_id IS NULL OR attempt_id IS NULL OR generation IS NULL;
+
+    WITH ranked AS (
+      SELECT id,
+             ROW_NUMBER() OVER (PARTITION BY job_id ORDER BY id) AS ordinal
+        FROM run_events
+       WHERE job_id IS NOT NULL
+    )
+    UPDATE run_events
+       SET job_sequence = (SELECT ordinal FROM ranked WHERE ranked.id = run_events.id)
+     WHERE job_id IS NOT NULL;
+
+    UPDATE tasks
+       SET next_event_sequence = COALESCE(
+         (SELECT MAX(e.job_sequence) + 1 FROM run_events e WHERE e.job_id = tasks.id),
+         1
+       );
+
+    UPDATE side_effect_ledger
+       SET job_id = COALESCE(job_id, task_id),
+           effect_state = CASE status
+             WHEN 'attempting' THEN 'started'
+             WHEN 'confirmed' THEN 'committed'
+             ELSE effect_state
+           END;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_idempotency
+      ON tasks(idempotency_namespace, idempotency_key)
+      WHERE idempotency_namespace IS NOT NULL AND idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_tasks_root_job
+      ON tasks(root_job_id, created_at);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_attempt_id
+      ON runs(attempt_id);
+    CREATE INDEX IF NOT EXISTS idx_runs_job_attempt
+      ON runs(task_id, attempt_number);
+    CREATE INDEX IF NOT EXISTS idx_runs_lease_expiry
+      ON runs(lease_expires_at)
+      WHERE lease_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_job_sequence
+      ON run_events(job_id, job_sequence)
+      WHERE job_id IS NOT NULL AND job_sequence IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_run_events_job_idempotency
+      ON run_events(job_id, idempotency_key)
+      WHERE job_id IS NOT NULL AND idempotency_key IS NOT NULL;
+  `);
+}
+
+/** Add the durable Phase 4 input, control, policy, and approval authorities. */
+function applyV21(db: Database.Database): void {
+  addMissingColumns(db, 'tasks', [
+    ['next_input_sequence', 'INTEGER NOT NULL DEFAULT 1'],
+  ]);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS durable_inputs (
+      input_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      target_attempt_id TEXT,
+      target_generation INTEGER,
+      session_id TEXT NOT NULL,
+      channel_id TEXT,
+      source TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      content TEXT,
+      content_ref TEXT,
+      content_hash TEXT NOT NULL,
+      state TEXT NOT NULL,
+      idempotency_namespace TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      claimed_by_attempt_id TEXT,
+      claimed_generation INTEGER,
+      claimed_at INTEGER,
+      consumed_at INTEGER,
+      supersedes_input_id TEXT,
+      expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (supersedes_input_id) REFERENCES durable_inputs(input_id) ON DELETE SET NULL,
+      UNIQUE (job_id, sequence),
+      UNIQUE (idempotency_namespace, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_durable_inputs_pending
+      ON durable_inputs(job_id, state, sequence);
+    CREATE INDEX IF NOT EXISTS idx_durable_inputs_session
+      ON durable_inputs(session_id, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS steering_commands (
+      steering_id TEXT PRIMARY KEY,
+      input_id TEXT NOT NULL UNIQUE,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      target_scope TEXT NOT NULL,
+      action TEXT NOT NULL,
+      payload TEXT,
+      state TEXT NOT NULL,
+      safe_boundary_sequence INTEGER,
+      invalidates_plan_digest TEXT,
+      applied_at INTEGER,
+      rejection_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (input_id) REFERENCES durable_inputs(input_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_steering_pending
+      ON steering_commands(job_id, attempt_id, generation, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS job_control_commands (
+      control_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT,
+      generation INTEGER,
+      kind TEXT NOT NULL,
+      source TEXT NOT NULL,
+      reason TEXT,
+      state TEXT NOT NULL,
+      idempotency_namespace TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      applied_at INTEGER,
+      rejection_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (idempotency_namespace, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_controls_pending
+      ON job_control_commands(job_id, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS policy_snapshots (
+      policy_snapshot_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      digest TEXT NOT NULL UNIQUE,
+      trust_level TEXT NOT NULL,
+      autonomy_policy TEXT NOT NULL,
+      approval_mode TEXT NOT NULL,
+      tool_metadata_version TEXT NOT NULL,
+      sandbox_policy_json TEXT NOT NULL,
+      network_policy_json TEXT NOT NULL,
+      plugin_grants_json TEXT NOT NULL,
+      mcp_grants_json TEXT NOT NULL,
+      spending_limits_json TEXT,
+      workspace_overrides_json TEXT NOT NULL,
+      job_overrides_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS approvals (
+      approval_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      request_sequence INTEGER NOT NULL,
+      tool_name TEXT NOT NULL,
+      risk_tier TEXT NOT NULL,
+      risk_reasons_json TEXT NOT NULL,
+      normalized_execution_plan TEXT NOT NULL,
+      action_digest TEXT NOT NULL,
+      policy_snapshot_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      decision TEXT,
+      decision_input_id TEXT,
+      decision_scope TEXT,
+      decided_by TEXT,
+      decision_channel TEXT,
+      requested_at INTEGER NOT NULL,
+      displayed_at INTEGER,
+      decided_at INTEGER,
+      expires_at INTEGER,
+      invalidated_at INTEGER,
+      invalidation_reason TEXT,
+      executed_at INTEGER,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (policy_snapshot_id) REFERENCES policy_snapshots(policy_snapshot_id),
+      FOREIGN KEY (decision_input_id) REFERENCES durable_inputs(input_id) ON DELETE SET NULL,
+      UNIQUE (job_id, request_sequence)
+    );
+    CREATE INDEX IF NOT EXISTS idx_approvals_waiting
+      ON approvals(job_id, state, requested_at);
+    CREATE INDEX IF NOT EXISTS idx_approvals_tool_call
+      ON approvals(tool_call_id, state);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -726,6 +1082,8 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 17, name: 'v4.13 gap 3 — job-card columns',                sql: V17_SQL },
   { version: 18, name: 'v4.13 gap 4 — resume linkage + wake-loop cap',   sql: V18_SQL },
   { version: 19, name: 'v4.12.1 — side-effect idempotency ledger',        sql: V19_SQL },
+  { version: 20, name: 'v4.15.1 — durable Job and Attempt foundation',    apply: applyV20 },
+  { version: 21, name: 'v4.15.1 - durable input and approval authority', apply: applyV21 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -763,14 +1121,22 @@ export function runMigrations(db: Database.Database): { from: number; to: number
   const pending = MIGRATIONS.filter((m) => m.version > from);
   if (pending.length === 0) return { from, to: from };
   const apply = db.transaction((m: Migration): void => {
-    db.exec(m.sql);
+    if (m.apply) m.apply(db);
+    else db.exec(m.sql ?? '');
     db.prepare(
       'INSERT OR REPLACE INTO schema_version (id, version, applied_at) VALUES (1, ?, ?)',
     ).run(m.version, Date.now());
-  });
+  }).immediate;
   let to = from;
   for (const m of pending) {
-    apply(m);
+    try {
+      apply(m);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const wrapped = new Error(`Migration ${m.version} (${m.name}) failed: ${detail}`) as Error & { cause?: unknown };
+      wrapped.cause = error;
+      throw wrapped;
+    }
     to = m.version;
   }
   return { from, to };

@@ -46,6 +46,11 @@ import { pwClose } from '../core/playwrightBridge'
 // runtime lock, crash recovery, health endpoints, signal handlers.
 import { bootstrapDaemon } from '../core/v4/daemon'
 import { resolveAidenPaths } from '../core/v4/paths'
+import { daemonDbPath } from '../core/v4/daemon/daemonConfig'
+import { openDaemonDb } from '../core/v4/daemon/db/connection'
+import { createJobEngine } from '../core/v4/daemon/jobEngine'
+import { createHttpJobCoordinator } from '../core/v4/daemon/httpJobIngress'
+import { currentJobExecutionContext } from '../core/v4/daemon/jobExecutionContext'
 import { estimateCompatibilityUsage } from '../core/v4/compatibilityUsage'
 import {
   beginPhysicalProviderAttempt,
@@ -490,7 +495,20 @@ const kbProgress = new Map<string, { status: 'processing' | 'done' | 'error'; pr
 // â”€â”€ App factory â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 export function createApiServer(): Express {
-  configureProviderAttemptLedger(resolveAidenPaths().sessionsDb)
+  const aidenPaths = resolveAidenPaths()
+  configureProviderAttemptLedger(aidenPaths.sessionsDb)
+  const apiDb = openDaemonDb(daemonDbPath(aidenPaths.root))
+  const apiInstanceId = `api_${process.pid}`
+  const apiNow = Date.now()
+  apiDb.prepare(
+    `INSERT OR IGNORE INTO daemon_instances
+       (instance_id, pid, hostname, started_at, last_heartbeat, version)
+     VALUES (?, ?, 'localhost', ?, ?, ?)`,
+  ).run(apiInstanceId, process.pid, apiNow, apiNow, VERSION)
+  const apiJobCoordinator = createHttpJobCoordinator({
+    engine: createJobEngine({ db: apiDb }),
+    instanceId: apiInstanceId,
+  })
   const app = express()
 
   // â”€â”€ Middleware â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -520,6 +538,9 @@ export function createApiServer(): Express {
     if (req.path.startsWith('/api/triggers/webhook/')) return next()
     return _jsonParser(req, res, next)
   })
+
+  app.use('/api/chat', apiJobCoordinator.middleware({ entryPoint: 'compatibility_api', source: 'api' }))
+  app.use('/v1/chat/completions', apiJobCoordinator.middleware({ entryPoint: 'openai_compatible_api', source: 'api' }))
 
   // Security headers
   app.use((_req: Request, res: Response, next: NextFunction) => {
@@ -5202,6 +5223,7 @@ export function createApiServer(): Express {
     sessionId: string,
     port:      number,
     onToken:   (tok: string) => void,
+    internalJobToken?: string | null,
   ): Promise<string> {
     return new Promise((resolve, reject) => {
       const body = JSON.stringify({ message: userText, history, sessionId, mode: 'auto' })
@@ -5214,6 +5236,7 @@ export function createApiServer(): Express {
           'Content-Type':   'application/json',
           'Accept':         'text/event-stream',
           'Content-Length': Buffer.byteLength(body),
+          ...apiJobCoordinator.internalHeaders(internalJobToken ?? null),
         },
       }
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -5337,6 +5360,9 @@ export function createApiServer(): Express {
         purpose: 'legacy_api' as const,
         providerConfigured: 'legacy-router',
         modelConfigured: modelName,
+        jobId: currentJobExecutionContext()?.jobId,
+        attemptId: currentJobExecutionContext()?.attemptId,
+        attemptGeneration: currentJobExecutionContext()?.generation,
       },
     }
     const attempt = beginPhysicalProviderAttempt(requestForAccounting, {
@@ -5367,7 +5393,7 @@ export function createApiServer(): Express {
       try {
         const fullText = await _driveAgentSSE(userText, history, sessionId, port, (tok) => {
           res.write(chunk({ content: tok }, null))
-        })
+        }, apiJobCoordinator.internalToken(res))
         const usage = estimateCompatibilityUsage(normalizedUsageMessages, fullText)
         attempt.success({ content: fullText, toolCalls: [], finishReason: 'stop', usage: { inputTokens: 0, outputTokens: 0 } }, providerByteLength(fullText))
         res.write(`data: ${JSON.stringify({
@@ -5389,7 +5415,14 @@ export function createApiServer(): Express {
     } else {
       // ── Non-streaming: collect full response, return as JSON ────
       try {
-        const fullText = await _driveAgentSSE(userText, history, sessionId, port, () => {})
+        const fullText = await _driveAgentSSE(
+          userText,
+          history,
+          sessionId,
+          port,
+          () => {},
+          apiJobCoordinator.internalToken(res),
+        )
         const usage = estimateCompatibilityUsage(normalizedUsageMessages, fullText)
         attempt.success({ content: fullText, toolCalls: [], finishReason: 'stop', usage: { inputTokens: 0, outputTokens: 0 } }, providerByteLength(fullText))
         res.json({

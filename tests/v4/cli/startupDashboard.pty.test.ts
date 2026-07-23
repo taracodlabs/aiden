@@ -6,6 +6,7 @@ import * as pty from 'node-pty';
 
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
@@ -43,6 +44,7 @@ async function launch(columns: number, paused = false): Promise<{
   child: RunningPty;
   raw: () => string;
   plain: () => string;
+  rendered: () => string;
 }> {
   const repoRoot = path.resolve(__dirname, '../../..');
   const home = await fs.mkdtemp(path.join(os.tmpdir(), `aiden-startup-${columns}-home-`));
@@ -82,21 +84,30 @@ async function launch(columns: number, paused = false): Promise<{
   });
   children.push(child);
   let output = '';
-  child.onData((chunk) => { output += chunk; });
+  const screen = new TerminalScreen(columns, 50);
+  child.onData((chunk) => {
+    output += chunk;
+    screen.write(chunk);
+  });
   await waitFor(
     () => output.includes(COMPOSER_READY_TOKEN),
     () => stripAnsi(output),
   );
-  return { child, raw: () => output, plain: () => stripAnsi(output) };
+  return {
+    child,
+    raw: () => output,
+    plain: () => stripAnsi(output),
+    rendered: () => screen.snapshot(),
+  };
 }
 
 function dashboardLines(output: string): string[] {
   const lines = output.split(/\r?\n/);
   const start = lines.findIndex((line) => line.includes('█████╗') || /^\s*AIDEN\s*$/.test(line));
-  const end = lines.findIndex((line, index) => index >= start && /Type (?:your message|· \/help)/.test(line));
+  const end = lines.findIndex((line, index) => index >= start && line.startsWith('╭─ ▲ You'));
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
-  return lines.slice(start, end + 1);
+  return lines.slice(start, end);
 }
 
 afterEach(async () => {
@@ -147,20 +158,30 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     expect(medium.plain()).toContain('Environment');
     expect(medium.plain()).toContain('Capabilities');
     expect(medium.plain()).toContain('github.com/taracodlabs/aiden');
-    expect(medium.plain()).not.toContain('╭');
+    expect(dashboardLines(medium.plain()).join('\n')).not.toContain('╭');
     for (const line of dashboardLines(medium.plain())) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(78);
     }
 
     const narrow = await launch(48);
-    expect(narrow.plain()).toMatch(/\bAIDEN\b/);
-    expect(narrow.plain()).toMatch(/Assistant\s+·\s+custom-default/i);
-    expect(narrow.plain()).toMatch(/built solo/i);
-    expect(narrow.plain()).not.toContain('Environment');
-    expect(narrow.plain()).not.toContain('Capabilities');
-    expect(narrow.plain()).not.toContain('╭');
-    for (const line of dashboardLines(narrow.plain())) {
+    const narrowRendered = narrow.rendered();
+    expect(narrowRendered).toMatch(/\bAIDEN\b/);
+    expect(narrowRendered).toMatch(/Assistant\s+·\s+custom-default/i);
+    expect(narrowRendered).toMatch(/built solo/i);
+    expect(narrowRendered).not.toContain('Environment');
+    expect(narrowRendered).not.toContain('Capabilities');
+    expect(dashboardLines(narrowRendered).join('\n')).not.toContain('╭');
+    for (const line of dashboardLines(narrowRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(46);
     }
+    const narrowRows = narrowRendered.split('\n');
+    expect(narrowRows.at(-4)).toContain('▲ You');
+    expect(narrowRows.at(-3)).toMatch(/^│\s+│$/);
+    expect(narrowRows.at(-2)).toMatch(/^╰─/);
+    expect(narrowRows.at(-1)).toContain('◉');
+    expect(stringWidth(narrowRows.at(-4) ?? '')).toBeLessThanOrEqual(47);
+    expect(stringWidth(narrowRows.at(-3) ?? '')).toBeLessThanOrEqual(47);
+    expect(stringWidth(narrowRows.at(-1) ?? '')).toBeLessThanOrEqual(46);
+    expect(narrowRows.slice(0, -4).filter((line) => line.includes('▲ You'))).toEqual([]);
   }, 75_000);
 });

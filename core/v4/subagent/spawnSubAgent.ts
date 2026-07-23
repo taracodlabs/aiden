@@ -42,6 +42,9 @@ import type { RunStore } from '../daemon/runStore';
 import type { Logger } from '../logger/logger';
 import { noopLogger } from '../logger/factory';
 import type { ProviderAttemptBudget } from '../../../providers/v4/types';
+import type { JobEngine } from '../daemon/jobEngine';
+import { currentJobExecutionContext, runWithJobExecutionContext } from '../daemon/jobExecutionContext';
+import { runWithProviderUsageContext } from '../../../providers/v4/providerAttemptAccounting';
 
 // ── Public types (per design doc §3) ─────────────────────────────────────
 
@@ -147,6 +150,8 @@ export interface SpawnSubAgentDeps extends ChildBuilderDeps {
   runStore: RunStore;
   /** Daemon instance id (or a REPL-sentinel) used as `runs.instance_id`. */
   instanceId: string;
+  /** Production child Job/Attempt authority. */
+  jobEngine?: JobEngine;
   /**
    * v4.6 Phase 1 observability — optional logger for spawn-side
    * traces (parsed spec, child-build summary, completion).
@@ -217,19 +222,108 @@ export async function spawnSubAgent(
 
   // ── 2. Fresh sessionId + run row ────────────────────────────────────────
   const childSessionId = randomUUID();
+  const parentJobContext = currentJobExecutionContext();
+  let childJobId: string | null = null;
+  let childAttemptId: string | null = null;
+  let childGeneration: number | null = null;
+  let childFenceToken: string | null = null;
+  let childAttemptVersion = 0;
+  let childJobVersion = 0;
+  let childLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
+  const childCtrl = new AbortController();
+  const stopChildHeartbeat = (): void => {
+    if (childLeaseHeartbeat !== null) {
+      clearInterval(childLeaseHeartbeat);
+      childLeaseHeartbeat = null;
+    }
+  };
 
   // Pre-create the child run row in 'running' state so the envelope
   // always carries a valid childRunId — even if buildChildAgent throws.
   let childRunId: number;
   try {
-    childRunId = deps.runStore.create({
-      sessionId:             childSessionId,
-      instanceId:            deps.instanceId,
-      status:                'running',
-      startedAt,
-      spawnedFromRunId:      ctx.parentRunId,
-      spawnedFromSessionId:  ctx.parentSessionId,
-    });
+    if (deps.jobEngine && parentJobContext) {
+      const parentJob = deps.jobEngine.getJob(parentJobContext.jobId);
+      if (!parentJob) throw new Error(`Parent Job not found: ${parentJobContext.jobId}`);
+      const admitted = deps.jobEngine.submitJob({
+        entryPoint: 'subagent',
+        source: 'subagent',
+        sessionId: childSessionId,
+        instanceId: deps.instanceId,
+        idempotencyNamespace: `child:${parentJobContext.jobId}`,
+        idempotencyKey: childSessionId,
+        goal: spec.goal,
+        title: spec.goal,
+        parentJobId: parentJobContext.jobId,
+        rootJobId: parentJob.rootJobId,
+      });
+      childJobId = admitted.jobId;
+      childAttemptId = admitted.attemptId;
+      childRunId = admitted.runId;
+      childJobVersion = deps.jobEngine.getJob(childJobId)?.stateVersion ?? 0;
+      const lease = deps.jobEngine.claimAttempt({
+        attemptId: childAttemptId, ownerId: deps.instanceId, ttlMs: 45_000,
+      });
+      if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
+        throw new Error(`Child Attempt lease unavailable: ${lease.conflict ?? 'unknown'}`);
+      }
+      childGeneration = lease.generation;
+      childFenceToken = lease.fenceToken;
+      childAttemptVersion = lease.stateVersion;
+      const attemptStarted = deps.jobEngine.transitionAttempt({
+        attemptId: childAttemptId,
+        expectedStateVersion: childAttemptVersion,
+        generation: childGeneration,
+        fenceToken: childFenceToken,
+        to: 'running',
+        eventIdempotencyKey: `attempt-running:${childAttemptId}:${childGeneration}`,
+        producer: 'subagent',
+      });
+      if (!attemptStarted.applied || attemptStarted.stateVersion === undefined) {
+        throw new Error(`Child Attempt start rejected: ${attemptStarted.conflict ?? 'unknown'}`);
+      }
+      childAttemptVersion = attemptStarted.stateVersion;
+      const jobStarted = deps.jobEngine.transitionJob({
+        jobId: childJobId,
+        attemptId: childAttemptId,
+        generation: childGeneration,
+        fenceToken: childFenceToken,
+        expectedStateVersion: childJobVersion,
+        to: 'running',
+        eventIdempotencyKey: `job-running:${childJobId}:${childGeneration}`,
+        producer: 'subagent',
+      });
+      if (!jobStarted.applied || jobStarted.stateVersion === undefined) {
+        throw new Error(`Child Job start rejected: ${jobStarted.conflict ?? 'unknown'}`);
+      }
+      childJobVersion = jobStarted.stateVersion;
+      childLeaseHeartbeat = setInterval(() => {
+        if (!deps.jobEngine || !childAttemptId || childGeneration === null || !childFenceToken) return;
+        const renewed = deps.jobEngine.renewAttemptLease({
+          attemptId: childAttemptId,
+          ownerId: deps.instanceId,
+          generation: childGeneration,
+          fenceToken: childFenceToken,
+          ttlMs: 45_000,
+        });
+        if (!renewed.applied || renewed.stateVersion === undefined) {
+          stopChildHeartbeat();
+          childCtrl.abort(new Error(`Child Attempt lease renewal failed: ${renewed.conflict ?? 'unknown'}`));
+          return;
+        }
+        childAttemptVersion = renewed.stateVersion;
+      }, 15_000);
+      childLeaseHeartbeat.unref?.();
+    } else {
+      childRunId = deps.runStore.create({
+        sessionId: childSessionId,
+        instanceId: deps.instanceId,
+        status: 'running',
+        startedAt,
+        spawnedFromRunId: ctx.parentRunId,
+        spawnedFromSessionId: ctx.parentSessionId,
+      });
+    }
   } catch (err) {
     // Persistence failed before we even started — surface as failed
     // envelope with a synthetic id of '0' so the contract holds.
@@ -242,6 +336,42 @@ export async function spawnSubAgent(
   }
 
   // ── 3. Build child agent ────────────────────────────────────────────────
+  const finalizeChildDurable = (input: {
+    jobStatus: 'completed' | 'failed' | 'cancelled';
+    attemptStatus: 'succeeded' | 'failed' | 'cancelled' | 'timed_out';
+    outcome: string;
+    finishReason: string;
+    evidence: unknown;
+  }): void => {
+    if (!deps.jobEngine || !childJobId || !childAttemptId || childGeneration === null || !childFenceToken) return;
+    stopChildHeartbeat();
+    const attempt = deps.jobEngine.transitionAttempt({
+      attemptId: childAttemptId,
+      expectedStateVersion: childAttemptVersion,
+      generation: childGeneration,
+      fenceToken: childFenceToken,
+      to: input.attemptStatus,
+      eventIdempotencyKey: `attempt-${input.attemptStatus}:${childAttemptId}:${childGeneration}`,
+      producer: 'subagent',
+      finishReason: input.finishReason,
+    });
+    if (!attempt.applied) throw new Error(`Child Attempt finalization rejected: ${attempt.conflict ?? 'unknown'}`);
+    const job = deps.jobEngine.finalizeJob({
+      jobId: childJobId,
+      attemptId: childAttemptId,
+      generation: childGeneration,
+      fenceToken: childFenceToken,
+      expectedStateVersion: childJobVersion,
+      status: input.jobStatus,
+      outcome: input.outcome,
+      finishReason: input.finishReason,
+      evidence: input.evidence,
+      eventIdempotencyKey: `job-finalized:${childJobId}:${childGeneration}`,
+      producer: 'subagent',
+    });
+    if (!job.applied) throw new Error(`Child Job finalization rejected: ${job.conflict ?? 'unknown'}`);
+  };
+
   const logger = deps.logger ?? noopLogger();
   // v4.12.1 Pillar 2 — collect escalations the child raised to the parent
   // (destructive / external / out-of-scope ops it refused to run itself).
@@ -290,7 +420,14 @@ export async function spawnSubAgent(
     // failures (constructor throws, registry issues, etc.) collapse
     // to the generic 'error' exitReason.
     if (err instanceof ProviderNotFoundError) {
-      deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'provider_not_found' });
+      if (deps.jobEngine && childJobId) {
+        finalizeChildDurable({
+          jobStatus: 'failed', attemptStatus: 'failed', outcome: 'failed',
+          finishReason: 'provider_not_found', evidence: { errorClass: err.name },
+        });
+      } else {
+        deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'provider_not_found' });
+      }
       return {
         ok:             false,
         status:         'failed',
@@ -309,7 +446,14 @@ export async function spawnSubAgent(
         escalations:    [],
       };
     }
-    deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'error' });
+    if (deps.jobEngine && childJobId) {
+      finalizeChildDurable({
+        jobStatus: 'failed', attemptStatus: 'failed', outcome: 'failed',
+        finishReason: 'error', evidence: { errorClass: err instanceof Error ? err.name : 'Error' },
+      });
+    } else {
+      deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'error' });
+    }
     return failureEnvelope({
       childRunId:     String(childRunId),
       childSessionId,
@@ -339,7 +483,6 @@ export async function spawnSubAgent(
   //   (b) timeoutMs elapses — child aborts.
   // Track which one fired so we can label the envelope as
   // 'interrupted' vs 'timeout' (the spec distinguishes them).
-  const childCtrl = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
     timedOut = true;
@@ -386,7 +529,7 @@ export async function spawnSubAgent(
   // parent's spanId). Out-of-context callers (legacy paths) leave
   // the call exactly as it was pre-Slice-7.
   const parentCtx = currentContext();
-  const runChild = async (): Promise<Awaited<ReturnType<typeof agentBundle.agent.runConversation>>> =>
+  const invokeChild = async (): Promise<Awaited<ReturnType<typeof agentBundle.agent.runConversation>>> =>
     agentBundle.agent.runConversation(
       agentBundle.history,
       {
@@ -402,6 +545,28 @@ export async function spawnSubAgent(
         onUiEvent: () => { /* no-op: subagents do not render */ },
       },
     );
+  const runChild = async (): Promise<Awaited<ReturnType<typeof agentBundle.agent.runConversation>>> =>
+    runWithProviderUsageContext({
+      sessionId: childSessionId,
+      taskId: childJobId,
+      runId: childRunId,
+      jobId: childJobId,
+      attemptId: childAttemptId,
+      attemptGeneration: childGeneration,
+      entryPoint: 'subagent',
+      purpose: 'subagent',
+    }, () => (
+      deps.jobEngine && childJobId && childAttemptId && childGeneration !== null && childFenceToken
+        ? runWithJobExecutionContext({
+            engine: deps.jobEngine,
+            jobId: childJobId,
+            attemptId: childAttemptId,
+            generation: childGeneration,
+            fenceToken: childFenceToken,
+            producer: 'subagent',
+          }, invokeChild)
+        : invokeChild()
+    ));
 
   try {
     const result = await (parentCtx
@@ -470,7 +635,9 @@ export async function spawnSubAgent(
     status === 'completed'   ? 'completed'
     : status === 'interrupted' ? 'interrupted'
     : 'failed';
-  deps.runStore.setStatus(childRunId, dbStatus, { finishReason: exitReason });
+  if (!deps.jobEngine || !childJobId) {
+    deps.runStore.setStatus(childRunId, dbStatus, { finishReason: exitReason });
+  }
 
   const durationMs = Date.now() - startedAt;
 
@@ -495,6 +662,25 @@ export async function spawnSubAgent(
     reasoningOnly     = ev.reasoningOnly;
     unconfirmedRemote = ev.unconfirmedRemote;
     handles           = ev.handles;
+  }
+
+  if (deps.jobEngine && childJobId) {
+    const jobStatus = status === 'completed' && verdict !== 'verification_failed'
+      ? 'completed'
+      : status === 'interrupted' ? 'cancelled' : 'failed';
+    const attemptStatus = status === 'completed'
+      ? 'succeeded'
+      : status === 'interrupted' ? 'cancelled'
+      : status === 'timeout' ? 'timed_out' : 'failed';
+    finalizeChildDurable({
+      jobStatus,
+      attemptStatus,
+      outcome: verdict ?? status,
+      finishReason: exitReason,
+      evidence: evidence ?? { status, exitReason },
+    });
+  } else {
+    stopChildHeartbeat();
   }
 
   // Pillar 3: `ok` now means VERIFIED completion, not a clean loop exit.

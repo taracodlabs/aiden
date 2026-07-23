@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import Database from 'better-sqlite3';
 import { AidenAgent, type ToolExecutor } from '../../../core/v4/aidenAgent';
 import { MockProviderAdapter } from '../../../core/v4/__mocks__/mockProvider';
 import { ToolRegistry, type ToolHandler } from '../../../core/v4/toolRegistry';
@@ -10,6 +11,9 @@ import {
 import { ApprovalEngine } from '../../../moat/approvalEngine';
 import { HonestyEnforcement } from '../../../moat/honestyEnforcement';
 import { resolveAidenPaths } from '../../../core/v4/paths';
+import { runMigrations } from '../../../core/v4/daemon/db/migrations';
+import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
+import { runWithJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
 
 describe('approval decision projection', () => {
   it('reconciles contradictory final prose from the existing trace without another provider call', async () => {
@@ -184,7 +188,32 @@ describe('approval decision projection', () => {
       honestyEnforcement: new HonestyEnforcement('enforce'),
     });
 
-    const result = await agent.runConversation([{ role: 'user', content: 'run the command' }]);
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('approval_instance', 1, 'localhost', ?, ?, '4.15.1')`,
+    ).run(now, now);
+    const engine = createJobEngine({ db });
+    const admitted = engine.submitJob({
+      entryPoint: 'test', source: 'test', sessionId: 'approval_session',
+      instanceId: 'approval_instance', idempotencyNamespace: 'approval-test',
+      idempotencyKey: 'interrupted', goal: 'interrupt approval',
+    });
+    const lease = engine.claimAttempt({
+      attemptId: admitted.attemptId, ownerId: 'approval_instance', ttlMs: 30_000,
+    });
+    const result = await runWithJobExecutionContext({
+      engine,
+      jobId: admitted.jobId,
+      attemptId: admitted.attemptId,
+      generation: lease.generation!,
+      fenceToken: lease.fenceToken!,
+      producer: 'test',
+    }, () => agent.runConversation([{ role: 'user', content: 'run the command' }]));
+    db.close();
     const presentation = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
       finalization: computeTaskFinalization({
         finishReason: result.finishReason,

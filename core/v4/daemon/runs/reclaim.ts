@@ -73,14 +73,24 @@ export function reclaimStuckRuns(db: Db, opts: ReclaimOptions): ReclaimResult {
   let candidates: Array<{ id: number }>;
   if (opts.instanceId !== undefined) {
     candidates = db.prepare(
-      `SELECT id FROM runs WHERE status = 'running' AND instance_id = ?`,
+      `SELECT id FROM runs
+        WHERE status = 'running' AND instance_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks t
+             WHERE t.id = runs.task_id AND t.idempotency_namespace IS NOT NULL
+          )`,
     ).all(opts.instanceId) as Array<{ id: number }>;
   } else {
     if (!opts.currentInstanceId) {
       throw new Error('reclaimStuckRuns: currentInstanceId required when instanceId omitted');
     }
     candidates = db.prepare(
-      `SELECT id FROM runs WHERE status = 'running' AND instance_id != ?`,
+      `SELECT id FROM runs
+        WHERE status = 'running' AND instance_id != ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks t
+             WHERE t.id = runs.task_id AND t.idempotency_namespace IS NOT NULL
+          )`,
     ).all(opts.currentInstanceId) as Array<{ id: number }>;
   }
 
@@ -101,7 +111,11 @@ export function reclaimStuckRuns(db: Db, opts: ReclaimOptions): ReclaimResult {
               completed_at   = ?,
               resume_pending = 1,
               resume_reason  = 'daemon_crashed'
-        WHERE status = 'running' AND instance_id = ?`,
+        WHERE status = 'running' AND instance_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks t
+             WHERE t.id = runs.task_id AND t.idempotency_namespace IS NOT NULL
+          )`,
     ).run(now, opts.instanceId);
   } else {
     updateResult = db.prepare(
@@ -111,7 +125,11 @@ export function reclaimStuckRuns(db: Db, opts: ReclaimOptions): ReclaimResult {
               completed_at   = ?,
               resume_pending = 1,
               resume_reason  = 'daemon_crashed'
-        WHERE status = 'running' AND instance_id != ?`,
+        WHERE status = 'running' AND instance_id != ?
+          AND NOT EXISTS (
+            SELECT 1 FROM tasks t
+             WHERE t.id = runs.task_id AND t.idempotency_namespace IS NOT NULL
+          )`,
     ).run(now, opts.currentInstanceId!);
   }
 

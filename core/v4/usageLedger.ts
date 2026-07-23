@@ -53,6 +53,9 @@ export interface ProviderAttemptRecord {
   readonly sessionId: string | null;
   readonly taskId: string | null;
   readonly runId: string | null;
+  readonly jobId?: string | null;
+  readonly attemptId?: string | null;
+  readonly attemptGeneration?: number | null;
   readonly entryPoint: string;
   readonly purpose: ProviderAttemptPurpose;
   readonly providerConfigured: string | null;
@@ -108,6 +111,8 @@ export interface ProviderAttemptQuery {
   sessionId?: string;
   taskId?: string;
   runId?: string;
+  jobId?: string;
+  attemptId?: string;
   provider?: string;
   model?: string;
   purpose?: ProviderAttemptPurpose;
@@ -161,6 +166,9 @@ interface ProviderAttemptRow {
   session_id: string | null;
   task_id: string | null;
   run_id: string | null;
+  job_id: string | null;
+  attempt_id: string | null;
+  attempt_generation: number | null;
   entry_point: string;
   purpose: ProviderAttemptPurpose;
   provider_configured: string | null;
@@ -210,7 +218,7 @@ interface ProviderAttemptRow {
   loaded_skill_tokens: number | null;
 }
 
-const LEDGER_SCHEMA_VERSION = 2;
+const LEDGER_SCHEMA_VERSION = 3;
 
 const LEDGER_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS provider_attempt_ledger_meta (
@@ -224,6 +232,9 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
   session_id TEXT,
   task_id TEXT,
   run_id TEXT,
+  job_id TEXT,
+  attempt_id TEXT,
+  attempt_generation INTEGER,
   entry_point TEXT NOT NULL,
   purpose TEXT NOT NULL,
   provider_configured TEXT,
@@ -289,7 +300,8 @@ CREATE INDEX IF NOT EXISTS idx_provider_attempts_purpose_status
 
 const INSERT_SQL = `
 INSERT INTO provider_attempts (
-  call_id, parent_call_id, session_id, task_id, run_id, entry_point, purpose,
+  call_id, parent_call_id, session_id, task_id, run_id,
+  job_id, attempt_id, attempt_generation, entry_point, purpose,
   provider_configured, provider_actual, model_configured, model_actual,
   api_mode, transport, attempt_index, fallback_index,
   credential_label_redacted, status, error_class, started_at, completed_at,
@@ -305,7 +317,8 @@ INSERT INTO provider_attempts (
   memory_tokens, user_profile_tokens, project_memory_tokens,
   skill_index_tokens, loaded_skill_tokens
 ) VALUES (
-  @call_id, @parent_call_id, @session_id, @task_id, @run_id, @entry_point, @purpose,
+  @call_id, @parent_call_id, @session_id, @task_id, @run_id,
+  @job_id, @attempt_id, @attempt_generation, @entry_point, @purpose,
   @provider_configured, @provider_actual, @model_configured, @model_actual,
   @api_mode, @transport, @attempt_index, @fallback_index,
   @credential_label_redacted, @status, @error_class, @started_at, @completed_at,
@@ -374,6 +387,51 @@ export class ProviderAttemptLedger {
     const { sql, params } = buildQuery(query);
     const rows = this.db.prepare(sql).all(...params) as ProviderAttemptRow[];
     return Object.freeze(rows.map(rowToRecord));
+  }
+
+  /**
+   * Fill a missing durable identity from an authoritative Job/Attempt mapping.
+   * Existing non-null linkage is never overwritten, so reconciliation cannot
+   * fabricate or move a physical provider attempt between Jobs.
+   */
+  reconcileJobLinkage(link: {
+    taskId?: string | null;
+    runId?: string | number | null;
+    jobId: string;
+    attemptId: string;
+    attemptGeneration: number;
+  }): number {
+    const identityClauses: string[] = [];
+    const identityParams: Array<string | number> = [];
+    if (link.taskId) {
+      identityClauses.push('task_id = ?');
+      identityParams.push(link.taskId);
+    }
+    if (link.runId !== undefined && link.runId !== null) {
+      identityClauses.push('run_id = ?');
+      identityParams.push(String(link.runId));
+    }
+    if (identityClauses.length === 0) return 0;
+    const result = this.db.prepare(
+      `UPDATE provider_attempts
+          SET job_id = COALESCE(job_id, ?),
+              attempt_id = COALESCE(attempt_id, ?),
+              attempt_generation = COALESCE(attempt_generation, ?)
+        WHERE ${identityClauses.join(' AND ')}
+          AND (job_id IS NULL OR job_id = ?)
+          AND (attempt_id IS NULL OR attempt_id = ?)
+          AND (attempt_generation IS NULL OR attempt_generation = ?)
+          AND (job_id IS NULL OR attempt_id IS NULL OR attempt_generation IS NULL)`,
+    ).run(
+      link.jobId,
+      link.attemptId,
+      link.attemptGeneration,
+      ...identityParams,
+      link.jobId,
+      link.attemptId,
+      link.attemptGeneration,
+    );
+    return result.changes;
   }
 
   project(query: UsageProjectionQuery = {}): ProviderUsageProjection {
@@ -483,10 +541,17 @@ function ensureLedgerColumns(db: DatabaseType): void {
     ['project_memory_tokens', 'INTEGER'],
     ['skill_index_tokens', 'INTEGER'],
     ['loaded_skill_tokens', 'INTEGER'],
+    ['job_id', 'TEXT'],
+    ['attempt_id', 'TEXT'],
+    ['attempt_generation', 'INTEGER'],
   ];
   for (const [name, sqlType] of additions) {
     if (!existing.has(name)) db.exec(`ALTER TABLE provider_attempts ADD COLUMN ${name} ${sqlType}`);
   }
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_provider_attempts_job_attempt
+      ON provider_attempts(job_id, attempt_id, started_at)
+  `);
 }
 
 function normalizeRecord(record: ProviderAttemptRecord): ProviderAttemptRecord {
@@ -513,6 +578,8 @@ function buildQuery(query: ProviderAttemptQuery): { sql: string; params: unknown
   equal('session_id', query.sessionId);
   equal('task_id', query.taskId);
   equal('run_id', query.runId);
+  equal('job_id', query.jobId);
+  equal('attempt_id', query.attemptId);
   equal('purpose', query.purpose);
   equal('status', query.status);
   if (query.provider !== undefined) {
@@ -550,6 +617,9 @@ function recordToRow(record: ProviderAttemptRecord): ProviderAttemptRow {
     session_id: record.sessionId,
     task_id: record.taskId,
     run_id: record.runId,
+    job_id: record.jobId ?? null,
+    attempt_id: record.attemptId ?? null,
+    attempt_generation: record.attemptGeneration ?? null,
     entry_point: record.entryPoint,
     purpose: record.purpose,
     provider_configured: record.providerConfigured,
@@ -607,6 +677,9 @@ function rowToRecord(row: ProviderAttemptRow): ProviderAttemptRecord {
     sessionId: row.session_id,
     taskId: row.task_id,
     runId: row.run_id,
+    jobId: row.job_id,
+    attemptId: row.attempt_id,
+    attemptGeneration: row.attempt_generation,
     entryPoint: row.entry_point,
     purpose: row.purpose,
     providerConfigured: row.provider_configured,

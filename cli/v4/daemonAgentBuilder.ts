@@ -39,7 +39,7 @@
 import type { AgentBuilder } from '../../core/v4/daemon/dispatcher';
 import { AidenAgent } from '../../core/v4/aidenAgent';
 import type { AidenAgentOptions, ToolExecutor } from '../../core/v4/aidenAgent';
-import type { ToolRegistry } from '../../core/v4/toolRegistry';
+import type { ToolContext, ToolRegistry } from '../../core/v4/toolRegistry';
 import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import type { ProviderAdapter } from '../../providers/v4/types';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
@@ -59,6 +59,8 @@ export interface BuildDaemonAgentBuilderInput {
   fallbackAdapter:      ProviderAdapter;
   toolRegistry:         ToolRegistry;
   toolExecutor:         ToolExecutor;
+  /** Shared services used to build a per-turn executor with the daemon policy. */
+  toolContext?:         ToolContext;
   auxiliaryClient:      AuxiliaryClient;
   promptBuilder:        PromptBuilder;
   /** Snapshot the REPL built; daemon-side overrides only providerId/modelId. */
@@ -123,6 +125,9 @@ export function buildDaemonAgentBuilder(
     // allowlist doesn't bleed across daemon turns.
     const approvalEngine = new ApprovalEngine('smart');
     approvalEngine['callbacks'] = input.approvalCallbacks;
+    const toolExecutor = deps.toolContext
+      ? deps.toolRegistry.buildExecutor({ ...deps.toolContext, approvalEngine })
+      : deps.toolExecutor;
 
     // Per-turn promptBuilderOptions — same snapshot the REPL uses,
     // only the providerId/modelId fields overridden to reflect the
@@ -142,7 +147,7 @@ export function buildDaemonAgentBuilder(
       // tools (`spawn_sub_agent` per Q6). Tools without an explicit
       // `contexts` field stay visible to both REPL and daemon.
       tools:                deps.toolRegistry.getSchemas(undefined, 'daemon'),
-      toolExecutor:         deps.toolExecutor,
+      toolExecutor,
       maxTurns,
       auxiliaryClient:      deps.auxiliaryClient,
       // v4.5 Phase 7 — explicit sessionId option threads per-trigger

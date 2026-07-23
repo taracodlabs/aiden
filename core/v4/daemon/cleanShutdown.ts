@@ -177,7 +177,11 @@ export function evaluateBootState(
                   resume_reason  = 'crash_recovery',
                   completed_at   = ?
             WHERE instance_id = ?
-              AND status IN ('queued','running')`,
+              AND status IN ('queued','running')
+              AND NOT EXISTS (
+                SELECT 1 FROM tasks t
+                 WHERE t.id = runs.task_id AND t.idempotency_namespace IS NOT NULL
+              )`,
         )
         .run(now, c.instance_id);
     }

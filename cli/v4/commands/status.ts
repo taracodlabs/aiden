@@ -85,7 +85,12 @@ export const status: SlashCommand = {
     );
     display.write('\n');
     display.write(`  ${display.rule()}\n`);
-    display.write(display.bottomPromptHint() + '\n');
+    if (
+      typeof display.fixedBottomRegionEnabled !== 'function'
+      || !display.fixedBottomRegionEnabled()
+    ) {
+      display.write(display.bottomPromptHint() + '\n');
+    }
     display.write('\n');
     return {};
   },

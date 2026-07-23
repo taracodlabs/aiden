@@ -16,7 +16,7 @@ describe('renderStartupCard closing-line order', () => {
     expect(SRC.indexOf('display.rule(Math.max(1, columns - 4))', h)).toBeGreaterThan(h);
   });
   it('turn loop does not emit bottomPromptHint per turn', () => {
-    const slice = SRC.slice(SRC.indexOf('while (iter < max)'), SRC.indexOf('await this.runAgentTurn(input)'));
+    const slice = SRC.slice(SRC.indexOf('while (iter < max)'), SRC.indexOf('private async runAgentTurn'));
     expect(slice).not.toMatch(/bottomPromptHint/);
   });
 });

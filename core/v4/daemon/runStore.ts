@@ -291,28 +291,57 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
   // (`const { emitEvent } = store; emitEvent(...)`) still hit the
   // same implementation — `this`-bound dispatch wouldn't survive
   // that pattern.
-  const emitEventRichImpl = (eo: EmitEventOptions): number => {
+  const emitEventRichTx = db.transaction((eo: EmitEventOptions): number => {
     const now = Date.now();
 
     // session_id: prefer caller-supplied (saves a JOIN); fall back
     // to a lookup against runs. Null only if the run row vanished —
     // shouldn't happen for live runs, but we tolerate it for
     // legacy/orphan rows.
-    let sessionId: string | null = eo.sessionId ?? null;
-    if (sessionId === null) {
-      const r = db.prepare(
-        'SELECT session_id FROM runs WHERE id = ?',
-      ).get(eo.runId) as { session_id: string | null } | undefined;
-      sessionId = r?.session_id ?? null;
-    }
+    const run = db.prepare(
+      `SELECT r.session_id, r.task_id, r.attempt_id, r.generation,
+              r.status, r.lease_expires_at, t.active_attempt_id
+         FROM runs r
+         LEFT JOIN tasks t ON t.id = r.task_id
+        WHERE r.id = ?`,
+    ).get(eo.runId) as {
+      session_id: string | null;
+      task_id: string | null;
+      attempt_id: string | null;
+      generation: number | null;
+      status: string;
+      lease_expires_at: number | null;
+      active_attempt_id: string | null;
+    } | undefined;
+    const sessionId: string | null = eo.sessionId ?? run?.session_id ?? null;
+    const authoritativeJobId = run?.task_id
+      && run.attempt_id
+      && run.active_attempt_id === run.attempt_id
+      && !['succeeded', 'failed', 'cancelled', 'timed_out', 'crashed', 'unknown'].includes(run.status)
+      && run.lease_expires_at !== null
+      && run.lease_expires_at > now
+      ? run.task_id
+      : null;
 
     // seq: per-run monotonic counter. COALESCE handles the first
     // event for a run (no rows → MAX returns NULL → COALESCE to 0
     // → +1 = 1). Indexed by (run_id, seq) so this scales.
-    const seqRow = db.prepare(
-      'SELECT COALESCE(MAX(seq), 0) AS m FROM run_events WHERE run_id = ?',
-    ).get(eo.runId) as { m: number };
-    const seq = seqRow.m + 1;
+    const allocated = db.prepare(
+      `UPDATE runs
+          SET next_event_sequence = next_event_sequence + 1
+        WHERE id = ?
+        RETURNING next_event_sequence - 1 AS seq`,
+    ).get(eo.runId) as { seq: number } | undefined;
+    if (!allocated) throw new Error(`Run not found: ${eo.runId}`);
+    const seq = allocated.seq;
+    const jobSequence = authoritativeJobId
+      ? (db.prepare(
+          `UPDATE tasks
+              SET next_event_sequence = next_event_sequence + 1
+            WHERE id = ?
+            RETURNING next_event_sequence - 1 AS seq`,
+        ).get(authoritativeJobId) as { seq: number } | undefined)?.seq ?? null
+      : null;
 
     // payload: serialise once, measure full size, then slice for
     // inline storage. The truncation flag + original size let
@@ -333,8 +362,9 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
          tool_call_id, parent_event_id,
          status, duration_ms, summary,
          payload, payload_truncated, payload_bytes, payload_ref,
-         visibility, source
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         visibility, source,
+         job_id, attempt_id, job_sequence, producer, generation, idempotency_key
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       eo.runId,
       sessionId,
@@ -355,8 +385,28 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
       null,                                 // payload_ref — reserved for v4.11 external store
       eo.visibility      ?? 'model',
       (eo.source as string | null | undefined) ?? null,
+      authoritativeJobId,
+      authoritativeJobId ? run?.attempt_id ?? null : null,
+      jobSequence,
+      (eo.source as string | null | undefined) ?? null,
+      authoritativeJobId ? run?.generation ?? null : null,
+      authoritativeJobId ? `run-event:${eo.runId}:${seq}` : null,
     );
     return Number(r.lastInsertRowid);
+  }).immediate;
+  const emitEventRichImpl = (eo: EmitEventOptions): number => emitEventRichTx(eo);
+  const assertCompatibilityMutation = (runId: number, operation: string): void => {
+    const row = db.prepare(
+      `SELECT r.attempt_id, t.entry_point
+         FROM runs r
+         LEFT JOIN tasks t ON t.id = r.task_id
+        WHERE r.id = ?`,
+    ).get(runId) as { attempt_id: string | null; entry_point: string | null } | undefined;
+    if (row?.attempt_id && row.entry_point) {
+      throw new Error(
+        `RunStore.${operation} cannot mutate durable Attempt ${row.attempt_id}; use the Job transition authority`,
+      );
+    }
   };
 
   return {
@@ -384,6 +434,7 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
       return Number(r.lastInsertRowid);
     },
     setStatus(runId, status, opts2 = {}) {
+      assertCompatibilityMutation(runId, 'setStatus');
       const completedAt = opts2.completedAt
         ?? (status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'interrupted'
             ? Date.now()
@@ -397,17 +448,22 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
       ).run(status, opts2.finishReason ?? null, completedAt, runId);
     },
     markResumePending(runId, reason) {
+      assertCompatibilityMutation(runId, 'markResumePending');
       db.prepare(
         `UPDATE runs SET resume_pending = 1, resume_reason = ? WHERE id = ?`,
       ).run(reason, runId);
     },
     listResumePending() {
       const rows = db.prepare(
-        `SELECT * FROM runs WHERE resume_pending = 1 ORDER BY started_at ASC`,
+        `SELECT r.* FROM runs r
+           LEFT JOIN tasks t ON t.id = r.task_id
+          WHERE r.resume_pending = 1 AND t.entry_point IS NULL
+          ORDER BY r.started_at ASC`,
       ).all() as RunRowSql[];
       return rows.map(rowToTs);
     },
     claimResumePending(runId, reason) {
+      assertCompatibilityMutation(runId, 'claimResumePending');
       // Single-statement compare-and-clear: exactly one caller wins.
       const info = db.prepare(
         `UPDATE runs SET resume_pending = 0, resume_reason = ?

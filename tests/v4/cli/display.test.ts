@@ -13,6 +13,8 @@ import {
 } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { ActivitySnapshot } from '../../../cli/v4/activityRegistry';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
 
 // Strip ANSI escape sequences so assertions stay terminal-agnostic.
 function stripAnsi(s: string): string {
@@ -1595,19 +1597,15 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     });
   });
 
-  it('wide (≥120 cols): 5 separators (v4.10 Slice 10.3 — brand + session-uptime + spelled "last")', () => {
+  it('wide (≥120 cols): keeps the three runtime segments visually distinct', () => {
     withCols(140, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
-      // v4.9.0 pre-ship UI: turn counter retired; ⌛ hourglass remains.
       expect(out).not.toMatch(/↻/);
-      expect(out).toContain('⌛');
-      // v4.10 Slice 10.3 — full-density tier now has 6 segments:
-      //   brand · provModel │ ctxSegFull │ sessionUptime │ last <elapsed> │ stateDot
-      // => 5 separators between 6 segments.
-      expect(out).toMatch(/Aiden v\d/);
-      expect(out).toMatch(/last\s+\d+s/);
-      expect(sepCount(out)).toBe(5);
+      expect(out).toContain('◆');
+      expect(out).toContain('◉ context');
+      expect(out).toContain('⧖');
+      expect(sepCount(out)).toBe(2);
     });
   });
 
@@ -1639,6 +1637,22 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
       const out = stripAnsi(d.statusFooter(BASE));
       // 80-col tier: no ANSI to strip in forceMono; raw len is the visible width.
       expect(out.length).toBeLessThanOrEqual(80);
+    });
+  });
+
+  it('48-col output budgets the wide timer glyph by terminal cell width', () => {
+    withCols(48, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+      const out = stripAnsi(d.statusFooter({
+        ...BASE,
+        provider: 'custom_openai',
+        model: 'custom-default',
+        ctxUsed: 0,
+        elapsedMs: 0,
+      }));
+      expect(stringWidth(out)).toBeLessThanOrEqual(46);
+      expect(out).toContain('◉ 0%');
+      expect(out).toContain('⧖');
     });
   });
 });

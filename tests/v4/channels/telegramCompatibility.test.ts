@@ -170,6 +170,26 @@ describe('Telegram maintained-client compatibility', () => {
     expect(gatewayMocks.unregisterChannel).toHaveBeenCalledWith('telegram');
   });
 
+  it('waits for startup cache maintenance before shutdown completes', async () => {
+    const client = new FakeTelegramClient();
+    const adapter = new TelegramAdapter({ clientFactory: vi.fn(() => client) });
+    (adapter as any).acquireLocalLock = () => true;
+    (adapter as any).releaseLocalLock = () => undefined;
+    let releaseMaintenance!: () => void;
+    (adapter as any).runVoiceCacheJanitor = vi.fn(() => new Promise<void>((resolve) => {
+      releaseMaintenance = resolve;
+    }));
+
+    await adapter.start();
+    const stopping = adapter.stop();
+    await Promise.resolve();
+
+    expect(client.stopPolling).not.toHaveBeenCalled();
+    releaseMaintenance();
+    await stopping;
+    expect(client.stopPolling).toHaveBeenCalledWith({ cancel: true });
+  });
+
   it('handles a text update once and preserves outbound reply options', async () => {
     const client = new FakeTelegramClient();
     const { adapter } = await startAdapter(client);
@@ -289,6 +309,7 @@ describe('Telegram maintained-client compatibility', () => {
     expect(entries.join('\n')).not.toContain(token);
     expect(entries.join('\n')).not.toContain('fixture-secret-token');
     expect(entries.join('\n')).toContain('[redacted]');
+    await adapter.stop();
   });
 });
 

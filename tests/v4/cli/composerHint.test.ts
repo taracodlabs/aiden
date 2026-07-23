@@ -5,12 +5,12 @@
  * Aiden — local-first agent.
  */
 /**
- * v4.14 composer polish:
- *   Issue 1 — the BUSY hint is width-safe: full on a wide terminal, and on a
- *   narrow one it keeps the FRONT ("Enter → …") with an ellipsis, never the
- *   wrapped tail ("…change · Ctrl+C stop") the single-line repaint used to show.
- *   Issue 2 — the persistent IDLE hint shows only when idle and nothing else
- *   owns the footer (no ghost/dropdown).
+ * Fixed-composer contract:
+ *   Issue 1 — actionable helper prose never becomes a second composer row.
+ *   The bounded surface communicates ownership through its mode label, and
+ *   typed drafts wrap upward without truncating the insertion end.
+ *   Issue 2 — the legacy Inquirer hint predicate remains available only when
+ *   the fixed Display-owned surface is not active.
  */
 import { describe, it, expect, vi } from 'vitest';
 import { Writable } from 'node:stream';
@@ -26,38 +26,42 @@ function makeDisplay(columns: number) {
   return { d: new Display({ skin: new SkinEngine({ forceMono: true }), stdout: out as unknown as NodeJS.WriteStream }), chunks };
 }
 
-describe('busy hint — width-safe (Issue 1)', () => {
+describe('busy hint — fixed-surface ownership (Issue 1)', () => {
   const HINT = 'Enter → steer · /busy to change · Ctrl+C stop';
 
-  it('a WIDE terminal shows the FULL hint (no truncation)', () => {
+  it('a WIDE terminal uses the mode label without floating helper prose', () => {
     const { d, chunks } = makeDisplay(100);
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setBusyHint(HINT);
-    expect(stripAnsi(chunks.join(''))).toContain(HINT);   // complete, end-to-end
+    const painted = stripAnsi(chunks.join(''));
+    expect(painted).toContain('▲ You · steer mode');
+    expect(painted).not.toContain(HINT);
     ind.stop();
   });
 
-  it('a NARROW terminal keeps the FRONT with an ellipsis — never the tail-only garbage', () => {
+  it('a NARROW terminal keeps the bounded mode label and omits helper fragments', () => {
     const { d, chunks } = makeDisplay(40);
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setBusyHint(HINT);
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('Enter →');        // the important front is kept
-    expect(painted).toContain('…');              // front-fit ellipsis
-    expect(painted).not.toContain('Ctrl+C stop'); // the TAIL is dropped, not the front
+    expect(painted).toContain('▲ You · steer mode');
+    expect(painted).not.toContain('Enter →');
+    expect(painted).not.toContain('Ctrl+C stop');
     ind.stop();
   });
 
-  it('long typed text keeps the CURSOR END (tail-fit), unlike the hint', () => {
-    const { d, chunks } = makeDisplay(80);   // avail 50; label + 48-char text overflows → tail-fit
+  it('long typed text wraps upward without a truncation ellipsis', () => {
+    const { d, chunks } = makeDisplay(50);
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setComposer('a very long message the user is typing right now', 'redirect');
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('…');              // ellipsis at the FRONT (tail-fit for typed text)
-    expect(painted).toContain('right now');      // most-recent chars (cursor end) kept
+    expect(painted).toContain('a very long message');
+    expect(painted).toContain('right');
+    expect(painted).toContain('now');
+    expect(painted).not.toContain('…');
     ind.stop();
   });
 });
@@ -75,6 +79,8 @@ describe('busy hint — single-owner ticker (Bug 1: burst bleed)', () => {
   const HINT = 'Enter → steer · /busy to change · Ctrl+C stop';
 
   it('a stale (non-owner) tool ticker does not repaint the hint into activity rows', () => {
+    const previous = process.env.AIDEN_COMPOSER_LANE;
+    process.env.AIDEN_COMPOSER_LANE = '0';
     vi.useFakeTimers();
     try {
       const { d, chunks } = makeDisplay(100);
@@ -91,6 +97,8 @@ describe('busy hint — single-owner ticker (Bug 1: burst bleed)', () => {
       a.ok(1); b.ok(1);
     } finally {
       vi.useRealTimers();
+      if (previous === undefined) delete process.env.AIDEN_COMPOSER_LANE;
+      else process.env.AIDEN_COMPOSER_LANE = previous;
     }
   });
 });

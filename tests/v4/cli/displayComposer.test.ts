@@ -5,10 +5,9 @@
  * Aiden — local-first agent.
  */
 /**
- * v4.12.1 Pillar 4 Slice 2c — the live during-turn composer woven into the
- * owned bottom row. Verifies: setComposer paints the buffer + mode label into
- * the live indicator; it survives (and repaints) a tool call; clearComposer
- * removes it; and it never fires without a live owner (no stray writes).
+ * The live during-turn composer uses one owned bottom surface. Verifies:
+ * setComposer paints the draft + mode label, tool calls do not swallow the
+ * input surface, and clearing removes it without stray writes.
  */
 import { describe, it, expect } from 'vitest';
 import { Writable } from 'node:stream';
@@ -38,7 +37,8 @@ describe('Display composer — live during-turn paint', () => {
     chunks.length = 0;
     d.setComposer('deploy now', 'redirect');
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('steer ▸ deploy now');
+    expect(painted).toContain('▲ You · steer mode');
+    expect(painted).toContain('│ deploy now');
     ind.stop();
   });
 
@@ -47,9 +47,10 @@ describe('Display composer — live during-turn paint', () => {
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setComposer('a', 'queue');
-    // owned-row discipline: repaint starts with up-one-line + erase.
-    expect(chunks.join('')).toMatch(/\x1b\[1A\x1b\[2K/);
-    expect(stripAnsi(chunks.join(''))).toContain('queue ▸ a');
+    // Fixed-region discipline: the draft is inside the boxed content row.
+    expect(chunks.join('')).toMatch(/\x1b\[22;1H\x1b\[2K/);
+    expect(stripAnsi(chunks.join(''))).toContain('▲ You · queue mode');
+    expect(stripAnsi(chunks.join(''))).toContain('│ a');
     ind.stop();
   });
 
@@ -63,7 +64,7 @@ describe('Display composer — live during-turn paint', () => {
     ind.stop();
   });
 
-  it('SURVIVES a tool call — the tool row carries the composer suffix', () => {
+  it('survives a tool call without moving the composer into the tool row', () => {
     const { d, chunks } = makeDisplay();
     const ind = d.activityIndicator('thinking');
     d.setComposer('hold on', 'queue');
@@ -75,7 +76,8 @@ describe('Display composer — live during-turn paint', () => {
     // is paused) — this is the whole point of Slice 2c.
     d.setComposer('hold on!', 'queue');
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('queue ▸ hold on!');
+    expect(painted).toContain('▲ You · queue mode');
+    expect(painted).toContain('│ hold on!');
     row.ok(120);
     ind.stop();
   });
@@ -89,7 +91,8 @@ describe('Display composer — live during-turn paint', () => {
     ind.resume();          // indicator reclaims the bottom
     chunks.length = 0;
     d.setComposer('back', 'redirect');
-    expect(stripAnsi(chunks.join(''))).toContain('steer ▸ back');
+    expect(stripAnsi(chunks.join(''))).toContain('▲ You · steer mode');
+    expect(stripAnsi(chunks.join(''))).toContain('│ back');
     ind.stop();
   });
 
@@ -101,7 +104,7 @@ describe('Display composer — live during-turn paint', () => {
     d.clearComposer();
     const painted = stripAnsi(chunks.join(''));
     expect(painted).not.toContain('typing…');
-    expect(painted).not.toContain('queue ▸');
+    expect(painted).not.toContain('▲ You');
     ind.stop();
   });
 
@@ -114,13 +117,14 @@ describe('Display composer — live during-turn paint', () => {
     ind.stop();
   });
 
-  it('after the indicator stops, setComposer does NOT write (no owner to repaint)', () => {
+  it('after the indicator stops, the independent composer lane still repaints', () => {
     const { d, chunks } = makeDisplay();
     const ind = d.activityIndicator('thinking');
     ind.stop();
     chunks.length = 0;
-    d.setComposer('ghost', 'queue');   // no live owner
-    expect(chunks.join('')).toBe('');
+    d.setComposer('next message', 'queue');
+    expect(stripAnsi(chunks.join(''))).toContain('▲ You · queue mode');
+    expect(stripAnsi(chunks.join(''))).toContain('│ next message');
   });
 
   it('pasted text shows clean (no paste markers reach the row)', () => {
@@ -130,7 +134,8 @@ describe('Display composer — live during-turn paint', () => {
     // chatSession passes an already-stripped buffer; the row shows it verbatim.
     d.setComposer('npm run build', 'redirect');
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('steer ▸ npm run build');
+    expect(painted).toContain('▲ You · steer mode');
+    expect(painted).toContain('│ npm run build');
     expect(painted).not.toContain('[200~');
     expect(painted).not.toContain('[201~');
     ind.stop();
@@ -139,36 +144,41 @@ describe('Display composer — live during-turn paint', () => {
 
 // ── v4.14 BUG 2 — the ALWAYS-visible input lane (persistent hint) ────────────
 describe('Display composer — persistent busy hint (input lane always visible)', () => {
-  it('setBusyHint shows the plain-language hint in the row BEFORE any keystroke', () => {
+  it('setBusyHint shows a labeled empty composer before any keystroke', () => {
     const { d, chunks } = makeDisplay();
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setBusyHint('Enter → steer · /busy to change · Ctrl+C stop');   // turn start, nothing typed
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('Enter → steer');   // input lane visible with zero typing
+    expect(painted).toContain('▲ You · steer mode');
+    expect(painted).not.toContain('Enter → steer');
+    expect(painted).toContain('│ ');
     ind.stop();
   });
 
-  it('typing OVERRIDES the hint with the live buffer; clearing the buffer falls BACK to the hint', () => {
+  it('typing fills the box; clearing restores a labeled empty composer', () => {
     const { d, chunks } = makeDisplay();
     const ind = d.activityIndicator('thinking');
     d.setBusyHint('Enter → queue · /busy to change · Ctrl+C stop');
     d.setComposer('hello', 'queue');
-    expect(stripAnsi(chunks.join(''))).toContain('queue ▸ hello');   // typed text wins
+    expect(stripAnsi(chunks.join(''))).toContain('│ hello');
     chunks.length = 0;
     d.setComposer('', 'queue');                                       // user cleared their line
-    expect(stripAnsi(chunks.join(''))).toContain('Enter → queue');   // hint returns (lane stays visible)
+    expect(stripAnsi(chunks.join(''))).toContain('▲ You · queue mode');
+    expect(stripAnsi(chunks.join(''))).not.toContain('Enter → queue');
+    expect(stripAnsi(chunks.join(''))).not.toContain('hello');
     ind.stop();
   });
 
-  it('the hint SURVIVES a tool call (rides the tool row, like the typed composer)', () => {
+  it('the labeled empty composer survives a tool call without helper text', () => {
     const { d, chunks } = makeDisplay();
     const ind = d.activityIndicator('thinking');
     d.setBusyHint('Enter → steer · /busy to change · Ctrl+C stop');
     ind.pause();
     const row = d.toolRow('web_research', { query: 'q' });
     const painted = stripAnsi(chunks.join(''));
-    expect(painted).toContain('Enter → steer');   // visible + typeable during a long tool call
+    expect(painted).toContain('▲ You · steer mode');
+    expect(painted).not.toContain('Enter → steer');
     row.ok(120);
     ind.stop();
   });
@@ -184,9 +194,9 @@ describe('Display composer — persistent busy hint (input lane always visible)'
   });
 });
 
-// ── v4.14 — the FIXED bottom lane routing (opt-in AIDEN_COMPOSER_LANE=1) ──────
-describe('Display composer — fixed bottom lane (opt-in) reserves + pins the row', () => {
-  it('setBusyHint reserves the scroll region and pins the composer to the bottom row', () => {
+// ── Fixed bottom surface with compatibility opt-out ───────────────────────
+describe('Display composer — fixed bottom surface compatibility opt-out', () => {
+  it('setBusyHint reserves the scroll region and pins the boxed composer', () => {
     const prev = process.env.AIDEN_COMPOSER_LANE;
     process.env.AIDEN_COMPOSER_LANE = '1';
     try {
@@ -194,14 +204,33 @@ describe('Display composer — fixed bottom lane (opt-in) reserves + pins the ro
       chunks.length = 0;
       d.setBusyHint('Enter → steer · /queue · Ctrl+C stop');
       const raw = chunks.join('');
-      expect(raw).toContain('\x1b[1;23r');                 // scroll region reserved (row 24 protected)
-      expect(raw).toContain('\x1b[24;1H');                 // composer pinned to the bottom row
-      expect(raw).toContain('Enter → steer');              // …with the plain-language hint
+      expect(raw).toContain('\x1b[1;20r');                 // boxed composer + status protected
+      expect(raw).toContain('\x1b[21;1H');                 // labeled top border
+      expect(raw).toContain('\x1b[22;1H');                 // composer content row
+      expect(raw).toContain('▲ You · queue mode');
+      expect(raw).not.toContain('Enter → steer');
       // turn end tears the region back down.
       d.clearComposer();
       expect(chunks.join('')).toContain('\x1b[r');          // full-screen scrolling restored
     } finally {
       if (prev === undefined) delete process.env.AIDEN_COMPOSER_LANE; else process.env.AIDEN_COMPOSER_LANE = prev;
     }
+  });
+
+  it('releases the reserved row for a modal and restores the exact draft afterward', () => {
+    const { d, chunks } = makeDisplay();
+    d.setBusyHint('Enter → queue · /queue · Ctrl+C stop');
+    d.setComposer('draft survives', 'queue');
+    chunks.length = 0;
+
+    d.pauseComposerSurface();
+    expect(chunks.join('')).toContain('\x1b[r');
+    expect(stripAnsi(chunks.join(''))).not.toContain('draft survives');
+
+    chunks.length = 0;
+    d.resumeComposerSurface();
+    expect(chunks.join('')).toContain('\x1b[1;20r');
+    expect(stripAnsi(chunks.join(''))).toContain('draft survives');
+    d.clearComposer();
   });
 });

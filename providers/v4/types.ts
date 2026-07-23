@@ -318,6 +318,9 @@ export interface ProviderCallUsageContext {
   sessionId?: string | null;
   taskId?: string | null;
   runId?: string | number | null;
+  jobId?: string | null;
+  attemptId?: string | null;
+  attemptGeneration?: number | null;
   entryPoint?: string;
   purpose?: import('../../core/v4/usageLedger').ProviderAttemptPurpose;
   providerConfigured?: string | null;

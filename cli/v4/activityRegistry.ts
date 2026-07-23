@@ -27,6 +27,8 @@ interface ActivityEntry {
 export interface ModalActivityOptions<T> {
   /** Return false when the settled modal outcome makes the paused activity terminal. */
   resumeActivityWhen?: (result: T) => boolean;
+  /** Restore terminal-owned fixed surfaces before activity rows repaint. */
+  beforeActivityResume?: () => void;
 }
 
 export interface ActivitySnapshot {
@@ -246,6 +248,7 @@ export class ActivityRegistry {
       }
       return result;
     } finally {
+      options.beforeActivityResume?.();
       this.resumeAfterModal();
     }
   }

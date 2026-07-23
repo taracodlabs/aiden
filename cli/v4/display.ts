@@ -38,11 +38,43 @@ import {
 } from './display/toolTrail';
 // v4.1.3-essentials — capability card renderer (auth/platform failures).
 // v4.10 Slice 10.3 — brand prefix in the full-density status bar tier.
-import { VERSION as AIDEN_VERSION } from '../../core/version';
 import { renderCapabilityCard } from './display/capabilityCard';
 import type { CapabilityCardData } from '../../providers/v4/types';
 import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
 import { recoveryActionsForOutcome } from './recoveryActions';
+
+const DISPLAY_ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+function terminalVisibleLength(value: string): number {
+  return stringWidth(value.replace(DISPLAY_ANSI_PATTERN, ''));
+}
+
+function truncateTerminalVisible(value: string, maxVisible: number): string {
+  if (terminalVisibleLength(value) <= maxVisible) return value;
+  let output = '';
+  let plain = '';
+  let index = 0;
+  let sawAnsi = false;
+  while (index < value.length) {
+    if (value[index] === '\x1b' && value[index + 1] === '[') {
+      const match = value.slice(index).match(/^\x1b\[[0-9;]*[A-Za-z]/);
+      if (match) {
+        output += match[0];
+        index += match[0].length;
+        sawAnsi = true;
+        continue;
+      }
+    }
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (stringWidth(plain + character) > maxVisible) break;
+    output += character;
+    plain += character;
+    index += character.length;
+  }
+  return sawAnsi ? output + '\x1b[0m' : output;
+}
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
 // replaces marked-terminal's defaults with structured headers, lists,
 // code blocks, blockquotes, and links.
@@ -51,7 +83,13 @@ import { getReplyRenderer } from './replyRenderer';
 import { renderCitationFooter } from './citationFooter';
 import { buildToolPreview } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
-import { ComposerLane, composerLaneEnabled, type LaneSink } from './composerLane';
+import {
+  ComposerLane,
+  composerLaneEnabled,
+  type BottomComposerMode,
+  type BottomComposerSurface,
+  type LaneSink,
+} from './composerLane';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 import type { ActivitySnapshot } from './activityRegistry';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
@@ -375,24 +413,34 @@ export class Display {
   private err: NodeJS.WriteStream;
 
   // ── v4.12.1 Pillar 4 Slice 2c — live during-turn composer ────────────────
-  // The rendered composer suffix (mode label + typed text), woven into
-  // whichever owned bottom row is live (activity indicator OR tool row) so it
-  // survives long tool calls. Empty string = nothing appended (not noisy).
+  // Legacy suffix projection plus the raw draft used by the fixed surface.
+  // Empty string means there is no busy draft.
   private composerText = '';
-  // v4.14 BUG 2 — the PERSISTENT plain-language busy hint ("Enter → steer ·
-  // …"). Set at turn start so the input lane is ALWAYS visible during a turn
-  // (not only after the user types); shown when `composerText` is empty. Empty
-  // = no turn running (or handed back to the normal prompt).
+  private composerDraft = '';
+  private composerMode: BottomComposerMode = 'queue';
+  // Existing busy guidance determines the fixed-surface mode and remains the
+  // legacy suffix fallback. Empty means no turn is running.
   private busyComposerHint = '';
   // The active bottom-owner registers a repaint fn here so a keystroke can
   // refresh it immediately instead of waiting for the owner's next tick. The
   // indicator + tool-row each set/restore this around their lifetime.
   private composerRepaint: (() => void) | null = null;
-  // v4.14 — the OPT-IN single-owner fixed bottom lane (scroll-region). When
-  // AIDEN_COMPOSER_LANE=1, the composer is pinned to a reserved bottom row and
-  // all turn output scrolls above it; otherwise the suffix path below is used
-  // unchanged. Lazily created on first use.
+  // Single-owner fixed bottom surface. Interactive terminals reserve a
+  // variable-height composer plus status row so turn output scrolls above it.
+  // Non-TTY output and the compatibility opt-out retain the legacy suffix path.
+  // Lazily created on first use.
   private composerLane: ComposerLane | null = null;
+  // The fixed status row is owned by the same controller as the composer.
+  // A factory is retained so resize can select the correct width tier.
+  private statusFooterSource: string | (() => string) = '';
+  // Main-prompt state is distinct from during-turn input so the existing queue
+  // buffer remains the sole owner of busy type-ahead.
+  private idleComposerContent = '';
+  private idleComposerDraft = '';
+  private idleComposerCursor = 0;
+  // Modal prompts need the full terminal surface while they own stdin. This
+  // depth pauses only composer painting and retains the exact draft/hint.
+  private composerSurfacePauseDepth = 0;
 
   constructor(opts: { skin?: SkinEngine; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}) {
     this.skin = opts.skin ?? getSkinEngine();
@@ -435,7 +483,7 @@ export class Display {
 
   /** Print the banner. `opts.tip` accepted for backward compat; unused. */
   printBanner(version?: string, opts: { tip?: string } = {}): void {
-    this.out.write(this.banner(version, opts));
+    this.writeOutput(this.banner(version, opts));
   }
 
   // ── Phase 23.6 — v3 visual primitives ──────────────────────────────────
@@ -515,7 +563,7 @@ export class Display {
 
   /**
    * Phase 26.2.3 — single-line assistant header in the
-   * `┃ Aiden` style. `┃` (U+2503 heavy vertical) and `Aiden` are
+   * `│ Aiden` style. The transcript rail and `Aiden` are
    * both brand-orange. The thin rule that previously sat under the
    * label is gone — the per-turn separator (printed BEFORE the user
    * prompt by chatSession) carries that visual weight now.
@@ -529,11 +577,7 @@ export class Display {
    * Returns one indented line with a trailing newline.
    */
   agentHeader(): string {
-    // v4.8.0 Slice 7 hotfix — replace v4.7 ┃ heavy-vertical with the
-    // Slice 4 framedPanel bar `▎` so reply chrome matches /help,
-    // approval prompt, and other Slice 4+ surfaces. Trailing `\n\n`
-    // (was `\n`) puts one blank between header and first content row.
-    const bar = this.skin.applyColors(glyphs.panel.bar, 'brand');
+    const bar = this.skin.applyColors('│', 'brand');
     const head = this.skin.applyColors('Aiden', 'brand');
     if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
       return `${this.timestampPrefix()}  ${bar} ${head}\n\n`;
@@ -554,7 +598,7 @@ export class Display {
     // indent provide enough breathing room; the extra blank was
     // stacking with other emit points to produce 3+ blank lines
     // between user prompt and reply.
-    this.out.write(`  ${this.rule()}\n`);
+    this.writeOutput(`  ${this.rule()}\n`);
   }
 
   /**
@@ -879,21 +923,14 @@ export class Display {
   }): string {
     const sk = this.skin;
     const SEP = sk.applyColors(' │ ', 'muted');
-    // v4.9.0 pre-ship UI hotfix — dropped the leading `▲` from
-    // provModel (prompt `▲` owns the marker; footer `▲` read as
-    // a duplicate orphan). Slice 7 per-metric palette preserved.
-    const provModel =
+    const providerModel =
+      `${sk.applyColors('◆', 'brand')} ` +
       `${sk.applyColors(args.provider, 'muted')}` +
       `${sk.applyColors(' · ', 'muted')}` +
       sk.applyColors(args.model, 'tool');
-
     const pct = args.ctxMax > 0
       ? Math.min(100, Math.round((args.ctxUsed / args.ctxMax) * 100))
       : 0;
-    // v4.9.0 pre-ship UI hotfix — bar math extracted to
-    // `computeContextBarFill` (1 cell per 20% bucket, ≥1 when any
-    // context used). Old `Math.round(pct/100 * barW)` floored to 0
-    // below ~10% so the bar stayed empty all session at typical use.
     const barW = 5;
     const filled = computeContextBarFill(pct, barW);
     const ctxKind: 'success' | 'warn' | 'error' =
@@ -905,75 +942,45 @@ export class Display {
       'warn',
     );
     const ctxPctText = sk.applyColors(`${pct}%`, ctxKind);
-
-    const elapsed = sk.applyColors(formatElapsedShort(args.elapsedMs), 'success');
-
-    // Progressive disclosure: pick layout based on RAW terminal width.
-    // `this.cols()` caps at 100 (frame budget for body content), but
-    // the footer wants the full physical width to choose its tier.
     const cols = (typeof this.out.columns === 'number' && this.out.columns >= 1)
       ? this.out.columns
       : 100;
-    // Tier ≥120: full density (ratio + bar + pct + turn + session + state).
-    // Tier ≥100: ratio + bar + pct + turn + elapsed.
-    // Tier <100: bar + pct + elapsed.
-    const stateDot = args.state
-      ? sk.applyColors(glyphs.status.dot, this.stateKind(args.state))
-      : '';
-    // v4.9.0 pre-ship UI: turn counter retired entirely — value-to-pixel
-    // ratio too low. `args.turnCount` stays in the signature for caller
-    // back-compat; ignored here.
     void args.turnCount;
-    // v4.8.0 Slice 9 hotfix — ⌛ restored ahead of the bare elapsed
-    // string. Wider font support than the retired ⏱. `sessionMs` arg
-    // stays plumbed-but-unused for backward compat with the field name.
-    const sessionSeg = args.elapsedMs !== undefined
-      ? `${sk.applyColors(glyphs.status.timer, 'success')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')}`
-      : '';
-    // ctxRatio + ctxPctText are pre-painted (warn + ctxKind respectively).
-    const ctxSegFull = `${ctxRatio} ${bar} ${ctxPctText}`;
-    const ctxSegCompact = `${bar} ${ctxPctText}`;
-
-    // v4.10 Slice 10.3 — full-density-tier extras:
-    //   - brand prefix `Aiden v4.X`
-    //   - spelled-out `last <elapsed>` for last-turn time
-    //   - session uptime `<elapsed>` from sessionMs (re-enabled; the
-    //     v4.9.0 comment retired it but Slice 10.3 brings it back
-    //     because it's signal users want during long sessions)
-    const brandSeg = `${sk.applyColors(`Aiden v${AIDEN_VERSION}`, 'brand')}`;
-    const lastTurnSpelled = args.elapsedMs !== undefined
-      ? `${sk.applyColors(glyphs.status.timer, 'success')} ${sk.applyColors(`last ${formatElapsedShort(args.elapsedMs)}`, 'success')}`
-      : '';
-    const sessionUptimeSeg = (typeof args.sessionMs === 'number' && args.sessionMs > 0)
-      ? sk.applyColors(formatElapsedShort(args.sessionMs), 'muted')
-      : '';
-
+    void args.sessionMs;
+    void args.state;
+    const contextFull =
+      `${sk.applyColors('◉ context', 'muted')} ${ctxRatio} ${bar} ${ctxPctText}`;
+    const contextCompact = `${sk.applyColors('◉ context', 'muted')} ${ctxPctText}`;
+    const timer =
+      `${sk.applyColors('⧖', 'success')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')}`;
     let segments: string[];
-    if (cols >= 120 && stateDot && sessionSeg) {
-      // Full density — v4.10 Slice 10.3 adds brand + session uptime
-      // + spelled-out "last <elapsed>" for the per-turn timer. Order:
-      //   Aiden v4.X · provider · model │ ctx │ session-uptime │ last 18s │ state
-      segments = [brandSeg, provModel, ctxSegFull];
-      if (sessionUptimeSeg) segments.push(sessionUptimeSeg);
-      segments.push(lastTurnSpelled, stateDot);
-    } else if (cols >= 100) {
-      // v4.8.1 Slice 2 hotfix — sessionSeg keeps the ⌛ identity glyph
-      // (single-cell, cheap) even at this tier. v4.9.0 pre-ship UI:
-      // turn counter retired; mid tier collapses to 2 separators.
-      // v4.10 Slice 10.3: brand + spell-out withheld here (width budget).
-      segments = [provModel, ctxSegFull, sessionSeg || elapsed];
+    if (cols >= 80) {
+      segments = [providerModel, contextFull, timer];
+    } else if (cols >= 54) {
+      segments = [providerModel, contextCompact, timer];
     } else {
-      segments = [provModel, ctxSegCompact, sessionSeg || elapsed];
+      const compactContext = `◉ ${pct}%`;
+      const providerModelBudget = Math.max(
+        8,
+        (cols - 1)
+          - terminalVisibleLength(compactContext)
+          - terminalVisibleLength(timer)
+          - 8,
+      );
+      const fullProviderModel = `${args.provider}:${args.model}`;
+      const abbreviatedProviderModel = `${args.provider.slice(0, 1)}:${args.model}`;
+      const compactProviderModel = terminalVisibleLength(fullProviderModel) <= providerModelBudget
+        ? fullProviderModel
+        : args.provider.length <= 8 && terminalVisibleLength(abbreviatedProviderModel) <= providerModelBudget
+          ? abbreviatedProviderModel
+          : truncateTerminalVisible(fullProviderModel, providerModelBudget);
+      segments = [
+        `${sk.applyColors('◆', 'brand')} ${sk.applyColors(compactProviderModel, 'tool')}`,
+        sk.applyColors(compactContext, ctxKind),
+        timer,
+      ];
     }
-    return truncateVisible(`  ${segments.join(SEP)}`, Math.max(1, cols - 2));
-  }
-
-  /** Map a per-turn outcome to the colour kind used by the state dot. */
-  private stateKind(state: 'ok' | 'warn' | 'error' | 'muted'): ColorKind {
-    if (state === 'ok')    return 'success';
-    if (state === 'warn')  return 'warn';
-    if (state === 'error') return 'error';
-    return 'muted';
+    return truncateTerminalVisible(segments.join(SEP), Math.max(1, cols - 1));
   }
 
   /**
@@ -1118,7 +1125,7 @@ export class Display {
       // Phase 23.5: spinner glyph in soft cyan (muted), not brand orange.
       // Quiet color, not loud.
       const glyph = skin.applyColors(frames[frame % frames.length], 'muted');
-      this.out.write(`\r${glyph} ${current}   `);
+      this.writeOutput(`\r${glyph} ${current}   `);
       frame += 1;
     };
 
@@ -1126,7 +1133,7 @@ export class Display {
       render();
       timer = setInterval(render, 90);
     } else {
-      this.out.write(`${text}\n`);
+      this.writeOutput(`${text}\n`);
     }
 
     return {
@@ -1139,9 +1146,9 @@ export class Display {
         if (timer) clearInterval(timer);
         if (isTty) {
           // clear the spinner line and write the final text on its own line
-          this.out.write('\r\x1b[K');
+          this.writeOutput('\r\x1b[K');
         }
-        if (finalText) this.out.write(`${finalText}\n`);
+        if (finalText) this.writeOutput(`${finalText}\n`);
       },
     };
   }
@@ -1350,7 +1357,7 @@ export class Display {
       // Single-row layout: walk up 1, erase, repaint, newline. Cursor
       // lands on the row below the indicator, ready for the next
       // tick to walk back up.
-      out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
+      this.writeOutput(`${ANSI_UP_ERASE}${buildLine()}\n`);
     };
 
     const startTick = (): void => {
@@ -1372,7 +1379,7 @@ export class Display {
       // space and acts as a Windows ConPTY flush trigger (v4.1.5
       // Issue M). Slice 11 collapsed the prior 2-row layout to 1.
       if (!isTty || !printed) return;
-      out.write(`${ANSI_UP_ERASE}\n`);
+      this.writeOutput(`${ANSI_UP_ERASE}\n`);
     };
 
     // Initial paint — only on TTY.
@@ -1391,11 +1398,11 @@ export class Display {
       if (stopped || paused || !isTty || !printed) return;
       type GFlag = typeof globalThis & { __aiden_legacy_indicator_paused?: boolean };
       if ((globalThis as GFlag).__aiden_legacy_indicator_paused) return;
-      out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
+      this.writeOutput(`${ANSI_UP_ERASE}${buildLine()}\n`);
     };
 
     if (isTty) {
-      out.write(`\n${buildLine()}\n`);
+      this.writeOutput(`\n${buildLine()}\n`);
       printed = true;
       startTick();
       // While the indicator owns the bottom row, a keystroke repaints it here.
@@ -1439,7 +1446,7 @@ export class Display {
         // resume omits it because the caller has already written its
         // own content above this point and an extra blank would
         // double up.)
-        out.write(`${buildLine()}\n`);
+        this.writeOutput(`${buildLine()}\n`);
         printed = true;
         startTick();
         // Re-claim composer repaint from the tool row that just finished.
@@ -1466,9 +1473,9 @@ export class Display {
         // (agentHeader → ▎ Aiden) produces a clean single-blank gap.
         if (!printed || !isTty) return;
         if (movedFromInitial) {
-          out.write(`${ANSI_UP_ERASE}\n`);
+          this.writeOutput(`${ANSI_UP_ERASE}\n`);
         } else {
-          out.write(`${ANSI_UP_ERASE}${ANSI_UP_ERASE}\n`);
+          this.writeOutput(`${ANSI_UP_ERASE}${ANSI_UP_ERASE}\n`);
         }
       },
       isPaused:  () => paused,
@@ -1518,16 +1525,17 @@ export class Display {
     };
     const erase = (): void => {
       if (!printed || !isTty) return;
-      out.write('\x1b[1A\x1b[2K\r');
+      this.writeOutput('\x1b[1A\x1b[2K\r');
       printed = false;
       lastBody = '';
     };
     const refresh = (frame?: number): void => {
+      this.refreshStatusFooter();
       if (!active || paused || !isTty) return;
       if (typeof frame === 'number') frameIndex = frame;
       const next = body();
       if (printed && !invalidated && next === lastBody) return;
-      out.write(printed
+      this.writeOutput(printed
         ? `\x1b[1A\x1b[2K\r${next}\x1b[1B\r`
         : `${next}\n`);
       printed = true;
@@ -1658,7 +1666,8 @@ export class Display {
       const liveSuffix = elapsed >= 1000
         ? `  ${sk.applyColors(`${phaseLabel} ${formatToolDuration(elapsed)}…`, 'muted')}`
         : '';
-      const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${glyph}  ` +
+      const runningGlyph = useIcons ? sk.applyColors('⚙', 'tool') : sk.applyColors('·', 'muted');
+      const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph}  ` +
         `${sk.applyColors(padVerb(verb), 'tool')} `;
       const suffix = `${liveSuffix}${this.composerSuffix()}`;
       const detailText = sk.applyColors(detail, 'muted');
@@ -1673,7 +1682,9 @@ export class Display {
 
     // Outcome row — entire line colored by outcome kind.
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
-      const prefix = `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} `;
+      const failed = kind === 'error' || kind === 'warn' || /^(?:cancelled|denied|blocked|timed out|fail)/u.test(suffix);
+      const outcomeGlyph = failed ? '!' : '✓';
+      const prefix = `${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(verb)} `;
       const suffixText = suffix ? `  ${suffix}` : '';
       const width = terminalRowWidth();
       const availableDetail = width === null
@@ -1687,6 +1698,7 @@ export class Display {
 
     // Capture stream reference so closures don't need `this`.
     const out = this.out;
+    const writeOutput = (text: string): void => this.writeOutput(text);
     const isTty = !!out.isTTY;
     // Keep a two-cell safety margin. Windows ConPTY can report the cursor
     // width one cell beyond the last safe printable column; filling that cell
@@ -1733,18 +1745,18 @@ export class Display {
       const fitted = fitTerminalRow(row);
       if (isTty && printed) {
         const body = fitted.endsWith('\n') ? fitted.slice(0, -1) : fitted;
-        out.write(settle
+        this.writeOutput(settle
           ? `\x1b[1A\x1b[2K\r${body}\n`
           : `\x1b[1A\x1b[2K\r${body}\x1b[1B\r`);
       }
-      else out.write(fitted);
+      else this.writeOutput(fitted);
       printed = true;
     };
 
     // Erase the last printed line (TTY only).
     const eraseLast = (): void => {
       if (isTty && printed) {
-        out.write('\x1b[1A\x1b[2K\r');
+        this.writeOutput('\x1b[1A\x1b[2K\r');
         printed = false;
       }
     };
@@ -1775,7 +1787,7 @@ export class Display {
       // its own newline-fencing + in-place rerender of the just-streamed
       // chunk so this row lands cleanly on its own line below.
       this.commitStreamChunk();
-      out.write(fitTerminalRow(runningRow()));
+      this.writeOutput(fitTerminalRow(runningRow()));
       printed = true;
       // v4.1.3-essentials: start the live-elapsed ticker. Fires every
       // 1s; first tick at +1s, when `runningRow()` starts emitting the
@@ -1945,7 +1957,7 @@ export class Display {
         if (settled || !pausedRow) return;
         pausedRow = false;
         if (!isTty) return;
-        out.write(fitTerminalRow(runningRow()));
+        writeOutput(fitTerminalRow(runningRow()));
         printed = true;
         startRunningTick();
       },
@@ -2095,36 +2107,114 @@ export class Display {
 
   /** Direct write helpers used by callers that already formatted text. */
   write(text: string): void {
+    this.writeOutput(text);
+  }
+
+  /** Test-only control markers are emitted after fixed composer cursor setup. */
+  writeAfterComposerCursor(text: string): void {
+    if (this.composerSurfacePauseDepth === 0 && composerLaneEnabled() && this.out.isTTY) {
+      this.paintComposerSurface();
+    }
+    if (this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()) {
+      this.composerLane.writeAfterCursor(text);
+      return;
+    }
     this.out.write(text);
   }
+
   writeError(text: string): void {
     this.err.write(text);
   }
 
+  /** Route flowing output through the fixed-region owner while it is active. */
+  private writeOutput(text: string): void {
+    if (this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()) {
+      this.composerLane.writeAbove(text);
+      return;
+    }
+    this.out.write(text);
+  }
+
   // ── v4.12.1 Pillar 4 Slice 2c — live composer surface ────────────────────
-  /**
-   * Update the live during-turn composer from a keystroke. `buffer` is the
-   * user's typed-so-far (already paste-stripped); `mode` is the busy-Enter
-   * mode. Repaints the active owned bottom row immediately so typing shows
-   * live (not blind). Empty buffer → the suffix disappears (never noisy).
-   */
+  /** Update the live during-turn draft and mode on the owned surface. */
   setComposer(buffer: string, mode: 'queue' | 'interrupt' | 'redirect'): void {
-    const next = renderComposerBuffer(buffer, mode, this.composerAvail());
-    if (next === this.composerText) return;
+    const idleChanged = this.idleComposerContent !== '';
+    this.idleComposerContent = '';
+    this.idleComposerDraft = '';
+    const maxWidth = composerLaneEnabled() && this.out.isTTY
+      ? this.composerLaneAvail()
+      : this.composerAvail();
+    const next = renderComposerBuffer(buffer, mode, maxWidth);
+    if (next === this.composerText && buffer === this.composerDraft
+      && mode === this.composerMode && !idleChanged) return;
     this.composerText = next;
+    this.composerDraft = buffer;
+    this.composerMode = mode;
     this.paintComposerSurface();
   }
 
-  /**
-   * v4.14 BUG 2 — set the PERSISTENT plain-language busy hint so the input lane
-   * is visible the moment a turn starts (before any keystroke). Called at turn
-   * start and whenever the hint changes (e.g. pause/resume). Repaints the live
-   * owned bottom row so it shows immediately.
-   */
+  /** Derive the fixed-surface mode from existing busy guidance. */
   setBusyHint(hint: string): void {
-    if (hint === this.busyComposerHint) return;
+    const idleChanged = this.idleComposerContent !== '';
+    this.idleComposerContent = '';
+    this.idleComposerDraft = '';
+    if (/\bqueue\b/i.test(hint)) this.composerMode = 'queue';
+    else if (/\bsteer\b|\bredirect\b/i.test(hint)) this.composerMode = 'redirect';
+    else if (/\bstop\b|\binterrupt\b/i.test(hint)) this.composerMode = 'interrupt';
+    if (hint === this.busyComposerHint && !idleChanged) return;
     this.busyComposerHint = hint;
     this.paintComposerSurface();
+  }
+
+  /** Update the normal prompt inside the fixed composer surface. */
+  setIdleComposer(buffer: string, hint: string, cursorIndex = buffer.length): void {
+    const busyChanged = this.composerText !== '' || this.busyComposerHint !== '';
+    this.composerText = '';
+    this.composerDraft = '';
+    this.busyComposerHint = '';
+    const body = buffer || hint;
+    const next = `${this.promptPrefix()} ${body}`;
+    if (next === this.idleComposerContent
+      && buffer === this.idleComposerDraft
+      && cursorIndex === this.idleComposerCursor
+      && !busyChanged) return;
+    this.idleComposerContent = next;
+    this.idleComposerDraft = buffer;
+    this.idleComposerCursor = cursorIndex;
+    this.paintComposerSurface();
+  }
+
+  /** Commit one normal submission above the fixed footer, then immediately
+   * restore an empty ready composer. Empty Enter remains a local no-op. */
+  submitIdleComposer(value: string, hint: string): void {
+    if (value.length > 0) {
+      this.write(`${this.promptPrefix()}You  ${value}\n`);
+    }
+    this.idleComposerContent = `${this.promptPrefix()} ${hint}`;
+    this.idleComposerDraft = '';
+    this.idleComposerCursor = 0;
+    this.paintComposerSurface();
+  }
+
+  /** Set the persistent status row. The optional factory is evaluated again
+   * after terminal resize so compact and wide tiers remain truthful. */
+  setStatusFooter(source: string | (() => string)): void {
+    this.statusFooterSource = source;
+    if (this.composerLane?.isActive()) {
+      this.composerLane.paintStatus(source);
+    } else {
+      this.paintComposerSurface();
+    }
+  }
+
+  private refreshStatusFooter(): void {
+    if (!this.composerLane?.isActive()) return;
+    this.composerLane.paintStatus(this.statusFooterSource);
+  }
+
+  /** True only when this interactive Display owns the boxed bottom surface. */
+  fixedBottomRegionEnabled(): boolean {
+    return composerLaneEnabled() && !!this.out.isTTY;
   }
 
   /** Clear the composer (turn end / handoff back to the normal prompt). Drops
@@ -2132,31 +2222,65 @@ export class Display {
   clearComposer(): void {
     if (this.composerText === '' && this.busyComposerHint === '') return;
     this.composerText = '';
+    this.composerDraft = '';
     this.busyComposerHint = '';
     this.paintComposerSurface();
   }
 
-  /** The raw composer content: the typed text if any, else the persistent hint,
-   *  else '' (no turn running). Shared by the lane and the suffix path. */
+  /** Activation content for the fixed surface and legacy suffix fallback. */
   private composerContent(): string {
-    return this.composerText || this.busyComposerHint;
+    return this.composerText || this.busyComposerHint || this.idleComposerContent;
+  }
+
+  private composerSurface(): BottomComposerSurface {
+    if (this.composerText || this.busyComposerHint) {
+      return {
+        draft: this.composerDraft,
+        mode: this.composerMode,
+        cursorIndex: this.composerDraft.length,
+      };
+    }
+    return {
+      draft: this.idleComposerDraft,
+      mode: 'idle',
+      cursorIndex: this.idleComposerCursor,
+    };
   }
 
   /**
-   * Paint the composer to whichever surface owns it. With AIDEN_COMPOSER_LANE=1
-   * the single-owner fixed lane reserves a bottom row (activate reserves the
-   * scroll region once, then repaints; empty content tears it down at turn
-   * end). Otherwise the legacy suffix path — repaint the live owned bottom row
-   * — is used exactly as before (default, unchanged).
+   * Paint through the single fixed-surface owner on interactive terminals.
+   * Empty content tears it down at turn end; non-TTY uses the legacy suffix.
    */
   private paintComposerSurface(): void {
-    if (composerLaneEnabled()) {
+    if (this.composerSurfacePauseDepth > 0) return;
+    if (composerLaneEnabled() && this.out.isTTY) {
       if (!this.composerLane) this.composerLane = new ComposerLane(this.laneSink());
       const content = this.composerContent();
-      if (content) this.composerLane.activate(content); else this.composerLane.deactivate();
+      const hasStatus = typeof this.statusFooterSource === 'function'
+        || this.statusFooterSource.length > 0;
+      if (content || hasStatus) {
+        this.composerLane.activate(this.composerSurface(), this.statusFooterSource);
+      } else {
+        this.composerLane.deactivate();
+      }
       return;
     }
     this.composerRepaint?.();
+  }
+
+  /** Temporarily release the fixed surface while a modal prompt owns the terminal.
+   * Draft and hint state remain intact and are repainted after the final
+   * matching resume. */
+  pauseComposerSurface(): void {
+    this.composerSurfacePauseDepth += 1;
+    if (this.composerSurfacePauseDepth === 1) this.composerLane?.deactivate();
+  }
+
+  /** Restore the fixed surface once the outermost modal prompt has settled. */
+  resumeComposerSurface(): void {
+    if (this.composerSurfacePauseDepth === 0) return;
+    this.composerSurfacePauseDepth -= 1;
+    if (this.composerSurfacePauseDepth === 0) this.paintComposerSurface();
   }
 
   /** Wire the lane to this display's real terminal stream + resize events. */
@@ -2188,6 +2312,11 @@ export class Display {
    */
   private composerAvail(): number {
     return Math.max(12, (this.out.columns ?? 80) - 30);
+  }
+
+  /** Width available to the independently owned bottom row. */
+  private composerLaneAvail(): number {
+    return Math.max(4, (this.out.columns ?? 80) - 2);
   }
 
   private composerSuffix(): string {
@@ -2228,22 +2357,22 @@ export class Display {
 
   /** Informational line, e.g. "Switching model…". */
   info(text: string): void {
-    this.out.write(`${this.skin.applyColors('›', 'accent')} ${text}\n`);
+    this.writeOutput(`${this.skin.applyColors('›', 'accent')} ${text}\n`);
   }
 
   /** Success line, e.g. "Switched to anthropic:claude-opus-4-7". */
   success(text: string): void {
-    this.out.write(`${this.skin.applyColors('✓', 'success')} ${text}\n`);
+    this.writeOutput(`${this.skin.applyColors('✓', 'success')} ${text}\n`);
   }
 
   /** Warning line, e.g. "Verbose mode requires restart." */
   warn(text: string): void {
-    this.out.write(`${this.skin.applyColors('!', 'warn')} ${text}\n`);
+    this.writeOutput(`${this.skin.applyColors('!', 'warn')} ${text}\n`);
   }
 
   /** Muted ("dim") line for low-priority diagnostics. */
   dim(text: string): void {
-    this.out.write(`${this.skin.applyColors(text, 'muted')}\n`);
+    this.writeOutput(`${this.skin.applyColors(text, 'muted')}\n`);
   }
 
   /** Render the single structured outcome owned by turn finalization. */
@@ -2309,12 +2438,12 @@ export class Display {
   /** Horizontal rule for grouping CLI output. */
   line(width = 60): void {
     const ch = this.skin.getActive().glyphs?.bullet === '*' ? '-' : '─';
-    this.out.write(`${this.skin.applyColors(ch.repeat(width), 'muted')}\n`);
+    this.writeOutput(`${this.skin.applyColors(ch.repeat(width), 'muted')}\n`);
   }
 
   /** Convenience: format an error and write it directly to stdout. */
   printError(message: string, suggestion?: string): void {
-    this.out.write(this.error(message, suggestion));
+    this.writeOutput(this.error(message, suggestion));
   }
 
   /**
@@ -2337,9 +2466,9 @@ export class Display {
     this.commitStreamChunk();
     const lines = renderCapabilityCard(data, (t, k) => this.applyColors(t, k));
     for (const line of lines) {
-      this.out.write(line + '\n');
+      this.writeOutput(line + '\n');
     }
-    this.out.write('\n');
+    this.writeOutput('\n');
   }
 
   // ── Phase 16c: streaming surface ─────────────────────────────────────
@@ -2401,7 +2530,7 @@ export class Display {
     if (!this.streamHeaderShown) {
       // Phase 26.2.3 — share the `▎ Aiden` header with non-streaming
       // agentTurn so streamed + non-streamed responses open identically.
-      this.out.write(this.agentHeader());
+      this.writeOutput(this.agentHeader());
       this.streamHeaderShown = true;
       this.streamBuffer = '';
       this.streamLineCount = 0;
@@ -2422,7 +2551,7 @@ export class Display {
     const endsNl = toWrite.endsWith('\n');
     const body = endsNl ? toWrite.slice(0, -1) : toWrite;
     toWrite = body.replace(/\n/g, '\n' + indent) + (endsNl ? '\n' : '');
-    this.out.write(toWrite);
+    this.writeOutput(toWrite);
     this.streamLastEndedNewline = text.endsWith('\n');
     // Phase v4.1-reply-formatting: track buffer + line count for the
     // post-stream re-render.
@@ -2562,7 +2691,7 @@ export class Display {
       // BOUNDED rerender erase: move up `lines` to the block start and clear
       // EXACTLY those lines — never `\x1b[J` (erase-to-end-of-screen), so a
       // re-render can't wipe anything parked below the stream's footprint.
-      this.out.write(clearLinesUpSeq(lines));
+      this.writeOutput(clearLinesUpSeq(lines));
       const formatted = this.markdown(buffered).trimEnd();
       // v4.1.4 reply-quality polish: same detect-and-skip indent + wrap
       // as agentTurn so streamed and one-shot replies share the visible
@@ -2571,14 +2700,14 @@ export class Display {
       // rails) pass through unchanged so their own gutter + wrap stays
       // intact.
       const indented = this.applyFrameToRendered(formatted);
-      this.out.write(indented + '\n');
+      this.writeOutput(indented + '\n');
     } catch {
       // Eraser already ran. v4.1.3-essentials: write the raw buffered
       // text back so the body doesn't vanish silently. The user sees
       // unformatted markdown rather than a missing reply — the honest
       // failure mode.
-      this.out.write(buffered);
-      if (!buffered.endsWith('\n')) this.out.write('\n');
+      this.writeOutput(buffered);
+      if (!buffered.endsWith('\n')) this.writeOutput('\n');
     }
   }
 
@@ -2608,7 +2737,7 @@ export class Display {
     // Ensure the streamed chunk ends with a newline so the interrupt
     // row doesn't stick to mid-token text from the prior delta.
     if (!this.streamLastEndedNewline) {
-      this.out.write('\n');
+      this.writeOutput('\n');
       this.streamLastEndedNewline = true;
       // The trailing newline we just wrote DOES bump the cursor's row,
       // but only by 1 — and `streamLineCount` should reflect physical
@@ -2655,7 +2784,7 @@ export class Display {
       // BOUNDED rerender erase (see clearLinesUpSeq): clears EXACTLY the
       // streamLineCount lines this chunk wrote, never `\x1b[J`, so nothing
       // parked below the stream is wiped.
-      this.out.write(clearLinesUpSeq(this.streamLineCount));
+      this.writeOutput(clearLinesUpSeq(this.streamLineCount));
     }
     // Rerender the closed prefix (handles its own heuristic gate
     // internally — a prefix without structure stays raw, which is
@@ -2663,7 +2792,7 @@ export class Display {
     this.tryRerenderInPlace(split.rerenderable, rerenderableLines);
     // Re-emit the carry verbatim. It's intentionally raw because the
     // unmatched `**` can't be rendered without its closing pair.
-    this.out.write(split.carry);
+    this.writeOutput(split.carry);
     // Reset the per-chunk window to the carry only. Next streamPartial
     // extends it; when the closing `**` lands, the next commit (or
     // streamComplete) rerenders cleanly.
@@ -2683,7 +2812,7 @@ export class Display {
   streamComplete(): void {
     if (!this.streamHeaderShown) return;
     if (!this.streamLastEndedNewline) {
-      this.out.write('\n');
+      this.writeOutput('\n');
       this.streamLineCount += 1;
     }
     // Final chunk: same in-place rerender path as commitStreamChunk
@@ -2711,7 +2840,7 @@ export class Display {
     const footer = renderCitationFooter(trace);
     if (!footer) return;
     if (!this.out.isTTY) return;
-    this.out.write(footer);
+    this.writeOutput(footer);
   }
 
   /**
@@ -2729,7 +2858,7 @@ export class Display {
     this.commitStreamChunk();
     const sk = this.skin;
     const arrow = sk.getActive().glyphs?.arrow ?? '>';
-    this.out.write(`${sk.applyColors(`${arrow} ${name}…`, 'tool')}\n`);
+    this.writeOutput(`${sk.applyColors(`${arrow} ${name}…`, 'tool')}\n`);
     this.streamLastEndedNewline = true;
   }
 
@@ -2811,7 +2940,7 @@ export class Display {
     // v4.8.0 Phase 2.4 — subagent kind: indent by depth inside the
     // gutter so nested rows tier below their parent.
     const indent = kindArg === 'subagent' ? '  '.repeat(depth) : '';
-    this.out.write(this.uiTrailRow(`${indent}${glyph} ${short}`, colorKind));
+    this.writeOutput(this.uiTrailRow(`${indent}${glyph} ${short}`, colorKind));
     this.streamLastEndedNewline = true;
   }
 
@@ -2831,7 +2960,7 @@ export class Display {
     const shortLabel = label.length > 80 ? label.slice(0, 79) + '…' : label;
     const shortSum   = summary.length > 120 ? summary.slice(0, 119) + '…' : summary;
     const tail = shortSum ? ` — ${shortSum}` : '';
-    this.out.write(this.uiTrailRow(`${glyph} ${shortLabel}${tail}`, kind));
+    this.writeOutput(this.uiTrailRow(`${glyph} ${shortLabel}${tail}`, kind));
     this.streamLastEndedNewline = true;
   }
 
@@ -2848,7 +2977,7 @@ export class Display {
     if (stdout) out += this.uiTrailRow(cap(stdout), 'muted');
     if (stderr) out += this.uiTrailRow(cap(stderr), 'error');
     if (!ok)    out += this.uiTrailRow(`(exit ${exitCode})`, 'error');
-    this.out.write(out);
+    this.writeOutput(out);
     this.streamLastEndedNewline = true;
   }
 
@@ -2864,7 +2993,7 @@ export class Display {
     const parts = [`${passed} passed`, `${failed} failed`];
     if (skipped > 0) parts.push(`${skipped} skipped`);
     const dur = durationMs > 0 ? ` in ${durationMs}ms` : '';
-    this.out.write(this.uiTrailRow(`${ok ? '✓' : '✗'} ${framework}: ${parts.join(', ')}${dur}`, ok ? 'success' : 'error'));
+    this.writeOutput(this.uiTrailRow(`${ok ? '✓' : '✗'} ${framework}: ${parts.join(', ')}${dur}`, ok ? 'success' : 'error'));
     this.streamLastEndedNewline = true;
   }
 
@@ -2897,7 +3026,7 @@ export class Display {
     const glyph = kindArg === 'success' ? '✓' : kindArg === 'warning' ? '⚠' : kindArg === 'error' ? '✗' : 'ℹ';
     const kind: ColorKind = kindArg === 'success' ? 'success' : kindArg === 'warning' ? 'warn' : kindArg === 'error' ? 'error' : 'tool';
     const short = message.length > 120 ? message.slice(0, 119) + '…' : message;
-    this.out.write(this.uiTrailRow(`${glyph} ${short}`, kind));
+    this.writeOutput(this.uiTrailRow(`${glyph} ${short}`, kind));
     this.streamLastEndedNewline = true;
   }
 
@@ -2913,7 +3042,7 @@ export class Display {
       const shortP = preview.length > 200 ? preview.slice(0, 199) + '…' : preview;
       out += this.uiTrailRow(`  ${shortP}`, 'muted');
     }
-    this.out.write(out);
+    this.writeOutput(out);
     this.streamLastEndedNewline = true;
   }
 }

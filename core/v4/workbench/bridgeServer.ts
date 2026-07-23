@@ -67,6 +67,9 @@ export interface EnqueueResult {
   accepted:        boolean;
   triggerEventId?: number;
   duplicate?:      boolean;
+  jobId?:          string;
+  attemptId?:      string;
+  runId?:          number;
 }
 
 /** Optional WRITE port — enqueues a task onto the daemon's safe job path. The
@@ -94,6 +97,44 @@ export interface TaskCanceller {
   cancel(runId: number): CancelResult;
 }
 
+export interface TaskInputReceiver {
+  receive(runId: number, content: string, idempotencyKey?: string): {
+    accepted: boolean;
+    runId: number;
+    inputId?: string;
+    duplicate?: boolean;
+  };
+}
+
+export interface TaskController {
+  pause(runId: number, idempotencyKey?: string): {
+    accepted: boolean;
+    applied: boolean;
+    runId: number;
+    controlId?: string;
+  };
+  resume(runId: number, idempotencyKey?: string): {
+    accepted: boolean;
+    runId: number;
+    attemptId?: string;
+    generation?: number;
+  };
+}
+
+export interface ApprovalDecider {
+  decide(approvalId: string, decision: 'approved' | 'denied' | 'cancelled'): {
+    accepted: boolean;
+    approvalId: string;
+    state?: string;
+  };
+}
+
+export interface DurableJobReader {
+  getJob(jobId: string): unknown | null;
+  getAttempt(attemptId: string): unknown | null;
+  listEvents(jobId: string, afterSequence?: number): unknown[];
+}
+
 export interface WorkbenchBridgeOptions {
   /** Read port over the shared run-event store (a RunStore satisfies this). */
   reader:      RunEventReader;
@@ -104,6 +145,10 @@ export interface WorkbenchBridgeOptions {
   enqueue?:    TaskEnqueuer;
   /** Optional STEER port for the stop button. Absent → cancel is 503. */
   cancel?:     TaskCanceller;
+  input?:      TaskInputReceiver;
+  control?:    TaskController;
+  approval?:   ApprovalDecider;
+  jobs?:       DurableJobReader;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -270,6 +315,15 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && url.pathname === '/api/tasks') { handlePostTask(req, res); return; }
     const cancelMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
     if (req.method === 'POST' && cancelMatch) { handleCancelTask(req, res, cancelMatch[1]); return; }
+    const inputMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/input$/);
+    if (req.method === 'POST' && inputMatch) { handleTaskInput(req, res, inputMatch[1]); return; }
+    const controlMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/(pause|resume)$/);
+    if (req.method === 'POST' && controlMatch) {
+      handleTaskControl(req, res, controlMatch[1], controlMatch[2] as 'pause' | 'resume');
+      return;
+    }
+    const approvalMatch = url.pathname.match(/^\/api\/approvals\/([^/]+)\/decision$/);
+    if (req.method === 'POST' && approvalMatch) { handleApprovalDecision(req, res, approvalMatch[1]); return; }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The built-in self-contained dark page. The per-launch write token is
@@ -306,6 +360,29 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       return;
     }
 
+    const jobEventsMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/events$/);
+    if (jobEventsMatch) {
+      if (!opts.jobs) { sendJson(res, 503, { error: 'durable Job query unavailable' }); return; }
+      const afterRaw = Number(url.searchParams.get('after') ?? 0);
+      const after = Number.isFinite(afterRaw) && afterRaw >= 0 ? Math.floor(afterRaw) : 0;
+      sendJson(res, 200, opts.jobs.listEvents(decodeURIComponent(jobEventsMatch[1]), after));
+      return;
+    }
+    const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
+    if (jobMatch) {
+      if (!opts.jobs) { sendJson(res, 503, { error: 'durable Job query unavailable' }); return; }
+      const job = opts.jobs.getJob(decodeURIComponent(jobMatch[1]));
+      sendJson(res, job ? 200 : 404, job ?? { error: 'job not found' });
+      return;
+    }
+    const attemptMatch = url.pathname.match(/^\/api\/attempts\/([^/]+)$/);
+    if (attemptMatch) {
+      if (!opts.jobs) { sendJson(res, 503, { error: 'durable Attempt query unavailable' }); return; }
+      const attempt = opts.jobs.getAttempt(decodeURIComponent(attemptMatch[1]));
+      sendJson(res, attempt ? 200 : 404, attempt ?? { error: 'attempt not found' });
+      return;
+    }
+
     // The dashboard's live feed: ALL recent events across sessions/runs, streamed
     // as plain SSE `message` frames (name is in the data) so one EventSource with
     // a single onmessage handler renders everything.
@@ -338,7 +415,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-      endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel'],
+      endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision'],
     });
   });
 
@@ -430,7 +507,14 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;
       try {
         const result = opts.enqueue.enqueue({ message, sessionId });
-        sendJson(res, 202, { accepted: result.accepted, triggerEventId: result.triggerEventId, duplicate: result.duplicate ?? false });
+        sendJson(res, 202, {
+          accepted: result.accepted,
+          triggerEventId: result.triggerEventId,
+          duplicate: result.duplicate ?? false,
+          job_id: result.jobId,
+          attempt_id: result.attemptId,
+          run_id: result.runId,
+        });
       } catch (e) {
         log(`enqueue failed: ${(e as Error).message}`);
         sendJson(res, 500, { error: 'enqueue failed' });
@@ -455,6 +539,59 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       log(`cancel failed: ${(e as Error).message}`);
       sendJson(res, 500, { error: 'cancel failed' });
     }
+  }
+
+  function handleTaskInput(req: http.IncomingMessage, res: http.ServerResponse, rawRunId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    const runId = Number(decodeURIComponent(rawRunId));
+    if (!Number.isFinite(runId)) { sendJson(res, 400, { error: 'runId must be numeric' }); return; }
+    if (!opts.input) { sendJson(res, 503, { error: 'durable input unavailable' }); return; }
+    readJsonBody(req, 64 * 1024).then((body) => {
+      const content = typeof body.message === 'string' ? stripPasteMarkers(body.message) : '';
+      if (!content.trim()) { sendJson(res, 400, { error: 'body requires a non-empty "message"' }); return; }
+      const key = typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined;
+      const result = opts.input!.receive(runId, content, key);
+      sendJson(res, result.accepted ? 202 : 409, {
+        accepted: result.accepted,
+        runId,
+        input_id: result.inputId,
+        duplicate: result.duplicate ?? false,
+      });
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleTaskControl(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawRunId: string,
+    kind: 'pause' | 'resume',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    const runId = Number(decodeURIComponent(rawRunId));
+    if (!Number.isFinite(runId)) { sendJson(res, 400, { error: 'runId must be numeric' }); return; }
+    if (!opts.control) { sendJson(res, 503, { error: `${kind} unavailable` }); return; }
+    readJsonBody(req, 16 * 1024).then((body) => {
+      const key = typeof body.idempotencyKey === 'string' ? body.idempotencyKey : undefined;
+      const result = kind === 'pause'
+        ? opts.control!.pause(runId, key)
+        : opts.control!.resume(runId, key);
+      sendJson(res, result.accepted ? 202 : 409, result);
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleApprovalDecision(req: http.IncomingMessage, res: http.ServerResponse, rawApprovalId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.approval) { sendJson(res, 503, { error: 'approval decisions unavailable' }); return; }
+    const approvalId = decodeURIComponent(rawApprovalId);
+    readJsonBody(req, 16 * 1024).then((body) => {
+      const decision = body.decision;
+      if (decision !== 'approved' && decision !== 'denied' && decision !== 'cancelled') {
+        sendJson(res, 400, { error: 'decision must be approved, denied, or cancelled' });
+        return;
+      }
+      const result = opts.approval!.decide(approvalId, decision);
+      sendJson(res, result.accepted ? 202 : 409, result);
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 
   return new Promise<WorkbenchBridge>((resolve, reject) => {

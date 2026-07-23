@@ -63,6 +63,8 @@ export interface MockProvider {
   callCount(): number;
   /** Last seen request body (parsed JSON). */
   lastRequest(): unknown | null;
+  /** All request bodies in physical arrival order. */
+  requests(): readonly unknown[];
   /** Stop the server + wait for close. */
   stop(): Promise<void>;
 }
@@ -81,6 +83,7 @@ export async function startMockProvider(
 
   let callCount = 0;
   let lastRequest: unknown | null = null;
+  const requests: unknown[] = [];
 
   const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && (req.url?.startsWith('/v1/models') || req.url?.startsWith('/models'))) {
@@ -105,6 +108,7 @@ export async function startMockProvider(
     } catch {
       lastRequest = body;
     }
+    requests.push(lastRequest);
     const scriptedTurn = script?.[callCount];
     callCount += 1;
 
@@ -185,6 +189,7 @@ export async function startMockProvider(
     port,
     callCount:    () => callCount,
     lastRequest:  () => lastRequest,
+    requests:     () => [...requests],
     stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
   };
 }

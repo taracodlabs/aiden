@@ -5,145 +5,396 @@
  * Aiden — local-first agent.
  */
 /**
- * cli/v4/composerLane.ts — v4.14 the single-owner FIXED bottom composer lane.
+ * Single-owner fixed terminal bottom region.
  *
- * THE PROBLEM it solves: today the during-turn composer is only a SUFFIX woven
- * into whichever transient status row is live (the activity indicator, a tool
- * row), and it is cleared the moment token streaming begins — so while a turn
- * streams there is no anchored input line, and typing is blind. There is no
- * single renderer that owns a fixed composer region.
+ * The owner reserves a variable-height boxed composer plus one status row.
+ * Transcript, activity, and tool writes are restored to the scrollable region;
+ * the hardware cursor is then returned to the draft insertion point. Modal
+ * prompts release the complete surface and a balanced resume reconstructs it.
  *
- * THE FIX: ONE owner reserves the bottom terminal row via a DEC scroll region
- * (DECSTBM). All turn output — streaming text, tool rows, the indicator —
- * scrolls inside the region ABOVE the lane; the terminal itself guarantees the
- * bottom row is never touched by that output, so the composer can never be
- * overwritten, pushed, or garbled. The lane repaints ONLY on a keystroke /
- * hint change / resize — no per-write flicker. This is the reusable
- * composer-ownership seam the future dashboard's steering bar drives too.
- *
- * Shipped OPT-IN via AIDEN_COMPOSER_LANE=1 while the live cursor behaviour is
- * proven in real-terminal smoke; the default render path is untouched.
- *
- * The escape-sequence builders are pure + unit-tested; the owner wires them to
- * a write sink + a terminal-dimensions source and tracks activate/resize state.
+ * AIDEN_COMPOSER_LANE=0 remains the compatibility escape hatch. Non-TTY output
+ * never emits terminal-control sequences.
  */
-
-// ── pure escape-sequence builders (unit-tested; no I/O) ──────────────────────
 
 const ESC = '\x1b';
-/** DECSC / DECRC — save / restore cursor (position, not content). */
 const SAVE = `${ESC}7`;
 const RESTORE = `${ESC}8`;
+const SAVE_TRANSCRIPT = `${ESC}[s`;
+const RESTORE_TRANSCRIPT = `${ESC}[u`;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
+const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+function terminalWidth(text: string): number {
+  return stringWidth(text.replace(ANSI_PATTERN, ''));
+}
 
 /**
- * Reserve the bottom `laneRows` rows by confining the scroll region to the rows
- * ABOVE them (DECSTBM `CSI top;bottom r`). Cursor-safe: DECSTBM homes the
- * cursor, so we save before and restore after — output keeps flowing from where
- * it was, now bounded to the region. `rows` = terminal height (1-based).
+ * Confine scrolling to the rows above the fixed region and place the transcript
+ * cursor at the bottom of that scrollable area.
  */
-export function reserveSeq(rows: number, laneRows = 1): string {
+export function reserveSeq(rows: number, laneRows = 2): string {
   const bottom = Math.max(1, rows - Math.max(1, laneRows));
-  return `${SAVE}${ESC}[1;${bottom}r${RESTORE}`;
+  return `${ESC}[1;${bottom}r${ESC}[${bottom};1H`;
 }
 
-/**
- * Paint `text` on the reserved bottom row, cursor-safe: save → jump to the
- * bottom row col 1 → clear line → write → restore. The saved/restored cursor is
- * the output cursor inside the region, so painting the lane never disturbs the
- * flowing output above it. `text` must already be width-fit (no wrap).
- */
-export function paintSeq(rows: number, text: string): string {
-  return `${SAVE}${ESC}[${rows};1H${ESC}[2K${text}${RESTORE}`;
+/** Paint one fixed row without disturbing the caller's saved cursor. */
+export function paintSeq(rows: number, text: string, offsetFromBottom = 0): string {
+  const row = Math.max(1, rows - Math.max(0, offsetFromBottom));
+  return `${SAVE}${ESC}[${row};1H${ESC}[2K${text}${RESTORE}`;
 }
 
-/**
- * Tear down: restore full-screen scrolling (`CSI r` with no params) and clear
- * the lane row so nothing is left pinned once the turn ends.
- */
-export function teardownSeq(rows: number): string {
-  return `${ESC}[r${SAVE}${ESC}[${rows};1H${ESC}[2K${RESTORE}`;
+/** Restore full-screen scrolling and clear every row owned by the region. */
+export function teardownSeq(rows: number, laneRows = 2): string {
+  let clear = '';
+  for (let offset = Math.max(1, laneRows) - 1; offset >= 0; offset -= 1) {
+    clear += `${ESC}[${Math.max(1, rows - offset)};1H${ESC}[2K`;
+  }
+  return `${ESC}[r${SAVE}${clear}${RESTORE}`;
 }
 
-/** Tail-fit `text` to `cols` columns (visible width), ellipsis at the FRONT so
- *  the most-recent keystrokes (the cursor end) stay visible. ANSI-free input. */
+/** Tail-fit compatibility helper retained for legacy importers. */
 export function fitLane(text: string, cols: number): string {
   const width = Math.max(4, cols);
-  if (text.length <= width) return text;
-  return '…' + text.slice(-(width - 1));
+  if (terminalWidth(text) <= width) return text;
+  const plain = text.replace(ANSI_PATTERN, '');
+  let tail = '';
+  for (const character of Array.from(plain).reverse()) {
+    if (stringWidth(`…${character}${tail}`) > width) break;
+    tail = character + tail;
+  }
+  return `…${tail}`;
 }
 
-// ── the owner ────────────────────────────────────────────────────────────────
+type StatusSource = string | (() => string);
+
+/** ANSI-aware front truncation used as the final no-wrap status guard. */
+function fitStatus(text: string, cols: number): string {
+  const width = Math.max(4, cols);
+  if (terminalWidth(text) <= width) return text;
+  let plain = '';
+  let out = '';
+  let sawAnsi = false;
+  for (let i = 0; i < text.length;) {
+    if (text[i] === ESC && text[i + 1] === '[') {
+      const match = /^\x1b\[[0-9;]*[A-Za-z]/u.exec(text.slice(i));
+      if (match) {
+        out += match[0];
+        i += match[0].length;
+        sawAnsi = true;
+        continue;
+      }
+    }
+    const codePoint = text.codePointAt(i);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (stringWidth(plain + character) > width) break;
+    out += character;
+    plain += character;
+    i += character.length;
+  }
+  return sawAnsi ? `${out}${ESC}[0m` : out;
+}
+
+function padVisible(text: string, width: number): string {
+  return `${text}${' '.repeat(Math.max(0, width - terminalWidth(text)))}`;
+}
+
+interface WrappedDraft {
+  lines: string[];
+  cursorLine: number;
+  cursorCell: number;
+}
+
+function wrapDraft(
+  text: string,
+  width: number,
+  maxLines: number,
+  cursorIndex = text.length,
+): WrappedDraft {
+  const boundedCursor = Math.max(0, Math.min(text.length, cursorIndex));
+  const beforeCursor = text.slice(0, boundedCursor)
+    .replace(/\r\n?/g, '\n')
+    .replace(/\t/g, '    ');
+  const afterCursor = text.slice(boundedCursor)
+    .replace(/\r\n?/g, '\n')
+    .replace(/\t/g, '    ');
+  const normalized = beforeCursor + afterCursor;
+  const normalizedCursor = beforeCursor.length;
+  const lines: string[] = [];
+  let line = '';
+  let offset = 0;
+  let cursorLine = 0;
+  let cursorCell = 0;
+  let cursorCaptured = false;
+  for (const character of Array.from(normalized)) {
+    if (!cursorCaptured && offset === normalizedCursor) {
+      cursorLine = lines.length;
+      cursorCell = terminalWidth(line);
+      cursorCaptured = true;
+    }
+    if (character === '\n') {
+      lines.push(line);
+      line = '';
+      offset += character.length;
+      continue;
+    }
+    if (terminalWidth(line + character) > width && line.length > 0) {
+      lines.push(line);
+      line = character;
+    } else {
+      line += character;
+    }
+    offset += character.length;
+  }
+  if (!cursorCaptured) {
+    cursorLine = lines.length;
+    cursorCell = terminalWidth(line);
+  }
+  lines.push(line);
+  const visibleCount = Math.max(1, maxLines);
+  const maxStart = Math.max(0, lines.length - visibleCount);
+  const visibleStart = Math.max(
+    0,
+    Math.min(cursorLine - Math.floor(visibleCount / 2), maxStart),
+  );
+  return {
+    lines: lines.slice(visibleStart, visibleStart + visibleCount),
+    cursorLine: cursorLine - visibleStart,
+    cursorCell,
+  };
+}
+
+export type BottomComposerMode = 'idle' | 'queue' | 'interrupt' | 'redirect';
+
+export interface BottomComposerSurface {
+  draft: string;
+  mode: BottomComposerMode;
+  cursorIndex?: number;
+}
+
+type ComposerSource = string | BottomComposerSurface;
+
+interface RenderedSurface {
+  lines: string[];
+  laneRows: number;
+  cursorRow: number;
+  cursorCol: number;
+}
+
+function normalizeComposer(source: ComposerSource): BottomComposerSurface {
+  return typeof source === 'string'
+    ? { draft: source, mode: 'idle' }
+    : source;
+}
+
+function modeTitle(mode: BottomComposerMode): string {
+  if (mode === 'idle') return '▲ You';
+  if (mode === 'queue') return '▲ You · queue mode';
+  if (mode === 'interrupt') return '▲ You · interrupt mode';
+  return '▲ You · steer mode';
+}
+
+export function renderBottomSurface(
+  rows: number,
+  cols: number,
+  composerSource: ComposerSource,
+  status: string,
+): RenderedSurface {
+  const composer = normalizeComposer(composerSource);
+  // Leave the final physical cell unused so Windows ConPTY never enters its
+  // pending-wrap state after painting a border or status row.
+  const outerWidth = Math.max(8, cols - 1);
+  const innerWidth = Math.max(1, outerWidth - 4);
+  const maxContentLines = Math.max(1, rows - 4);
+  const wrapped = wrapDraft(
+    composer.draft,
+    innerWidth,
+    maxContentLines,
+    composer.cursorIndex,
+  );
+  const content = wrapped.lines;
+  const laneRows = Math.min(rows - 1, content.length + 3);
+  const title = modeTitle(composer.mode);
+  const titleRoom = Math.max(1, outerWidth - 5);
+  const fittedTitle = terminalWidth(title) <= titleRoom ? title : fitStatus(title, titleRoom);
+  const topPrefix = `╭─ ${fittedTitle} `;
+  const top = `${topPrefix}${'─'.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}╮`;
+  const body = content.map((line) => `│ ${padVisible(line, innerWidth)} │`);
+  const bottom = `╰${'─'.repeat(Math.max(0, outerWidth - 2))}╯`;
+  const fittedStatus = fitStatus(status, outerWidth);
+  const topRow = rows - laneRows + 1;
+  return {
+    lines: [top, ...body, bottom, fittedStatus],
+    laneRows,
+    cursorRow: topRow + 1 + wrapped.cursorLine,
+    cursorCol: Math.min(outerWidth - 1, 3 + wrapped.cursorCell),
+  };
+}
 
 export interface LaneSink {
   write: (s: string) => void;
-  /** Terminal height in rows; may change on resize. */
   rows: () => number;
-  /** Terminal width in columns. */
   cols: () => number;
-  /** Subscribe to terminal resize; returns an unsubscribe fn. */
   onResize: (fn: () => void) => () => void;
 }
 
-/**
- * Owns the fixed bottom composer lane for the duration of a turn. Idempotent
- * activate/deactivate; repaints on demand and re-anchors on resize. Holds the
- * last painted text so a resize can restore it without the caller re-supplying.
- */
-export class ComposerLane {
+export class BottomRegion {
   private active = false;
-  private lastText = '';
+  private composerSource: ComposerSource = { draft: '', mode: 'idle' };
+  private statusSource: StatusSource = '';
+  private laneRows = 0;
+  private lastFrame = '';
   private unsubResize: (() => void) | null = null;
 
   constructor(private readonly sink: LaneSink) {}
 
-  isActive(): boolean { return this.active; }
+  isActive(): boolean {
+    return this.active;
+  }
 
-  /** Reserve the lane and paint `text`. Idempotent — a second activate just
-   *  repaints. Subscribes to resize so the lane re-anchors cleanly. */
-  activate(text: string): void {
-    const rows = this.sink.rows();
+  /** Reserve and paint the complete surface. Repeated activation is an update. */
+  activate(composer: ComposerSource, status: StatusSource = this.statusSource): void {
+    this.composerSource = composer;
+    this.statusSource = status;
     if (!this.active) {
-      this.sink.write(reserveSeq(rows));
-      this.unsubResize = this.sink.onResize(() => this.reanchor());
       this.active = true;
+      this.unsubResize = this.sink.onResize(() => this.reanchor());
     }
-    this.paint(text);
+    this.paintAll();
   }
 
-  /** Repaint the lane with new text (keystroke / hint change). No-op when the
-   *  text is unchanged, so a redundant paint never flickers. */
-  paint(text: string): void {
+  /** Backward-compatible composer update. */
+  paint(composer: ComposerSource): void {
     if (!this.active) return;
-    const fitted = fitLane(text, this.sink.cols());
-    if (fitted === this.lastText) return;
-    this.lastText = fitted;
-    this.sink.write(paintSeq(this.sink.rows(), fitted));
+    this.composerSource = composer;
+    this.paintAll();
   }
 
-  /** Resize: re-reserve the region for the new height and repaint in place. */
+  paintStatus(status: StatusSource): void {
+    if (!this.active) return;
+    this.statusSource = status;
+    this.paintAll();
+  }
+
+  /**
+   * Write flowing output in the scrollable transcript, then return the hardware
+   * cursor to the draft insertion point without repainting or mutating draft.
+   */
+  writeAbove(text: string): void {
+    if (!this.active) {
+      this.sink.write(text);
+      return;
+    }
+    const surface = this.surface();
+    this.sink.write(
+      `${RESTORE_TRANSCRIPT}${text}${SAVE_TRANSCRIPT}` +
+      `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`,
+    );
+  }
+
+  /** Emit a control-only marker after cursor ownership is established. */
+  writeAfterCursor(text: string): void {
+    if (!this.active) {
+      this.sink.write(text);
+      return;
+    }
+    const surface = this.surface();
+    this.sink.write(
+      `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h${text}`,
+    );
+  }
+
+  private surface(): RenderedSurface {
+    const rawStatus = typeof this.statusSource === 'function'
+      ? this.statusSource()
+      : this.statusSource;
+    return renderBottomSurface(
+      this.sink.rows(),
+      this.sink.cols(),
+      this.composerSource,
+      rawStatus,
+    );
+  }
+
+  private clearOwnedRows(count: number): string {
+    let sequence = '';
+    for (let offset = Math.max(1, count) - 1; offset >= 0; offset -= 1) {
+      sequence += `${ESC}[${Math.max(1, this.sink.rows() - offset)};1H${ESC}[2K`;
+    }
+    return sequence;
+  }
+
+  private establishGeometry(nextRows: number): string {
+    if (this.laneRows === nextRows && this.laneRows > 0) return '';
+    const previousRows = this.laneRows;
+    this.laneRows = nextRows;
+    if (previousRows === 0) {
+      // Make physical room before reserving the footer. Painting directly over
+      // the last rows would destroy startup/transcript content already there.
+      // Line feeds at the full-screen bottom move those rows into normal
+      // scrollback and leave clean cells for the new fixed surface.
+      return `${ESC}[r${ESC}[${this.sink.rows()};1H${'\n'.repeat(nextRows)}` +
+        `${reserveSeq(this.sink.rows(), nextRows)}${SAVE_TRANSCRIPT}`;
+    }
+    const growth = Math.max(0, nextRows - previousRows);
+    const previousTranscriptBottom = Math.max(1, this.sink.rows() - previousRows);
+    // When a wrapped draft grows upward, scroll transcript rows before claiming
+    // the additional cells. This preserves the newest transcript content above
+    // the composer instead of erasing it during the geometry change.
+    const makeRoom = growth > 0
+      ? `${ESC}[${previousTranscriptBottom};1H${'\n'.repeat(growth)}`
+      : '';
+    return `${RESTORE_TRANSCRIPT}${makeRoom}${ESC}[r` +
+      `${this.clearOwnedRows(Math.max(previousRows, nextRows))}` +
+      `${reserveSeq(this.sink.rows(), nextRows)}${SAVE_TRANSCRIPT}`;
+  }
+
+  private paintAll(): void {
+    if (!this.active) return;
+    const surface = this.surface();
+    const frame = surface.lines.join('\n');
+    const geometry = this.establishGeometry(surface.laneRows);
+    if (!geometry && frame === this.lastFrame) {
+      this.sink.write(`${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`);
+      return;
+    }
+    this.lastFrame = frame;
+    const topRow = this.sink.rows() - surface.laneRows + 1;
+    let sequence = geometry;
+    surface.lines.forEach((line, index) => {
+      sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
+    });
+    sequence += `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`;
+    this.sink.write(sequence);
+  }
+
   private reanchor(): void {
     if (!this.active) return;
-    const rows = this.sink.rows();
-    this.sink.write(reserveSeq(rows));
-    const text = this.lastText;
-    this.lastText = '';        // force the repaint (dims changed)
-    this.paint(text);
+    this.lastFrame = '';
+    const previousRows = this.laneRows;
+    this.laneRows = 0;
+    this.sink.write(`${RESTORE_TRANSCRIPT}${ESC}[r${this.clearOwnedRows(previousRows)}`);
+    this.paintAll();
   }
 
-  /** Restore full-screen scrolling + clear the lane. Idempotent. */
+  /** Release and clear the complete surface exactly once. */
   deactivate(): void {
     if (!this.active) return;
-    this.sink.write(teardownSeq(this.sink.rows()));
+    this.sink.write(
+      `${RESTORE_TRANSCRIPT}${ESC}[r${this.clearOwnedRows(this.laneRows)}`,
+    );
     this.unsubResize?.();
     this.unsubResize = null;
     this.active = false;
-    this.lastText = '';
+    this.laneRows = 0;
+    this.lastFrame = '';
   }
 }
 
-/** True when the fixed-lane renderer is opted into. Default OFF (unchanged
- *  render path) until the live cursor behaviour is proven in real-terminal
- *  smoke; flip the default here once it is. */
+/** Existing importer compatibility. */
+export { BottomRegion as ComposerLane };
+
 export function composerLaneEnabled(): boolean {
-  return process.env.AIDEN_COMPOSER_LANE === '1';
+  return process.env.AIDEN_COMPOSER_LANE !== '0';
 }

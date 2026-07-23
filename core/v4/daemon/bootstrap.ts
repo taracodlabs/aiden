@@ -49,10 +49,11 @@ import { createIdempotencyStore } from './idempotencyStore';
 import type { IdempotencyStore } from './idempotencyStore';
 import { createRunStore } from './runStore';
 import { createTaskStore } from './taskStore';
+import { createJobEngine } from './jobEngine';
+import { sweepDurableJobRecovery } from './jobRecoverySweep';
 import { sweepResumePending } from './resumeSweep';
 import type { RunStore } from './runStore';
 // v4.10 Slice 10.2b — shared event taxonomy.
-import { categorizeEvent } from './eventCategories';
 import { createRestartFailureCounter } from './restartFailureCounter';
 import type { RestartFailureCounter } from './restartFailureCounter';
 import { getResourceRegistry } from './resourceRegistry';
@@ -548,6 +549,7 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     });
     const idempotencyStore      = createIdempotencyStore({ db });
     const runStore              = createRunStore({ db });
+    const jobEngine             = createJobEngine({ db });
     const restartFailureCounter = createRestartFailureCounter({ db, threshold: cfg.restartFailureThreshold });
     const resourceRegistry      = getResourceRegistry();
     try { idempotencyStore.reseed(); } catch { /* best-effort */ }
@@ -601,7 +603,10 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       const ingressBindHost = process.env.AIDEN_DAEMON_BIND ?? '127.0.0.1';
       mountRunsRoutes({
         app,
+        db,
         triggerBus,
+        jobEngine,
+        instanceId: tracker.instanceId,
         log,
         apiKeyRequired: ingressBindHost !== '127.0.0.1' && ingressBindHost !== 'localhost',
       });
@@ -934,7 +939,7 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       // fires or just an immediate stop.
       const runnerFactory: () => DaemonAgentRunner = opts.agentBuilder
         ? () => createRealAgentRunner({
-            db, runStore, resourceRegistry,
+            db, runStore, jobEngine, resourceRegistry,
             log, agentBuilder: opts.agentBuilder!,
             persistedDefault: opts.persistedDefaultModel,
             // v4.13 Gap 4 — daemon runs carry the durable job-card.
@@ -943,55 +948,55 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
         : () => makeRunner(async (input) => {
           // Phase 5a placeholder runner — used when no AgentBuilder
           // is injected (e.g. user has no provider configured yet).
-          // Marks the run completed with finishReason='stop' after
-          // creating the run row + emitting a placeholder event.
-          // The bus / dispatch / lease / markDone path is fully
-          // exercised end-to-end so soak harness + tests still
-          // work without a real model wired.
-          const runId = runStore.create({
+          // Admission has already created the Job and Attempt. Missing
+          // provider runtime is retryable and must never look successful.
+          const runId = input.admission?.runId ?? runStore.create({
             sessionId:      input.sessionId,
             instanceId:     input.instanceId,
             triggerEventId: input.triggerEventId,
-            status:         'running',
+            status:         'queued',
           });
-          // v4.10 Slice 10.2b — rich emission via the shared taxonomy.
-          // Placeholder runner path; still wants a categorised row so
-          // trace_query produces consistent shape regardless of which
-          // runner was wired.
-          const tags = categorizeEvent('dispatcher:invoked');
-          runStore.emitEventRich({
+          const result: DaemonAgentResult = {
             runId,
-            category:  tags.category,
-            kind:      tags.kind,
-            name:      'dispatcher:invoked',
-            sessionId: input.sessionId,
-            summary:   `placeholder/${input.triggerContext.source}`,
-            payload: {
-              source:    input.triggerContext.source,
-              triggerId: input.triggerContext.triggerId,
-              eventId:   input.triggerEventId,
-              templated: input.triggerContext.promptTemplate !== null,
-              messageLen: input.initialMessage.length,
-            },
-            visibility:'system',
-            source:    'daemon',
-          });
-          runStore.setStatus(runId, 'completed', { finishReason: 'stop' });
-          const result: DaemonAgentResult = { runId, finishReason: 'stop' };
+            finishReason: 'error',
+            error: 'agent_runtime_unavailable',
+          };
           return result;
         });
       dispatcher = createDispatcher({
         triggerBus,
         runStore,
+        jobEngine,
         db,
         ownerId:       tracker.instanceId,
         instanceId:    tracker.instanceId,
         workerCount:   1,                   // Q-P5-1(a)
         runnerFactory,
+        initialRunnerKind: opts.agentBuilder ? 'real' : 'placeholder',
         log,
       });
       dispatcher.start();
       log('info', `[dispatcher] active workerCount=1 runner=${opts.agentBuilder ? 'real' : 'placeholder'}`);
+      const runDurableRecoverySweep = (): void => {
+        if (dispatcher?.runnerKind() !== 'real') return;
+        try {
+          const sweep = sweepDurableJobRecovery({
+            jobEngine,
+            triggerBus,
+            instanceId: tracker.instanceId,
+            producer: 'daemon-recovery',
+          });
+          if (sweep.expired > 0 || sweep.enqueued > 0) {
+            log('warn', `[job-recovery] expired=${sweep.expired} retried=${sweep.retried} ` +
+              `needs_user=${sweep.needsUser} dead_letter=${sweep.deadLettered} enqueued=${sweep.enqueued}`);
+          }
+        } catch (e) {
+          log('warn', `[job-recovery] sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      };
+      runDurableRecoverySweep();
+      const durableRecoveryTimer = setInterval(runDurableRecoverySweep, 30_000);
+      if (typeof durableRecoveryTimer.unref === 'function') durableRecoveryTimer.unref();
       // v4.13 Gap 4 — resume sweep: act on the resume_pending marks
       // crash recovery left. Gated on a REAL runner — re-driving into
       // the placeholder would fake-complete resumed tasks. Best-effort.
@@ -1126,9 +1131,11 @@ export function installDaemonAgentBuilder(
   try {
     const dbHandle = openDaemonDb(handle.dbPath!);
     const taskStore = createTaskStore({ db: dbHandle });
+    const jobEngine = createJobEngine({ db: dbHandle });
     const realRunner = createRealAgentRunner({
       db:               dbHandle,
       runStore:         handle.runStore,
+      jobEngine,
       resourceRegistry: handle.resourceRegistry ?? undefined,
       log:              logFn,
       agentBuilder,
@@ -1137,6 +1144,18 @@ export function installDaemonAgentBuilder(
       taskStore,
     });
     handle.dispatcher.installRunner(realRunner);
+    if (handle.triggerBus && handle.instanceId) {
+      const sweep = sweepDurableJobRecovery({
+        jobEngine,
+        triggerBus: handle.triggerBus,
+        instanceId: handle.instanceId,
+        producer: 'daemon-recovery',
+      });
+      if (sweep.expired > 0 || sweep.enqueued > 0) {
+        logFn('warn', `[job-recovery] expired=${sweep.expired} retried=${sweep.retried} ` +
+          `needs_user=${sweep.needsUser} dead_letter=${sweep.deadLettered} enqueued=${sweep.enqueued}`);
+      }
+    }
     // v4.13 Gap 4 — with a real runner installed, act on any pending
     // resume marks (the foundation booted with the placeholder, which
     // must never re-drive). Best-effort.

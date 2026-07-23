@@ -28,6 +28,8 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
 import type { RunStore } from '../../../core/v4/daemon/runStore';
+import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
+import { runWithJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
 import { ToolRegistry } from '../../../core/v4/toolRegistry';
 import type { ToolContext, ToolHandler } from '../../../core/v4/toolRegistry';
 import { MockProviderAdapter } from '../../../core/v4/__mocks__/mockProvider';
@@ -131,6 +133,39 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
     expect(result.metrics.durationMs).toBeGreaterThanOrEqual(0);
     expect(result.childRunId).toMatch(/^\d+$/);
     expect(result.childSessionId).toMatch(/^[a-f0-9-]{36}$/);
+  });
+
+  it('creates a durable child Job and Attempt linked to the parent/root identity', async () => {
+    const jobEngine = createJobEngine({ db });
+    const parent = jobEngine.submitJob({
+      entryPoint: 'test', source: 'test', sessionId: 'parent_session',
+      instanceId: INST, idempotencyNamespace: 'parent', idempotencyKey: 'parent_1',
+      requestFingerprint: 'parent_fingerprint', goal: 'parent goal',
+    });
+    const lease = jobEngine.claimAttempt({ attemptId: parent.attemptId, ownerId: INST, ttlMs: 30_000 });
+    const started = jobEngine.transitionAttempt({
+      attemptId: parent.attemptId, expectedStateVersion: lease.stateVersion!,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, to: 'running',
+      eventIdempotencyKey: 'parent-attempt-running', producer: 'test',
+    });
+    jobEngine.transitionJob({
+      jobId: parent.jobId, attemptId: parent.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!,
+      expectedStateVersion: 0, to: 'running',
+      eventIdempotencyKey: 'parent-job-running', producer: 'test',
+    });
+
+    const result = await runWithJobExecutionContext({
+      engine: jobEngine, jobId: parent.jobId, attemptId: parent.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, producer: 'test',
+    }, () => spawnSubAgent({ goal: 'durable child' }, { ...makeDeps(), jobEngine }, {}));
+
+    const children = jobEngine.listJobs({ rootJobId: parent.jobId }).filter((job) => job.id !== parent.jobId);
+    expect(started.applied).toBe(true);
+    expect(result.status).toBe('completed');
+    expect(children).toHaveLength(1);
+    expect(children[0]).toMatchObject({ parentJobId: parent.jobId, rootJobId: parent.jobId, status: 'completed' });
+    expect(jobEngine.listAttempts(children[0]!.id)[0]).toMatchObject({ status: 'succeeded' });
   });
 
   // ──────────────────────────────────────────────────────────────────────

@@ -5,43 +5,12 @@
  * Aiden — local-first agent.
  */
 /**
- * v4.10 Slice 10.5 — Bug D regression layer (PTY harness).
+ * Real-terminal regression for single ownership of the fixed composer.
+ * A partial slash command must remain inside the boxed Display-owned surface;
+ * Inquirer's prompt, helper, ghost, and dropdown output must stay suppressed.
  *
- * Two prior attempts at Bug D (cursor mis-positioning past ghost text
- * in the input prompt) shipped INERT:
- *   - v4.9.2 Slice 2 (commit 0d0668f1): inline cursorBackward escape.
- *     @inquirer/core's screen-manager.js absolute cursorTo() overrode
- *     it. Tests against the rendered string couldn't see the
- *     terminal-level effect.
- *   - v4.9.6: same shape, reframed with save/restore. Same outcome.
- *
- * Common cause of both inert ships: NO real-PTY regression layer.
- * Unit tests that inspect the returned line string can't observe what
- * the terminal actually paints because @inquirer/core mutates output
- * AFTER the prompt function returns. v4.9.1 mock-blindness pattern,
- * mirror class.
- *
- * This test fixes that gap. The Slice 10.4 node-pty harness
- * (tests/v4/harness/aidenTerm.ts) spawns a real Aiden under a real
- * pseudo-terminal and lets us observe the actual byte stream. We type
- * a partial slash command and assert two things about the rendered
- * frame:
- *
- *   1. The line containing `▲ /d` does NOT contain the ghost
- *      suggestion text (e.g. `aemon` — the tail of `/daemon`).
- *   2. The next line after the prompt line DOES contain that ghost
- *      suggestion, on its own line, dimmed.
- *
- * Path A fix (this slice): move the ghost from inline assembly into
- * the bottomContent tuple slot. Inquirer's screen-manager paints
- * bottomContent below the input line and walks the cursor back up
- * to the input line. With no embedded ghost, the cursor naturally
- * lands right after the typed value — correct by construction, no
- * library-internal coupling.
- *
- * CI cost: ~5s per run (PTY boot + Aiden init + Ctrl+C teardown).
- * Single test in this file — keep PTY tests serial; do NOT use
- * `it.concurrent`.
+ * The source-contract test at the end separately protects ghost placement on
+ * the compatibility path where Inquirer still renders the prompt.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { promises as fs } from 'node:fs';
@@ -49,6 +18,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { spawnAidenTerm, type AidenTerm } from '../harness/aidenTerm';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 // The PTY regression layer below is a genuinely-interactive test: it
 // spawns a real Aiden under a pseudo-terminal and waits for the
@@ -75,7 +45,7 @@ afterEach(async () => {
 });
 
 describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (PTY harness, Slice 10.5)', () => {
-  it('typing a partial slash command renders ghost in footer, NOT inline', async () => {
+  it('typing a partial slash command stays exclusively in the fixed composer row', async () => {
     const cwd       = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-bugd-cwd-'));
     const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-bugd-home-'));
     cleanupDirs.push(cwd, aidenHome);
@@ -105,43 +75,36 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
 
     await term.waitForPrompt({ timeoutMs: 30_000 });
 
-    // Type `/d` (no Enter). Aiden's slash-command dropdown picks up
-    // matching commands; the ghost suggestion is the tail of the
-    // top match (e.g. `aemon` for `/daemon`). The dropdown also
-    // renders below — that's expected and fine.
+    // Type `/d` without submitting. In fixed-bottom-region mode the
+    // Display-owned composer is the only prompt renderer; Inquirer's
+    // ghost, helper, and dropdown footer must not create another row.
     term.type('/d');
 
-    // Wait until the rendered frame stabilises with a recognisable
-    // ghost suggestion or dropdown row. We look for any match of
-    // `aemon` (from `/daemon`) OR `octor` (from `/doctor`) somewhere
-    // in the stream — either confirms the ghost / dropdown surfaced.
     await term.waitFor(
-      (plain) => /aemon|octor/.test(plain),
-      { timeoutMs: 10_000, label: 'ghost-or-dropdown render' },
+      (plain) => plain.includes('/d'),
+      { timeoutMs: 10_000, label: 'fixed composer draft' },
     );
 
     // ── Assertions ────────────────────────────────────────────────
-    const plain = term.plain();
-    const lines = plain.split('\n');
+    const screen = new TerminalScreen(120, 30);
+    screen.write(term.raw());
+    const lines = screen.lines();
 
-    // Find the prompt line — the one containing `▲ /d`.
-    const promptLineIdx = lines.findIndex((l) => l.includes('▲') && l.includes('/d'));
-    expect(promptLineIdx).toBeGreaterThanOrEqual(0);
-    const promptLine = lines[promptLineIdx];
+    const composerTop = lines.at(-4) ?? '';
+    const composerLine = lines.at(-3) ?? '';
+    const composerBottom = lines.at(-2) ?? '';
+    const statusLine = lines.at(-1) ?? '';
+    expect(composerTop).toContain('▲ You');
+    expect(composerLine).toContain('/d');
+    expect(composerBottom).toMatch(/^╰─/);
+    expect(statusLine).toContain('groq');
+    expect(statusLine).toContain('◉ context');
 
-    // ASSERTION 1: prompt line must NOT contain ghost-suggestion text
-    // inline. The ghost for `/d` should be the tail of the top
-    // matching slash command — its presence on the prompt line
-    // proves the pre-Slice-10.5 inline assembly is still in effect.
-    expect(promptLine).not.toContain('aemon');
-
-    // ASSERTION 2: the ghost suggestion (or dropdown rows including
-    // the full command name) MUST appear on a separate line below
-    // the prompt line. Scan all lines AFTER the prompt for the
-    // suggestion fragment.
-    const linesAfter = lines.slice(promptLineIdx + 1);
-    const haveGhostBelow = linesAfter.some((l) => /aemon|octor/.test(l));
-    expect(haveGhostBelow).toBe(true);
+    const rowsAboveFooter = lines.slice(0, -4);
+    expect(rowsAboveFooter.some((line) => line.trim() === '/d')).toBe(false);
+    expect(rowsAboveFooter.some((line) => line.includes('Type your message'))).toBe(false);
+    expect(rowsAboveFooter.some((line) => /aemon|octor/.test(line))).toBe(false);
+    expect(rowsAboveFooter.some((line) => line.trimStart().startsWith('▲'))).toBe(false);
 
     // Clean exit via Ctrl+C — same rationale as the Slice 10.4 smoke.
     term.ctrl('c');

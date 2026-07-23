@@ -44,6 +44,10 @@ import type {
 } from '../../../../providers/v4/types';
 import type { Logger } from '../../logger/logger';
 import { noopLogger } from '../../logger/factory';
+import { randomUUID } from 'node:crypto';
+import type { JobEngine } from '../../daemon/jobEngine';
+import { executeDurableJob } from '../../daemon/jobLifecycle';
+import { ApprovalEngine } from '../../../../moat/approvalEngine';
 
 /** MCP wire shape for a tool. Same JSON-Schema as ToolSchema.inputSchema. */
 export interface McpTool {
@@ -150,9 +154,17 @@ export function buildToolCallHandler(
   context: ToolContext,
   env: ToolBridgeEnv,
   logger: Logger = noopLogger(),
+  jobAuthority?: { engine: JobEngine; instanceId: string },
 ): (name: string, args: Record<string, unknown>) => Promise<McpToolCallResult> {
   const exposed = new Set(exposedToolNames(registry, env));
-  const execute = registry.buildExecutor(context);
+  // Direct MCP calls have no interactive approval channel. Preserve an
+  // explicitly supplied authority, but otherwise install the existing manual
+  // engine without a prompter so mutating tools fail closed after durable Job
+  // admission. Exposure is capability discovery, not execution approval.
+  const executionContext: ToolContext = context.approvalEngine
+    ? context
+    : { ...context, approvalEngine: new ApprovalEngine('manual') };
+  const execute = registry.buildExecutor(executionContext);
 
   return async (name, args) => {
     if (!exposed.has(name)) {
@@ -175,11 +187,34 @@ export function buildToolCallHandler(
       };
     }
 
-    const id = `mcp-${name}-${Date.now().toString(36)}`;
+    const id = `mcp-${name}-${randomUUID()}`;
     const call: ToolCallRequest = { id, name, arguments: args ?? {} };
     let result: ToolCallResult;
     try {
-      result = await execute(call);
+      const executeCall = () => execute(call);
+      result = jobAuthority
+        ? (await executeDurableJob({
+            engine: jobAuthority.engine,
+            ownerId: jobAuthority.instanceId,
+            admission: {
+              entryPoint: 'mcp',
+              source: 'mcp-stdio',
+              sessionId: `mcp:${jobAuthority.instanceId}`,
+              instanceId: jobAuthority.instanceId,
+              idempotencyNamespace: `mcp:${jobAuthority.instanceId}`,
+              idempotencyKey: id,
+              goal: `Execute ${name}`,
+              title: name,
+            },
+            execute: (handle) => execute(call, handle.signal),
+            finalize: (value) => ({
+              status: value.error ? 'failed' : 'completed',
+              outcome: value.error ? 'failed' : 'completed',
+              finishReason: value.error ? 'tool_error' : 'stop',
+              evidence: { toolCallId: id, toolName: name, succeeded: !value.error },
+            }),
+          })).value
+        : await executeCall();
     } catch (err) {
       // The executor itself swallows handler exceptions, but a bug in
       // the executor (or a moat layer hard-throw) would land here.
