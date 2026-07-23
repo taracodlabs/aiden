@@ -14,6 +14,8 @@ import {
 import type { JobEngine } from '../../../core/v4/daemon/jobEngine';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import { ToolRegistry } from '../../../core/v4/toolRegistry';
+import type { ActionAuthority, NormalizedAction, PolicySnapshotInput } from '../../../core/v4/actionAuthority';
+import { ApprovalEngine } from '../../../moat/approvalEngine';
 
 describe('ToolRegistry durable execution identity', () => {
   it('persists and starts a mutating ToolCall before the handler executes', async () => {
@@ -153,5 +155,103 @@ describe('ToolRegistry durable execution identity', () => {
     expect(handler).not.toHaveBeenCalled();
     expect(result.result).toBeNull();
     expect(result.error).toContain('stale_fence');
+  });
+
+  it('persists approval_required and denies safely when no interactive channel exists', async () => {
+    const handler = vi.fn(async () => ({ ok: true }));
+    const engine = {
+      prepareToolCall: vi.fn(() => ({ applied: true })),
+      startToolCall: vi.fn(),
+      completeToolCall: vi.fn(() => ({ applied: true })),
+    } as unknown as JobEngine;
+    const actionAuthority = {
+      request: vi.fn(() => ({
+        approvalId: 'approval_exact', policySnapshotId: 'policy_exact',
+      })),
+      markDisplayed: vi.fn(),
+    } as unknown as ActionAuthority;
+    const registry = new ToolRegistry();
+    registry.register({
+      schema: { name: 'unattended_write', description: 'writes', inputSchema: { type: 'object' } },
+      category: 'write', riskTier: 'caution', mutates: true, toolset: 'misc', execute: handler,
+    });
+    const execute = registry.buildExecutor({
+      cwd: process.cwd(),
+      paths: resolveAidenPaths({ rootOverride: 'C:/tmp/aiden-job-identity' }),
+      actionAuthority,
+      policySnapshot: {
+        trustLevel: 'Observer', autonomyPolicy: 'deny_without_interactive_channel', approvalMode: 'manual',
+        toolMetadataVersion: 'test', sandboxPolicy: {}, networkPolicy: {}, pluginGrants: [],
+        mcpGrants: [], workspaceOverrides: {}, jobOverrides: {},
+      },
+    });
+
+    const result = await runWithJobExecutionContext({
+      engine, jobId: 'job_1', attemptId: 'attempt_1', generation: 1,
+      fenceToken: 'fence_1', producer: 'mcp',
+    }, () => execute({ id: 'tool_unattended', name: 'unattended_write', arguments: {} }));
+
+    expect(actionAuthority.request).toHaveBeenCalledOnce();
+    expect(actionAuthority.markDisplayed).not.toHaveBeenCalled();
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.error).toContain('approval_exact');
+  });
+
+  it('recomputes policy and action identity immediately before execution', async () => {
+    const handler = vi.fn(async () => ({ ok: true }));
+    const engine = {
+      prepareToolCall: vi.fn(() => ({ applied: true })),
+      startToolCall: vi.fn(),
+      completeToolCall: vi.fn(() => ({ applied: true })),
+    } as unknown as JobEngine;
+    const policy: PolicySnapshotInput = {
+      trustLevel: 'Assistant', autonomyPolicy: 'ask_for_mutations', approvalMode: 'manual',
+      toolMetadataVersion: 'test', sandboxPolicy: {}, networkPolicy: {}, pluginGrants: [],
+      mcpGrants: [], workspaceOverrides: {}, jobOverrides: {},
+    };
+    let approvedAction: NormalizedAction | undefined;
+    const actionAuthority = {
+      request: vi.fn((command: { normalized: NormalizedAction }) => {
+        approvedAction = command.normalized;
+        return {
+          approvalId: 'approval_policy',
+          policySnapshotId: command.normalized.policySnapshot.policySnapshotId,
+        };
+      }),
+      markDisplayed: vi.fn(),
+      decide: vi.fn(),
+      authorizeExecution: vi.fn((command: { actionDigest: string; policySnapshotId: string }) => ({
+        authorized: command.actionDigest === approvedAction?.actionDigest
+          && command.policySnapshotId === approvedAction?.policySnapshot.policySnapshotId,
+        reason: 'approved action changed or binding mismatch',
+      })),
+    } as unknown as ActionAuthority;
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async () => {
+        policy.trustLevel = 'Observer';
+        return 'allow';
+      },
+    });
+    const registry = new ToolRegistry();
+    registry.register({
+      schema: { name: 'policy_bound_write', description: 'writes', inputSchema: { type: 'object' } },
+      category: 'write', riskTier: 'caution', mutates: true, toolset: 'misc', execute: handler,
+    });
+    const execute = registry.buildExecutor({
+      cwd: process.cwd(),
+      paths: resolveAidenPaths({ rootOverride: 'C:/tmp/aiden-job-identity' }),
+      actionAuthority,
+      approvalEngine,
+      policySnapshot: policy,
+    });
+
+    const result = await runWithJobExecutionContext({
+      engine, jobId: 'job_1', attemptId: 'attempt_1', generation: 1,
+      fenceToken: 'fence_1', producer: 'test',
+    }, () => execute({ id: 'tool_policy', name: 'policy_bound_write', arguments: { path: 'result.txt' } }));
+
+    expect(actionAuthority.authorizeExecution).toHaveBeenCalledOnce();
+    expect(handler).not.toHaveBeenCalled();
+    expect(result.error).toContain('binding mismatch');
   });
 });

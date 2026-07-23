@@ -58,6 +58,12 @@ function durableToolCallId(context: JobExecutionContext, modelCallId: string): s
     .digest('hex')}`;
 }
 
+/** Resolve the stable persisted ToolCall identity for the active Attempt. */
+export function currentDurableToolCallId(modelCallId: string): string | null {
+  const context = currentJobExecutionContext();
+  return context ? durableToolCallId(context, modelCallId) : null;
+}
+
 export class DurableToolCallConflictError extends Error {
   constructor(readonly operation: string, readonly result: TransitionResult) {
     super(`Durable ToolCall ${operation} rejected: ${result.conflict ?? 'duplicate'}`);
