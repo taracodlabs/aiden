@@ -5,148 +5,159 @@
  * Aiden — local-first agent.
  */
 /**
- * cli/v4/composerLane.ts — v4.14 the single-owner FIXED bottom composer lane.
+ * Single-owner fixed terminal bottom region.
  *
- * THE PROBLEM it solves: today the during-turn composer is only a SUFFIX woven
- * into whichever transient status row is live (the activity indicator, a tool
- * row), and it is cleared the moment token streaming begins — so while a turn
- * streams there is no anchored input line, and typing is blind. There is no
- * single renderer that owns a fixed composer region.
+ * One DEC scroll region keeps transcript, activity, and tool output above two
+ * reserved rows. The second-last row is the composer and the last row is the
+ * provider/model/context/timer status strip. Modal prompts release both rows
+ * together; resize re-anchors and repaints both from their full source values.
  *
- * THE FIX: ONE owner reserves the bottom terminal row via a DEC scroll region
- * (DECSTBM). All turn output — streaming text, tool rows, the indicator —
- * scrolls inside the region ABOVE the lane; the terminal itself guarantees the
- * bottom row is never touched by that output, so the composer can never be
- * overwritten, pushed, or garbled. The lane repaints ONLY on a keystroke /
- * hint change / resize — no per-write flicker. This is the reusable
- * composer-ownership seam the future dashboard's steering bar drives too.
- *
- * Enabled for interactive terminals by default. AIDEN_COMPOSER_LANE=0 is an
- * emergency compatibility escape hatch; non-interactive output never uses the
- * lane.
- *
- * The escape-sequence builders are pure + unit-tested; the owner wires them to
- * a write sink + a terminal-dimensions source and tracks activate/resize state.
+ * AIDEN_COMPOSER_LANE=0 remains the compatibility escape hatch. Non-TTY output
+ * never emits terminal-control sequences.
  */
 
-// ── pure escape-sequence builders (unit-tested; no I/O) ──────────────────────
-
 const ESC = '\x1b';
-/** DECSC / DECRC — save / restore cursor (position, not content). */
 const SAVE = `${ESC}7`;
 const RESTORE = `${ESC}8`;
 
 /**
- * Reserve the bottom `laneRows` rows by confining the scroll region to the rows
- * ABOVE them (DECSTBM `CSI top;bottom r`). Cursor-safe: DECSTBM homes the
- * cursor, so we save before and restore after — output keeps flowing from where
- * it was, now bounded to the region. `rows` = terminal height (1-based).
+ * Confine scrolling to the rows above the fixed region and place the transcript
+ * cursor at the bottom of that scrollable area. The explicit cursor placement
+ * avoids restoring a cursor that was already inside a newly reserved row.
  */
-export function reserveSeq(rows: number, laneRows = 1): string {
+export function reserveSeq(rows: number, laneRows = 2): string {
   const bottom = Math.max(1, rows - Math.max(1, laneRows));
-  return `${SAVE}${ESC}[1;${bottom}r${RESTORE}`;
+  return `${ESC}[1;${bottom}r${ESC}[${bottom};1H`;
 }
 
-/**
- * Paint `text` on the reserved bottom row, cursor-safe: save → jump to the
- * bottom row col 1 → clear line → write → restore. The saved/restored cursor is
- * the output cursor inside the region, so painting the lane never disturbs the
- * flowing output above it. `text` must already be width-fit (no wrap).
- */
-export function paintSeq(rows: number, text: string): string {
-  return `${SAVE}${ESC}[${rows};1H${ESC}[2K${text}${RESTORE}`;
+/** Paint one fixed row without disturbing the transcript cursor. */
+export function paintSeq(rows: number, text: string, offsetFromBottom = 0): string {
+  const row = Math.max(1, rows - Math.max(0, offsetFromBottom));
+  return `${SAVE}${ESC}[${row};1H${ESC}[2K${text}${RESTORE}`;
 }
 
-/**
- * Tear down: restore full-screen scrolling (`CSI r` with no params) and clear
- * the lane row so nothing is left pinned once the turn ends.
- */
-export function teardownSeq(rows: number): string {
-  return `${ESC}[r${SAVE}${ESC}[${rows};1H${ESC}[2K${RESTORE}`;
+/** Restore full-screen scrolling and clear every row owned by the region. */
+export function teardownSeq(rows: number, laneRows = 2): string {
+  let clear = '';
+  for (let offset = Math.max(1, laneRows) - 1; offset >= 0; offset -= 1) {
+    clear += `${ESC}[${Math.max(1, rows - offset)};1H${ESC}[2K`;
+  }
+  return `${ESC}[r${SAVE}${clear}${RESTORE}`;
 }
 
-/** Tail-fit `text` to `cols` columns (visible width), ellipsis at the FRONT so
- *  the most-recent keystrokes (the cursor end) stay visible. ANSI-free input. */
+/** Tail-fit composer text so the cursor end remains visible. */
 export function fitLane(text: string, cols: number): string {
   const width = Math.max(4, cols);
   if (text.length <= width) return text;
   return '…' + text.slice(-(width - 1));
 }
 
-// ── the owner ────────────────────────────────────────────────────────────────
+type StatusSource = string | (() => string);
+
+/** ANSI-aware front truncation. Status formatters normally width-tier their
+ * output; this is the final no-wrap guard for custom/test status strings. */
+function fitStatus(text: string, cols: number): string {
+  const width = Math.max(4, cols);
+  let visible = 0;
+  let out = '';
+  for (let i = 0; i < text.length && visible < width;) {
+    if (text[i] === ESC && text[i + 1] === '[') {
+      const match = /^\x1b\[[0-9;]*[A-Za-z]/u.exec(text.slice(i));
+      if (match) {
+        out += match[0];
+        i += match[0].length;
+        continue;
+      }
+    }
+    out += text[i];
+    visible += 1;
+    i += 1;
+  }
+  return out;
+}
 
 export interface LaneSink {
   write: (s: string) => void;
-  /** Terminal height in rows; may change on resize. */
   rows: () => number;
-  /** Terminal width in columns. */
   cols: () => number;
-  /** Subscribe to terminal resize; returns an unsubscribe fn. */
   onResize: (fn: () => void) => () => void;
 }
 
-/**
- * Owns the fixed bottom composer lane for the duration of a turn. Idempotent
- * activate/deactivate; repaints on demand and re-anchors on resize. Holds the
- * last painted text so a resize can restore it without the caller re-supplying.
- */
-export class ComposerLane {
+export class BottomRegion {
   private active = false;
-  private sourceText = '';
-  private lastText = '';
+  private composerSource = '';
+  private statusSource: StatusSource = '';
+  private lastComposer = '';
+  private lastStatus = '';
   private unsubResize: (() => void) | null = null;
 
   constructor(private readonly sink: LaneSink) {}
 
-  isActive(): boolean { return this.active; }
+  isActive(): boolean {
+    return this.active;
+  }
 
-  /** Reserve the lane and paint `text`. Idempotent — a second activate just
-   *  repaints. Subscribes to resize so the lane re-anchors cleanly. */
-  activate(text: string): void {
-    const rows = this.sink.rows();
+  /** Reserve and paint both rows. Repeated activation is an idempotent update. */
+  activate(composer: string, status: StatusSource = this.statusSource): void {
     if (!this.active) {
-      this.sink.write(reserveSeq(rows));
+      this.sink.write(reserveSeq(this.sink.rows()));
       this.unsubResize = this.sink.onResize(() => this.reanchor());
       this.active = true;
     }
-    this.paint(text);
+    this.composerSource = composer;
+    this.statusSource = status;
+    this.paintAll();
   }
 
-  /** Repaint the lane with new text (keystroke / hint change). No-op when the
-   *  text is unchanged, so a redundant paint never flickers. */
+  /** Backward-compatible composer-row update. */
   paint(text: string): void {
     if (!this.active) return;
-    this.sourceText = text;
+    this.composerSource = text;
     const fitted = fitLane(text, this.sink.cols());
-    if (fitted === this.lastText) return;
-    this.lastText = fitted;
-    this.sink.write(paintSeq(this.sink.rows(), fitted));
+    if (fitted === this.lastComposer) return;
+    this.lastComposer = fitted;
+    this.sink.write(paintSeq(this.sink.rows(), fitted, 1));
   }
 
-  /** Resize: re-reserve the region for the new height and repaint in place. */
+  paintStatus(status: StatusSource): void {
+    if (!this.active) return;
+    this.statusSource = status;
+    const raw = typeof status === 'function' ? status() : status;
+    const fitted = fitStatus(raw, this.sink.cols());
+    if (fitted === this.lastStatus) return;
+    this.lastStatus = fitted;
+    this.sink.write(paintSeq(this.sink.rows(), fitted, 0));
+  }
+
+  private paintAll(): void {
+    this.paint(this.composerSource);
+    this.paintStatus(this.statusSource);
+  }
+
   private reanchor(): void {
     if (!this.active) return;
-    const rows = this.sink.rows();
-    this.sink.write(reserveSeq(rows));
-    const text = this.sourceText;
-    this.lastText = '';        // force the repaint (dims changed)
-    this.paint(text);
+    this.sink.write(reserveSeq(this.sink.rows()));
+    this.lastComposer = '';
+    this.lastStatus = '';
+    this.paintAll();
   }
 
-  /** Restore full-screen scrolling + clear the lane. Idempotent. */
+  /** Release and clear both rows exactly once. Source values remain with the
+   * display owner so a balanced modal resume can repaint them. */
   deactivate(): void {
     if (!this.active) return;
     this.sink.write(teardownSeq(this.sink.rows()));
     this.unsubResize?.();
     this.unsubResize = null;
     this.active = false;
-    this.sourceText = '';
-    this.lastText = '';
+    this.lastComposer = '';
+    this.lastStatus = '';
   }
 }
 
-/** True unless the fixed-lane renderer is explicitly disabled. Display also
- * requires a TTY before emitting terminal control sequences. */
+/** Existing importer compatibility; the implementation now owns both rows. */
+export { BottomRegion as ComposerLane };
+
 export function composerLaneEnabled(): boolean {
   return process.env.AIDEN_COMPOSER_LANE !== '0';
 }

@@ -49,6 +49,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { spawnAidenTerm, type AidenTerm } from '../harness/aidenTerm';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 // The PTY regression layer below is a genuinely-interactive test: it
 // spawns a real Aiden under a pseudo-terminal and waits for the
@@ -75,7 +76,7 @@ afterEach(async () => {
 });
 
 describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (PTY harness, Slice 10.5)', () => {
-  it('typing a partial slash command renders ghost in footer, NOT inline', async () => {
+  it('typing a partial slash command renders ghost on a separate row, not inline', async () => {
     const cwd       = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-bugd-cwd-'));
     const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-bugd-home-'));
     cleanupDirs.push(cwd, aidenHome);
@@ -121,8 +122,9 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
     );
 
     // ── Assertions ────────────────────────────────────────────────
-    const plain = term.plain();
-    const lines = plain.split('\n');
+    const screen = new TerminalScreen(120, 30);
+    screen.write(term.raw());
+    const lines = screen.lines();
 
     // Find the prompt line — the one containing `▲ /d`.
     const promptLineIdx = lines.findIndex((l) => l.includes('▲') && l.includes('/d'));
@@ -135,13 +137,11 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
     // proves the pre-Slice-10.5 inline assembly is still in effect.
     expect(promptLine).not.toContain('aemon');
 
-    // ASSERTION 2: the ghost suggestion (or dropdown rows including
-    // the full command name) MUST appear on a separate line below
-    // the prompt line. Scan all lines AFTER the prompt for the
-    // suggestion fragment.
-    const linesAfter = lines.slice(promptLineIdx + 1);
-    const haveGhostBelow = linesAfter.some((l) => /aemon|octor/.test(l));
-    expect(haveGhostBelow).toBe(true);
+    // ASSERTION 2: the ghost suggestion (or dropdown row) remains on a
+    // separate physical row. The fixed composer is anchored below transient
+    // dropdown content, so rendered-screen position is authoritative.
+    const nonPromptLines = lines.filter((_line, index) => index !== promptLineIdx);
+    expect(nonPromptLines.some((line) => /aemon|octor/.test(line))).toBe(true);
 
     // Clean exit via Ctrl+C — same rationale as the Slice 10.4 smoke.
     term.ctrl('c');

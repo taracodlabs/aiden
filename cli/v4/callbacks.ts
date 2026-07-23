@@ -321,8 +321,15 @@ export class CliCallbacks {
   async withModalActivity<T>(run: () => Promise<T>, options?: ModalActivityOptions<T>): Promise<T> {
     this.display.pauseComposerSurface();
     try {
-      return await this.activities.runModal(run, options);
+      return await this.activities.runModal(run, {
+        ...options,
+        beforeActivityResume: () => {
+          this.display.resumeComposerSurface();
+          options?.beforeActivityResume?.();
+        },
+      });
     } finally {
+      // Idempotent fallback for a defensive failure before runModal's finally.
       this.display.resumeComposerSurface();
     }
   }

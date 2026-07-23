@@ -72,6 +72,11 @@ export interface AidenPromptConfig {
   /** v4.14 — persistent plain-language idle hint shown in the footer when no
    *  ghost/dropdown is active (e.g. "Type your message · /help · /mode"). */
   hint?: string;
+  /** Route the main prompt through Display's fixed two-row terminal region.
+   * Dropdown/ghost content remains transient above that region. */
+  fixedComposer?: {
+    update: (value: string, hint: string) => void;
+  };
 }
 
 const DEFAULT_DROPDOWN_LIMIT = 8;
@@ -423,5 +428,9 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
 
   const footer = footerParts.length > 0 ? footerParts.join('\n') : undefined;
 
+  if (config.fixedComposer) {
+    if (status === 'idle') config.fixedComposer.update(value, config.hint ?? '');
+    return footer ?? '';
+  }
   return footer ? [line, footer] : line;
 });

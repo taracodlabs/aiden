@@ -822,6 +822,7 @@ export class ChatSession implements ChatSessionLike {
     this.opts.agent.setActiveModel(providerId, modelId);
     this.currentProviderId = providerId;
     this.currentModelId = modelId;
+    if (this.usesFixedBottomRegion()) this.renderStatusLine();
   }
 
   /** Skill slash command activation hook (Phase 14c). */
@@ -1007,6 +1008,11 @@ export class ChatSession implements ChatSessionLike {
       process.on('exit', exitHandler);
     }
 
+    // The interactive terminal owns a persistent two-row bottom region before
+    // the first composer mounts. Compatibility/non-TTY paths retain the
+    // historical post-turn status output.
+    if (this.usesFixedBottomRegion()) this.renderStatusLine();
+
     // 4. Main loop.
     // Tier-3.1.1: feed the new aidenPrompt with live slash commands +
     // recent history so ghost-text + dropdown work out of the box.
@@ -1017,6 +1023,7 @@ export class ChatSession implements ChatSessionLike {
       createDefaultPromptApi({
         commands:     this.opts.commandRegistry.list(),
         loadHistory:  () => loadRecent(500),
+        display:      this.opts.display,
       });
     const max = this.opts.maxIterations ?? Number.POSITIVE_INFINITY;
     let iter = 0;
@@ -1974,6 +1981,7 @@ export class ChatSession implements ChatSessionLike {
     // Phase 22 Task 4: status bar reflects the live phase. Set on
     // entry, cleared in both success and error paths below.
     this.setStatusState({ kind: 'generating', sinceMs: Date.now() });
+    if (this.usesFixedBottomRegion()) this.renderStatusLine();
     // v4.8.1 Slice 2 hotfix #3 — removed the prior Tier-3.1a dim
     // rule between the user input echo and the agent reply. The dim
     // colour read as a near-blank row in live smoke, and stacked
@@ -3753,8 +3761,7 @@ export class ChatSession implements ChatSessionLike {
     // with brand prefix (`Aiden v<X.Y>`), session uptime (sessionMs
     // re-enabled), and spelled-out `last <elapsed>` for the per-turn
     // timer. Mid (≥100) and narrow (<100) tiers unchanged.
-    display.write(
-      '\n' + display.statusFooter({
+    const statusArgs = {
         provider,
         model,
         ctxUsed: usedTokens,
@@ -3763,8 +3770,29 @@ export class ChatSession implements ChatSessionLike {
         turnCount: this.turnCount,
         sessionMs: Date.now() - this.startedAt,
         state:     this.lastTurnOutcome,
-      }) + '\n\n',
-    );
+    } as const;
+
+    if (this.usesFixedBottomRegion()) {
+      display.setStatusFooter(() => display.statusFooter({
+        ...statusArgs,
+        elapsedMs: this.statusState.kind === 'generating'
+          ? Date.now() - this.statusState.sinceMs
+          : this.lastTurnElapsedMs,
+        sessionMs: Date.now() - this.startedAt,
+      }));
+      return;
+    }
+
+    display.write('\n' + display.statusFooter(statusArgs) + '\n\n');
+  }
+
+  /** Test and injected integrations may provide a partial Display surface. */
+  private usesFixedBottomRegion(): boolean {
+    const candidate = this.opts.display as Display & {
+      fixedBottomRegionEnabled?: () => boolean;
+    };
+    return typeof candidate.fixedBottomRegionEnabled === 'function'
+      && candidate.fixedBottomRegionEnabled();
   }
 
   // ── Input ──────────────────────────────────────────────────────────
@@ -4109,6 +4137,7 @@ export function formatDuration(ms: number): string {
 interface DefaultPromptOpts {
   commands?:    SlashCommandLite[];
   loadHistory?: () => Promise<string[]>;
+  display?:     Display;
 }
 
 function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
@@ -4164,6 +4193,8 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
           }
           return value ?? '';
         }
+        const fixedBottomRegion = typeof opts.display?.fixedBottomRegionEnabled === 'function'
+          && opts.display.fixedBottomRegionEnabled();
         const value = await aidenPrompt({
           message:  prompt,
           commands: opts.commands ?? [],
@@ -4173,7 +4204,20 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
           // "▲" line), so idle shows a neat bar with a hint, not a bare glyph.
           // Skipped on the "… " multi-line continuation.
           hint:     prompt.includes('▲') ? 'Type your message · /help · /mode' : undefined,
+          fixedComposer: fixedBottomRegion
+            ? {
+                update: (draft, hint) => {
+                  opts.display?.setIdleComposer(draft, hint);
+                },
+              }
+            : undefined,
         });
+        if (fixedBottomRegion && prompt.includes('▲')) {
+          opts.display.submitIdleComposer(
+            value ?? '',
+            'Type your message · /help · /mode',
+          );
+        }
         const trimmed = (value ?? '').trim();
         // Append to disk history. Awaited so the write flushes before
         // the agent loop progresses — `/quit` exits the process and

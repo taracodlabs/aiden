@@ -5,9 +5,9 @@
  * Aiden — local-first agent.
  */
 /**
- * v4.14 — the single-owner FIXED bottom composer lane (scroll-region). Proves
+ * The single-owner fixed two-row bottom region. Proves
  * the pure escape-sequence builders and the owner's lifecycle: reserving the
- * region protects the bottom row, painting is cursor-safe + de-duplicated (no
+ * region protects composer and status rows, painting is cursor-safe + de-duplicated (no
  * flicker), resize re-anchors, teardown restores full-screen scrolling. The
  * live cursor behaviour on a real terminal is the Shiva smoke.
  */
@@ -20,18 +20,20 @@ import {
 const ESC = '\x1b';
 
 describe('escape-sequence builders (pure)', () => {
-  it('reserveSeq confines the scroll region to the rows ABOVE the lane, cursor-safe', () => {
-    // 24-row terminal, 1-row lane → region rows 1..23; save/restore around it.
-    expect(reserveSeq(24)).toBe(`${ESC}7${ESC}[1;23r${ESC}8`);
+  it('reserveSeq confines scrolling above the two-row region', () => {
+    expect(reserveSeq(24)).toBe(`${ESC}[1;22r${ESC}[22;1H`);
   });
   it('reserveSeq clamps a tiny terminal to a valid region', () => {
-    expect(reserveSeq(1)).toBe(`${ESC}7${ESC}[1;1r${ESC}8`);  // never a 0/negative bottom
+    expect(reserveSeq(1)).toBe(`${ESC}[1;1r${ESC}[1;1H`);
   });
-  it('paintSeq jumps to the bottom row, clears it, writes, and restores the cursor', () => {
+  it('paintSeq targets status and composer rows independently', () => {
     expect(paintSeq(24, 'Enter → steer')).toBe(`${ESC}7${ESC}[24;1H${ESC}[2KEnter → steer${ESC}8`);
+    expect(paintSeq(24, 'Enter → steer', 1)).toBe(`${ESC}7${ESC}[23;1H${ESC}[2KEnter → steer${ESC}8`);
   });
-  it('teardownSeq restores full-screen scrolling and clears the lane row', () => {
-    expect(teardownSeq(24)).toBe(`${ESC}[r${ESC}7${ESC}[24;1H${ESC}[2K${ESC}8`);
+  it('teardownSeq restores full-screen scrolling and clears both rows', () => {
+    expect(teardownSeq(24)).toBe(
+      `${ESC}[r${ESC}7${ESC}[23;1H${ESC}[2K${ESC}[24;1H${ESC}[2K${ESC}8`,
+    );
   });
   it('fitLane tail-fits with a FRONT ellipsis (keeps the cursor end visible)', () => {
     expect(fitLane('short', 80)).toBe('short');
@@ -65,16 +67,17 @@ function mockSink(rows = 24, cols = 80) {
 }
 
 describe('ComposerLane — lifecycle', () => {
-  it('activate reserves the region THEN paints the composer on the bottom row', () => {
+  it('activate reserves the region and paints composer above status', () => {
     const s = mockSink(24);
     const lane = new ComposerLane(s);
-    lane.activate('Enter → steer · /queue · Ctrl+C stop');
+    lane.activate('Enter → steer · /queue · Ctrl+C stop', 'provider · model · ctx · 1s');
     expect(lane.isActive()).toBe(true);
     const out = s.text();
-    expect(out).toContain(`${ESC}[1;23r`);                 // region reserved (protects row 24)
-    expect(out).toContain(`${ESC}[24;1H${ESC}[2KEnter → steer`); // composer painted on the lane
+    expect(out).toContain(`${ESC}[1;22r`);
+    expect(out).toContain(`${ESC}[23;1H${ESC}[2KEnter → steer`);
+    expect(out).toContain(`${ESC}[24;1H${ESC}[2Kprovider`);
     // reserve happens before the first paint
-    expect(out.indexOf('[1;23r')).toBeLessThan(out.indexOf('[24;1H'));
+    expect(out.indexOf('[1;22r')).toBeLessThan(out.indexOf('[23;1H'));
   });
 
   it('paint with the SAME text is a no-op — no flicker on redundant repaints', () => {
@@ -102,7 +105,7 @@ describe('ComposerLane — lifecycle', () => {
     lane.activate('Enter → steer');
     lane.paint('steer ▸ x');
     // Every paint is bracketed by save/restore → the output cursor is never lost.
-    const paints = s.text().split(`${ESC}7`).filter((p) => p.includes(';1H'));
+    const paints = s.text().split(`${ESC}7`).slice(1).filter((p) => p.includes(';1H'));
     for (const p of paints) expect(p).toContain(ESC + '8');
   });
 
@@ -112,8 +115,8 @@ describe('ComposerLane — lifecycle', () => {
     lane.activate('Enter → steer');
     (s as any).fireResize(30);   // terminal grew to 30 rows
     const out = s.text();
-    expect(out).toContain(`${ESC}[1;29r`);                 // region re-reserved for 30 rows
-    expect(out).toContain(`${ESC}[30;1H`);                 // composer re-anchored to new bottom
+    expect(out).toContain(`${ESC}[1;28r`);
+    expect(out).toContain(`${ESC}[29;1H`);
   });
 
   it('restores the full draft after a narrow-to-wide resize', () => {
@@ -140,9 +143,9 @@ describe('ComposerLane — lifecycle', () => {
     const s = mockSink();
     const lane = new ComposerLane(s);
     lane.activate('a');
-    const reserves1 = s.text().split('[1;23r').length - 1;
+    const reserves1 = s.text().split('[1;22r').length - 1;
     lane.activate('b');
-    const reserves2 = s.text().split('[1;23r').length - 1;
+    const reserves2 = s.text().split('[1;22r').length - 1;
     expect(reserves1).toBe(1);
     expect(reserves2).toBe(1);          // still one reserve
     expect(s.text()).toContain('b');    // repainted

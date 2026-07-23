@@ -47,6 +47,10 @@ function pressDownThenEnter(terminal: RunningPty, count: number): void {
   next();
 }
 
+function quotePowerShellLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
+}
+
 afterEach(async () => {
   if (child) {
     try { child.kill(); } catch { /* already exited */ }
@@ -93,9 +97,17 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     const rows = 30;
     const screen = new TerminalScreen(columns, rows);
     const frames: Record<string, string> = {};
-    child = pty.spawn(process.execPath, [
-      '-r', path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs'),
-      path.join(repoRoot, 'dist/cli/v4/aidenCLI.js'),
+    const preloadPath = path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs');
+    const cliPath = path.join(repoRoot, 'dist/cli/v4/aidenCLI.js');
+    const powerShellCommand = [
+      '&',
+      quotePowerShellLiteral(process.execPath),
+      '-r',
+      quotePowerShellLiteral(preloadPath),
+      quotePowerShellLiteral(cliPath),
+    ].join(' ');
+    child = pty.spawn('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', powerShellCommand,
     ], {
       cwd, cols: columns, rows,
       env: { ...process.env, AIDEN_HOME: aidenHome, AIDEN_TEST_REPO_ROOT: repoRoot,
@@ -106,8 +118,10 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
 
     let output = '';
     let state = 'boot';
-    let firstBottom = '';
-    let secondBottom = '';
+    let firstComposer = '';
+    let secondComposer = '';
+    let firstStatus = '';
+    let secondStatus = '';
     let providerCallsBeforeExit = 0;
     let queuedRequestContents: Array<string | undefined> = [];
     let finishPoll: ReturnType<typeof setInterval> | null = null;
@@ -127,6 +141,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         output += chunk;
         screen.write(chunk);
         const plain = stripAnsi(output);
+        const rendered = screen.snapshot();
         const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
         const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
 
@@ -140,22 +155,25 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         } else if (
           state === 'tool'
           && /running[\s\S]*Start-Sleep/i.test(plain)
-          && screen.bottomLine().includes('Enter → queue')
+          && screen.lines().at(-2)?.includes('Enter → queue')
+          && screen.bottomLine().includes('custom_openai')
         ) {
           state = 'queue-one';
           frames.toolRunning = screen.snapshot();
           typeLikeKeyboard(child!, 'QUEUE ONE');
         } else if (state === 'queue-one' && ids.length >= 1) {
           state = 'queue-one-reset';
-        } else if (state === 'queue-one-reset' && screen.bottomLine().includes('Enter → queue')) {
-          firstBottom = screen.bottomLine();
+        } else if (state === 'queue-one-reset' && screen.lines().at(-2)?.includes('Enter → queue')) {
+          firstComposer = screen.lines().at(-2) ?? '';
+          firstStatus = screen.bottomLine();
           frames.firstQueue = screen.snapshot();
           state = 'queue-two';
           typeLikeKeyboard(child!, 'QUEUE TWO');
         } else if (state === 'queue-two' && ids.length >= 2) {
           state = 'queue-two-reset';
-        } else if (state === 'queue-two-reset' && screen.bottomLine().includes('Enter → queue')) {
-          secondBottom = screen.bottomLine();
+        } else if (state === 'queue-two-reset' && screen.lines().at(-2)?.includes('Enter → queue')) {
+          secondComposer = screen.lines().at(-2) ?? '';
+          secondStatus = screen.bottomLine();
           frames.secondQueue = screen.snapshot();
           state = 'finishing';
           finishPoll = setInterval(() => {
@@ -174,7 +192,8 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
               typeLikeKeyboard(child!, '/queue');
             }, 250);
           }, 25);
-        } else if (state === 'queue-check' && /queue is empty/i.test(plain)) {
+        } else if (state === 'queue-check' && /queue is empty/i.test(rendered)) {
+          frames.queueEmpty = rendered;
           state = 'exiting';
           typeLikeKeyboard(child!, '/exit');
         }
@@ -184,16 +203,30 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
 
     const plain = stripAnsi(output);
     const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
-    expect(firstBottom).toContain('Enter → queue');
-    expect(secondBottom).toContain('Enter → queue');
-    expect(frames.toolRunning.split('\n').at(-1)).toContain('Enter → queue');
+    expect(firstComposer).toContain('Enter → queue');
+    expect(secondComposer).toContain('Enter → queue');
+    expect(firstStatus).toContain('custom_openai');
+    expect(secondStatus).toContain('custom_openai');
+    expect(firstStatus).toContain('ctx');
+    expect(secondStatus).toContain('ctx');
+    expect(firstStatus).toMatch(/\b(?:\d+ms|\d+s)\b/);
+    expect(secondStatus).toMatch(/\b(?:\d+ms|\d+s)\b/);
+    expect(frames.toolRunning.split('\n').at(-2)).toContain('Enter → queue');
+    expect(frames.toolRunning.split('\n').at(-1)).toContain('custom_openai');
+    expect(
+      frames.toolRunning.split('\n').filter((line) => line.includes('run a slow safe tool')),
+    ).toHaveLength(1);
+    for (const frame of Object.values(frames)) {
+      const lines = frame.split('\n');
+      expect(lines.slice(0, -1).filter((line) => line.includes('custom_openai'))).toHaveLength(0);
+    }
     expect(ids).toHaveLength(2);
     expect(ids[0]).not.toBe(ids[1]);
     const queuedRuns = plain.match(/running queued: QUEUE (?:ONE|TWO)/g) ?? [];
     expect(queuedRuns).toEqual(['running queued: QUEUE ONE', 'running queued: QUEUE TWO']);
     expect(queuedRequestContents).toEqual(['QUEUE ONE', 'QUEUE TWO']);
     expect(providerCallsBeforeExit).toBe(4);
-    expect(plain).toMatch(/queue is empty/i);
+    expect(frames.queueEmpty).toMatch(/queue is empty/i);
 
     const evidenceDir = process.env.AIDEN_ACCEPTANCE_EVIDENCE_DIR;
     if (evidenceDir) {
@@ -499,6 +532,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     });
 
     let output = '';
+    const screen = new TerminalScreen(240, 40);
     let state = 'boot';
     let queueChecks = 0;
     let queueCommandSent = false;
@@ -509,21 +543,23 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
       )), 75_000);
       child!.onData((chunk) => {
         output += chunk;
+        screen.write(chunk);
         const plain = stripAnsi(output);
+        const rendered = screen.snapshot();
         const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
         if (state === 'boot' && readyCount >= 1) {
           state = 'first-select';
           setTimeout(() => typeLikeKeyboard(child!, 'Run consecutive clarification acceptance'), 500);
         }
-        if (state === 'first-select' && plain.includes('Which format?')) {
+        if (state === 'first-select' && rendered.includes('Which format?')) {
           state = 'second-text';
           setTimeout(() => pressDownThenEnter(child!, 1), 500);
         }
-        if (state === 'second-text' && plain.includes('What topic?')) {
+        if (state === 'second-text' && rendered.includes('What topic?')) {
           state = 'clarify-final';
           setTimeout(() => typeLikeKeyboard(child!, 'P2A terminal ownership'), secondPromptDelayMs);
         }
-        if (state === 'clarify-final' && plain.includes('clarifications complete: PDF | P2A terminal ownership')) {
+        if (state === 'clarify-final' && rendered.includes('clarifications complete: PDF | P2A terminal ownership')) {
           state = 'queue-ready';
         }
         if (state === 'queue-ready' && readyCount >= 2) {
@@ -531,7 +567,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           queueCommandSent = true;
           typeLikeKeyboard(child!, '/queue');
         }
-        const emptyQueueCount = plain.match(/queue is empty/gi)?.length ?? 0;
+        const emptyQueueCount = rendered.match(/queue is empty/gi)?.length ?? 0;
         if (state === 'queue-1' && emptyQueueCount >= 1) {
           queueChecks += 1;
           state = 'done';

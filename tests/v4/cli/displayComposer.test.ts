@@ -47,8 +47,8 @@ describe('Display composer — live during-turn paint', () => {
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setComposer('a', 'queue');
-    // Fixed-lane discipline: jump to the final row and erase it in place.
-    expect(chunks.join('')).toMatch(/\x1b\[24;1H\x1b\[2K/);
+    // Fixed-region discipline: composer is the second-last row.
+    expect(chunks.join('')).toMatch(/\x1b\[23;1H\x1b\[2K/);
     expect(stripAnsi(chunks.join(''))).toContain('queue ▸ a');
     ind.stop();
   });
@@ -194,8 +194,8 @@ describe('Display composer — fixed bottom lane (opt-in) reserves + pins the ro
       chunks.length = 0;
       d.setBusyHint('Enter → steer · /queue · Ctrl+C stop');
       const raw = chunks.join('');
-      expect(raw).toContain('\x1b[1;23r');                 // scroll region reserved (row 24 protected)
-      expect(raw).toContain('\x1b[24;1H');                 // composer pinned to the bottom row
+      expect(raw).toContain('\x1b[1;22r');                 // final two rows protected
+      expect(raw).toContain('\x1b[23;1H');                 // composer above status row
       expect(raw).toContain('Enter → steer');              // …with the plain-language hint
       // turn end tears the region back down.
       d.clearComposer();
@@ -217,7 +217,7 @@ describe('Display composer — fixed bottom lane (opt-in) reserves + pins the ro
 
     chunks.length = 0;
     d.resumeComposerSurface();
-    expect(chunks.join('')).toContain('\x1b[1;23r');
+    expect(chunks.join('')).toContain('\x1b[1;22r');
     expect(stripAnsi(chunks.join(''))).toContain('draft survives');
     d.clearComposer();
   });

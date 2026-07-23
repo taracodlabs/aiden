@@ -393,6 +393,14 @@ export class Display {
   // Non-TTY output and the compatibility opt-out use the legacy suffix path.
   // Lazily created on first use.
   private composerLane: ComposerLane | null = null;
+  // The fixed status row is owned by the same controller as the composer.
+  // A factory is retained so resize can select the correct width tier.
+  private statusFooterSource: string | (() => string) = '';
+  // Main-prompt content is routed through the same fixed composer row. It is
+  // distinct from during-turn input so the existing queue buffer remains the
+  // sole owner of busy type-ahead.
+  private idleComposerContent = '';
+  private idleComposerHasDraft = false;
   // Modal prompts need the full terminal surface while they own stdin. This
   // depth pauses only composer painting and retains the exact draft/hint.
   private composerSurfacePauseDepth = 0;
@@ -934,8 +942,9 @@ export class Display {
       ? `${sk.applyColors(glyphs.status.timer, 'success')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')}`
       : '';
     // ctxRatio + ctxPctText are pre-painted (warn + ctxKind respectively).
-    const ctxSegFull = `${ctxRatio} ${bar} ${ctxPctText}`;
-    const ctxSegCompact = `${bar} ${ctxPctText}`;
+    const ctxLabel = sk.applyColors('ctx', 'muted');
+    const ctxSegFull = `${ctxLabel} ${ctxRatio} ${bar} ${ctxPctText}`;
+    const ctxSegCompact = `${ctxLabel} ${bar} ${ctxPctText}`;
 
     // v4.10 Slice 10.3 — full-density-tier extras:
     //   - brand prefix `Aiden v4.X`
@@ -965,8 +974,32 @@ export class Display {
       // turn counter retired; mid tier collapses to 2 separators.
       // v4.10 Slice 10.3: brand + spell-out withheld here (width budget).
       segments = [provModel, ctxSegFull, sessionSeg || elapsed];
-    } else {
+    } else if (cols >= 60) {
       segments = [provModel, ctxSegCompact, sessionSeg || elapsed];
+    } else {
+      // The fixed footer must retain all four essential signals even on a
+      // classic 44-column PowerShell window. Decoration degrades first.
+      const compactContext = `ctx${pct}%`;
+      const compactTimer = sessionSeg || elapsed;
+      const providerModelBudget = Math.max(
+        8,
+        (cols - 4)
+          - visibleLength(compactContext)
+          - visibleLength(compactTimer)
+          - 6,
+      );
+      const fullProviderModel = `${args.provider}:${args.model}`;
+      const abbreviatedProviderModel = `${args.provider.slice(0, 1)}:${args.model}`;
+      const compactProviderModel = visibleLength(fullProviderModel) <= providerModelBudget
+        ? fullProviderModel
+        : args.provider.length <= 8 && visibleLength(abbreviatedProviderModel) <= providerModelBudget
+          ? abbreviatedProviderModel
+          : truncateVisible(fullProviderModel, providerModelBudget);
+      segments = [
+        this.skin.applyColors(compactProviderModel, 'tool'),
+        this.skin.applyColors(compactContext, ctxKind),
+        compactTimer,
+      ];
     }
     return truncateVisible(`  ${segments.join(SEP)}`, Math.max(1, cols - 2));
   }
@@ -1526,6 +1559,7 @@ export class Display {
       lastBody = '';
     };
     const refresh = (frame?: number): void => {
+      this.refreshStatusFooter();
       if (!active || paused || !isTty) return;
       if (typeof frame === 'number') frameIndex = frame;
       const next = body();
@@ -2112,11 +2146,14 @@ export class Display {
    * live (not blind). Empty buffer → the suffix disappears (never noisy).
    */
   setComposer(buffer: string, mode: 'queue' | 'interrupt' | 'redirect'): void {
+    const idleChanged = this.idleComposerContent !== '';
+    this.idleComposerContent = '';
+    this.idleComposerHasDraft = false;
     const maxWidth = composerLaneEnabled() && this.out.isTTY
       ? this.composerLaneAvail()
       : this.composerAvail();
     const next = renderComposerBuffer(buffer, mode, maxWidth);
-    if (next === this.composerText) return;
+    if (next === this.composerText && !idleChanged) return;
     this.composerText = next;
     this.paintComposerSurface();
   }
@@ -2128,9 +2165,57 @@ export class Display {
    * owned bottom row so it shows immediately.
    */
   setBusyHint(hint: string): void {
-    if (hint === this.busyComposerHint) return;
+    const idleChanged = this.idleComposerContent !== '';
+    this.idleComposerContent = '';
+    this.idleComposerHasDraft = false;
+    if (hint === this.busyComposerHint && !idleChanged) return;
     this.busyComposerHint = hint;
     this.paintComposerSurface();
+  }
+
+  /** Update the normal prompt inside the fixed composer row. */
+  setIdleComposer(buffer: string, hint: string): void {
+    const busyChanged = this.composerText !== '' || this.busyComposerHint !== '';
+    this.composerText = '';
+    this.busyComposerHint = '';
+    const body = buffer || hint;
+    const next = `${this.promptPrefix()} ${body}`;
+    this.idleComposerHasDraft = buffer.length > 0;
+    if (next === this.idleComposerContent && !busyChanged) return;
+    this.idleComposerContent = next;
+    this.paintComposerSurface();
+  }
+
+  /** Commit one normal submission above the fixed footer, then immediately
+   * restore an empty ready composer. Empty Enter remains a local no-op. */
+  submitIdleComposer(value: string, hint: string): void {
+    if (value.length > 0) {
+      this.write(`${this.promptPrefix()} ${value}\n`);
+    }
+    this.idleComposerContent = `${this.promptPrefix()} ${hint}`;
+    this.idleComposerHasDraft = false;
+    this.paintComposerSurface();
+  }
+
+  /** Set the persistent status row. The optional factory is evaluated again
+   * after terminal resize so compact and wide tiers remain truthful. */
+  setStatusFooter(source: string | (() => string)): void {
+    this.statusFooterSource = source;
+    if (this.composerLane?.isActive()) {
+      this.composerLane.paintStatus(source);
+    } else {
+      this.paintComposerSurface();
+    }
+  }
+
+  private refreshStatusFooter(): void {
+    if (!this.composerLane?.isActive()) return;
+    this.composerLane.paintStatus(this.statusFooterSource);
+  }
+
+  /** True only when this interactive Display owns the two-row surface. */
+  fixedBottomRegionEnabled(): boolean {
+    return composerLaneEnabled() && !!this.out.isTTY;
   }
 
   /** Clear the composer (turn end / handoff back to the normal prompt). Drops
@@ -2145,7 +2230,7 @@ export class Display {
   /** The raw composer content: the typed text if any, else the persistent hint,
    *  else '' (no turn running). Shared by the lane and the suffix path. */
   private composerContent(): string {
-    return this.composerText || this.busyComposerHint;
+    return this.composerText || this.busyComposerHint || this.idleComposerContent;
   }
 
   /**
@@ -2158,7 +2243,13 @@ export class Display {
     if (composerLaneEnabled() && this.out.isTTY) {
       if (!this.composerLane) this.composerLane = new ComposerLane(this.laneSink());
       const content = this.composerLaneContent();
-      if (content) this.composerLane.activate(content); else this.composerLane.deactivate();
+      const hasStatus = typeof this.statusFooterSource === 'function'
+        || this.statusFooterSource.length > 0;
+      if (content || hasStatus) {
+        this.composerLane.activate(content, this.statusFooterSource);
+      } else {
+        this.composerLane.deactivate();
+      }
       return;
     }
     this.composerRepaint?.();
@@ -2220,7 +2311,7 @@ export class Display {
    * remains visible. */
   private composerLaneContent(): string {
     const content = this.composerContent();
-    if (this.composerText || !content) return content;
+    if (this.composerText || this.idleComposerHasDraft || !content) return content;
     const available = this.composerLaneAvail();
     return visibleLength(content) <= available
       ? content

@@ -49,21 +49,25 @@ describe.each([100, 44])('busy composer rendered screen at %i columns', (columns
       skin: new SkinEngine({ forceMono: true }),
     });
 
+    display.setStatusFooter('provider · model · ctx 1k/32k · 1s');
     display.setBusyHint('Enter → queue · /busy to change · Ctrl+C stop');
     const tool = display.toolRow('shell_exec', { command: 'Start-Sleep -Seconds 6' });
-    expect(screen.bottomLine()).toContain('Enter → queue');
+    expect(screen.lines().at(-2)).toContain('Enter → queue');
+    expect(screen.bottomLine()).toContain('provider');
 
     display.setComposer('QUEUE ONE', 'queue');
     display.write('\n✓ queued (1 pending) · input_first\n');
     display.setComposer('', 'queue');
     expect(screen.snapshot()).toContain('input_first');
-    expect(screen.bottomLine()).toContain('Enter → queue');
+    expect(screen.lines().at(-2)).toContain('Enter → queue');
+    expect(screen.bottomLine()).toContain('provider');
 
     display.setComposer('QUEUE TWO', 'queue');
     display.write('\n✓ queued (2 pending) · input_second\n');
     display.setComposer('', 'queue');
     expect(screen.snapshot()).toContain('input_second');
-    expect(screen.bottomLine()).toContain('Enter → queue');
+    expect(screen.lines().at(-2)).toContain('Enter → queue');
+    expect(screen.bottomLine()).toContain('provider');
 
     tool.ok(6_000);
     display.clearComposer();
