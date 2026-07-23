@@ -19,6 +19,13 @@
 const ESC = '\x1b';
 const SAVE = `${ESC}7`;
 const RESTORE = `${ESC}8`;
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
+const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+function terminalWidth(text: string): number {
+  return stringWidth(text.replace(ANSI_PATTERN, ''));
+}
 
 /**
  * Confine scrolling to the rows above the fixed region and place the transcript
@@ -48,8 +55,14 @@ export function teardownSeq(rows: number, laneRows = 2): string {
 /** Tail-fit composer text so the cursor end remains visible. */
 export function fitLane(text: string, cols: number): string {
   const width = Math.max(4, cols);
-  if (text.length <= width) return text;
-  return '…' + text.slice(-(width - 1));
+  if (terminalWidth(text) <= width) return text;
+  const plain = text.replace(ANSI_PATTERN, '');
+  let tail = '';
+  for (const character of Array.from(plain).reverse()) {
+    if (stringWidth(`…${character}${tail}`) > width) break;
+    tail = character + tail;
+  }
+  return `…${tail}`;
 }
 
 type StatusSource = string | (() => string);
@@ -58,22 +71,29 @@ type StatusSource = string | (() => string);
  * output; this is the final no-wrap guard for custom/test status strings. */
 function fitStatus(text: string, cols: number): string {
   const width = Math.max(4, cols);
-  let visible = 0;
+  if (terminalWidth(text) <= width) return text;
+  let plain = '';
   let out = '';
-  for (let i = 0; i < text.length && visible < width;) {
+  let sawAnsi = false;
+  for (let i = 0; i < text.length;) {
     if (text[i] === ESC && text[i + 1] === '[') {
       const match = /^\x1b\[[0-9;]*[A-Za-z]/u.exec(text.slice(i));
       if (match) {
         out += match[0];
         i += match[0].length;
+        sawAnsi = true;
         continue;
       }
     }
-    out += text[i];
-    visible += 1;
-    i += 1;
+    const codePoint = text.codePointAt(i);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (stringWidth(plain + character) > width) break;
+    out += character;
+    plain += character;
+    i += character.length;
   }
-  return out;
+  return sawAnsi ? `${out}${ESC}[0m` : out;
 }
 
 export interface LaneSink {
@@ -113,7 +133,7 @@ export class BottomRegion {
   paint(text: string): void {
     if (!this.active) return;
     this.composerSource = text;
-    const fitted = fitLane(text, this.sink.cols());
+    const fitted = fitLane(text, Math.max(4, this.sink.cols() - 2));
     if (fitted === this.lastComposer) return;
     this.lastComposer = fitted;
     this.sink.write(paintSeq(this.sink.rows(), fitted, 1));
@@ -123,7 +143,7 @@ export class BottomRegion {
     if (!this.active) return;
     this.statusSource = status;
     const raw = typeof status === 'function' ? status() : status;
-    const fitted = fitStatus(raw, this.sink.cols());
+    const fitted = fitStatus(raw, Math.max(4, this.sink.cols() - 2));
     if (fitted === this.lastStatus) return;
     this.lastStatus = fitted;
     this.sink.write(paintSeq(this.sink.rows(), fitted, 0));

@@ -16,6 +16,8 @@ import {
   reserveSeq, paintSeq, teardownSeq, fitLane, ComposerLane, composerLaneEnabled,
   type LaneSink,
 } from '../../../cli/v4/composerLane';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
 
 const ESC = '\x1b';
 
@@ -41,6 +43,11 @@ describe('escape-sequence builders (pure)', () => {
     expect(fit.length).toBe(10);
     expect(fit.startsWith('…')).toBe(true);
     expect(fit.endsWith('z')).toBe(true);   // most-recent chars kept
+  });
+  it('fitLane budgets wide terminal glyphs without wrapping', () => {
+    const fit = fitLane('prefix ⌛ preserve-the-end', 12);
+    expect(stringWidth(fit)).toBeLessThanOrEqual(12);
+    expect(fit).toMatch(/the-end$/);
   });
 });
 
@@ -78,6 +85,20 @@ describe('ComposerLane — lifecycle', () => {
     expect(out).toContain(`${ESC}[24;1H${ESC}[2Kprovider`);
     // reserve happens before the first paint
     expect(out.indexOf('[1;22r')).toBeLessThan(out.indexOf('[23;1H'));
+  });
+
+  it('keeps the status row inside the physical width budget', () => {
+    const s = mockSink(24, 48);
+    const lane = new ComposerLane(s);
+    lane.activate(
+      'Type your message',
+      '  custom_openai:custom-default │ ctx0% │ ⌛ 0ms',
+    );
+    const painted = s.text()
+      .split(`${ESC}[24;1H${ESC}[2K`).at(-1)!
+      .split(ESC + '8')[0]
+      .replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+    expect(stringWidth(painted)).toBeLessThanOrEqual(46);
   });
 
   it('paint with the SAME text is a no-op — no flicker on redundant repaints', () => {

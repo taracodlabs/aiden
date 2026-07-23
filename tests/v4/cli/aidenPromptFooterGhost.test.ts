@@ -76,7 +76,7 @@ afterEach(async () => {
 });
 
 describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (PTY harness, Slice 10.5)', () => {
-  it('typing a partial slash command renders ghost on a separate row, not inline', async () => {
+  it('typing a partial slash command stays exclusively in the fixed composer row', async () => {
     const cwd       = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-bugd-cwd-'));
     const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-bugd-home-'));
     cleanupDirs.push(cwd, aidenHome);
@@ -106,19 +106,14 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
 
     await term.waitForPrompt({ timeoutMs: 30_000 });
 
-    // Type `/d` (no Enter). Aiden's slash-command dropdown picks up
-    // matching commands; the ghost suggestion is the tail of the
-    // top match (e.g. `aemon` for `/daemon`). The dropdown also
-    // renders below — that's expected and fine.
+    // Type `/d` without submitting. In fixed-bottom-region mode the
+    // Display-owned composer is the only prompt renderer; Inquirer's
+    // ghost, helper, and dropdown footer must not create another row.
     term.type('/d');
 
-    // Wait until the rendered frame stabilises with a recognisable
-    // ghost suggestion or dropdown row. We look for any match of
-    // `aemon` (from `/daemon`) OR `octor` (from `/doctor`) somewhere
-    // in the stream — either confirms the ghost / dropdown surfaced.
     await term.waitFor(
-      (plain) => /aemon|octor/.test(plain),
-      { timeoutMs: 10_000, label: 'ghost-or-dropdown render' },
+      (plain) => plain.includes('/d'),
+      { timeoutMs: 10_000, label: 'fixed composer draft' },
     );
 
     // ── Assertions ────────────────────────────────────────────────
@@ -126,22 +121,18 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
     screen.write(term.raw());
     const lines = screen.lines();
 
-    // Find the prompt line — the one containing `▲ /d`.
-    const promptLineIdx = lines.findIndex((l) => l.includes('▲') && l.includes('/d'));
-    expect(promptLineIdx).toBeGreaterThanOrEqual(0);
-    const promptLine = lines[promptLineIdx];
+    const composerLine = lines.at(-2) ?? '';
+    const statusLine = lines.at(-1) ?? '';
+    expect(composerLine).toContain('▲');
+    expect(composerLine).toContain('/d');
+    expect(statusLine).toContain('groq');
+    expect(statusLine).toContain('ctx');
 
-    // ASSERTION 1: prompt line must NOT contain ghost-suggestion text
-    // inline. The ghost for `/d` should be the tail of the top
-    // matching slash command — its presence on the prompt line
-    // proves the pre-Slice-10.5 inline assembly is still in effect.
-    expect(promptLine).not.toContain('aemon');
-
-    // ASSERTION 2: the ghost suggestion (or dropdown row) remains on a
-    // separate physical row. The fixed composer is anchored below transient
-    // dropdown content, so rendered-screen position is authoritative.
-    const nonPromptLines = lines.filter((_line, index) => index !== promptLineIdx);
-    expect(nonPromptLines.some((line) => /aemon|octor/.test(line))).toBe(true);
+    const rowsAboveFooter = lines.slice(0, -2);
+    expect(rowsAboveFooter.some((line) => line.trim() === '/d')).toBe(false);
+    expect(rowsAboveFooter.some((line) => line.includes('Type your message'))).toBe(false);
+    expect(rowsAboveFooter.some((line) => /aemon|octor/.test(line))).toBe(false);
+    expect(rowsAboveFooter.some((line) => line.trimStart().startsWith('▲'))).toBe(false);
 
     // Clean exit via Ctrl+C — same rationale as the Slice 10.4 smoke.
     term.ctrl('c');

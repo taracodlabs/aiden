@@ -430,7 +430,10 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
 
   if (config.fixedComposer) {
     if (status === 'idle') config.fixedComposer.update(value, config.hint ?? '');
-    return footer ?? '';
+    // Display is the sole renderer while the fixed region is active. Returning
+    // helper, ghost, dropdown, or answer content here would give Inquirer's
+    // screen manager a second prompt row above the reserved composer.
+    return '';
   }
   return footer ? [line, footer] : line;
 });

@@ -3656,8 +3656,10 @@ export class ChatSession implements ChatSessionLike {
     // the user-input zone together with the new bottom-rule emission
     // in the REPL loop.
     display.write('\n');
-    display.write(display.bottomPromptHint() + '\n');
-    display.write('\n');
+    if (!this.usesFixedBottomRegion()) {
+      display.write(display.bottomPromptHint() + '\n');
+      display.write('\n');
+    }
     display.write(`  ${display.rule(Math.max(1, columns - 4))}\n`);
   }
 

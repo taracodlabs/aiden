@@ -6,6 +6,7 @@ import * as pty from 'node-pty';
 
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
@@ -43,6 +44,7 @@ async function launch(columns: number, paused = false): Promise<{
   child: RunningPty;
   raw: () => string;
   plain: () => string;
+  rendered: () => string;
 }> {
   const repoRoot = path.resolve(__dirname, '../../..');
   const home = await fs.mkdtemp(path.join(os.tmpdir(), `aiden-startup-${columns}-home-`));
@@ -82,12 +84,21 @@ async function launch(columns: number, paused = false): Promise<{
   });
   children.push(child);
   let output = '';
-  child.onData((chunk) => { output += chunk; });
+  const screen = new TerminalScreen(columns, 50);
+  child.onData((chunk) => {
+    output += chunk;
+    screen.write(chunk);
+  });
   await waitFor(
     () => output.includes(COMPOSER_READY_TOKEN),
     () => stripAnsi(output),
   );
-  return { child, raw: () => output, plain: () => stripAnsi(output) };
+  return {
+    child,
+    raw: () => output,
+    plain: () => stripAnsi(output),
+    rendered: () => screen.snapshot(),
+  };
 }
 
 function dashboardLines(output: string): string[] {
@@ -153,14 +164,21 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     }
 
     const narrow = await launch(48);
-    expect(narrow.plain()).toMatch(/\bAIDEN\b/);
-    expect(narrow.plain()).toMatch(/Assistant\s+·\s+custom-default/i);
-    expect(narrow.plain()).toMatch(/built solo/i);
-    expect(narrow.plain()).not.toContain('Environment');
-    expect(narrow.plain()).not.toContain('Capabilities');
-    expect(narrow.plain()).not.toContain('╭');
-    for (const line of dashboardLines(narrow.plain())) {
+    const narrowRendered = narrow.rendered();
+    expect(narrowRendered).toMatch(/\bAIDEN\b/);
+    expect(narrowRendered).toMatch(/Assistant\s+·\s+custom-default/i);
+    expect(narrowRendered).toMatch(/built solo/i);
+    expect(narrowRendered).not.toContain('Environment');
+    expect(narrowRendered).not.toContain('Capabilities');
+    expect(narrowRendered).not.toContain('╭');
+    for (const line of dashboardLines(narrowRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(46);
     }
+    const narrowRows = narrowRendered.split('\n');
+    expect(narrowRows.at(-2)).toContain('Type your message');
+    expect(narrowRows.at(-1)).toContain('ctx');
+    expect(stringWidth(narrowRows.at(-2) ?? '')).toBeLessThanOrEqual(46);
+    expect(stringWidth(narrowRows.at(-1) ?? '')).toBeLessThanOrEqual(46);
+    expect(narrowRows.slice(0, -2).filter((line) => line.includes('Type your message'))).toEqual([]);
   }, 75_000);
 });

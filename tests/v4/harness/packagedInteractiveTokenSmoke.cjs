@@ -22,8 +22,20 @@ function plain(value) {
     .replace(/\r/g, '');
 }
 
-function submit(terminal, value) {
-  terminal.write(`${value}\r`);
+function submit(terminal, value, onComplete) {
+  let index = 0;
+  const writeNext = () => {
+    if (index < value.length) {
+      terminal.write(value[index++]);
+      setTimeout(writeNext, 10);
+    } else {
+      setTimeout(() => {
+        terminal.write('\r');
+        onComplete();
+      }, 100);
+    }
+  };
+  writeNext();
 }
 
 function runFirstSession() {
@@ -38,48 +50,60 @@ function runFirstSession() {
     let state = 'boot';
     let historyTurns = 0;
     let historyReadyTarget = 0;
+    let submitting = false;
+    const send = (value, afterSent) => {
+      submitting = true;
+      submit(terminal, value, () => {
+        submitting = false;
+        afterSent?.();
+      });
+    };
     const timeout = setTimeout(() => {
       terminal.kill();
       reject(new Error(`First packaged interactive session timed out (${state}):\n${plain(output).slice(-12_000)}`));
     }, 90_000);
     terminal.onData((chunk) => {
       output += chunk;
+      if (submitting) return;
       const text = plain(output);
       const readyCount = output.split(readyToken).length - 1;
       if (state === 'boot' && readyCount >= 1) {
-        state = 'mode'; submit(terminal, '/mode economy');
+        state = 'mode'; send('/mode economy');
       } else if (state === 'mode' && text.includes('Usage mode: economy')) {
-        state = 'budget-set'; submit(terminal, '/budget 120');
+        state = 'budget-set'; send('/budget 120');
       } else if (state === 'budget-set' && text.includes('Session token cap set')) {
-        state = 'first-turn'; submit(terminal, 'package history turn 1');
+        state = 'first-turn'; send('package history turn 1');
       } else if (state === 'first-turn' && text.includes('PACKAGED SIMPLE PASS') && readyCount >= 4) {
-        state = 'budget-warning'; submit(terminal, '/budget');
+        state = 'budget-warning'; send('/budget');
       } else if (state === 'budget-warning' && text.includes('Budget warning.')) {
-        state = 'budget-expand'; submit(terminal, '/budget 100000');
+        state = 'budget-expand'; send('/budget 100000');
       } else if (state === 'budget-expand' && text.includes('Session token cap set to 100,000')) {
         historyTurns = 1;
-        historyReadyTarget = readyCount + 1;
-        state = 'history'; submit(terminal, `use a tool for package history ${historyTurns}`);
+        state = 'history';
+        send(`use a tool for package history ${historyTurns}`, () => {
+          historyReadyTarget = output.split(readyToken).length;
+        });
       } else if (state === 'history' && readyCount >= historyReadyTarget) {
         if (historyTurns < 4) {
           historyTurns += 1;
-          historyReadyTarget = readyCount + 1;
-          submit(terminal, `use a tool for package history ${historyTurns}`);
+          send(`use a tool for package history ${historyTurns}`, () => {
+            historyReadyTarget = output.split(readyToken).length;
+          });
         } else {
-          state = 'usage-json'; submit(terminal, '/usage --json');
+          state = 'usage-json'; send('/usage --json');
         }
       } else if (state === 'usage-json' && text.includes('"physicalAttempts":9')) {
-        state = 'usage-human'; submit(terminal, '/usage');
+        state = 'usage-human'; send('/usage');
       } else if (state === 'usage-human' && text.includes('Usage — Current session')) {
         if (!text.includes('cumulative exposures')) throw new Error('Human usage summary omitted schema exposure context.');
-        state = 'usage-details'; submit(terminal, '/usage details');
+        state = 'usage-details'; send('/usage details');
       } else if (state === 'usage-details' && text.includes('Usage details — Current session')) {
         if (!text.includes('Providers and models') || !text.includes('Purposes')) {
           throw new Error('Detailed usage output omitted required sections.');
         }
-        state = 'compress'; submit(terminal, '/compress');
+        state = 'compress'; send('/compress');
       } else if (state === 'compress' && /Compressed \d+ .* \d+ messages/.test(text)) {
-        state = 'quit'; submit(terminal, '/quit');
+        state = 'quit'; send('/quit');
       }
     });
     terminal.onExit(({ exitCode }) => {
@@ -103,20 +127,26 @@ function runRestartSession() {
     });
     let output = '';
     let state = 'boot';
+    let submitting = false;
+    const send = (value) => {
+      submitting = true;
+      submit(terminal, value, () => { submitting = false; });
+    };
     const timeout = setTimeout(() => {
       terminal.kill();
       reject(new Error(`Restarted packaged session timed out (${state}):\n${plain(output).slice(-12_000)}\nRequest trace:\n${requestTrace()}`));
     }, 60_000);
     terminal.onData((chunk) => {
       output += chunk;
+      if (submitting) return;
       const text = plain(output);
       const readyCount = output.split(readyToken).length - 1;
       if (state === 'boot' && readyCount >= 1) {
-        state = 'usage'; submit(terminal, '/usage --json');
+        state = 'usage'; send('/usage --json');
       } else if (state === 'usage' && text.includes('"compression":{"physicalAttempts":1')) {
-        state = 'turn'; submit(terminal, 'RESTART');
+        state = 'turn'; send('RESTART');
       } else if (state === 'turn' && text.includes('PACKAGED RESTART PASS') && readyCount >= 3) {
-        state = 'quit'; submit(terminal, '/quit');
+        state = 'quit'; send('/quit');
       }
     });
     terminal.onExit(({ exitCode }) => {

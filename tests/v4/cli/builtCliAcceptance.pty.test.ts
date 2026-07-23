@@ -70,6 +70,116 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
   it.each([
     { label: 'normal width', columns: 100 },
     { label: 'narrow width', columns: 44 },
+  ])('keeps idle typing exclusively inside the fixed composer at $label', async ({ columns }) => {
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-idle-footer-home-'));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-idle-footer-cwd-'));
+    cleanup.push(aidenHome, cwd);
+    provider = await startMockProvider({
+      modelId: 'custom-default',
+      script: [{ content: 'IDLE OWNER RESPONSE' }],
+    });
+    await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'idle-footer\n', 'utf8');
+    await fs.writeFile(path.join(aidenHome, 'config.yaml'), [
+      'model:', '  provider: custom_openai', '  modelId: custom-default',
+      'providers:', '  custom_openai:', '    apiKey: idle-footer-key',
+      'display:', '  streaming: true', '  renderer: legacy',
+    ].join('\n') + '\n', 'utf8');
+
+    const rows = 30;
+    const screen = new TerminalScreen(columns, rows);
+    const preloadPath = path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs');
+    const cliPath = path.join(repoRoot, 'dist/cli/v4/aidenCLI.js');
+    const powerShellCommand = [
+      '&',
+      quotePowerShellLiteral(process.execPath),
+      '-r',
+      quotePowerShellLiteral(preloadPath),
+      quotePowerShellLiteral(cliPath),
+    ].join(' ');
+    child = pty.spawn('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', powerShellCommand,
+    ], {
+      cwd, cols: columns, rows,
+      env: {
+        ...process.env,
+        AIDEN_HOME: aidenHome,
+        AIDEN_TEST_REPO_ROOT: repoRoot,
+        AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl,
+        CUSTOM_OPENAI_API_KEY: 'idle-footer-key',
+        AIDEN_NO_UPDATE_CHECK: '1',
+        AIDEN_TEST_COMPOSER_READY: '1',
+        TELEGRAM_BOT_TOKEN: '',
+        FORCE_COLOR: '0',
+        NO_COLOR: '1',
+      },
+    });
+
+    const draft = 'POWERSHELL FIXED DRAFT';
+    let output = '';
+    let state = 'boot';
+    let typingFrame = '';
+    let restoredFrame = '';
+    await new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(
+        `idle footer timeout (${state}):\n${screen.snapshot()}`,
+      )), 40_000);
+      child!.onData((chunk) => {
+        output += chunk;
+        screen.write(chunk);
+        const rendered = screen.snapshot();
+        const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
+        if (state === 'boot' && readyCount >= 1) {
+          state = 'typing';
+          typeLikeKeyboard(child!, draft, false);
+          setTimeout(() => {
+            typingFrame = screen.snapshot();
+            state = 'submitted';
+            child!.write('\r');
+          }, 750);
+        } else if (
+          state === 'submitted'
+          && rendered.includes('IDLE OWNER RESPONSE')
+          && readyCount >= 2
+        ) {
+          restoredFrame = rendered;
+          state = 'exiting';
+          typeLikeKeyboard(child!, '/exit');
+        }
+      });
+      child!.onExit(({ exitCode }) => {
+        if (state !== 'exiting') return;
+        clearTimeout(timeout);
+        child = null;
+        if (exitCode === 0) resolve();
+        else reject(new Error(`idle footer CLI exited with ${exitCode}`));
+      });
+    });
+
+    for (const [name, frame, composerNeedle] of [
+      ['typing', typingFrame, draft],
+      ['restored', restoredFrame, 'Type your message'],
+    ] as const) {
+      const lines = frame.split('\n');
+      expect(lines.at(-2), name).toContain(composerNeedle);
+      expect(lines.at(-1), name).toContain('custom_openai');
+      expect(lines.at(-1), name).toContain('ctx');
+      const rowsAboveFooter = lines.slice(0, -2);
+      expect(rowsAboveFooter.filter((line) => line.includes('Type your message')), name).toEqual([]);
+      const submittedRows = rowsAboveFooter.filter((line) => line.trimStart().startsWith('▲'));
+      if (name === 'typing') {
+        expect(submittedRows, name).toEqual([]);
+        expect(rowsAboveFooter.filter((line) => line.includes(draft)), name).toEqual([]);
+      } else {
+        expect(submittedRows, name).toHaveLength(1);
+        expect(submittedRows[0], name).toContain(draft);
+      }
+    }
+  });
+
+  it.each([
+    { label: 'normal width', columns: 100 },
+    { label: 'narrow width', columns: 44 },
   ])('keeps the rendered bottom composer visible after two queued messages at $label', async ({ columns }) => {
     const repoRoot = path.resolve(__dirname, '../../..');
     const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-pinned-queue-home-'));

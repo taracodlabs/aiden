@@ -43,6 +43,39 @@ import { renderCapabilityCard } from './display/capabilityCard';
 import type { CapabilityCardData } from '../../providers/v4/types';
 import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
 import { recoveryActionsForOutcome } from './recoveryActions';
+
+const DISPLAY_ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+
+function terminalVisibleLength(value: string): number {
+  return stringWidth(value.replace(DISPLAY_ANSI_PATTERN, ''));
+}
+
+function truncateTerminalVisible(value: string, maxVisible: number): string {
+  if (terminalVisibleLength(value) <= maxVisible) return value;
+  let output = '';
+  let plain = '';
+  let index = 0;
+  let sawAnsi = false;
+  while (index < value.length) {
+    if (value[index] === '\x1b' && value[index + 1] === '[') {
+      const match = value.slice(index).match(/^\x1b\[[0-9;]*[A-Za-z]/);
+      if (match) {
+        output += match[0];
+        index += match[0].length;
+        sawAnsi = true;
+        continue;
+      }
+    }
+    const codePoint = value.codePointAt(index);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (stringWidth(plain + character) > maxVisible) break;
+    output += character;
+    plain += character;
+    index += character.length;
+  }
+  return sawAnsi ? output + '\x1b[0m' : output;
+}
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
 // replaces marked-terminal's defaults with structured headers, lists,
 // code blocks, blockquotes, and links.
@@ -984,24 +1017,24 @@ export class Display {
       const providerModelBudget = Math.max(
         8,
         (cols - 4)
-          - visibleLength(compactContext)
-          - visibleLength(compactTimer)
+          - terminalVisibleLength(compactContext)
+          - terminalVisibleLength(compactTimer)
           - 6,
       );
       const fullProviderModel = `${args.provider}:${args.model}`;
       const abbreviatedProviderModel = `${args.provider.slice(0, 1)}:${args.model}`;
-      const compactProviderModel = visibleLength(fullProviderModel) <= providerModelBudget
+      const compactProviderModel = terminalVisibleLength(fullProviderModel) <= providerModelBudget
         ? fullProviderModel
-        : args.provider.length <= 8 && visibleLength(abbreviatedProviderModel) <= providerModelBudget
+        : args.provider.length <= 8 && terminalVisibleLength(abbreviatedProviderModel) <= providerModelBudget
           ? abbreviatedProviderModel
-          : truncateVisible(fullProviderModel, providerModelBudget);
+          : truncateTerminalVisible(fullProviderModel, providerModelBudget);
       segments = [
         this.skin.applyColors(compactProviderModel, 'tool'),
         this.skin.applyColors(compactContext, ctxKind),
         compactTimer,
       ];
     }
-    return truncateVisible(`  ${segments.join(SEP)}`, Math.max(1, cols - 2));
+    return truncateTerminalVisible(`  ${segments.join(SEP)}`, Math.max(1, cols - 2));
   }
 
   /** Map a per-turn outcome to the colour kind used by the state dot. */
