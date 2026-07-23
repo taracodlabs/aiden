@@ -388,11 +388,14 @@ export class Display {
   // refresh it immediately instead of waiting for the owner's next tick. The
   // indicator + tool-row each set/restore this around their lifetime.
   private composerRepaint: (() => void) | null = null;
-  // v4.14 — the OPT-IN single-owner fixed bottom lane (scroll-region). When
-  // AIDEN_COMPOSER_LANE=1, the composer is pinned to a reserved bottom row and
-  // all turn output scrolls above it; otherwise the suffix path below is used
-  // unchanged. Lazily created on first use.
+  // Single-owner fixed bottom lane (scroll-region). Interactive terminals pin
+  // the composer to a reserved bottom row so turn output scrolls above it.
+  // Non-TTY output and the compatibility opt-out use the legacy suffix path.
+  // Lazily created on first use.
   private composerLane: ComposerLane | null = null;
+  // Modal prompts need the full terminal surface while they own stdin. This
+  // depth pauses only composer painting and retains the exact draft/hint.
+  private composerSurfacePauseDepth = 0;
 
   constructor(opts: { skin?: SkinEngine; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}) {
     this.skin = opts.skin ?? getSkinEngine();
@@ -2109,7 +2112,10 @@ export class Display {
    * live (not blind). Empty buffer → the suffix disappears (never noisy).
    */
   setComposer(buffer: string, mode: 'queue' | 'interrupt' | 'redirect'): void {
-    const next = renderComposerBuffer(buffer, mode, this.composerAvail());
+    const maxWidth = composerLaneEnabled() && this.out.isTTY
+      ? this.composerLaneAvail()
+      : this.composerAvail();
+    const next = renderComposerBuffer(buffer, mode, maxWidth);
     if (next === this.composerText) return;
     this.composerText = next;
     this.paintComposerSurface();
@@ -2143,20 +2149,34 @@ export class Display {
   }
 
   /**
-   * Paint the composer to whichever surface owns it. With AIDEN_COMPOSER_LANE=1
-   * the single-owner fixed lane reserves a bottom row (activate reserves the
-   * scroll region once, then repaints; empty content tears it down at turn
-   * end). Otherwise the legacy suffix path — repaint the live owned bottom row
-   * — is used exactly as before (default, unchanged).
+   * Paint the composer to whichever surface owns it. On an interactive
+   * terminal, the single-owner fixed lane reserves a bottom row; empty content
+   * tears it down at turn end. Non-TTY output uses the legacy suffix path.
    */
   private paintComposerSurface(): void {
-    if (composerLaneEnabled()) {
+    if (this.composerSurfacePauseDepth > 0) return;
+    if (composerLaneEnabled() && this.out.isTTY) {
       if (!this.composerLane) this.composerLane = new ComposerLane(this.laneSink());
-      const content = this.composerContent();
+      const content = this.composerLaneContent();
       if (content) this.composerLane.activate(content); else this.composerLane.deactivate();
       return;
     }
     this.composerRepaint?.();
+  }
+
+  /** Temporarily release the fixed row while a modal prompt owns the terminal.
+   * Draft and hint state remain intact and are repainted after the final
+   * matching resume. */
+  pauseComposerSurface(): void {
+    this.composerSurfacePauseDepth += 1;
+    if (this.composerSurfacePauseDepth === 1) this.composerLane?.deactivate();
+  }
+
+  /** Restore the fixed row once the outermost modal prompt has settled. */
+  resumeComposerSurface(): void {
+    if (this.composerSurfacePauseDepth === 0) return;
+    this.composerSurfacePauseDepth -= 1;
+    if (this.composerSurfacePauseDepth === 0) this.paintComposerSurface();
   }
 
   /** Wire the lane to this display's real terminal stream + resize events. */
@@ -2188,6 +2208,23 @@ export class Display {
    */
   private composerAvail(): number {
     return Math.max(12, (this.out.columns ?? 80) - 30);
+  }
+
+  /** Width available to the independently owned bottom row. */
+  private composerLaneAvail(): number {
+    return Math.max(4, (this.out.columns ?? 80) - 2);
+  }
+
+  /** Preserve the actionable front of an idle hint at narrow widths. Typed
+   * input is already tail-fitted by renderComposerBuffer so its cursor end
+   * remains visible. */
+  private composerLaneContent(): string {
+    const content = this.composerContent();
+    if (this.composerText || !content) return content;
+    const available = this.composerLaneAvail();
+    return visibleLength(content) <= available
+      ? content
+      : `${truncateVisible(content, Math.max(1, available - 1))}…`;
   }
 
   private composerSuffix(): string {

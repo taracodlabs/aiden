@@ -21,8 +21,9 @@
  * hint change / resize — no per-write flicker. This is the reusable
  * composer-ownership seam the future dashboard's steering bar drives too.
  *
- * Shipped OPT-IN via AIDEN_COMPOSER_LANE=1 while the live cursor behaviour is
- * proven in real-terminal smoke; the default render path is untouched.
+ * Enabled for interactive terminals by default. AIDEN_COMPOSER_LANE=0 is an
+ * emergency compatibility escape hatch; non-interactive output never uses the
+ * lane.
  *
  * The escape-sequence builders are pure + unit-tested; the owner wires them to
  * a write sink + a terminal-dimensions source and tracks activate/resize state.
@@ -91,6 +92,7 @@ export interface LaneSink {
  */
 export class ComposerLane {
   private active = false;
+  private sourceText = '';
   private lastText = '';
   private unsubResize: (() => void) | null = null;
 
@@ -114,6 +116,7 @@ export class ComposerLane {
    *  text is unchanged, so a redundant paint never flickers. */
   paint(text: string): void {
     if (!this.active) return;
+    this.sourceText = text;
     const fitted = fitLane(text, this.sink.cols());
     if (fitted === this.lastText) return;
     this.lastText = fitted;
@@ -125,7 +128,7 @@ export class ComposerLane {
     if (!this.active) return;
     const rows = this.sink.rows();
     this.sink.write(reserveSeq(rows));
-    const text = this.lastText;
+    const text = this.sourceText;
     this.lastText = '';        // force the repaint (dims changed)
     this.paint(text);
   }
@@ -137,13 +140,13 @@ export class ComposerLane {
     this.unsubResize?.();
     this.unsubResize = null;
     this.active = false;
+    this.sourceText = '';
     this.lastText = '';
   }
 }
 
-/** True when the fixed-lane renderer is opted into. Default OFF (unchanged
- *  render path) until the live cursor behaviour is proven in real-terminal
- *  smoke; flip the default here once it is. */
+/** True unless the fixed-lane renderer is explicitly disabled. Display also
+ * requires a TTY before emitting terminal control sequences. */
 export function composerLaneEnabled(): boolean {
-  return process.env.AIDEN_COMPOSER_LANE === '1';
+  return process.env.AIDEN_COMPOSER_LANE !== '0';
 }

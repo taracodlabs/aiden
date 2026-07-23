@@ -46,12 +46,18 @@ describe('escape-sequence builders (pure)', () => {
 function mockSink(rows = 24, cols = 80) {
   const writes: string[] = [];
   let resizeCb: (() => void) | null = null;
-  const sink: LaneSink & { fireResize: (r: number) => void; text: () => string; setRows: (r: number) => void } = {
+  const sink: LaneSink & {
+    fireResize: (r: number) => void;
+    text: () => string;
+    setRows: (r: number) => void;
+    setCols: (c: number) => void;
+  } = {
     write: (s) => writes.push(s),
     rows: () => rows,
     cols: () => cols,
     onResize: (fn) => { resizeCb = fn; return () => { resizeCb = null; }; },
     setRows: (r) => { rows = r; },
+    setCols: (c) => { cols = c; },
     fireResize: (r) => { rows = r; resizeCb?.(); },
     text: () => writes.join(''),
   };
@@ -110,6 +116,16 @@ describe('ComposerLane — lifecycle', () => {
     expect(out).toContain(`${ESC}[30;1H`);                 // composer re-anchored to new bottom
   });
 
+  it('restores the full draft after a narrow-to-wide resize', () => {
+    const s = mockSink(24, 16);
+    const lane = new ComposerLane(s);
+    lane.activate('queue ▸ preserve the complete draft');
+    expect(s.text()).not.toContain('queue ▸ preserve');
+    s.setCols(80);
+    s.fireResize(24);
+    expect(s.text()).toContain('queue ▸ preserve the complete draft');
+  });
+
   it('deactivate restores full-screen scrolling + clears the lane (idempotent)', () => {
     const s = mockSink(24);
     const lane = new ComposerLane(s);
@@ -133,12 +149,14 @@ describe('ComposerLane — lifecycle', () => {
   });
 });
 
-describe('composerLaneEnabled — opt-in (default OFF)', () => {
+describe('composerLaneEnabled — interactive default with compatibility opt-out', () => {
   it('reads AIDEN_COMPOSER_LANE', () => {
     const prev = process.env.AIDEN_COMPOSER_LANE;
     try {
       delete process.env.AIDEN_COMPOSER_LANE;
-      expect(composerLaneEnabled()).toBe(false);   // safe default: unchanged render path
+      expect(composerLaneEnabled()).toBe(true);
+      process.env.AIDEN_COMPOSER_LANE = '0';
+      expect(composerLaneEnabled()).toBe(false);
       process.env.AIDEN_COMPOSER_LANE = '1';
       expect(composerLaneEnabled()).toBe(true);
     } finally {

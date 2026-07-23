@@ -51,7 +51,7 @@ describe('busy hint — width-safe (Issue 1)', () => {
   });
 
   it('long typed text keeps the CURSOR END (tail-fit), unlike the hint', () => {
-    const { d, chunks } = makeDisplay(80);   // avail 50; label + 48-char text overflows → tail-fit
+    const { d, chunks } = makeDisplay(50);
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setComposer('a very long message the user is typing right now', 'redirect');
@@ -75,6 +75,8 @@ describe('busy hint — single-owner ticker (Bug 1: burst bleed)', () => {
   const HINT = 'Enter → steer · /busy to change · Ctrl+C stop';
 
   it('a stale (non-owner) tool ticker does not repaint the hint into activity rows', () => {
+    const previous = process.env.AIDEN_COMPOSER_LANE;
+    process.env.AIDEN_COMPOSER_LANE = '0';
     vi.useFakeTimers();
     try {
       const { d, chunks } = makeDisplay(100);
@@ -91,6 +93,8 @@ describe('busy hint — single-owner ticker (Bug 1: burst bleed)', () => {
       a.ok(1); b.ok(1);
     } finally {
       vi.useRealTimers();
+      if (previous === undefined) delete process.env.AIDEN_COMPOSER_LANE;
+      else process.env.AIDEN_COMPOSER_LANE = previous;
     }
   });
 });

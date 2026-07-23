@@ -47,8 +47,8 @@ describe('Display composer — live during-turn paint', () => {
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setComposer('a', 'queue');
-    // owned-row discipline: repaint starts with up-one-line + erase.
-    expect(chunks.join('')).toMatch(/\x1b\[1A\x1b\[2K/);
+    // Fixed-lane discipline: jump to the final row and erase it in place.
+    expect(chunks.join('')).toMatch(/\x1b\[24;1H\x1b\[2K/);
     expect(stripAnsi(chunks.join(''))).toContain('queue ▸ a');
     ind.stop();
   });
@@ -114,13 +114,13 @@ describe('Display composer — live during-turn paint', () => {
     ind.stop();
   });
 
-  it('after the indicator stops, setComposer does NOT write (no owner to repaint)', () => {
+  it('after the indicator stops, the independent composer lane still repaints', () => {
     const { d, chunks } = makeDisplay();
     const ind = d.activityIndicator('thinking');
     ind.stop();
     chunks.length = 0;
-    d.setComposer('ghost', 'queue');   // no live owner
-    expect(chunks.join('')).toBe('');
+    d.setComposer('next message', 'queue');
+    expect(stripAnsi(chunks.join(''))).toContain('queue ▸ next message');
   });
 
   it('pasted text shows clean (no paste markers reach the row)', () => {
@@ -203,5 +203,22 @@ describe('Display composer — fixed bottom lane (opt-in) reserves + pins the ro
     } finally {
       if (prev === undefined) delete process.env.AIDEN_COMPOSER_LANE; else process.env.AIDEN_COMPOSER_LANE = prev;
     }
+  });
+
+  it('releases the reserved row for a modal and restores the exact draft afterward', () => {
+    const { d, chunks } = makeDisplay();
+    d.setBusyHint('Enter → queue · /queue · Ctrl+C stop');
+    d.setComposer('draft survives', 'queue');
+    chunks.length = 0;
+
+    d.pauseComposerSurface();
+    expect(chunks.join('')).toContain('\x1b[r');
+    expect(stripAnsi(chunks.join(''))).not.toContain('draft survives');
+
+    chunks.length = 0;
+    d.resumeComposerSurface();
+    expect(chunks.join('')).toContain('\x1b[1;23r');
+    expect(stripAnsi(chunks.join(''))).toContain('draft survives');
+    d.clearComposer();
   });
 });

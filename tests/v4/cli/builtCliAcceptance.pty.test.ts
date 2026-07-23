@@ -5,6 +5,7 @@ import path from 'node:path';
 import * as pty from 'node-pty';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 type RunningPty = ReturnType<typeof pty.spawn>;
 let child: RunningPty | null = null;
@@ -62,6 +63,149 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', () => {
+  it.each([
+    { label: 'normal width', columns: 100 },
+    { label: 'narrow width', columns: 44 },
+  ])('keeps the rendered bottom composer visible after two queued messages at $label', async ({ columns }) => {
+    const repoRoot = path.resolve(__dirname, '../../..');
+    const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-pinned-queue-home-'));
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-pinned-queue-cwd-'));
+    cleanup.push(aidenHome, cwd);
+    provider = await startMockProvider({
+      modelId: 'custom-default',
+      chunkDelayMs: 5,
+      script: [
+        { toolCalls: [{ id: 'slow-shell', name: 'shell_exec', arguments: {
+          command: 'Start-Sleep -Seconds 4; Write-Output TOOL-DONE',
+        } }] },
+        { content: 'ORIGINAL JOB COMPLETE' },
+        { content: 'QUEUE ONE COMPLETE' },
+        { content: 'QUEUE TWO COMPLETE' },
+      ],
+    });
+    await fs.writeFile(path.join(aidenHome, '.onboarding-shown'), 'pinned-queue\n', 'utf8');
+    await fs.writeFile(path.join(aidenHome, 'config.yaml'), [
+      'model:', '  provider: custom_openai', '  modelId: custom-default',
+      'providers:', '  custom_openai:', '    apiKey: pinned-queue-key',
+      'display:', '  streaming: true', '  renderer: legacy',
+    ].join('\n') + '\n', 'utf8');
+
+    const rows = 30;
+    const screen = new TerminalScreen(columns, rows);
+    const frames: Record<string, string> = {};
+    child = pty.spawn(process.execPath, [
+      '-r', path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs'),
+      path.join(repoRoot, 'dist/cli/v4/aidenCLI.js'),
+    ], {
+      cwd, cols: columns, rows,
+      env: { ...process.env, AIDEN_HOME: aidenHome, AIDEN_TEST_REPO_ROOT: repoRoot,
+        AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl, CUSTOM_OPENAI_API_KEY: 'pinned-queue-key',
+        AIDEN_NO_UPDATE_CHECK: '1', AIDEN_TEST_COMPOSER_READY: '1', TELEGRAM_BOT_TOKEN: '',
+        FORCE_COLOR: '0', NO_COLOR: '1' },
+    });
+
+    let output = '';
+    let state = 'boot';
+    let firstBottom = '';
+    let secondBottom = '';
+    let providerCallsBeforeExit = 0;
+    let queuedRequestContents: Array<string | undefined> = [];
+    let finishPoll: ReturnType<typeof setInterval> | null = null;
+    const completion = new Promise<void>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(
+        `pinned queue timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
+      )), 65_000);
+      child!.onExit(({ exitCode }) => {
+        if (state !== 'exiting') return;
+        clearTimeout(timeout);
+        if (finishPoll) clearInterval(finishPoll);
+        child = null;
+        if (exitCode === 0) resolve();
+        else reject(new Error(`pinned queue CLI exited with ${exitCode}`));
+      });
+      child!.onData((chunk) => {
+        output += chunk;
+        screen.write(chunk);
+        const plain = stripAnsi(output);
+        const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
+        const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
+
+        if (state === 'boot' && readyCount >= 1) {
+          state = 'approval';
+          typeLikeKeyboard(child!, 'run a slow safe tool');
+        } else if (state === 'approval' && plain.includes('Decision')) {
+          state = 'tool';
+          frames.approval = screen.snapshot();
+          setTimeout(() => child!.write('\r'), 250);
+        } else if (
+          state === 'tool'
+          && /running[\s\S]*Start-Sleep/i.test(plain)
+          && screen.bottomLine().includes('Enter → queue')
+        ) {
+          state = 'queue-one';
+          frames.toolRunning = screen.snapshot();
+          typeLikeKeyboard(child!, 'QUEUE ONE');
+        } else if (state === 'queue-one' && ids.length >= 1) {
+          state = 'queue-one-reset';
+        } else if (state === 'queue-one-reset' && screen.bottomLine().includes('Enter → queue')) {
+          firstBottom = screen.bottomLine();
+          frames.firstQueue = screen.snapshot();
+          state = 'queue-two';
+          typeLikeKeyboard(child!, 'QUEUE TWO');
+        } else if (state === 'queue-two' && ids.length >= 2) {
+          state = 'queue-two-reset';
+        } else if (state === 'queue-two-reset' && screen.bottomLine().includes('Enter → queue')) {
+          secondBottom = screen.bottomLine();
+          frames.secondQueue = screen.snapshot();
+          state = 'finishing';
+          finishPoll = setInterval(() => {
+            if ((provider?.callCount() ?? 0) < 4) return;
+            if (finishPoll) clearInterval(finishPoll);
+            finishPoll = null;
+            providerCallsBeforeExit = provider!.callCount();
+            queuedRequestContents = (provider!.requests().slice(2, 4) as Array<{
+              messages?: Array<{ role?: string; content?: string }>;
+            }>).map((request) => (
+              request.messages?.filter((message) => message.role === 'user').at(-1)?.content
+            ));
+            state = 'queue-check-pending';
+            setTimeout(() => {
+              state = 'queue-check';
+              typeLikeKeyboard(child!, '/queue');
+            }, 250);
+          }, 25);
+        } else if (state === 'queue-check' && /queue is empty/i.test(plain)) {
+          state = 'exiting';
+          typeLikeKeyboard(child!, '/exit');
+        }
+      });
+    });
+    await completion;
+
+    const plain = stripAnsi(output);
+    const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
+    expect(firstBottom).toContain('Enter → queue');
+    expect(secondBottom).toContain('Enter → queue');
+    expect(frames.toolRunning.split('\n').at(-1)).toContain('Enter → queue');
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+    const queuedRuns = plain.match(/running queued: QUEUE (?:ONE|TWO)/g) ?? [];
+    expect(queuedRuns).toEqual(['running queued: QUEUE ONE', 'running queued: QUEUE TWO']);
+    expect(queuedRequestContents).toEqual(['QUEUE ONE', 'QUEUE TWO']);
+    expect(providerCallsBeforeExit).toBe(4);
+    expect(plain).toMatch(/queue is empty/i);
+
+    const evidenceDir = process.env.AIDEN_ACCEPTANCE_EVIDENCE_DIR;
+    if (evidenceDir) {
+      await fs.mkdir(evidenceDir, { recursive: true });
+      await fs.writeFile(
+        path.join(evidenceDir, `busy-queue-${columns}-columns.txt`),
+        Object.entries(frames).map(([name, frame]) => `--- ${name} ---\n${frame}`).join('\n\n'),
+        'utf8',
+      );
+    }
+  }, 75_000);
+
   it('preserves an exact multiline busy submission through resize and provider handoff', async () => {
     const repoRoot = path.resolve(__dirname, '../../..');
     const aidenHome = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-busy-queue-home-'));
@@ -113,7 +257,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           setTimeout(() => child!.resize(44, 40), 120);
           setTimeout(() => child!.resize(110, 40), 240);
           setTimeout(() => child!.write('\r'), 400);
-        } else if (state === 'queueing' && plain.includes('QUEUED TURN COMPLETE') && readyCount >= 2) {
+        } else if (state === 'queueing' && provider!.callCount() >= 2 && readyCount >= 2) {
           state = 'queue-check';
           typeLikeKeyboard(child!, '/queue');
         } else if (state === 'queue-check' && /queue is empty/i.test(plain)) {
@@ -272,7 +416,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         } else if (state === 'denying' && plain.includes('RESIZE APPROVAL COMPLETE') && readyCount >= 2) {
           state = 'normal';
           typeLikeKeyboard(child!, 'normal after resize');
-        } else if (state === 'normal' && plain.includes('NORMAL AFTER RESIZE') && readyCount >= 3) {
+        } else if (state === 'normal' && provider!.callCount() >= 3 && readyCount >= 3) {
           state = 'queue';
           typeLikeKeyboard(child!, '/queue');
         } else if (state === 'queue' && /queue is empty/i.test(plain)) {

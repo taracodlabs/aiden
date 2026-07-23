@@ -192,7 +192,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
             child!.write('\x1b[B');
             setTimeout(() => child!.write('\r'), 150);
           }, 250);
-        } else if (state === 'single-denial-settle' && plain.includes('SINGLE DENIAL COMPLETE') && readyCount >= 3) {
+        } else if (
+          state === 'single-denial-settle'
+          && provider!.callCount() >= 3
+          && plain.slice(turnStart).includes('Denied · Task:')
+          && readyCount >= 3
+        ) {
           settled.denial = plain.slice(turnStart);
           state = 'clear-before-allow';
           typeLine(child!, '/clear');
@@ -203,7 +208,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (state === 'single-allow-prompt' && plain.slice(turnStart).includes('Decision')) {
           state = 'single-allow-settle';
           setTimeout(() => child!.write('\r'), 250);
-        } else if (state === 'single-allow-settle' && plain.includes('SINGLE ALLOW COMPLETE') && readyCount >= 5) {
+        } else if (
+          state === 'single-allow-settle'
+          && provider!.callCount() >= 5
+          && plain.slice(turnStart).includes('Completed · Task:')
+          && readyCount >= 5
+        ) {
           settled.allow = plain.slice(turnStart);
           state = 'clear-after-single';
           typeLine(child!, '/clear');
@@ -217,7 +227,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (state === 'batch-valid-retry' && plain.includes('Could not parse')) {
           state = 'batch-valid-settle';
           setTimeout(() => typeLine(child!, '1'), 200);
-        } else if (state === 'batch-valid-settle' && plain.includes('BATCH RETRY COMPLETE') && readyCount >= 7) {
+        } else if (
+          state === 'batch-valid-settle'
+          && provider!.callCount() >= 8
+          && /(?:Partially completed|Verified) · Task:/.test(plain.slice(turnStart))
+          && readyCount >= 7
+        ) {
           settled.retry = plain.slice(turnStart);
           state = 'clear-after-retry';
           typeLine(child!, '/clear');
@@ -228,7 +243,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (state === 'batch-cancel-prompt' && plain.includes('Cancel this write')) {
           state = 'batch-cancel-settle';
           setTimeout(() => child!.write('\x03'), 250);
-        } else if (state === 'batch-cancel-settle' && plain.includes('BATCH CANCELLATION COMPLETE') && readyCount >= 9) {
+        } else if (
+          state === 'batch-cancel-settle'
+          && provider!.callCount() >= 10
+          && plain.slice(turnStart).includes('Cancelled · Task:')
+          && readyCount >= 9
+        ) {
           settled.cancel = plain.slice(turnStart);
           state = 'clear-after-cancel';
           typeLine(child!, '/clear');
@@ -239,7 +259,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (state === 'batch-none-prompt' && plain.includes('Deny this write')) {
           state = 'batch-none-settle';
           setTimeout(() => typeLine(child!, 'none'), 200);
-        } else if (state === 'batch-none-settle' && plain.includes('BATCH NONE COMPLETE') && readyCount >= 11) {
+        } else if (
+          state === 'batch-none-settle'
+          && provider!.callCount() >= 12
+          && plain.slice(turnStart).includes('Denied · Task:')
+          && readyCount >= 11
+        ) {
           settled.none = plain.slice(turnStart);
           state = 'queue';
           typeLine(child!, '/queue');

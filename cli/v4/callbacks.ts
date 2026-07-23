@@ -319,7 +319,12 @@ export class CliCallbacks {
   }
 
   async withModalActivity<T>(run: () => Promise<T>, options?: ModalActivityOptions<T>): Promise<T> {
-    return this.activities.runModal(run, options);
+    this.display.pauseComposerSurface();
+    try {
+      return await this.activities.runModal(run, options);
+    } finally {
+      this.display.resumeComposerSurface();
+    }
   }
 
   completeActivityTurn(): void {
