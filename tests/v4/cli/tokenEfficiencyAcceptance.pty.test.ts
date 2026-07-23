@@ -7,6 +7,7 @@ import * as pty from 'node-pty';
 import { ProviderAttemptLedger } from '../../../core/v4/usageLedger';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 type RunningPty = ReturnType<typeof pty.spawn>;
 let child: RunningPty | null = null;
@@ -86,19 +87,22 @@ describe.skipIf(process.platform !== 'win32')('built CLI token-efficiency accept
     });
 
     let output = '';
+    const screen = new TerminalScreen(110, 40);
     let state = 'boot';
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error(
-        `token-efficiency acceptance timeout (${state}):\n${plain(output).slice(-12_000)}`,
+        `token-efficiency acceptance timeout (${state}):\n${screen.snapshot()}`,
       )), 45_000);
       child!.onData((chunk) => {
         output += chunk;
-        const text = plain(output);
+        screen.write(chunk);
+        const text = screen.snapshot();
+        const rawText = plain(output);
         const ready = output.split(COMPOSER_READY_TOKEN).length - 1;
         if (state === 'boot' && ready >= 1) {
           state = 'estimate';
           submit(child!, '/estimate --json inspect one file');
-        } else if (state === 'estimate' && text.includes('"selectedMode":"balanced"') && ready >= 2) {
+        } else if (state === 'estimate' && rawText.includes('"selectedMode":"balanced"') && ready >= 2) {
           expect(provider!.callCount()).toBe(0);
           state = 'mode'; submit(child!, '/mode economy');
         } else if (state === 'mode' && text.includes('Usage mode: economy') && ready >= 3) {
@@ -107,7 +111,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI token-efficiency accept
           state = 'turn'; submit(child!, 'reply with the acceptance phrase');
         } else if (state === 'turn' && text.includes('TOKEN EFFICIENCY ACCEPTANCE') && ready >= 5) {
           state = 'usage-json'; submit(child!, '/usage --json');
-        } else if (state === 'usage-json' && text.includes('"physicalAttempts":1') && ready >= 6) {
+        } else if (state === 'usage-json' && rawText.includes('"physicalAttempts":1') && ready >= 6) {
           state = 'usage-human'; submit(child!, '/usage');
         } else if (state === 'usage-human' && text.includes('Usage — Current session') && ready >= 7) {
           expect(text).toContain('cumulative exposures');
@@ -117,7 +121,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI token-efficiency accept
           expect(text).toContain('Providers and models');
           expect(text).toContain('Purposes');
           state = 'budget-json'; submit(child!, '/budget --json');
-        } else if (state === 'budget-json' && text.includes('"tokenBudget":100000') && ready >= 9) {
+        } else if (state === 'budget-json' && rawText.includes('"tokenBudget":100000') && ready >= 9) {
           state = 'queue'; submit(child!, '/queue');
         } else if (state === 'queue' && /queue is empty/i.test(text) && ready >= 10) {
           state = 'quit'; submit(child!, '/quit');
