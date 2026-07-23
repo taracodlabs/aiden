@@ -101,7 +101,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
       env: { ...process.env, AIDEN_HOME: aidenHome, AIDEN_TEST_REPO_ROOT: repoRoot,
         AIDEN_TEST_PROVIDER_BASE_URL: provider.baseUrl, CUSTOM_OPENAI_API_KEY: 'pinned-queue-key',
         AIDEN_NO_UPDATE_CHECK: '1', AIDEN_TEST_COMPOSER_READY: '1', TELEGRAM_BOT_TOKEN: '',
-        FORCE_COLOR: '0', NO_COLOR: '1' },
+        AIDEN_SANDBOX: '0', FORCE_COLOR: '0', NO_COLOR: '1' },
     });
 
     let output = '';
