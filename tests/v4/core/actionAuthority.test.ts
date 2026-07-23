@@ -120,7 +120,9 @@ describe('final action and durable Approval authority', () => {
         riskTier: 'caution',
         policy,
       });
-      expect(normalized.plan.affectedResources).toEqual([path.join(target, 'result.txt')]);
+      expect(normalized.plan.affectedResources).toEqual([
+        path.join(fs.realpathSync.native(target), 'result.txt'),
+      ]);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
