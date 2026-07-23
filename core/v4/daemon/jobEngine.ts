@@ -117,6 +117,17 @@ export interface JobEngine {
   getAttempt(attemptId: string): AttemptRecord | null;
   listAttempts(jobId: string): AttemptRecord[];
   listEvents(jobId: string, afterSequence?: number): JobEventRecord[];
+  appendJobEvent(command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+    type: string;
+    payload?: Record<string, unknown> | null;
+    producer: string;
+    idempotencyKey: string;
+    causationId?: string | null;
+    correlationId?: string | null;
+  }): { applied: boolean; duplicate: boolean; jobSequence?: number; conflict?: 'not_found' | 'stale_generation' };
   transitionJob(command: {
     jobId: string;
     attemptId: string;
@@ -159,6 +170,21 @@ export interface JobEngine {
     eventIdempotencyKey: string;
     now?: number;
   }): TransitionResult;
+  pauseJob(command: {
+    jobId: string;
+    reason: string;
+    producer: string;
+    eventIdempotencyKey: string;
+    now?: number;
+  }): TransitionResult;
+  resumeJob(command: {
+    jobId: string;
+    instanceId: string;
+    triggerReason: string;
+    producer: string;
+    eventIdempotencyKey: string;
+    now?: number;
+  }): { attemptId: string; runId: number; attemptNumber: number; generation: number };
   transitionAttempt(command: {
     attemptId: string;
     expectedStateVersion: number;
@@ -609,6 +635,43 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     return { jobId, attemptId, runId, reused: false };
   }).immediate;
 
+  const appendJobEventTx = db.transaction((command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+    type: string;
+    payload?: Record<string, unknown> | null;
+    producer: string;
+    idempotencyKey: string;
+    causationId?: string | null;
+    correlationId?: string | null;
+  }) => {
+    const attempt = getAttemptRow(command.attemptId);
+    if (!attempt || attempt.task_id !== command.jobId) {
+      return { applied: false, duplicate: false, conflict: 'not_found' as const };
+    }
+    if (attempt.generation !== command.generation) {
+      return { applied: false, duplicate: false, conflict: 'stale_generation' as const };
+    }
+    const appended = appendEvent({
+      jobId: command.jobId,
+      runId: attempt.id,
+      attemptId: command.attemptId,
+      generation: command.generation,
+      type: command.type,
+      payload: command.payload,
+      producer: command.producer,
+      idempotencyKey: command.idempotencyKey,
+      causationId: command.causationId,
+      correlationId: command.correlationId,
+    });
+    return {
+      applied: !appended.duplicate,
+      duplicate: appended.duplicate,
+      jobSequence: appended.jobSequence,
+    };
+  }).immediate;
+
   const transitionJobTx = db.transaction((command: Parameters<JobEngine['transitionJob']>[0]): TransitionResult => {
     if (existingEvent(command.jobId, command.eventIdempotencyKey)) {
       return { applied: false, duplicate: true };
@@ -910,6 +973,134 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       idempotencyKey: command.eventIdempotencyKey,
     });
     return { applied: true, stateVersion: nextVersion };
+  }).immediate;
+
+  const pauseJobTx = db.transaction((command: Parameters<JobEngine['pauseJob']>[0]): TransitionResult => {
+    if (existingEvent(command.jobId, command.eventIdempotencyKey)) {
+      return { applied: false, duplicate: true };
+    }
+    const job = getJobRow(command.jobId);
+    if (!job) return { applied: false, conflict: 'not_found' };
+    if (JOB_TERMINAL.has(job.status)) return { applied: false, conflict: 'terminal_state' };
+    if (job.status === 'paused') return { applied: false, duplicate: true, stateVersion: job.state_version };
+    const attempt = job.active_attempt_id ? getAttemptRow(job.active_attempt_id) : undefined;
+    if (!attempt || ATTEMPT_TERMINAL.has(attempt.status)) return { applied: false, conflict: 'not_found' };
+    const now = command.now ?? Date.now();
+    const attemptVersion = attempt.state_version + 1;
+    const attemptChanged = db.prepare(
+      `UPDATE runs
+          SET status = 'waiting', state_version = ?, finish_reason = ?,
+              lease_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
+              lease_heartbeat_at = NULL, fence_token = NULL
+        WHERE attempt_id = ? AND state_version = ? AND generation = ?`,
+    ).run(attemptVersion, command.reason, attempt.attempt_id, attempt.state_version, attempt.generation);
+    if (attemptChanged.changes !== 1) return { applied: false, conflict: 'state_version' };
+    appendEvent({
+      jobId: job.id,
+      runId: attempt.id,
+      attemptId: attempt.attempt_id,
+      generation: attempt.generation,
+      type: 'attempt.paused',
+      payload: { reason: command.reason },
+      producer: command.producer,
+      idempotencyKey: `${command.eventIdempotencyKey}:attempt`,
+    });
+    const nextVersion = job.state_version + 1;
+    const jobChanged = db.prepare(
+      `UPDATE tasks SET status = 'paused', state_version = ?, finish_reason = ?, updated_at = ?
+        WHERE id = ? AND state_version = ? AND active_attempt_id = ?`,
+    ).run(nextVersion, command.reason, now, job.id, job.state_version, attempt.attempt_id);
+    if (jobChanged.changes !== 1) return { applied: false, conflict: 'state_version' };
+    appendEvent({
+      jobId: job.id,
+      runId: attempt.id,
+      attemptId: attempt.attempt_id,
+      generation: attempt.generation,
+      type: 'job.paused',
+      payload: { reason: command.reason },
+      producer: command.producer,
+      idempotencyKey: command.eventIdempotencyKey,
+    });
+    return { applied: true, stateVersion: nextVersion };
+  }).immediate;
+
+  const resumeJobTx = db.transaction((command: Parameters<JobEngine['resumeJob']>[0]) => {
+    const job = getJobRow(command.jobId);
+    if (!job) throw new Error('Resume Job not found');
+    if (JOB_TERMINAL.has(job.status)) throw new Error('Cannot resume a terminal Job');
+    if (job.status !== 'paused') throw new Error('Resume requires a paused Job');
+    const previous = job.active_attempt_id ? getAttemptRow(job.active_attempt_id) : undefined;
+    if (!previous) throw new Error('Paused Job has no active Attempt');
+    const now = command.now ?? Date.now();
+    const previousChanged = db.prepare(
+      `UPDATE runs
+          SET status = 'cancelled', state_version = state_version + 1,
+              finish_reason = 'superseded by resume', completed_at = ?, ended_at = ?
+        WHERE attempt_id = ? AND generation = ? AND status = 'waiting'`,
+    ).run(now, now, previous.attempt_id, previous.generation);
+    if (previousChanged.changes !== 1) throw new Error('Paused Attempt changed concurrently');
+    appendEvent({
+      jobId: job.id,
+      runId: previous.id,
+      attemptId: previous.attempt_id,
+      generation: previous.generation,
+      type: 'attempt.cancelled',
+      payload: { reason: 'superseded by resume' },
+      producer: command.producer,
+      idempotencyKey: `${command.eventIdempotencyKey}:previous`,
+    });
+    const max = db.prepare(
+      'SELECT COALESCE(MAX(attempt_number), 0) AS attempt_number, COALESCE(MAX(generation), 0) AS generation FROM runs WHERE task_id = ?',
+    ).get(job.id) as { attempt_number: number; generation: number };
+    const attemptNumber = max.attempt_number + 1;
+    const generation = max.generation + 1;
+    const attemptId = randomId('attempt');
+    const inserted = db.prepare(
+      `INSERT INTO runs (
+         session_id, instance_id, status, started_at, resume_pending,
+         task_id, attempt_id, attempt_number, generation, state_version,
+         recovery_of_attempt_id, trigger_reason
+       ) VALUES (?, ?, 'queued', ?, 0, ?, ?, ?, ?, 0, ?, ?)`,
+    ).run(
+      previous.session_id,
+      command.instanceId,
+      now,
+      job.id,
+      attemptId,
+      attemptNumber,
+      generation,
+      previous.attempt_id,
+      command.triggerReason,
+    );
+    const jobChanged = db.prepare(
+      `UPDATE tasks
+          SET status = 'queued', state_version = state_version + 1,
+              active_attempt_id = ?, finish_reason = NULL, updated_at = ?
+        WHERE id = ? AND state_version = ? AND status = 'paused'`,
+    ).run(attemptId, now, job.id, job.state_version);
+    if (jobChanged.changes !== 1) throw new Error('Paused Job changed concurrently');
+    const runId = Number(inserted.lastInsertRowid);
+    appendEvent({
+      jobId: job.id,
+      runId,
+      attemptId,
+      generation,
+      type: 'job.resumed',
+      payload: { previousAttemptId: previous.attempt_id },
+      producer: command.producer,
+      idempotencyKey: command.eventIdempotencyKey,
+    });
+    appendEvent({
+      jobId: job.id,
+      runId,
+      attemptId,
+      generation,
+      type: 'attempt.created',
+      payload: { attemptNumber, recoveryOfAttemptId: previous.attempt_id, triggerReason: command.triggerReason },
+      producer: command.producer,
+      idempotencyKey: `${command.eventIdempotencyKey}:attempt`,
+    });
+    return { attemptId, runId, attemptNumber, generation };
   }).immediate;
 
   const claimAttemptTx = db.transaction((command: Parameters<JobEngine['claimAttempt']>[0]): LeaseResult => {
@@ -1517,9 +1708,12 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         };
       });
     },
+    appendJobEvent: appendJobEventTx,
     transitionJob: transitionJobTx,
     finalizeJob: finalizeJobTx,
     cancelJob: cancelJobTx,
+    pauseJob: pauseJobTx,
+    resumeJob: resumeJobTx,
     transitionAttempt: transitionAttemptTx,
     claimAttempt: claimAttemptTx,
     renewAttemptLease: renewAttemptTx,

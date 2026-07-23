@@ -30,7 +30,7 @@ describe('prompt-zone rule boundaries', () => {
   it('chatSession.ts emits BOTTOM rule immediately before runAgentTurn', () => {
     const src = readFileSync(path.join(__dirname, '../../../../cli/v4/chatSession.ts'), 'utf8');
     const lines = src.split('\n');
-    const idx = lines.findIndex((l) => /await this\.runAgentTurn\(input\)/.test(l));
+    const idx = lines.findIndex((l) => /await this\.runAgentTurn\(input(?:,\s*inputAlreadyPersisted)?\)/.test(l));
     expect(idx).toBeGreaterThan(0);
     const preceding = lines.slice(Math.max(0, idx - 8), idx).join('\n');
     expect(preceding).toMatch(/display\.write\(\s*`\s+\$\{this\.opts\.display\.rule\(\)\}\\n`\s*\)/);

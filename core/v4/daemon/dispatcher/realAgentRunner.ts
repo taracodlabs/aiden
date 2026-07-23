@@ -80,6 +80,7 @@ import { mapTaskOutcomePresentation, taskOutcomeInputFromFinalization } from '..
 import { emitArtifactVerified, emitCostUpdated, type PillarEventSink } from '../../pillarEvents';
 import type { TaskStore } from '../taskStore';
 import type { JobEngine } from '../jobEngine';
+import { createJobControlAuthority } from '../jobControlAuthority';
 import { runWithJobExecutionContext } from '../jobExecutionContext';
 import {
   resolveDaemonModel,
@@ -180,6 +181,9 @@ export function createRealAgentRunner(
         entryPoint: 'daemon',
       })
     : createDailyBudgetTracker({ db: opts.db, budget: configuredBudget });
+  const jobControls = opts.jobEngine
+    ? createJobControlAuthority({ db: opts.db, jobEngine: opts.jobEngine })
+    : null;
 
   return {
     async invoke(input: DaemonAgentInput): Promise<DaemonAgentResult> {
@@ -192,11 +196,17 @@ export function createRealAgentRunner(
       let durableJobVersion = 0;
       let durableAttemptVersion = 0;
       let durableLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
+      let durableControlWatcher: ReturnType<typeof setInterval> | null = null;
       const durableAbort = new AbortController();
+      let pausedAtBoundary = false;
       const stopDurableHeartbeat = (): void => {
         if (durableLeaseHeartbeat !== null) {
           clearInterval(durableLeaseHeartbeat);
           durableLeaseHeartbeat = null;
+        }
+        if (durableControlWatcher !== null) {
+          clearInterval(durableControlWatcher);
+          durableControlWatcher = null;
         }
       };
       const finishDurable = (input2: {
@@ -338,6 +348,17 @@ export function createRealAgentRunner(
           durableAttemptVersion = renewed.stateVersion;
         }, 20_000);
         durableLeaseHeartbeat.unref?.();
+        // Commands can be written by another process (Workbench/API). Observe
+        // the authoritative Job row and physically abort the active provider or
+        // tool when cancellation wins, rather than merely changing a status.
+        durableControlWatcher = setInterval(() => {
+          if (!opts.jobEngine || !durableJobId || durableAbort.signal.aborted) return;
+          const status = opts.jobEngine.getJob(durableJobId)?.status;
+          if (status === 'cancelled' || status === 'cancelling') {
+            durableAbort.abort(new Error('Durable Job cancellation requested'));
+          }
+        }, 250);
+        durableControlWatcher.unref?.();
       }
 
       // ── 1: pre-turn budget gate ────────────────────────────────────────
@@ -545,6 +566,17 @@ export function createRealAgentRunner(
           runId,
           entryPoint: 'daemon',
           signal: invocationSignal,
+          waitForResumeIfPaused: async () => {
+            if (!jobControls || !durableJobId) return;
+            const paused = jobControls.commands.applyPendingAtBoundary({ jobId: durableJobId, now: now() });
+            if (!paused.applied) return;
+            pausedAtBoundary = true;
+            if (durableLeaseHeartbeat !== null) {
+              clearInterval(durableLeaseHeartbeat);
+              durableLeaseHeartbeat = null;
+            }
+            throw new Error('Durable Job paused at safe boundary');
+          },
           // The agent honours its own abort signal via per-tool aborts;
           // tools that respect AbortSignal (shell_exec, fetch_*) will
           // bail when perTurnWatcher trips.
@@ -600,6 +632,30 @@ export function createRealAgentRunner(
       } catch (e) {
         invocationError = e instanceof Error ? (e.stack ?? e.message) : String(e);
         log('error', `[real-runner] runConversation threw eventId=${input.triggerEventId}: ${invocationError.slice(0, 500)}`);
+      }
+
+      if (pausedAtBoundary) {
+        stopDurableHeartbeat();
+        try {
+          opts.runStore.emitEventRich({
+            runId,
+            category: 'dispatcher',
+            kind: 'dispatcher.paused',
+            name: 'dispatcher:paused',
+            sessionId: input.sessionId,
+            status: 'paused',
+            summary: 'paused at safe boundary',
+            payload: { jobId: durableJobId, attemptId: durableAttemptId, generation: durableGeneration },
+            visibility: 'system',
+            source: 'daemon',
+          });
+        } catch { /* the authoritative Job event is already durable */ }
+        return { runId, finishReason: 'interrupted', error: 'paused' };
+      }
+
+      if (opts.jobEngine && durableJobId && opts.jobEngine.getJob(durableJobId)?.status === 'cancelled') {
+        stopDurableHeartbeat();
+        return { runId, finishReason: 'interrupted', error: 'cancelled' };
       }
 
       if (durableJobId && durableAttemptId && durableGeneration !== null) {

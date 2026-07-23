@@ -414,6 +414,105 @@ describe('Workbench steer — token-gated POST /api/tasks/:runId/cancel', () => 
   });
 });
 
+describe('Workbench durable input, pause, resume, and approval commands', () => {
+  const TOKEN = 'durable-command-token';
+
+  it('routes every command through its injected durable authority port', async () => {
+    const calls: string[] = [];
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: TOKEN,
+      input: {
+        receive: (id, content, key) => {
+          calls.push(`input:${id}:${content}:${key}`);
+          return { accepted: true, runId: id, inputId: 'input_exact' };
+        },
+      },
+      control: {
+        pause: (id, key) => {
+          calls.push(`pause:${id}:${key}`);
+          return { accepted: true, applied: false, runId: id, controlId: 'pause_exact' };
+        },
+        resume: (id, key) => {
+          calls.push(`resume:${id}:${key}`);
+          return { accepted: true, runId: id, attemptId: 'attempt_new', generation: 2 };
+        },
+      },
+      approval: {
+        decide: (id, decision) => {
+          calls.push(`approval:${id}:${decision}`);
+          return { accepted: true, approvalId: id, state: decision };
+        },
+      },
+      port: 0,
+    });
+    const headers = { 'x-workbench-token': TOKEN };
+
+    expect((await httpPost(b.port, `/api/tasks/${runId}/input`, {
+      message: 'next exact input', idempotencyKey: 'input-key',
+    }, headers)).status).toBe(202);
+    expect((await httpPost(b.port, `/api/tasks/${runId}/pause`, {
+      idempotencyKey: 'pause-key',
+    }, headers)).status).toBe(202);
+    expect((await httpPost(b.port, `/api/tasks/${runId}/resume`, {
+      idempotencyKey: 'resume-key',
+    }, headers)).status).toBe(202);
+    expect((await httpPost(b.port, '/api/approvals/approval_exact/decision', {
+      decision: 'approved',
+    }, headers)).status).toBe(202);
+
+    expect(calls).toEqual([
+      `input:${runId}:next exact input:input-key`,
+      `pause:${runId}:pause-key`,
+      `resume:${runId}:resume-key`,
+      'approval:approval_exact:approved',
+    ]);
+    await b.close();
+  });
+
+  it('does not treat ordinary input as an approval decision', async () => {
+    const approvals: string[] = [];
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: TOKEN,
+      input: { receive: (id) => ({ accepted: true, runId: id, inputId: 'input_yes' }) },
+      approval: {
+        decide: (id, decision) => {
+          approvals.push(`${id}:${decision}`);
+          return { accepted: true, approvalId: id, state: decision };
+        },
+      },
+      port: 0,
+    });
+    const response = await httpPost(b.port, `/api/tasks/${runId}/input`, { message: 'yes' }, {
+      'x-workbench-token': TOKEN,
+    });
+    expect(response.status).toBe(202);
+    expect(approvals).toEqual([]);
+    await b.close();
+  });
+});
+
+describe('Workbench durable Job projections', () => {
+  it('queries Job and Attempt identity and replays events from a Job sequence cursor', async () => {
+    const jobs = {
+      getJob: (id: string) => id === 'job_exact' ? { id, status: 'waiting', activeAttemptId: 'attempt_exact' } : null,
+      getAttempt: (id: string) => id === 'attempt_exact' ? { id, jobId: 'job_exact', generation: 3 } : null,
+      listEvents: (id: string, after: number) => id === 'job_exact'
+        ? [{ jobId: id, jobSequence: after + 1, type: 'approval.created' }]
+        : [],
+    };
+    const b = await startWorkbenchBridge({ reader: runStore, jobs, port: 0 });
+    const job = await httpGet(b.port, '/api/jobs/job_exact');
+    const attempt = await httpGet(b.port, '/api/attempts/attempt_exact');
+    const events = await httpGet(b.port, '/api/jobs/job_exact/events?after=7');
+    expect(JSON.parse(job.body)).toMatchObject({ id: 'job_exact', status: 'waiting' });
+    expect(JSON.parse(attempt.body)).toMatchObject({ id: 'attempt_exact', generation: 3 });
+    expect(JSON.parse(events.body)).toEqual([{ jobId: 'job_exact', jobSequence: 8, type: 'approval.created' }]);
+    await b.close();
+  });
+});
+
 // ── Serving the built React dashboard (dashboard-next/out) ────────────────────
 
 describe('Workbench bridge — static React dashboard', () => {

@@ -80,7 +80,11 @@ import type { SkillLoader } from '../../core/v4/skillLoader';
 import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import type { ConfigManager } from '../../core/v4/config';
 import type { PersonalityManager } from '../../core/v4/personality';
-import { runWithJobExecutionContext } from '../../core/v4/daemon/jobExecutionContext';
+import {
+  runWithJobExecutionContext,
+  type JobExecutionContext,
+} from '../../core/v4/daemon/jobExecutionContext';
+import type { ProviderCallUsageContext } from '../../providers/v4/types';
 import type { PluginLoader } from '../../core/v4/plugins/pluginLoader';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
 import type { Message } from '../../providers/v4/types';
@@ -450,6 +454,8 @@ export interface ChatSessionOptions {
   replRunStore?:    import('../../core/v4/daemon/runStore').RunStore;
   /** Authoritative durable Job/Attempt admission and transition service. */
   jobEngine?:       import('../../core/v4/daemon/jobEngine').JobEngine;
+  /** Durable input, steering, pause, resume, and cancellation authority. */
+  jobControlAuthority?: import('../../core/v4/daemon/jobControlAuthority').JobControlAuthority;
   replInstanceId?:  string;
   /**
    * v4.10 Slice 10.8 — durable Task-lite store. Optional for tests +
@@ -667,6 +673,10 @@ export class ChatSession implements ChatSessionLike {
    * listener attached for the duration of each turn.
    */
   private readonly duringTurnInput = new DuringTurnInput();
+  private activeDurableTarget: { jobId: string; attemptId: string; generation: number } | null = null;
+  private readonly durableQueueInputIds: string[] = [];
+  private durableInputOrdinal = 0;
+  private durableBoundarySequence = 0;
   private queueGuidanceShown = false;
   /** P2A transitional lease for prompts that overlap during-turn input. */
   private readonly inputAuthority = new InputAuthority();
@@ -675,7 +685,11 @@ export class ChatSession implements ChatSessionLike {
   setBusyMode(mode: BusyEnterMode): void { this.duringTurnInput.setMode(mode); }
   getBusyMode(): BusyEnterMode { return this.duringTurnInput.getMode(); }
   listQueue(): string[] { return this.duringTurnInput.peek(); }
-  clearQueue(): number { return this.duringTurnInput.clear(); }
+  clearQueue(): number {
+    if (this.sessionId) this.opts.jobControlAuthority?.inputs.cancelPendingForSession(this.sessionId);
+    this.durableQueueInputIds.length = 0;
+    return this.duringTurnInput.clear();
+  }
   queueCount(): number { return this.duringTurnInput.count(); }
 
   /**
@@ -837,6 +851,16 @@ export class ChatSession implements ChatSessionLike {
     // stale.
     if (this.opts.replParentRunRef) {
       this.opts.replParentRunRef.chatSessionId = this.sessionId;
+    }
+
+    // Rebuild the responsive in-memory projection from durable unconsumed
+    // records. The SQLite authority remains the source of truth.
+    if (this.opts.jobControlAuthority) {
+      for (const record of this.opts.jobControlAuthority.inputs.listPendingForSession(this.sessionId)) {
+        if (record.kind !== 'message' || record.content === null) continue;
+        this.duringTurnInput.enqueue(record.content);
+        this.durableQueueInputIds.push(record.inputId);
+      }
     }
 
     // 2. Boxed startup card.
@@ -1090,11 +1114,37 @@ export class ChatSession implements ChatSessionLike {
         // with a rule + blank, so suppress on the very first iteration.
         if (iter > 1) this.opts.display.printTurnSeparator();
         let input: string;
+        let inputAlreadyPersisted = false;
         // v4.12.1 Slice 2a — idle boundary: run a message the user queued
         // WHILE the previous turn was busy before blocking on fresh input.
         // Echo it so a queued message never fires invisibly.
         const queuedNext = this.duringTurnInput.dequeue();
         if (queuedNext !== null) {
+          inputAlreadyPersisted = true;
+          const durableInputId = this.durableQueueInputIds.shift();
+          if (durableInputId && this.opts.jobControlAuthority) {
+            const record = this.opts.jobControlAuthority.inputs.get(durableInputId);
+            if (record?.targetAttemptId && record.targetGeneration !== null) {
+              const claimed = this.opts.jobControlAuthority.inputs.claimNext({
+                jobId: record.jobId,
+                attemptId: record.targetAttemptId,
+                generation: record.targetGeneration,
+                inputId: durableInputId,
+                kinds: ['message'],
+              });
+              if (!claimed || claimed.inputId !== durableInputId) {
+                throw new Error(`Durable queued input claim failed: ${durableInputId}`);
+              }
+              const consumed = this.opts.jobControlAuthority.inputs.consume({
+                inputId: durableInputId,
+                attemptId: record.targetAttemptId,
+                generation: record.targetGeneration,
+              });
+              if (!consumed.applied && !consumed.duplicate) {
+                throw new Error(`Durable queued input consume failed: ${durableInputId}`);
+              }
+            }
+          }
           try { this.opts.display.dim(`▸ running queued: ${queuedNext}`); } catch { /* defensive */ }
           input = queuedNext;
           // Fall through to the slash/agent dispatch below with this input.
@@ -1203,7 +1253,7 @@ export class ChatSession implements ChatSessionLike {
         // slash commands + empty input + /quit all `continue` above and
         // never reach this line, matching the task's edge-case spec.
         this.opts.display.write(`  ${this.opts.display.rule()}\n`);
-        await this.runAgentTurn(input);
+        await this.runAgentTurn(input, inputAlreadyPersisted);
       }
     } finally {
       // v4.10 Slice 10.7a — REPL no longer active; any subsequent
@@ -1619,7 +1669,7 @@ export class ChatSession implements ChatSessionLike {
     }
   }
 
-  private async runAgentTurn(userInput: string): Promise<void> {
+  private async runAgentTurn(userInput: string, inputAlreadyPersisted = false): Promise<void> {
     // v4.11 Slice B — snapshot pre-turn history for /undo (in-memory,
     // bounded). Captured before any mutation; `this.history` is only
     // reassigned at end-of-turn, so this copy is the true pre-turn state.
@@ -1719,6 +1769,17 @@ export class ChatSession implements ChatSessionLike {
           // the Enter-modes), not as prompt-level slash commands.
           const word = submission.trim().toLowerCase();
           if (word === '/pause') {
+            const target = this.activeDurableTarget;
+            if (target && this.opts.jobControlAuthority) {
+              this.opts.jobControlAuthority.commands.request({
+                ...target,
+                kind: 'pause',
+                source: 'tui',
+                reason: 'user requested pause',
+                idempotencyNamespace: `tui-control:${this.sessionId}`,
+                idempotencyKey: `pause:${target.attemptId}:${++this.durableInputOrdinal}`,
+              });
+            }
             const ok = this.duringTurnInput.requestPause();
             try {
               this.opts.display.dim(ok ? '  ‖ paused — /resume to continue (Ctrl+C still stops)' : '  ‖ already paused');
@@ -1727,19 +1788,134 @@ export class ChatSession implements ChatSessionLike {
             return;
           }
           if (word === '/resume') {
-            const ok = this.duringTurnInput.resume();
+            let durableResumed = true;
+            const target = this.activeDurableTarget;
+            if (target && this.opts.jobControlAuthority && jobEngine && replInstanceId) {
+              try {
+                const resumed = this.opts.jobControlAuthority.commands.resume({
+                  jobId: target.jobId,
+                  source: 'tui',
+                  instanceId: replInstanceId,
+                  idempotencyNamespace: `tui-control:${this.sessionId}`,
+                  idempotencyKey: `resume:${target.attemptId}:${++this.durableInputOrdinal}`,
+                });
+                const lease = jobEngine.claimAttempt({
+                  attemptId: resumed.attemptId,
+                  ownerId: replInstanceId,
+                  ttlMs: 45_000,
+                });
+                if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
+                  throw new Error(`resumed Attempt lease unavailable: ${lease.conflict ?? 'unknown'}`);
+                }
+                const attemptRunning = jobEngine.transitionAttempt({
+                  attemptId: resumed.attemptId,
+                  expectedStateVersion: lease.stateVersion,
+                  generation: lease.generation,
+                  fenceToken: lease.fenceToken,
+                  to: 'running',
+                  eventIdempotencyKey: `attempt-running:${resumed.attemptId}:${lease.generation}`,
+                  producer: 'repl',
+                });
+                const resumedJob = jobEngine.getJob(target.jobId);
+                if (!attemptRunning.applied || attemptRunning.stateVersion === undefined || !resumedJob) {
+                  throw new Error('resumed Attempt start rejected');
+                }
+                const jobRunning = jobEngine.transitionJob({
+                  jobId: target.jobId,
+                  attemptId: resumed.attemptId,
+                  generation: lease.generation,
+                  fenceToken: lease.fenceToken,
+                  expectedStateVersion: resumedJob.stateVersion,
+                  to: 'running',
+                  eventIdempotencyKey: `job-running:${target.jobId}:${lease.generation}`,
+                  producer: 'repl',
+                });
+                if (!jobRunning.applied || jobRunning.stateVersion === undefined) {
+                  throw new Error('resumed Job start rejected');
+                }
+                detachRuntimeControl?.();
+                jobAttemptId = resumed.attemptId;
+                replRunId = resumed.runId;
+                jobGeneration = lease.generation;
+                jobFenceToken = lease.fenceToken;
+                attemptStateVersion = attemptRunning.stateVersion;
+                jobStateVersion = jobRunning.stateVersion;
+                this.activeDurableTarget = {
+                  jobId: target.jobId,
+                  attemptId: resumed.attemptId,
+                  generation: lease.generation,
+                };
+                detachRuntimeControl = this.opts.jobControlAuthority.runtime.attach(resumed.attemptId, turnAbort);
+                if (jobExecutionContextRef) {
+                  jobExecutionContextRef.attemptId = resumed.attemptId;
+                  jobExecutionContextRef.generation = lease.generation;
+                  jobExecutionContextRef.fenceToken = lease.fenceToken;
+                }
+                if (providerUsageContextRef) {
+                  providerUsageContextRef.runId = resumed.runId;
+                  providerUsageContextRef.attemptId = resumed.attemptId;
+                  providerUsageContextRef.attemptGeneration = lease.generation;
+                }
+                startJobLeaseHeartbeat();
+              } catch (error) {
+                durableResumed = false;
+                try { this.opts.display.warn(`  resume failed: ${error instanceof Error ? error.message : String(error)}`); } catch { /* defensive */ }
+              }
+            }
+            const ok = durableResumed && this.duringTurnInput.resume();
             try {
               this.opts.display.dim(ok ? '  ▸ resumed' : '  ▸ not paused');
               this.opts.display.setBusyHint(this.duringTurnInput.busyHint());
             } catch { /* defensive */ }
             return;
           }
+          const target = this.activeDurableTarget;
+          let durableInputId: string | null = null;
+          if (target && this.opts.jobControlAuthority) {
+            const ordinal = ++this.durableInputOrdinal;
+            if (this.duringTurnInput.getMode() === 'redirect') {
+              this.opts.jobControlAuthority.steering.submit({
+                ...target,
+                sessionId: this.sessionId!,
+                source: 'tui',
+                action: 'redirect',
+                payload: submission,
+                idempotencyNamespace: `tui-steering:${this.sessionId}`,
+                idempotencyKey: `steer:${target.attemptId}:${ordinal}`,
+              });
+            } else if (this.duringTurnInput.getMode() === 'interrupt') {
+              this.opts.jobControlAuthority.commands.request({
+                ...target,
+                kind: 'interrupt',
+                source: 'tui',
+                reason: 'busy input requested interruption',
+                idempotencyNamespace: `tui-control:${this.sessionId}`,
+                idempotencyKey: `interrupt:${target.attemptId}:${ordinal}`,
+              });
+            } else {
+              const received = this.opts.jobControlAuthority.inputs.receive({
+                jobId: target.jobId,
+                targetAttemptId: target.attemptId,
+                targetGeneration: target.generation,
+                sessionId: this.sessionId!,
+                channelId: 'repl',
+                source: 'tui',
+                kind: 'message',
+                content: submission,
+                idempotencyNamespace: `tui-input:${this.sessionId}`,
+                idempotencyKey: `input:${target.attemptId}:${ordinal}`,
+              });
+              durableInputId = received.record.inputId;
+            }
+          }
           const act = this.duringTurnInput.onBusyEnter(submission);
           if (act.action === 'queued') {
+            if (durableInputId) this.durableQueueInputIds.push(durableInputId);
             try {
               const guidance = this.queueGuidanceShown ? '' : ' — FIFO after this turn · /queue to inspect';
               this.queueGuidanceShown = true;
-              this.opts.display.dim(`  ✓ queued (${act.count} pending)${guidance}`);
+              const acknowledgment = durableInputId ? ` · ${durableInputId}` : '';
+              this.opts.display.dim(`  ✓ queued (${act.count} pending)${acknowledgment}${guidance}`);
             } catch { /* defensive */ }
           } else if (act.action === 'steered') {
             // Slice 2b — buffered; lands after the current tool, next iteration.
@@ -1751,7 +1927,21 @@ export class ChatSession implements ChatSessionLike {
         // esc cancels the turn AND drops any pending steer (a hard interrupt
         // supersedes a nudge — no stale steer leaks onto the next turn). The
         // queue is kept (Slice-2a decision).
-        onEscape: () => { this.duringTurnInput.clearSteer(); requestTurnCancel(this.currentAbortController); },
+        onEscape: () => {
+          this.duringTurnInput.clearSteer();
+          const target = this.activeDurableTarget;
+          if (target && this.opts.jobControlAuthority) {
+            this.opts.jobControlAuthority.commands.request({
+              ...target,
+              kind: 'interrupt',
+              source: 'tui',
+              reason: 'escape interrupted the turn',
+              idempotencyNamespace: `tui-control:${this.sessionId}`,
+              idempotencyKey: `escape:${target.attemptId}:${++this.durableInputOrdinal}`,
+            });
+          }
+          requestTurnCancel(this.currentAbortController);
+        },
         onCtrlC:  () => { try { (process as NodeJS.Process).emit('SIGINT'); } catch { /* defensive */ } },
         // Slice 2c — paint the live during-turn buffer so the user sees their
         // keystrokes (not blind), labelled with what Enter will do. Empty
@@ -1832,12 +2022,36 @@ export class ChatSession implements ChatSessionLike {
     let jobFenceToken: string | null = null;
     let jobStateVersion = 0;
     let attemptStateVersion = 0;
+    let detachRuntimeControl: (() => void) | null = null;
+    let jobExecutionContextRef: JobExecutionContext | null = null;
+    let providerUsageContextRef: ProviderCallUsageContext | null = null;
     let jobLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
     const stopJobLeaseHeartbeat = (): void => {
       if (jobLeaseHeartbeat !== null) {
         clearInterval(jobLeaseHeartbeat);
         jobLeaseHeartbeat = null;
       }
+    };
+    const startJobLeaseHeartbeat = (): void => {
+      stopJobLeaseHeartbeat();
+      if (!jobEngine || !replInstanceId) return;
+      jobLeaseHeartbeat = setInterval(() => {
+        if (!jobAttemptId || jobGeneration === null || !jobFenceToken || turnAbort.signal.aborted) return;
+        const renewed = jobEngine.renewAttemptLease({
+          attemptId: jobAttemptId,
+          ownerId: replInstanceId,
+          generation: jobGeneration,
+          fenceToken: jobFenceToken,
+          ttlMs: 45_000,
+        });
+        if (!renewed.applied || renewed.stateVersion === undefined) {
+          stopJobLeaseHeartbeat();
+          turnAbort.abort(new Error(`Durable Attempt lease renewal failed: ${renewed.conflict ?? 'unknown'}`));
+          return;
+        }
+        attemptStateVersion = renewed.stateVersion;
+      }, 15_000);
+      jobLeaseHeartbeat.unref?.();
     };
 
     if (jobEngine) {
@@ -1858,6 +2072,36 @@ export class ChatSession implements ChatSessionLike {
       replRunId = admitted.runId;
       replTaskId = admitted.jobId;
       jobAttemptId = admitted.attemptId;
+      if (this.opts.jobControlAuthority && !inputAlreadyPersisted) {
+        const durableInput = this.opts.jobControlAuthority.inputs.receive({
+          jobId: admitted.jobId,
+          targetAttemptId: admitted.attemptId,
+          targetGeneration: 1,
+          sessionId: this.sessionId,
+          channelId: 'repl',
+          source: 'tui',
+          kind: 'message',
+          content: userInput,
+          idempotencyNamespace: `interactive-input:${this.sessionId}`,
+          idempotencyKey: `job:${admitted.jobId}:initial`,
+        });
+        const claimed = this.opts.jobControlAuthority.inputs.claimNext({
+          jobId: admitted.jobId,
+          attemptId: admitted.attemptId,
+          generation: 1,
+          inputId: durableInput.record.inputId,
+          kinds: ['message'],
+        });
+        if (!claimed) throw new Error(`Initial durable input claim failed: ${durableInput.record.inputId}`);
+        const consumed = this.opts.jobControlAuthority.inputs.consume({
+          inputId: durableInput.record.inputId,
+          attemptId: admitted.attemptId,
+          generation: 1,
+        });
+        if (!consumed.applied && !consumed.duplicate) {
+          throw new Error(`Initial durable input consume failed: ${durableInput.record.inputId}`);
+        }
+      }
       if (replParentRunRef) {
         replParentRunRef.runId = replRunId;
         replParentRunRef.sessionId = this.sessionId;
@@ -1900,23 +2144,21 @@ export class ChatSession implements ChatSessionLike {
         throw new Error(`Durable Job start rejected: ${jobRunning.conflict ?? 'unknown'}`);
       }
       jobStateVersion = jobRunning.stateVersion;
-      jobLeaseHeartbeat = setInterval(() => {
-        if (!jobAttemptId || jobGeneration === null || !jobFenceToken || turnAbort.signal.aborted) return;
-        const renewed = jobEngine.renewAttemptLease({
-          attemptId: jobAttemptId,
-          ownerId: replInstanceId,
-          generation: jobGeneration,
-          fenceToken: jobFenceToken,
-          ttlMs: 45_000,
-        });
-        if (!renewed.applied || renewed.stateVersion === undefined) {
-          stopJobLeaseHeartbeat();
-          turnAbort.abort(new Error(`Durable Attempt lease renewal failed: ${renewed.conflict ?? 'unknown'}`));
-          return;
-        }
-        attemptStateVersion = renewed.stateVersion;
-      }, 15_000);
-      jobLeaseHeartbeat.unref?.();
+      this.activeDurableTarget = {
+        jobId: admitted.jobId,
+        attemptId: admitted.attemptId,
+        generation: jobGeneration,
+      };
+      jobExecutionContextRef = {
+        engine: jobEngine,
+        jobId: admitted.jobId,
+        attemptId: admitted.attemptId,
+        generation: jobGeneration,
+        fenceToken: jobFenceToken,
+        producer: 'repl',
+      };
+      detachRuntimeControl = this.opts.jobControlAuthority?.runtime.attach(admitted.attemptId, turnAbort) ?? null;
+      startJobLeaseHeartbeat();
     } else if (replRunStore && replInstanceId && this.sessionId) {
       try {
         replRunId = replRunStore.create({
@@ -2268,7 +2510,7 @@ export class ChatSession implements ChatSessionLike {
         aborted: turnAbort.signal.aborted,
         pendingPromises: ['agent.runConversation'],
       });
-      const runAgent = () => runWithProviderUsageContext({
+      providerUsageContextRef = {
         sessionId: this.sessionId,
         taskId: replTaskId,
         runId: replRunId,
@@ -2278,7 +2520,8 @@ export class ChatSession implements ChatSessionLike {
         entryPoint: 'cli',
         selectedMode,
         selectedProfile,
-      }, () => this.opts.agent.runConversation(baseHistory, {
+      };
+      const runAgent = () => runWithProviderUsageContext(providerUsageContextRef!, () => this.opts.agent.runConversation(baseHistory, {
         stream: streamingEnabled,
         sessionId: this.sessionId,
         taskId: replTaskId,
@@ -2300,10 +2543,32 @@ export class ChatSession implements ChatSessionLike {
         // v4.12.1 Slice 2b — mid-turn steer pull. The loop drains this at its
         // safe boundary and injects the nudge as tool-stream context. The
         // controller owns the buffer; an interrupt clears it (below).
-        drainSteer: () => this.duringTurnInput.drainSteer(),
+        drainSteer: () => {
+          const projected = this.duringTurnInput.drainSteer();
+          const target = this.activeDurableTarget;
+          if (!target || !this.opts.jobControlAuthority) return projected;
+          const appliedPayloads: string[] = [];
+          while (true) {
+            const applied = this.opts.jobControlAuthority.steering.applyNext({
+              ...target,
+              safeBoundarySequence: ++this.durableBoundarySequence,
+              instanceId: replInstanceId ?? undefined,
+            });
+            if (!applied) break;
+            if (applied.state === 'applied' && applied.payload?.trim()) appliedPayloads.push(applied.payload);
+          }
+          return appliedPayloads.length > 0 ? appliedPayloads.join('\n') : projected;
+        },
         // v4.14 — PAUSE gate. The loop awaits this at the SAME safe boundary;
         // /pause freezes the turn, /resume (or a Ctrl+C abort) unblocks it.
-        waitForResumeIfPaused: (sig) => this.duringTurnInput.waitWhilePaused(sig),
+        waitForResumeIfPaused: async (sig) => {
+          const target = this.activeDurableTarget;
+          if (target && this.opts.jobControlAuthority && this.duringTurnInput.isPaused()) {
+            const paused = this.opts.jobControlAuthority.commands.applyPendingAtBoundary({ jobId: target.jobId });
+            if (paused.applied) stopJobLeaseHeartbeat();
+          }
+          await this.duringTurnInput.waitWhilePaused(sig);
+        },
         // v4.11 Slice 4 — expose the per-turn runtime context to
         // tools via `agent.getCurrentTurnContext()`. The spawn /
         // fanout facades read it to thread parent signal + cost
@@ -2429,15 +2694,8 @@ export class ChatSession implements ChatSessionLike {
           : undefined,
       }));
       const result = await (
-        jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && jobFenceToken
-          ? runWithJobExecutionContext({
-              engine: jobEngine,
-              jobId: replTaskId,
-              attemptId: jobAttemptId,
-              generation: jobGeneration,
-              fenceToken: jobFenceToken,
-              producer: 'repl',
-            }, runAgent)
+        jobExecutionContextRef
+          ? runWithJobExecutionContext(jobExecutionContextRef, runAgent)
           : runAgent()
       );
       if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && replRunId !== null) {
@@ -3113,6 +3371,9 @@ export class ChatSession implements ChatSessionLike {
         activityTimers: this.opts.callbacks.activityTimerCount?.() ?? 0,
         modalPauseDepth: this.opts.callbacks.activityModalPauseDepth?.() ?? 0,
       });
+      detachRuntimeControl?.();
+      detachRuntimeControl = null;
+      if (this.activeDurableTarget?.attemptId === jobAttemptId) this.activeDurableTarget = null;
       // v4.11 Slice 3 — release the per-turn cancel handles. ORDER
       // MATTERS:
       //   1. Drop activeTurnId FIRST so any late callbacks already

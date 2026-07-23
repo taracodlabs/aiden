@@ -272,7 +272,7 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'failure_state', 'files_touched', 'finish_reason',
       'goal', 'id', 'idempotency_key', 'idempotency_namespace',
-      'next_event_sequence', 'parent_task_id',
+      'next_event_sequence', 'next_input_sequence', 'parent_task_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'permissions', 'policy_snapshot_id', 'principal_id', 'recovery_state',
       'request_fingerprint',

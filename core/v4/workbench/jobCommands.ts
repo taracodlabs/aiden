@@ -6,7 +6,9 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import type { Db } from '../daemon/db/connection';
+import { createActionAuthority, type ActionAuthority } from '../actionAuthority';
 import type { JobEngine } from '../daemon/jobEngine';
+import { createJobControlAuthority, type JobControlAuthority } from '../daemon/jobControlAuthority';
 import type { RunStore } from '../daemon/runStore';
 import type { TriggerBus } from '../daemon/triggerBus';
 
@@ -16,8 +18,12 @@ export function createWorkbenchJobCommands(options: {
   jobEngine: JobEngine;
   runStore: RunStore;
   instanceId: string;
+  controlAuthority?: JobControlAuthority;
+  actionAuthority?: ActionAuthority;
   idFactory?: () => string;
 }) {
+  const controlAuthority = options.controlAuthority ?? createJobControlAuthority({ db: options.db, jobEngine: options.jobEngine });
+  const actionAuthority = options.actionAuthority ?? createActionAuthority({ db: options.db, jobEngine: options.jobEngine });
   const nextId = options.idFactory ?? randomUUID;
   const enqueueTx = options.db.transaction((task: { message: string; sessionId?: string }) => {
     const idempotencyKey = nextId();
@@ -48,6 +54,14 @@ export function createWorkbenchJobCommands(options: {
   }).immediate;
 
   const finalRun = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+  const activeTarget = (runId: number) => {
+    const run = options.runStore.get(runId);
+    if (!run?.taskId) return null;
+    const job = options.jobEngine.getJob(run.taskId);
+    const attempt = job?.activeAttemptId ? options.jobEngine.getAttempt(job.activeAttemptId) : null;
+    if (!job || !attempt) return null;
+    return { run, job, attempt };
+  };
   return {
     enqueue: {
       enqueue(task: { message: string; sessionId?: string }) {
@@ -68,15 +82,17 @@ export function createWorkbenchJobCommands(options: {
         if (!run) return { accepted: false, runId };
         if (finalRun.has(String(run.status))) return { accepted: true, runId, alreadyFinal: true };
         if (run.taskId && options.jobEngine.getJob(run.taskId)) {
-          const result = options.jobEngine.cancelJob({
+          const attempt = options.jobEngine.getAttempt(options.jobEngine.getJob(run.taskId)?.activeAttemptId ?? '');
+          const result = controlAuthority.commands.request({
             jobId: run.taskId,
+            attemptId: attempt?.id,
+            generation: attempt?.generation,
+            kind: 'cancel',
             reason: 'stopped from workbench web',
-            producer: 'workbench',
-            eventIdempotencyKey: `workbench-cancel:${run.taskId}`,
+            source: 'workbench',
+            idempotencyNamespace: 'workbench-control',
+            idempotencyKey: `cancel:${run.taskId}`,
           });
-          if (!result.applied && result.conflict === 'terminal_state') {
-            return { accepted: true, runId, alreadyFinal: true };
-          }
           if (!result.applied && !result.duplicate) return { accepted: false, runId };
           try {
             options.runStore.emitEvent(runId, 'task_cancelled', {
@@ -90,6 +106,102 @@ export function createWorkbenchJobCommands(options: {
           });
         }
         return { accepted: true, runId };
+      },
+    },
+    input: {
+      receive(runId: number, content: string, idempotencyKey = nextId()) {
+        const target = activeTarget(runId);
+        if (!target) return { accepted: false, runId };
+        const received = controlAuthority.inputs.receive({
+          jobId: target.job.id,
+          targetAttemptId: target.attempt.id,
+          targetGeneration: target.attempt.generation,
+          sessionId: target.run.sessionId ?? `workbench:${target.job.id}`,
+          channelId: 'workbench',
+          source: 'workbench',
+          kind: 'message',
+          content,
+          idempotencyNamespace: 'workbench-input',
+          idempotencyKey,
+        });
+        return {
+          accepted: true,
+          runId,
+          jobId: target.job.id,
+          attemptId: target.attempt.id,
+          inputId: received.record.inputId,
+          duplicate: received.duplicate,
+        };
+      },
+    },
+    control: {
+      pause(runId: number, idempotencyKey = nextId()) {
+        const target = activeTarget(runId);
+        if (!target) return { accepted: false, applied: false, runId };
+        const result = controlAuthority.commands.request({
+          jobId: target.job.id,
+          attemptId: target.attempt.id,
+          generation: target.attempt.generation,
+          kind: 'pause',
+          source: 'workbench',
+          reason: 'paused from workbench',
+          idempotencyNamespace: 'workbench-control',
+          idempotencyKey,
+        });
+        return { accepted: true, applied: result.applied, runId, controlId: result.controlId };
+      },
+      applyPauseBoundary(runId: number) {
+        const run = options.runStore.get(runId);
+        if (!run?.taskId) return { accepted: false, applied: false };
+        const result = controlAuthority.commands.applyPendingAtBoundary({ jobId: run.taskId });
+        return { accepted: true, applied: result.applied };
+      },
+      resume(runId: number, idempotencyKey = nextId()) {
+        const run = options.runStore.get(runId);
+        if (!run?.taskId) return { accepted: false, runId };
+        const resumed = controlAuthority.commands.resume({
+          jobId: run.taskId,
+          source: 'workbench',
+          instanceId: options.instanceId,
+          idempotencyNamespace: 'workbench-control',
+          idempotencyKey,
+        });
+        const job = options.jobEngine.getJob(run.taskId)!;
+        const trigger = options.triggerBus.insert({
+          source: 'manual',
+          sourceKey: `workbench-resume:${run.taskId}`,
+          idempotencyKey: `resume:${idempotencyKey}`,
+          payload: {
+            body: { prompt: job.goal, source: 'workbench-resume' },
+            sessionId: job.sessionId,
+            durable_job: {
+              job_id: job.id,
+              attempt_id: resumed.attemptId,
+              run_id: resumed.runId,
+            },
+          },
+        });
+        options.db.prepare('UPDATE runs SET trigger_event_id = ? WHERE attempt_id = ?')
+          .run(trigger.id, resumed.attemptId);
+        return { accepted: true, runId, triggerEventId: trigger.id, ...resumed };
+      },
+    },
+    approval: {
+      decide(approvalId: string, decision: 'approved' | 'denied' | 'cancelled') {
+        const record = actionAuthority.get(approvalId);
+        if (!record) return { accepted: false, approvalId };
+        const decided = actionAuthority.decide({
+          approvalId,
+          jobId: record.jobId,
+          attemptId: record.attemptId,
+          generation: record.generation,
+          actionDigest: record.actionDigest,
+          policySnapshotId: record.policySnapshotId,
+          decision,
+          decidedBy: 'user',
+          decisionChannel: 'workbench',
+        });
+        return { accepted: true, approvalId, state: decided.state };
       },
     },
   };

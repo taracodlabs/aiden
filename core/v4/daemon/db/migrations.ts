@@ -922,6 +922,146 @@ function applyV20(db: Database.Database): void {
   `);
 }
 
+/** Add the durable Phase 4 input, control, policy, and approval authorities. */
+function applyV21(db: Database.Database): void {
+  addMissingColumns(db, 'tasks', [
+    ['next_input_sequence', 'INTEGER NOT NULL DEFAULT 1'],
+  ]);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS durable_inputs (
+      input_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      target_attempt_id TEXT,
+      target_generation INTEGER,
+      session_id TEXT NOT NULL,
+      channel_id TEXT,
+      source TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      content TEXT,
+      content_ref TEXT,
+      content_hash TEXT NOT NULL,
+      state TEXT NOT NULL,
+      idempotency_namespace TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      claimed_by_attempt_id TEXT,
+      claimed_generation INTEGER,
+      claimed_at INTEGER,
+      consumed_at INTEGER,
+      supersedes_input_id TEXT,
+      expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (supersedes_input_id) REFERENCES durable_inputs(input_id) ON DELETE SET NULL,
+      UNIQUE (job_id, sequence),
+      UNIQUE (idempotency_namespace, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_durable_inputs_pending
+      ON durable_inputs(job_id, state, sequence);
+    CREATE INDEX IF NOT EXISTS idx_durable_inputs_session
+      ON durable_inputs(session_id, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS steering_commands (
+      steering_id TEXT PRIMARY KEY,
+      input_id TEXT NOT NULL UNIQUE,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      target_scope TEXT NOT NULL,
+      action TEXT NOT NULL,
+      payload TEXT,
+      state TEXT NOT NULL,
+      safe_boundary_sequence INTEGER,
+      invalidates_plan_digest TEXT,
+      applied_at INTEGER,
+      rejection_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (input_id) REFERENCES durable_inputs(input_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_steering_pending
+      ON steering_commands(job_id, attempt_id, generation, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS job_control_commands (
+      control_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT,
+      generation INTEGER,
+      kind TEXT NOT NULL,
+      source TEXT NOT NULL,
+      reason TEXT,
+      state TEXT NOT NULL,
+      idempotency_namespace TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      applied_at INTEGER,
+      rejection_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (idempotency_namespace, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_controls_pending
+      ON job_control_commands(job_id, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS policy_snapshots (
+      policy_snapshot_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      digest TEXT NOT NULL UNIQUE,
+      trust_level TEXT NOT NULL,
+      autonomy_policy TEXT NOT NULL,
+      approval_mode TEXT NOT NULL,
+      tool_metadata_version TEXT NOT NULL,
+      sandbox_policy_json TEXT NOT NULL,
+      network_policy_json TEXT NOT NULL,
+      plugin_grants_json TEXT NOT NULL,
+      mcp_grants_json TEXT NOT NULL,
+      spending_limits_json TEXT,
+      workspace_overrides_json TEXT NOT NULL,
+      job_overrides_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS approvals (
+      approval_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      request_sequence INTEGER NOT NULL,
+      tool_name TEXT NOT NULL,
+      risk_tier TEXT NOT NULL,
+      risk_reasons_json TEXT NOT NULL,
+      normalized_execution_plan TEXT NOT NULL,
+      action_digest TEXT NOT NULL,
+      policy_snapshot_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      decision TEXT,
+      decision_input_id TEXT,
+      decision_scope TEXT,
+      decided_by TEXT,
+      decision_channel TEXT,
+      requested_at INTEGER NOT NULL,
+      displayed_at INTEGER,
+      decided_at INTEGER,
+      expires_at INTEGER,
+      invalidated_at INTEGER,
+      invalidation_reason TEXT,
+      executed_at INTEGER,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (policy_snapshot_id) REFERENCES policy_snapshots(policy_snapshot_id),
+      FOREIGN KEY (decision_input_id) REFERENCES durable_inputs(input_id) ON DELETE SET NULL,
+      UNIQUE (job_id, request_sequence)
+    );
+    CREATE INDEX IF NOT EXISTS idx_approvals_waiting
+      ON approvals(job_id, state, requested_at);
+    CREATE INDEX IF NOT EXISTS idx_approvals_tool_call
+      ON approvals(tool_call_id, state);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -943,6 +1083,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 18, name: 'v4.13 gap 4 — resume linkage + wake-loop cap',   sql: V18_SQL },
   { version: 19, name: 'v4.12.1 — side-effect idempotency ledger',        sql: V19_SQL },
   { version: 20, name: 'v4.15.1 — durable Job and Attempt foundation',    apply: applyV20 },
+  { version: 21, name: 'v4.15.1 - durable input and approval authority', apply: applyV21 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

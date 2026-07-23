@@ -33,6 +33,7 @@ import express from 'express';
 import type { TriggerBus } from '../triggerBus';
 import type { Db } from '../db/connection';
 import { IdempotencyConflictError, type JobEngine } from '../jobEngine';
+import { createJobControlAuthority, type JobControlAuthority } from '../jobControlAuthority';
 import { fingerprintCanonical } from '../idempotency/runIdempotencyStore';
 // v4.9.0 Slice 7 — inbound trace adoption.
 import {
@@ -53,6 +54,7 @@ export interface MountRunsRoutesOptions {
   db:         Db;
   jobEngine:  JobEngine;
   instanceId: string;
+  jobControlAuthority?: JobControlAuthority;
   log:        (level: 'info' | 'warn' | 'error', msg: string) => void;
   /** Optional shared-secret check via `AIDEN_API_KEY` env var. */
   apiKeyRequired?: boolean;
@@ -65,22 +67,28 @@ export interface MountedRunsRoutes {
 
 export function mountRunsRoutes(opts: MountRunsRoutesOptions): MountedRunsRoutes {
   const PATH = '/api/runs';
+  const controlAuthority = opts.jobControlAuthority ?? createJobControlAuthority({
+    db: opts.db,
+    jobEngine: opts.jobEngine,
+  });
+
+  const authorized = (req: Request, res: Response): boolean => {
+    if (!opts.apiKeyRequired) return true;
+    const expected = process.env.AIDEN_API_KEY ?? '';
+    const auth = req.header('authorization') ?? '';
+    const tokenMatch = /^Bearer\s+(\S+)/i.exec(auth);
+    const provided = tokenMatch ? tokenMatch[1] : '';
+    if (expected && expected === provided) return true;
+    res.status(401).json({ error: 'unauthorized' });
+    return false;
+  };
 
   opts.app.post(
     PATH,
     express.json({ limit: '1mb' }),
     (req: Request, res: Response, _next: NextFunction): void => {
       // Optional shared-secret auth.
-      if (opts.apiKeyRequired) {
-        const expected = process.env.AIDEN_API_KEY ?? '';
-        const auth = req.header('authorization') ?? '';
-        const tokenMatch = /^Bearer\s+(\S+)/i.exec(auth);
-        const provided = tokenMatch ? tokenMatch[1] : '';
-        if (!expected || expected !== provided) {
-          res.status(401).json({ error: 'unauthorized' });
-          return;
-        }
-      }
+      if (!authorized(req, res)) return;
 
       const body = (req.body ?? {}) as Record<string, unknown>;
       if (!body || typeof body !== 'object' || Array.isArray(body)) {
@@ -200,6 +208,112 @@ export function mountRunsRoutes(opts: MountRunsRoutesOptions): MountedRunsRoutes
       // Quiet unused-warning on the db handle; future Slice 8 uses it
       // to back-fill the `runs.external_trace_id` column on creation.
       void getCurrentDaemonDb;
+    },
+  );
+
+  opts.app.post(
+    `${PATH}/:attemptId/:command`,
+    express.json({ limit: '64kb' }),
+    (req: Request, res: Response): void => {
+      if (!authorized(req, res)) return;
+      const command = String(req.params.command ?? '');
+      if (!['input', 'pause', 'resume', 'cancel', 'interrupt'].includes(command)) {
+        res.status(404).json({ error: 'unknown_run_command' });
+        return;
+      }
+      const attempt = opts.jobEngine.getAttempt(String(req.params.attemptId ?? ''));
+      if (!attempt) { res.status(404).json({ error: 'attempt_not_found' }); return; }
+      const job = attempt.jobId ? opts.jobEngine.getJob(attempt.jobId) : null;
+      if (!job) { res.status(404).json({ error: 'job_not_found' }); return; }
+      const body = req.body && typeof req.body === 'object' && !Array.isArray(req.body)
+        ? req.body as Record<string, unknown>
+        : {};
+      const providedKey = (req.header('idempotency-key') ?? '').trim();
+      const key = providedKey || newRequestId();
+      try {
+        if (command === 'input') {
+          const content = typeof body.message === 'string' ? body.message : '';
+          if (!content.trim()) { res.status(400).json({ error: 'message_required' }); return; }
+          const received = controlAuthority.inputs.receive({
+            jobId: attempt.jobId,
+            targetAttemptId: attempt.id,
+            targetGeneration: attempt.generation,
+            sessionId: job.sessionId,
+            channelId: 'daemon-api',
+            source: 'api',
+            kind: 'message',
+            content,
+            idempotencyNamespace: 'daemon-api-input',
+            idempotencyKey: key,
+          });
+          res.status(202).json({
+            accepted: true,
+            duplicate: received.duplicate,
+            input_id: received.record.inputId,
+            job_id: attempt.jobId,
+            attempt_id: attempt.id,
+          });
+          return;
+        }
+        if (command === 'resume') {
+          const resumed = controlAuthority.commands.resume({
+            jobId: attempt.jobId,
+            source: 'api',
+            instanceId: opts.instanceId,
+            idempotencyNamespace: 'daemon-api-control',
+            idempotencyKey: key,
+          });
+          const trigger = opts.triggerBus.insert({
+            source: 'manual',
+            sourceKey: `api-resume:${attempt.jobId}`,
+            idempotencyKey: `resume:${key}`,
+            payload: {
+              body: { prompt: job.goal, source: 'api-resume' },
+              sessionId: job.sessionId,
+              durable_job: {
+                job_id: job.id,
+                attempt_id: resumed.attemptId,
+                run_id: resumed.runId,
+              },
+            },
+          });
+          opts.db.prepare('UPDATE runs SET trigger_event_id = ? WHERE attempt_id = ?')
+            .run(trigger.id, resumed.attemptId);
+          res.status(202).json({
+            accepted: true,
+            duplicate: resumed.duplicate,
+            control_id: resumed.controlId,
+            job_id: attempt.jobId,
+            attempt_id: resumed.attemptId,
+            run_id: resumed.runId,
+            generation: resumed.generation,
+            trigger_event_id: trigger.id,
+          });
+          return;
+        }
+        const result = controlAuthority.commands.request({
+          jobId: attempt.jobId,
+          attemptId: attempt.id,
+          generation: attempt.generation,
+          kind: command as 'pause' | 'cancel' | 'interrupt',
+          source: 'api',
+          reason: typeof body.reason === 'string' ? body.reason : command,
+          idempotencyNamespace: 'daemon-api-control',
+          idempotencyKey: key,
+        });
+        res.status(202).json({
+          accepted: true,
+          persisted: result.persisted,
+          applied: result.applied,
+          duplicate: result.duplicate,
+          control_id: result.controlId,
+          job_id: attempt.jobId,
+          attempt_id: attempt.id,
+        });
+      } catch (error) {
+        opts.log('warn', `[api/runs] ${command} rejected: ${error instanceof Error ? error.message : String(error)}`);
+        res.status(409).json({ error: 'run_command_rejected' });
+      }
     },
   );
 

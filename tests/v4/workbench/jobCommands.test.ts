@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
+import { createActionAuthority, normalizeExecutionPlan } from '../../../core/v4/actionAuthority';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
 import { createTriggerBus } from '../../../core/v4/daemon/triggerBus';
 import { createWorkbenchJobCommands } from '../../../core/v4/workbench/jobCommands';
@@ -101,5 +102,73 @@ describe('Workbench durable Job commands', () => {
       producer: 'test',
     }).applied).toBe(false);
     expect(jobEngine.listEvents(admitted.jobId).map((event) => event.type)).toContain('job.cancelled');
+  });
+
+  it('persists queued input and pause before acknowledging, then resumes with a new Attempt', () => {
+    const { enqueue, input, control, jobEngine } = commands();
+    const admitted = enqueue.enqueue({ message: 'long work', sessionId: 'workbench-session' });
+    const lease = jobEngine.claimAttempt({
+      attemptId: admitted.attemptId, ownerId: 'workbench-runner', ttlMs: 30_000,
+    });
+    jobEngine.transitionAttempt({
+      attemptId: admitted.attemptId, expectedStateVersion: lease.stateVersion!,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, to: 'running',
+      eventIdempotencyKey: 'input-attempt-running', producer: 'test',
+    });
+    jobEngine.transitionJob({
+      jobId: admitted.jobId, attemptId: admitted.attemptId, expectedStateVersion: 0,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, to: 'running',
+      eventIdempotencyKey: 'input-job-running', producer: 'test',
+    });
+
+    const queued = input.receive(admitted.runId, 'follow up', 'input-key');
+    expect(queued).toMatchObject({ accepted: true, inputId: expect.stringMatching(/^input_/) });
+    expect(control.pause(admitted.runId, 'pause-key')).toMatchObject({ accepted: true, applied: false });
+    expect(jobEngine.getJob(admitted.jobId)?.status).toBe('running');
+    expect(control.applyPauseBoundary(admitted.runId)).toEqual({ accepted: true, applied: true });
+    expect(jobEngine.getJob(admitted.jobId)?.status).toBe('paused');
+
+    const resumed = control.resume(admitted.runId, 'resume-key');
+    expect(resumed).toMatchObject({
+      accepted: true,
+      attemptId: expect.any(String),
+      generation: 2,
+      triggerEventId: expect.any(Number),
+    });
+    expect(resumed.attemptId).not.toBe(admitted.attemptId);
+    expect(db.prepare('SELECT trigger_event_id FROM runs WHERE attempt_id = ?').get(resumed.attemptId))
+      .toEqual({ trigger_event_id: resumed.triggerEventId });
+  });
+
+  it('resolves a durable approval by exact ID without treating ordinary input as consent', () => {
+    const value = commands();
+    const admitted = value.enqueue.enqueue({ message: 'write a file', sessionId: 'workbench-session' });
+    const actionAuthority = createActionAuthority({ db, jobEngine: value.jobEngine });
+    const normalized = normalizeExecutionPlan({
+      toolName: 'file_write', args: { path: 'result.txt' }, cwd: process.cwd(),
+      mutates: true, riskTier: 'caution',
+      policy: {
+        trustLevel: 'Assistant', autonomyPolicy: 'ask_for_mutations', approvalMode: 'smart',
+        toolMetadataVersion: 'test', sandboxPolicy: {}, networkPolicy: {}, pluginGrants: [],
+        mcpGrants: [], workspaceOverrides: {}, jobOverrides: {},
+      },
+    });
+    const pending = actionAuthority.request({
+      jobId: admitted.jobId, attemptId: admitted.attemptId, generation: 1,
+      toolCallId: 'workbench-tool', toolName: 'file_write', riskTier: 'caution',
+      riskReasons: [], normalized,
+    });
+    const commandsWithApproval = createWorkbenchJobCommands({
+      db, triggerBus: createTriggerBus({ db }), jobEngine: value.jobEngine,
+      runStore: value.runStore, instanceId: 'workbench_test',
+      actionAuthority, idFactory: () => 'approval-command-key',
+    });
+
+    expect(commandsWithApproval.approval.decide(pending.approvalId, 'approved')).toMatchObject({
+      accepted: true, approvalId: pending.approvalId, state: 'approved',
+    });
+    expect(() => commandsWithApproval.input.receive(admitted.runId, 'yes', 'ordinary-yes'))
+      .not.toThrow();
+    expect(actionAuthority.get(pending.approvalId)?.state).toBe('approved');
   });
 });
