@@ -13,6 +13,7 @@ import path from 'node:path';
 import http from 'node:http';
 
 import { spawn } from 'node:child_process';
+import express from 'express';
 import {
   bootstrapDaemonFoundation,
   getDaemonHandle,
@@ -34,6 +35,7 @@ import {
 let aidenHome: string;
 let prev: Record<string, string | undefined>;
 let basePort: number;
+let apiServer: http.Server | null = null;
 
 interface PostOptions {
   body:    Record<string, unknown>;
@@ -69,18 +71,8 @@ function postJson(port: number, p: string, opts: PostOptions): Promise<PostRespo
   });
 }
 
-async function waitForListening(server: import('node:http').Server, ms = 2000): Promise<void> {
-  if (server.listening) return;
-  return new Promise<void>((resolve, reject) => {
-    const t = setTimeout(() => { server.off('listening', ok); reject(new Error('listen timeout')); }, ms);
-    const ok = (): void => { clearTimeout(t); resolve(); };
-    server.once('listening', ok);
-  });
-}
-
 beforeEach(async () => {
   aidenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-s7-'));
-  basePort  = 40000 + Math.floor(Math.random() * 10000);
   prev = {
     AIDEN_HOME: process.env.AIDEN_HOME, HOME: process.env.HOME,
     USERPROFILE: process.env.USERPROFILE, AIDEN_DAEMON: process.env.AIDEN_DAEMON,
@@ -90,12 +82,30 @@ beforeEach(async () => {
   process.env.HOME = aidenHome;
   process.env.USERPROFILE = aidenHome;
   process.env.AIDEN_DAEMON = '1';
-  process.env.AIDEN_DAEMON_PORT = String(basePort);
+  delete process.env.AIDEN_DAEMON_PORT;
   _resetDaemonBootstrapForTests();
-  const h = bootstrapDaemonFoundation();
-  if (h.httpServer) await waitForListening(h.httpServer);
+  const app = express();
+  bootstrapDaemonFoundation({ app });
+  apiServer = http.createServer(app);
+  await new Promise<void>((resolve, reject) => {
+    apiServer!.once('error', reject);
+    apiServer!.listen(0, '127.0.0.1', () => {
+      apiServer!.off('error', reject);
+      resolve();
+    });
+  });
+  basePort = (apiServer.address() as { port: number }).port;
 });
 afterEach(async () => {
+  if (apiServer) {
+    const server = apiServer;
+    apiServer = null;
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  }
   const h = getDaemonHandle();
   if (h?.dispatcher) { try { await h.dispatcher.stop(2_000); } catch { /* noop */ } }
   if (h?.httpServer) { try { h.httpServer.close(); } catch { /* noop */ } }
@@ -113,9 +123,8 @@ const VALID_TP    = '00-aabbccddeeff00112233445566778899-1122334455667788-01';
 const VALID_TRACE = 'aabbccddeeff00112233445566778899';
 
 describe('Slice 7 inbound trace adoption + 7 captured smoke scenarios', () => {
-  // Smokes 1-5 share one bootstrap to dodge the per-test HTTP teardown race
-  // (the listener `close()` returns sync but the OS socket release is async;
-  // a fresh `listen()` on a new port a few ms later can still ECONNREFUSED).
+  // Smokes 1-5 share one daemon foundation so trace and idempotency
+  // observations are made against the same ingress authority.
   it('smokes 1-5: HTTP ingress (no/valid/malformed traceparent + valid/garbage X-Request-Id)', async () => {
     // smoke 1 — no traceparent
     const r1 = await postJson(basePort, '/api/runs', { body: { args: { x: 1 } } });
