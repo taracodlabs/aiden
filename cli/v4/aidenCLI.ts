@@ -82,6 +82,8 @@ import { openDaemonDb } from '../../core/v4/daemon/db/connection';
 import { createRunStore } from '../../core/v4/daemon/runStore';
 import { createJobEngine } from '../../core/v4/daemon/jobEngine';
 import type { JobEngine } from '../../core/v4/daemon/jobEngine';
+import { createJobControlAuthority } from '../../core/v4/daemon/jobControlAuthority';
+import { createActionAuthority } from '../../core/v4/actionAuthority';
 import { executeDurableJob } from '../../core/v4/daemon/jobLifecycle';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
 import { runWithProviderUsageContext } from '../../providers/v4/providerAttemptAccounting';
@@ -532,7 +534,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       // under the default safe-only policy: risky/mutating tools auto-denied).
       const triggerBus = createTriggerBus({ db });
       const token = randomBytes(24).toString('hex');
-      const { enqueue, cancel } = createWorkbenchJobCommands({
+      const { enqueue, cancel, input, control, approval } = createWorkbenchJobCommands({
         db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId,
       });
       // STEER path: the stop button cancels a running job by run id. We record
@@ -549,7 +551,19 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       ].filter((d): d is string => Boolean(d));
       const staticDir = staticCandidates.find((d) => existsSync(nodePath.join(d, 'index.html')));
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
-      const bridge   = await startWorkbenchBridge({ reader: runStore, sessions, enqueue, cancel, token, staticDir, port });
+      const bridge   = await startWorkbenchBridge({
+        reader: runStore,
+        sessions,
+        enqueue,
+        cancel,
+        input,
+        control,
+        approval,
+        jobs: jobEngine,
+        token,
+        staticDir,
+        port,
+      });
       const dashUrl  = `http://${bridge.host}:${bridge.port}/`;
       const daemonUp = process.env.AIDEN_DAEMON === '1';
       process.stdout.write(
@@ -1200,6 +1214,8 @@ export async function buildAgentRuntime(
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
   const jobEngine = createJobEngine({ db: replDb });
+  const jobControlAuthority = createJobControlAuthority({ db: replDb, jobEngine });
+  const actionAuthority = createActionAuthority({ db: replDb, jobEngine });
   // v4.10 Slice 10.8 — durable Task-lite store. Shares the daemon.db
   // handle with replRunStore so /tasks listing + /adjust mutations
   // see the same WAL view chatSession's runAgentTurn writes through.
@@ -2281,6 +2297,19 @@ export async function buildAgentRuntime(
     memory: memoryManager,
     memoryGuard,
     approvalEngine,
+    actionAuthority,
+    policySnapshot: {
+      trustLevel: resolveConfiguredAutonomyLevel(config),
+      autonomyPolicy: 'runtime',
+      approvalMode: config.getValue<string>('agent.approval_mode', 'smart'),
+      toolMetadataVersion: VERSION,
+      sandboxPolicy: { roots: [process.cwd()], deny: [] },
+      networkPolicy: {},
+      pluginGrants: [],
+      mcpGrants: [],
+      workspaceOverrides: {},
+      jobOverrides: {},
+    },
     ssrfProtection,
     tirithScanner,
     skillLoader,
@@ -2754,6 +2783,7 @@ export async function buildAgentRuntime(
     fallbackAdapter: adapter,
     toolRegistry,
     toolExecutor,
+    toolContext: toolExecutorContext,
     auxiliaryClient,
     promptBuilder,
     promptBuilderOptions,
@@ -3684,6 +3714,8 @@ export async function buildAgentRuntime(
     // v4.6 Phase 2Q-B — REPL parent-run wiring.
     replRunStore,
     jobEngine,
+    jobControlAuthority,
+    actionAuthority,
     replInstanceId,
     replParentRunRef,
     // v4.10 Slice 10.8 — durable Task-lite store.
@@ -3717,6 +3749,8 @@ export interface AgentRuntime {
   ssrfProtection: SSRFProtection;
   tirithScanner: TirithScanner;
   approvalEngine: ApprovalEngine;
+  actionAuthority: import('../../core/v4/actionAuthority').ActionAuthority;
+  jobControlAuthority: import('../../core/v4/daemon/jobControlAuthority').JobControlAuthority;
   auxiliaryClient: AuxiliaryClient;
   callbacks: CliCallbacks;
   plannerGuard: PlannerGuard;
@@ -4148,6 +4182,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // callbacks so children get `spawned_from_run_id` populated.
     replRunStore:     runtime.replRunStore,
     jobEngine:        runtime.jobEngine,
+    jobControlAuthority: runtime.jobControlAuthority,
     replInstanceId:   runtime.replInstanceId,
     replParentRunRef: runtime.replParentRunRef,
     // v4.10 Slice 10.8 — durable Task-lite store. ChatSession's

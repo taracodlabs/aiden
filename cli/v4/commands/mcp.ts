@@ -79,6 +79,7 @@ import {
 } from '../../../core/v4/daemon';
 import { VERSION as AIDEN_VERSION } from '../../../core/version';
 import { createJobEngine, type JobEngine } from '../../../core/v4/daemon/jobEngine';
+import { createActionAuthority } from '../../../core/v4/actionAuthority';
 import type { RunStore } from '../../../core/v4/daemon/runStore';
 import type { Db } from '../../../core/v4/daemon/db/connection';
 // v4.6 Phase 3A — operator kill-switch. Initialised here so
@@ -174,6 +175,7 @@ async function buildMcpRuntime(opts: RunMcpOptions = {}) {
   ).run(mcpInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), AIDEN_VERSION);
   const mcpRunStore = createRunStore({ db: mcpDb });
   const mcpJobEngine = createJobEngine({ db: mcpDb });
+  const actionAuthority = createActionAuthority({ db: mcpDb, jobEngine: mcpJobEngine });
 
   const toolContext = {
     cwd: process.cwd(),
@@ -182,6 +184,19 @@ async function buildMcpRuntime(opts: RunMcpOptions = {}) {
     memory,
     processes,
     skillLoader,
+    actionAuthority,
+    policySnapshot: {
+      trustLevel: 'Observer',
+      autonomyPolicy: 'deny_without_interactive_channel',
+      approvalMode: 'manual',
+      toolMetadataVersion: AIDEN_VERSION,
+      sandboxPolicy: { roots: [process.cwd()], deny: [] },
+      networkPolicy: {},
+      pluginGrants: [],
+      mcpGrants: [],
+      workspaceOverrides: {},
+      jobOverrides: {},
+    },
     // approvalEngine / ssrfProtection / tirithScanner / memoryGuard
     // intentionally omitted — see header comment.
   };
