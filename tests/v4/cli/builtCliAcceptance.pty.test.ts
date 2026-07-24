@@ -158,13 +158,13 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           setTimeout(() => {
             child!.write('\x1b[D'.repeat('DRAFT'.length));
             child!.write('X');
-            setTimeout(() => {
-              typingFrame = screen.snapshot();
-              typingCursor = screen.cursorPosition();
-              state = 'submitted';
-              child!.write('\r');
-            }, 250);
+            state = 'awaiting-typed-draft';
           }, 500);
+        } else if (state === 'awaiting-typed-draft' && rendered.includes(draft)) {
+          typingFrame = screen.snapshot();
+          typingCursor = screen.cursorPosition();
+          state = 'submitted';
+          child!.write('\r');
         } else if (
           state === 'submitted'
           && rendered.includes('IDLE OWNER RESPONSE')
@@ -632,7 +632,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         } else if (state === 'denying' && plain.includes('RESIZE APPROVAL COMPLETE') && readyCount >= 2) {
           state = 'normal';
           typeLikeKeyboard(child!, 'normal after resize');
-        } else if (state === 'normal' && provider!.callCount() >= 3 && readyCount >= 3) {
+        } else if (state === 'normal' && plain.includes('NORMAL AFTER RESIZE') && readyCount >= 3) {
           state = 'queue';
           typeLikeKeyboard(child!, '/queue');
         } else if (state === 'queue' && /queue is empty/i.test(plain)) {
