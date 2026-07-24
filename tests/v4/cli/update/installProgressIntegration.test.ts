@@ -1,5 +1,5 @@
-/**
- * v4.9.1 — executeInstall integration: phases drive off mock npm
+﻿/**
+ * v4.9.1 â€” executeInstall integration: phases drive off mock npm
  * stdout; EPERM produces a platform-correct remediation; DEP0190
  * is filtered from the surfaced `error`/`stderr`.
  */
@@ -23,7 +23,7 @@ function fakeChild(stdoutLines: string[], stderrLines: string[], exitCode: numbe
   return child;
 }
 
-describe('executeInstall — phase callback', () => {
+describe('executeInstall â€” phase callback', () => {
   it('emits truthful indeterminate lifecycle phases on success', async () => {
     const phases: string[] = [];
     const spawnImpl = vi.fn(() => fakeChild(
@@ -38,15 +38,16 @@ describe('executeInstall — phase callback', () => {
     });
     expect(r.success).toBe(true);
     expect(r.installedVersion).toBe('4.9.1');
-    expect(phases[0]).toBe('preparing update');
-    expect(phases).toContain('installing');
-    expect(phases).toContain('verifying');
+    expect(phases[0]).toBe('resolving installation');
+    expect(phases).toContain('starting installer');
+    expect(phases).toContain('installing package');
+    expect(phases).toContain('verifying installed version');
     expect(phases[phases.length - 1]).toBe('complete');
   });
 });
 
-describe('executeInstall — EPERM produces platform-correct hints', () => {
-  it('Windows EPERM → PowerShell syntax in error', async () => {
+describe('executeInstall â€” EPERM produces platform-correct hints', () => {
+  it('Windows EPERM â†’ PowerShell syntax in error', async () => {
     const spawnImpl = vi.fn(() => fakeChild(
       [], ['npm ERR! code EPERM', 'npm ERR! operation not permitted'], 1,
     ));
@@ -61,7 +62,7 @@ describe('executeInstall — EPERM produces platform-correct hints', () => {
     expect(r.error).not.toMatch(/sudo/);
     expect(r.error).not.toMatch(/^export /m);
   });
-  it('darwin EACCES → bash export + .zshrc', async () => {
+  it('darwin EACCES â†’ bash export + .zshrc', async () => {
     const spawnImpl = vi.fn(() => fakeChild(
       [], ['npm ERR! code EACCES', 'npm ERR! syscall mkdir'], 1,
     ));
@@ -78,7 +79,7 @@ describe('executeInstall — EPERM produces platform-correct hints', () => {
   });
 });
 
-describe('executeInstall — DEP0190 filter', () => {
+describe('executeInstall â€” DEP0190 filter', () => {
   it('DEP lines do not appear in surfaced stderr/error', async () => {
     const spawnImpl = vi.fn(() => fakeChild(
       [],

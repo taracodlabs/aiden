@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+﻿import { describe, expect, it, vi } from 'vitest';
 
 import {
   inspectUpdateInstall,
@@ -85,16 +85,17 @@ describe('inspectUpdateInstall', () => {
     expect(plan.reason).toBe('npm-unavailable');
   });
 
-  it('fails closed when npm prefix discovery fails', async () => {
+  it('uses the running package target when npm prefix discovery fails after npm is found', async () => {
     const plan = await inspectUpdateInstall(windowsGlobal({
       runCommand: vi.fn(async () => ({ exitCode: 1, stdout: '', stderr: 'configuration error' })),
     }));
-    expect(plan.installAllowed).toBe(false);
-    expect(plan.reason).toBe('prefix-resolution-failed');
+    expect(plan.installAllowed).toBe(true);
+    expect(plan.reason).toBe('ready');
+    expect(plan.prefix).toBe('C:\\Users\\Shiva Rao\\AppData\\Roaming\\npm');
     expect(plan.guidance.join('\n')).not.toContain('configuration error');
   });
 
-  it('rejects an npm executable whose global root does not own the running package', async () => {
+  it('ignores an unrelated npm global root and keeps the running package target', async () => {
     const otherPrefix = 'D:\\other-prefix';
     const plan = await inspectUpdateInstall(windowsGlobal({
       runCommand: vi.fn(async (_command, args) => ({
@@ -105,10 +106,10 @@ describe('inspectUpdateInstall', () => {
         stderr: '',
       })),
     }));
-    expect(plan.installAllowed).toBe(false);
-    expect(plan.reason).toBe('npm-environment-mismatch');
+    expect(plan.installAllowed).toBe(true);
+    expect(plan.reason).toBe('ready');
+    expect(plan.prefix).toBe('C:\\Users\\Shiva Rao\\AppData\\Roaming\\npm');
   });
-
   it.each([
     {
       name: 'package runner',
@@ -164,10 +165,10 @@ describe('inspectUpdateInstall', () => {
   });
 
   it('preserves a long Unicode prefix without shell interpolation', async () => {
-    const prefix = 'C:\\Users\\Śhiva\\工具\\npm prefix with spaces';
+    const prefix = 'C:\\Users\\Åšhiva\\å·¥å…·\\npm prefix with spaces';
     const root = `${prefix}\\node_modules`;
     const plan = await inspectUpdateInstall(windowsGlobal({
-      home: 'C:\\Users\\Śhiva',
+      home: 'C:\\Users\\Åšhiva',
       detectionInput: {
         platform: 'win32',
         env: {},
@@ -183,5 +184,58 @@ describe('inspectUpdateInstall', () => {
     }));
     expect(plan.installAllowed).toBe(true);
     expect(plan.prefix).toBe(prefix);
+  });
+  it('targets the running AppData package when npm configuration points at Program Files', async () => {
+    const appDataPrefix = 'C:\\Users\\shiva\\AppData\\Roaming\\npm';
+    const appDataRoot = `${appDataPrefix}\\node_modules`;
+    const configuredPrefix = 'D:\\Program Files\\nodejs';
+    const configuredRoot = `${configuredPrefix}\\node_modules`;
+    const probed: string[] = [];
+    const plan = await inspectUpdateInstall(windowsGlobal({
+      home: 'C:\\Users\\shiva',
+      detectionInput: {
+        platform: 'win32',
+        env: {},
+        moduleDir: [appDataRoot, 'aiden-runtime', 'dist', 'core', 'v4', 'update'].join('\\'),
+        argvScript: [appDataRoot, 'aiden-runtime', 'dist', 'cli', 'v4', 'aidenCLI.js'].join('\\'),
+      },
+      resolveNpm: () => ({ path: `${configuredPrefix}\\npm.cmd`, isShim: true }),
+      runCommand: vi.fn(async (_command, args) => ({
+        exitCode: 0,
+        stdout: args[0] === 'prefix' ? `${configuredPrefix}\r\n` : `${configuredRoot}\r\n`,
+        stderr: '',
+      })),
+      probeWritable: vi.fn(async (directory) => { probed.push(directory); return true; }),
+    }));
+
+    expect(plan.installAllowed).toBe(true);
+    expect(plan.reason).toBe('ready');
+    expect(plan.prefix).toBe(appDataPrefix);
+    expect(plan.globalRoot).toBe(appDataRoot);
+    expect(plan.packagePath).toBe(`${appDataRoot}\\aiden-runtime`);
+    expect(plan.scope).toBe('user');
+    expect(probed).toEqual([appDataPrefix, appDataRoot, `${appDataRoot}\\aiden-runtime`]);
+    expect(plan.guidance.join('\n')).not.toMatch(/Administrator|config set prefix|Program Files/i);
+  });
+
+  it('can derive the target from the running package when npm root discovery fails', async () => {
+    const appDataPrefix = 'C:\\Users\\shiva\\AppData\\Roaming\\npm';
+    const appDataRoot = `${appDataPrefix}\\node_modules`;
+    const plan = await inspectUpdateInstall(windowsGlobal({
+      home: 'C:\\Users\\shiva',
+      detectionInput: {
+        platform: 'win32',
+        env: {},
+        moduleDir: [appDataRoot, 'aiden-runtime', 'dist'].join('\\'),
+        argvScript: [appDataRoot, 'aiden-runtime', 'dist', 'cli', 'v4', 'aidenCLI.js'].join('\\'),
+      },
+      resolveNpm: () => ({ path: 'D:\\Program Files\\nodejs\\npm.cmd', isShim: true }),
+      runCommand: vi.fn(async () => ({ exitCode: 1, stdout: '', stderr: 'bad prefix' })),
+      probeWritable: vi.fn(async () => true),
+    }));
+
+    expect(plan.installAllowed).toBe(true);
+    expect(plan.prefix).toBe(appDataPrefix);
+    expect(plan.packagePath).toBe(`${appDataRoot}\\aiden-runtime`);
   });
 });

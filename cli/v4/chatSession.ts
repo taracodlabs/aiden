@@ -1267,6 +1267,7 @@ export class ChatSession implements ChatSessionLike {
         await this.runAgentTurn(input, inputAlreadyPersisted);
       }
     } finally {
+      try { this.opts.display.releaseBottomRegion(); } catch { /* defensive */ }
       // v4.10 Slice 10.7a — REPL no longer active; any subsequent
       // logger writes (e.g. SIGINT cleanup paths) can use stderr
       // freely. Paired with markReplActive above; idempotent if the
@@ -3731,7 +3732,13 @@ export class ChatSession implements ChatSessionLike {
         const pb = require('./ui/progressBar') as typeof import('./ui/progressBar');
         const bar = pb.startPhaseIndicator({
           label:  `Updating aiden-runtime ${status.latest} in ${plan.prefix}...`,
-          phases: ['preparing update', 'installing', 'verifying', 'complete'],
+          phases: [
+            'resolving installation',
+            'starting installer',
+            'installing package',
+            'verifying installed version',
+            'complete',
+          ],
         });
         const controller = new AbortController();
         const cancel = (): void => controller.abort();

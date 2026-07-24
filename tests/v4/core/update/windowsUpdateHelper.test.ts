@@ -1,4 +1,4 @@
-import { promises as fs } from 'node:fs';
+﻿import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -69,7 +69,7 @@ describe('Windows update helper', () => {
       success: false,
       kind: 'permission',
       targetVersion: '4.16.0',
-      prefix: 'C:\\Users\\Śhiva\\npm',
+      prefix: 'C:\\Users\\Åšhiva\\npm',
       completedAt: 42,
       rawOutput: 'must not surface',
     }));
@@ -78,10 +78,29 @@ describe('Windows update helper', () => {
       success: false,
       kind: 'permission',
       targetVersion: '4.16.0',
-      prefix: 'C:\\Users\\Śhiva\\npm',
+      prefix: 'C:\\Users\\Åšhiva\\npm',
       completedAt: 42,
     });
     expect(await fs.stat(resultFile).then(() => true, () => false)).toBe(false);
     expect(await consumeWindowsUpdateResult(root)).toBeNull();
+  });
+  it('writes helper state for the exact target prefix and helper uses --prefix', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-updater-prefix-'));
+    roots.push(root);
+    const child = { unref: vi.fn() };
+    const spawnImpl = vi.fn(() => child);
+    const p = plan();
+    const prepared = await prepareWindowsUpdateHelper({
+      stateDir: root,
+      plan: p,
+      parentPid: 1234,
+      nodeExecutable: 'C:\\Program Files\\nodejs\\node.exe',
+      spawnImpl: spawnImpl as never,
+    });
+    const state = JSON.parse(await fs.readFile(prepared.statePath, 'utf8')) as { prefix: string; packagePath: string };
+    const helperSource = await fs.readFile(prepared.helperPath, 'utf8');
+    expect(state.prefix).toBe(p.prefix);
+    expect(state.packagePath).toBe(p.packagePath);
+    expect(helperSource).toContain("'--prefix', state.prefix");
   });
 });

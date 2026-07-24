@@ -104,7 +104,7 @@ async function runInstall(ctx: SlashCommandContext): Promise<void> {
   // on a warm cache, longer on cold). The indicator paints to a TTY
   // only — non-TTY callers (CI, pipes) see the static "Installing…"
   // line above and the result row below, no shimmer.
-  const indicator = ctx.display.activityIndicator('preparing update');
+  const indicator = ctx.display.activityIndicator('resolving installation');
   let result;
   try {
     result = await executeInstall({

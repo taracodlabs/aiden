@@ -89,7 +89,7 @@ describe('executeInstall — happy path', () => {
     });
     expect(spawnImpl).toHaveBeenCalledWith(
       'npm',
-      ['install', '-g', 'aiden-runtime@latest'],
+      ['install', '-g', 'aiden-runtime@latest', '--prefix', '<test-prefix>'],
       expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
     );
   });
@@ -103,7 +103,7 @@ describe('executeInstall — happy path', () => {
     });
     expect(spawnImpl).toHaveBeenCalledWith(
       'npm',
-      ['install', '-g', 'aiden-runtime@4.1.4'],
+      ['install', '-g', 'aiden-runtime@4.1.4', '--prefix', '<test-prefix>'],
       expect.any(Object),
     );
   });

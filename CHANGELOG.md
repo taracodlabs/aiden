@@ -1,3 +1,22 @@
+## v4.16.1 — 2026-07-24
+
+### Windows self-update correctness
+
+- The in-app updater now targets the npm prefix that owns the running `aiden-runtime` package instead of an unrelated configured npm prefix.
+- Windows updates pass an explicit `--prefix` to npm, verify the installed package version at that exact target, and fail safely when provenance is ambiguous.
+- Update progress now reports truthful phases and elapsed time without fabricated percentages.
+- Failure classification distinguishes permission, network, registry authorization, missing versions, native build failures, timeouts, cancellations, and installed-version mismatches.
+
+### Upgrade instructions
+
+```bash
+npm install -g aiden-runtime@4.16.1
+```
+
+Restart Aiden after upgrading.
+
+---
+
 ## v4.16.0 — 2026-07-24
 
 ### Overview

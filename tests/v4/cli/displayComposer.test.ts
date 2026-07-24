@@ -233,4 +233,19 @@ describe('Display composer — fixed bottom surface compatibility opt-out', () =
     expect(stripAnsi(chunks.join(''))).toContain('draft survives');
     d.clearComposer();
   });
+
+  it('releases the full bottom region during session teardown', () => {
+    const { d, chunks } = makeDisplay();
+    d.setBusyHint('Enter â†’ steer Â· /queue Â· Ctrl+C stop');
+    d.setComposer('cleanup draft', 'redirect');
+    d.setStatusFooter('provider \u00b7 model \u00b7 context \u00b7 timer');
+    chunks.length = 0;
+    d.releaseBottomRegion();
+    const raw = chunks.join('');
+    expect(raw).toContain('\x1b[r');
+    const painted = stripAnsi(raw);
+    expect(painted).not.toContain('cleanup draft');
+    expect(painted).not.toContain('provider \u00b7 model');
+    expect(painted).not.toContain('â–² You');
+  });
 });

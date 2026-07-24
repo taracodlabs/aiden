@@ -805,4 +805,28 @@ describe('ChatSession durable Job admission', () => {
     expect(agent.runConversation).not.toHaveBeenCalled();
     warnSpy.mockRestore();
   });
+
+  it('releases the bottom region on /quit teardown', async () => {
+    const reg = new CommandRegistry();
+    const { display } = mkDisplay();
+    reg.register({
+      name: 'quit',
+      description: 'quit',
+      category: 'system',
+      handler: async () => ({ exit: true }),
+    });
+    const releaseSpy = vi.spyOn(display, 'releaseBottomRegion');
+    const { agent } = mkAgent();
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        commandRegistry: reg,
+        display,
+        promptApi: mkPromptApi({ inputs: ['/quit'] }),
+      }),
+    );
+    await session.run();
+    expect(releaseSpy).toHaveBeenCalled();
+    expect(agent.runConversation).not.toHaveBeenCalled();
+  });
 });

@@ -261,7 +261,7 @@ export function startPhaseIndicator(opts: ProgressBarOptions): PhaseIndicator {
 /** npm install phase → default percent. Best-effort bar shaping. */
 export function npmInstallPhasePercent(phase: string): number {
   switch (phase) {
-    case 'spawning':    return 3;
+    case 'spawning':    return 0;
     case 'resolving':   return 15;
     case 'downloading': return 50;
     case 'extracting':  return 85;

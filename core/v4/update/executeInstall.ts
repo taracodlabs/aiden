@@ -24,6 +24,7 @@ export type InstallFailureKind =
   | 'registry'
   | 'version-not-found'
   | 'package-manager'
+  | 'native-build'
   | 'timeout'
   | 'cancelled'
   | 'verification';
@@ -98,10 +99,16 @@ function classifyFailure(
   if (/(etarget|no matching version|version not found)/i.test(text)) {
     return 'version-not-found';
   }
-  if (/(econnreset|econnrefused|enotfound|etimedout|network request|network timeout|socket hang up)/i.test(text)) {
+  if (/(econnreset|econnrefused|enotfound|etimedout|network request|network timeout|socket hang up|dns lookup failed)/i.test(text)) {
     return 'network';
   }
-  if (/(registry|\b404 not found|http (401|403|404|429|5\d\d)|npm err! code e40[134])/i.test(text)) {
+  if (/(node-gyp|gyp err!|prebuild-install|native build|build failed)/i.test(text)) {
+    return 'native-build';
+  }
+  if (/(npm err! code e401|npm err! code e403|\b401 unauthorized\b|\b403 forbidden\b|http (401|403))/i.test(text)) {
+    return 'registry';
+  }
+  if (/(registry|\b404 not found|http (404|429|5\d\d)|npm err! code e40[134])/i.test(text)) {
     return 'registry';
   }
   return 'package-manager';
@@ -123,6 +130,8 @@ function failureMessage(kind: InstallFailureKind, plan: UpdateInstallPlan): stri
       return 'The package registry rejected or could not complete the update request. Retry with /update install.';
     case 'version-not-found':
       return `aiden-runtime ${plan.targetVersion} is not available from the configured registry.`;
+    case 'native-build':
+      return 'The package manager could not complete a native dependency build. Inspect npm diagnostics and retry after the build toolchain is available.';
     case 'timeout':
       return 'The npm update exceeded its time limit and was stopped. Retry with /update install.';
     case 'cancelled':
@@ -211,13 +220,13 @@ export async function executeInstall(
       };
     }
     try {
-      options.onPhase?.('preparing update');
+      options.onPhase?.('resolving installation');
       const prepare = options.prepareWindowsHelper ?? prepareWindowsUpdateHelper;
       const helper = await prepare({
         stateDir: options.updateStateDir,
         plan,
       });
-      options.onPhase?.('complete');
+      options.onPhase?.('starting installer');
       return {
         success: true,
         scheduled: true,
@@ -244,13 +253,15 @@ export async function executeInstall(
   const killTree = options.killProcessTreeImpl ??
     ((child: ChildProcess, signal: NodeJS.Signals) => killProcessTree(child, signal, { platform }));
   const packageSpec = `aiden-runtime@${targetVersion}`;
+  const installArgs = ['install', '-g', packageSpec, '--prefix', plan.prefix!];
 
-  onPhase('preparing update');
+  onPhase('resolving installation');
 
   return new Promise<InstallResult>((resolve) => {
     let child: ChildProcess;
     try {
-      child = spawnCommand(plan.npmExecutable!, ['install', '-g', packageSpec], {
+      onPhase('starting installer');
+      child = spawnCommand(plan.npmExecutable!, installArgs, {
         stdio: ['ignore', 'pipe', 'pipe'],
         platform,
         env,
@@ -344,7 +355,7 @@ export async function executeInstall(
         return;
       }
 
-      onPhase('verifying');
+      onPhase('verifying installed version');
       const installedVersion = await verifyVersion(plan.packagePath!);
       if (targetVersion !== 'latest' && installedVersion !== targetVersion) {
         onPhase('failed');
@@ -382,7 +393,7 @@ export async function executeInstall(
     child.once('error', onError);
     child.once('close', onClose);
     options.signal?.addEventListener('abort', onAbort, { once: true });
-    onPhase('installing');
+    onPhase('installing package');
     timeout = setTimeout(() => stop('timeout'), timeoutMs);
     timeout.unref?.();
   });

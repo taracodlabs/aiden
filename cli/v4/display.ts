@@ -2217,6 +2217,21 @@ export class Display {
     return composerLaneEnabled() && !!this.out.isTTY;
   }
 
+  /** Release all fixed bottom-region state for full-session teardown. */
+  releaseBottomRegion(): void {
+    this.composerSurfacePauseDepth = 0;
+    this.composerText = '';
+    this.composerDraft = '';
+    this.busyComposerHint = '';
+    this.idleComposerContent = '';
+    this.idleComposerDraft = '';
+    this.idleComposerCursor = 0;
+    this.statusFooterSource = '';
+    this.composerLane?.deactivate();
+    // Avoid re-activating on the next status refresh during exit.
+    this.composerSurfacePauseDepth = 0;
+  }
+
   /** Clear the composer (turn end / handoff back to the normal prompt). Drops
    *  BOTH the typed text and the persistent busy hint. */
   clearComposer(): void {

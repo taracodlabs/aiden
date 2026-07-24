@@ -59,8 +59,9 @@ const classify = (text) => {
   const value = String(text || '').toLowerCase();
   if (/(eacces|eperm|permission denied|operation not permitted|access is denied)/.test(value)) return 'permission';
   if (/(etarget|no matching version|version not found)/.test(value)) return 'version-not-found';
-  if (/(econnreset|econnrefused|enotfound|etimedout|network request|socket hang up)/.test(value)) return 'network';
-  if (/(registry|http (401|403|404|429|5\d\d))/.test(value)) return 'registry';
+  if (/(econnreset|econnrefused|enotfound|etimedout|network request|socket hang up|dns lookup failed)/.test(value)) return 'network';
+  if (/(node-gyp|gyp err!|prebuild-install|native build|build failed)/.test(value)) return 'native-build';
+  if (/(registry|http (401|403|404|429|5\d\d)|npm err! code e40[134])/.test(value)) return 'registry';
   return 'package-manager';
 };
 const cleanup = () => {
@@ -77,7 +78,7 @@ const cleanup = () => {
       return;
     }
 
-    const installArgs = ['install', '-g', 'aiden-runtime@' + state.targetVersion];
+    const installArgs = ['install', '-g', 'aiden-runtime@' + state.targetVersion, '--prefix', state.prefix];
     let command = state.npmExecutable;
     let args = installArgs;
     const options = { shell: false, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] };

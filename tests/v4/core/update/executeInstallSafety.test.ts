@@ -1,4 +1,4 @@
-import { EventEmitter } from 'node:events';
+﻿import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 
 import { executeInstall } from '../../../../core/v4/update/executeInstall';
@@ -88,7 +88,7 @@ describe('executeInstall safety', () => {
     expect(result.success).toBe(true);
     expect(fake.spawnImpl).toHaveBeenCalledWith(
       readyPlan().npmExecutable,
-      ['install', '-g', `aiden-runtime@${targetVersion}`],
+      ['install', '-g', `aiden-runtime@${targetVersion}`, '--prefix', readyPlan().prefix],
       expect.objectContaining({ shell: false }),
     );
   });
@@ -111,6 +111,8 @@ describe('executeInstall safety', () => {
     ['EPERM', 'npm ERR! code EPERM', 'permission'],
     ['network', 'npm ERR! code ECONNRESET\nnetwork request failed', 'network'],
     ['registry', 'npm ERR! registry returned 503', 'registry'],
+    ['registry auth', 'npm ERR! code E403\n403 Forbidden', 'registry'],
+    ['native build', 'npm ERR! node-gyp rebuild failed', 'native-build'],
     ['version unavailable', 'npm ERR! code ETARGET\nNo matching version found', 'version-not-found'],
   ] as const)('classifies %s without leaking raw output', async (_name, stderr, expected) => {
     const fake = fakeSpawn({ stderr, exitCode: 1 });
@@ -172,5 +174,44 @@ describe('executeInstall safety', () => {
     const result = await pending;
     expect(result.kind).toBe('cancelled');
     expect(killProcess).toHaveBeenCalledOnce();
+  });
+  it('passes the exact resolved prefix to npm instead of relying on npm config', async () => {
+    const fake = fakeSpawn({ stdout: 'changed 1 package\n', exitCode: 0 });
+    const plan = {
+      ...readyPlan(),
+      npmExecutable: 'D:\\Program Files\\nodejs\\npm.cmd',
+      prefix: 'C:\\Users\\shiva\\AppData\\Roaming\\npm',
+      packagePath: 'C:\\Users\\shiva\\AppData\\Roaming\\npm\\node_modules\\aiden-runtime',
+    };
+    const result = await executeInstall({
+      targetVersion,
+      plan,
+      platform: 'linux',
+      spawnImpl: fake.spawnImpl as never,
+      readInstalledVersion: vi.fn(async () => targetVersion),
+    });
+    expect(result.success).toBe(true);
+    expect(fake.spawnImpl).toHaveBeenCalledWith(
+      plan.npmExecutable,
+      ['install', '-g', `aiden-runtime@${targetVersion}`, '--prefix', plan.prefix],
+      expect.objectContaining({ shell: false }),
+    );
+  });
+
+  it('classifies DNS and registry authorization failures without calling them permissions', async () => {
+    const network = await executeInstall({
+      targetVersion,
+      plan: readyPlan(),
+      platform: 'linux',
+      spawnImpl: fakeSpawn({ stderr: 'npm ERR! DNS lookup failed', exitCode: 1 }).spawnImpl as never,
+    });
+    expect(network.kind).toBe('network');
+    const auth = await executeInstall({
+      targetVersion,
+      plan: readyPlan(),
+      platform: 'linux',
+      spawnImpl: fakeSpawn({ stderr: 'npm ERR! code E401\n401 Unauthorized', exitCode: 1 }).spawnImpl as never,
+    });
+    expect(auth.kind).toBe('registry');
   });
 });

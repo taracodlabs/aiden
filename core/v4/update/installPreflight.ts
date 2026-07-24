@@ -88,6 +88,22 @@ function currentPackagePath(input: DetectInstallMethodInput, platform: NodeJS.Pl
   return match?.[2] ? pathApi(platform).normalize(match[2]) : undefined;
 }
 
+function installTargetFromRunningPackage(
+  runningPackage: string | undefined,
+  platform: NodeJS.Platform,
+): { prefix: string; globalRoot: string; packagePath: string } | null {
+  if (!runningPackage) return null;
+  const paths = pathApi(platform);
+  const normalized = paths.normalize(runningPackage).replace(/[\\/]+$/, '');
+  const packageName = paths.basename(normalized).toLowerCase();
+  const globalRoot = paths.dirname(normalized);
+  const nodeModulesName = paths.basename(globalRoot).toLowerCase();
+  if (packageName !== 'aiden-runtime' || nodeModulesName !== 'node_modules') return null;
+  const prefix = paths.dirname(globalRoot);
+  if (!paths.isAbsolute(prefix)) return null;
+  return { prefix, globalRoot, packagePath: normalized };
+}
+
 function equivalentOrInside(candidate: string, root: string, platform: NodeJS.Platform): boolean {
   const paths = pathApi(platform);
   const normalize = (value: string): string => {
@@ -271,24 +287,37 @@ export async function inspectUpdateInstall(
     runCommand(npm.path, ['prefix', '-g']),
     runCommand(npm.path, ['root', '-g']),
   ]);
-  const prefix = prefixResult.stdout.trim();
-  const globalRoot = rootResult.stdout.trim();
-  if (
-    prefixResult.exitCode !== 0 ||
-    rootResult.exitCode !== 0 ||
-    !paths.isAbsolute(prefix) ||
-    !paths.isAbsolute(globalRoot)
-  ) {
-    return {
-      ...manualPlan(options.targetVersion, 'npm-global', 'prefix-resolution-failed', [
-        'Aiden could not resolve the active npm global prefix and package root. No installer was started.',
-      ]),
-      npmExecutable: npm.path,
-    };
+  let prefix = prefixResult.stdout.trim();
+  let globalRoot = rootResult.stdout.trim();
+  let packagePath = paths.isAbsolute(globalRoot) ? paths.join(globalRoot, 'aiden-runtime') : '';
+  const runningPackage = currentPackagePath(detectionInput, platform);
+  const runningTarget = installTargetFromRunningPackage(runningPackage, platform);
+  const npmResolvedTarget =
+    prefixResult.exitCode === 0 &&
+    rootResult.exitCode === 0 &&
+    paths.isAbsolute(prefix) &&
+    paths.isAbsolute(globalRoot);
+
+  if (!npmResolvedTarget) {
+    if (detected.method === 'npm-global' && runningTarget) {
+      ({ prefix, globalRoot, packagePath } = runningTarget);
+    } else {
+      return {
+        ...manualPlan(options.targetVersion, 'npm-global', 'prefix-resolution-failed', [
+          'Aiden could not resolve the active npm global prefix and package root. No installer was started.',
+        ]),
+        npmExecutable: npm.path,
+        currentPackagePath: runningPackage,
+      };
+    }
   }
 
-  const packagePath = paths.join(globalRoot, 'aiden-runtime');
-  const runningPackage = currentPackagePath(detectionInput, platform);
+  if (runningTarget && !equivalentOrInside(runningTarget.packagePath, packagePath, platform)) {
+    if (detected.method === 'npm-global') {
+      ({ prefix, globalRoot, packagePath } = runningTarget);
+    }
+  }
+
   if (!runningPackage || !equivalentOrInside(runningPackage, packagePath, platform)) {
     if (detected.method === 'npm-local') {
       return {

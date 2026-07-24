@@ -1,5 +1,5 @@
-/**
- * v4.9.1 — progress bar renderer + state machine.
+﻿/**
+ * v4.9.1 â€” progress bar renderer + state machine.
  * Pure-function tests for renderLine + detectRenderMode + phase mapping;
  * stream tests for animated lifecycle (paint, complete, fail).
  */
@@ -23,24 +23,24 @@ function captureStream(): { stream: Writable; chunks: string[] } {
 const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
 
 describe('detectRenderMode', () => {
-  it('non-TTY → plain text, no color, no blocks, not animated', () => {
+  it('non-TTY â†’ plain text, no color, no blocks, not animated', () => {
     expect(detectRenderMode(false, {})).toEqual({ color: false, blocks: false, animated: false });
   });
-  it('TTY default → color + blocks + animated', () => {
+  it('TTY default â†’ color + blocks + animated', () => {
     expect(detectRenderMode(true, {})).toEqual({ color: true, blocks: true, animated: true });
   });
-  it('TTY + NO_COLOR → no color, still blocks + animated', () => {
+  it('TTY + NO_COLOR â†’ no color, still blocks + animated', () => {
     const m = detectRenderMode(true, { NO_COLOR: '1' });
     expect(m.color).toBe(false);
     expect(m.blocks).toBe(true);
     expect(m.animated).toBe(true);
   });
-  it('TTY + TERM=dumb → no color, no blocks (use #-), still animated', () => {
+  it('TTY + TERM=dumb â†’ no color, no blocks (use #-), still animated', () => {
     const m = detectRenderMode(true, { TERM: 'dumb' });
     expect(m.color).toBe(false);
     expect(m.blocks).toBe(false);
   });
-  it('TTY + CI=true → degraded like dumb', () => {
+  it('TTY + CI=true â†’ degraded like dumb', () => {
     const m = detectRenderMode(true, { CI: 'true' });
     expect(m.color).toBe(false);
     expect(m.blocks).toBe(false);
@@ -51,7 +51,7 @@ describe('renderLine', () => {
   const base = { width: 10, percent: 50, phase: 'downloading', elapsedMs: 3200 } as const;
   it('block glyphs + color', () => {
     const line = renderLine({ ...base, mode: { color: true, blocks: true, animated: true } });
-    expect(line).toMatch(/█████░░░░░/);
+    expect(line).toContain('█████░░░░░');
     expect(line).toMatch(/50%/);
     expect(line).toMatch(/downloading/);
     expect(line).toMatch(/3\.2s/);
@@ -59,14 +59,14 @@ describe('renderLine', () => {
   });
   it('block glyphs + NO_COLOR (no ANSI)', () => {
     const line = renderLine({ ...base, mode: { color: false, blocks: true, animated: true } });
-    expect(line).toMatch(/█████░░░░░/);
+    expect(line).toContain('█████░░░░░');
     expect(line).not.toMatch(/\x1b\[/);
   });
-  it('dumb terminal → #- fallback', () => {
+  it('dumb terminal â†’ #- fallback', () => {
     const line = renderLine({ ...base, mode: { color: false, blocks: false, animated: false } });
     expect(line).toMatch(/#####-----/);
-    expect(line).not.toMatch(/█/);
-    expect(line).not.toMatch(/░/);
+    expect(line).not.toContain('█');
+    expect(line).not.toContain('█');
   });
   it('clamps percent to [0,100]', () => {
     const lo = renderLine({ ...base, percent: -5, mode: { color: false, blocks: true, animated: true } });
@@ -77,8 +77,8 @@ describe('renderLine', () => {
 });
 
 describe('npm phase helpers', () => {
-  it('phase → percent mapping covers the install timeline', () => {
-    expect(npmInstallPhasePercent('spawning'))    .toBeLessThan(npmInstallPhasePercent('resolving'));
+  it('phase â†’ percent mapping covers the install timeline', () => {
+    expect(npmInstallPhasePercent('spawning')).toBe(0);
     expect(npmInstallPhasePercent('resolving'))   .toBeLessThan(npmInstallPhasePercent('downloading'));
     expect(npmInstallPhasePercent('downloading')) .toBeLessThan(npmInstallPhasePercent('extracting'));
     expect(npmInstallPhasePercent('extracting'))  .toBeLessThan(npmInstallPhasePercent('verifying'));
@@ -90,17 +90,17 @@ describe('npm phase helpers', () => {
     expect(detectNpmPhase('added 247 packages in 4s')).toBe('verifying');
     expect(detectNpmPhase('npm http fetch GET 200 https://registry'))
       .toBe('downloading');
-    // "reify:<pkg>: extract" → extracting (extract keyword wins over reify).
+    // "reify:<pkg>: extract" â†’ extracting (extract keyword wins over reify).
     expect(detectNpmPhase('reify:better-sqlite3: extract'))
       .toBe('extracting');
     // Plain reify lines (no extract keyword) map to downloading.
-    expect(detectNpmPhase('reify:better-sqlite3 ━━╸'))
+    expect(detectNpmPhase('reify:better-sqlite3 â”â”â•¸'))
       .toBe('downloading');
     expect(detectNpmPhase('npm WARN unrelated text')).toBeNull();
   });
 });
 
-describe('startProgressBar — stream behavior', () => {
+describe('startProgressBar â€” stream behavior', () => {
   let cap: ReturnType<typeof captureStream>;
   beforeEach(() => { cap = captureStream(); });
 
@@ -113,17 +113,17 @@ describe('startProgressBar — stream behavior', () => {
     bar.complete('Updated to 4.9.1');
     const out = stripAnsi(cap.chunks.join(''));
     expect(out).toMatch(/Installing aiden-runtime v4\.9\.1/);
-    expect(out).toMatch(/✓ Updated to 4\.9\.1/);
+    expect(out).toContain('✓ Updated to 4.9.1');
   });
-  it('fail() emits ✗ + message', () => {
+  it('fail() emits âœ— + message', () => {
     const bar = startProgressBar({
       label: 'L', phases: ['spawning'], out: cap.stream, isTTY: false, env: {},
     });
     bar.fail('Permission denied');
     const out = stripAnsi(cap.chunks.join(''));
-    expect(out).toMatch(/✗ Permission denied/);
+    expect(out).toContain('✗ Permission denied');
   });
-  it('non-TTY → no ANSI sequences in output', () => {
+  it('non-TTY â†’ no ANSI sequences in output', () => {
     const bar = startProgressBar({
       label: 'L', phases: ['spawning', 'installed'],
       out: cap.stream, isTTY: false, env: {},
@@ -132,7 +132,7 @@ describe('startProgressBar — stream behavior', () => {
     bar.complete('done');
     expect(cap.chunks.join('')).not.toMatch(/\x1b\[/);
   });
-  it('NO_COLOR=1 → no ANSI sequences even when TTY', () => {
+  it('NO_COLOR=1 â†’ no ANSI sequences even when TTY', () => {
     const bar = startProgressBar({
       label: 'L', phases: ['spawning', 'installed'],
       out: cap.stream, isTTY: true, env: { NO_COLOR: '1' },
@@ -151,11 +151,11 @@ describe('startProgressBar — stream behavior', () => {
   });
 });
 
-describe('startPhaseIndicator — truthful indeterminate updater status', () => {
+describe('startPhaseIndicator â€” truthful indeterminate updater status', () => {
   it('renders phases without a fabricated numeric percentage', () => {
     const cap = captureStream();
     const indicator = startPhaseIndicator({
-      label: 'Updating aiden-runtime 4.16.0',
+      label: 'Updating aiden-runtime 4.16.1',
       phases: ['checking installation', 'installing', 'verifying'],
       out: cap.stream,
       isTTY: false,
@@ -186,5 +186,20 @@ describe('startPhaseIndicator — truthful indeterminate updater status', () => 
     indicator.cancel('duplicate');
     indicator.setPhase('verifying');
     expect(cap.chunks.length).toBe(atCancel);
+  });
+  it('never renders the old fabricated 3% spawning status', () => {
+    const cap = captureStream();
+    const indicator = startPhaseIndicator({
+      label: 'Updating',
+      phases: ['starting installer'],
+      out: cap.stream,
+      isTTY: false,
+      env: {},
+    });
+    indicator.setPhase('starting installer');
+    indicator.complete('done');
+    const output = stripAnsi(cap.chunks.join(''));
+    expect(output).not.toContain('3%');
+    expect(output).not.toContain('spawning');
   });
 });
