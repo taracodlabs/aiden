@@ -31,6 +31,7 @@ export type InstallMethod =
   | 'npm-global'
   | 'npm-local'
   | 'npx'
+  | 'source'
   | 'standalone-binary'
   | 'unknown';
 
@@ -157,6 +158,22 @@ export function detectInstallMethod(
       description:               `local npm install in project (${path.basename(projectRoot)})`,
       updateCommand: (v) =>
         `cd ${projectRoot} && npm install aiden-runtime@${v}`,
+    };
+  }
+
+  // Repository/source execution. This deliberately checks the live
+  // TypeScript CLI shape only; compiled copies outside node_modules
+  // remain unknown until the async preflight can inspect them.
+  if (
+    /[/\\]cli[/\\]v4[/\\]aidenCLI\.ts$/i.test(argvScript) ||
+    env.AIDEN_SOURCE_CHECKOUT === '1'
+  ) {
+    return {
+      method:                    'source',
+      inProcessInstallSupported: false,
+      description:               'repository/source execution',
+      updateCommand: (_v) =>
+        'Update this source checkout with its repository workflow; no npm-global install was started.',
     };
   }
 

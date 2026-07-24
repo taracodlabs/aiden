@@ -94,16 +94,16 @@ describe('executeInstall — happy path', () => {
     );
   });
 
-  it('honors a custom packageSpec override (test seam)', async () => {
+  it('honors an exact targetVersion override', async () => {
     const spawnImpl = fakeSpawn({ stdout: '+ aiden-runtime@4.1.4', exitCode: 0 });
     await executeInstall({
       spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
-      packageSpec: 'aiden-runtime@beta',
+      targetVersion: '4.1.4',
       platform: 'linux',
     });
     expect(spawnImpl).toHaveBeenCalledWith(
       'npm',
-      ['install', '-g', 'aiden-runtime@beta'],
+      ['install', '-g', 'aiden-runtime@4.1.4'],
       expect.any(Object),
     );
   });
@@ -150,9 +150,9 @@ describe('executeInstall — permission denied', () => {
     });
     expect(result.success).toBe(false);
     // v4.9.1 — message wording refreshed (platformInstructions builder).
-    expect(result.error).toContain('permission denied');
-    expect(result.error).toContain('sudo npm install -g aiden-runtime@latest');
-    expect(result.error).toMatch(/npm config set prefix "[^"]*\.npm-global"/);
+    expect(result.kind).toBe('permission');
+    expect(result.error).toContain('configured npm global prefix');
+    expect(result.error).not.toMatch(/sudo|config set prefix/);
   });
 
   it('detects EPERM / "access is denied" → Windows admin remediation', async () => {
@@ -165,7 +165,8 @@ describe('executeInstall — permission denied', () => {
       platform: 'win32',
     });
     expect(result.success).toBe(false);
-    expect(result.error).toContain('PowerShell as Administrator');
+    expect(result.kind).toBe('permission');
+    expect(result.error).not.toContain('Administrator');
     expect(result.error).toContain('npm install -g aiden-runtime@latest');
   });
 
@@ -180,11 +181,11 @@ describe('executeInstall — permission denied', () => {
     });
     // v4.9.1 — message wording refreshed; "darwin" now appears in headline,
     // sudo path still the first remediation.
-    expect(result.error).toMatch(/sudo|darwin/);
-    expect(result.error).toContain('sudo npm');
+    expect(result.kind).toBe('permission');
+    expect(result.error).not.toMatch(/sudo|Administrator/);
   });
 
-  it('all permission-denied branches include the user-local prefix alternative', async () => {
+  it('all permission-denied branches preserve the configured prefix', async () => {
     for (const platform of ['win32', 'darwin', 'linux'] as NodeJS.Platform[]) {
       const spawnImpl = fakeSpawn({
         stderr: 'EACCES: permission denied',
@@ -195,8 +196,8 @@ describe('executeInstall — permission denied', () => {
         platform,
       });
       // v4.9.1 — phrasing refreshed; Option 2 now reads "user-local prefix".
-      expect(result.error).toMatch(/user-local prefix/);
-      expect(result.error).toContain('npm config set prefix');
+      expect(result.error).toContain('<test-prefix>');
+      expect(result.error).not.toMatch(/npm config set prefix|SetEnvironmentVariable|sudo/);
     }
   });
 });
@@ -211,8 +212,8 @@ describe('executeInstall — failure modes', () => {
       spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
     });
     expect(result.success).toBe(false);
-    expect(result.error).toContain('exit 1');
-    expect(result.error).toContain('404 Not Found');
+    expect(result.kind).toBe('registry');
+    expect(result.error).not.toContain('404 Not Found');
     expect(result.exitCode).toBe(1);
   });
 
@@ -223,8 +224,8 @@ describe('executeInstall — failure modes', () => {
       spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
     });
     expect(result.success).toBe(false);
-    expect(result.error).toContain('npm spawn failed');
-    expect(result.error).toContain('Is npm installed and on PATH?');
+    expect(result.kind).toBe('npm-unavailable');
+    expect(result.error).toContain('npm executable');
   });
 
   it('timeout → kills child + returns honest timeout error', async () => {
@@ -238,8 +239,8 @@ describe('executeInstall — failure modes', () => {
       timeoutMs: 50,
     });
     expect(result.success).toBe(false);
-    expect(result.error).toContain('timed out');
-    expect(result.error).toContain('50ms');
+    expect(result.kind).toBe('timeout');
+    expect(result.error).toContain('time limit');
     expect(result.exitCode).toBe(-1);
   });
 
@@ -251,8 +252,8 @@ describe('executeInstall — failure modes', () => {
       spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
     });
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Could not launch npm');
-    expect(result.error).toContain('spawn synchronously failed');
+    expect(result.kind).toBe('package-manager');
+    expect(result.error).not.toContain('spawn synchronously failed');
   });
 });
 

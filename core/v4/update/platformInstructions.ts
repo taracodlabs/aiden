@@ -55,22 +55,21 @@ export function permissionDeniedInstructions(opts: {
   platform: NodeJS.Platform;
   home:     string;
   env?:     NodeJS.ProcessEnv;
+  prefix?:  string;
 }): PlatformInstructions {
   const env = opts.env ?? process.env;
+  const prefix = opts.prefix ?? 'the configured npm global prefix';
 
   if (opts.platform === 'win32') {
     return {
-      headline: 'Install failed: permission denied. npm needs Administrator for a global install on Windows.',
+      headline: `Install failed: the active npm target is not writable (${prefix}).`,
       shell:    'powershell',
       steps: [
-        'Option 1 — Run once with elevated privileges:',
-        '  • Open PowerShell as Administrator (right-click → "Run as administrator")',
-        '  • npm install -g aiden-runtime@latest',
+        'Aiden did not change npm configuration, PATH, or privileges.',
+        'Use the shell or environment manager that owns this existing prefix.',
         '',
-        'Option 2 — Permanent: switch npm to a user-local prefix (no admin needed ever again):',
-        '  • npm config set prefix "$env:USERPROFILE\\AppData\\Roaming\\npm"',
-        '  • [Environment]::SetEnvironmentVariable("Path", "$env:USERPROFILE\\AppData\\Roaming\\npm;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")',
-        '  • Close + reopen PowerShell, then:  npm install -g aiden-runtime@latest',
+        'Manual retry:',
+        '  • npm install -g aiden-runtime@latest',
       ],
     };
   }
@@ -79,17 +78,14 @@ export function permissionDeniedInstructions(opts: {
   const shell  = detectShell(env);
   const rcFile = rcFileFor(shell, opts.home);
   return {
-    headline: `Install failed: permission denied. npm needs sudo for a global install on ${opts.platform}.`,
+    headline: `Install failed: the active npm target is not writable (${prefix}).`,
     shell:    shell ?? undefined,
     rcFile,
     steps: [
-      'Option 1 — Run once with elevated privileges:',
-      '  • sudo npm install -g aiden-runtime@latest',
+      'Aiden did not change npm configuration, PATH, or privileges.',
+      'Use the shell or environment manager that owns this existing prefix.',
       '',
-      'Option 2 — Permanent: switch npm to a user-local prefix (no sudo needed ever again):',
-      `  • npm config set prefix "${opts.home}/.npm-global"`,
-      `  • echo 'export PATH="${opts.home}/.npm-global/bin:$PATH"' >> ${rcFile}`,
-      `  • source ${rcFile}`,
+      'Manual retry:',
       '  • npm install -g aiden-runtime@latest',
     ],
   };
@@ -111,18 +107,15 @@ export function detectStalePrefix(opts: {
   home:     string;
   env?:     NodeJS.ProcessEnv;
 }): { warning: string; switchSteps: string[] } | null {
-  const env = opts.env ?? process.env;
   const p   = opts.prefix;
   // Windows risk: Program Files.
   if (opts.platform === 'win32') {
     if (/^[a-zA-Z]:\\Program Files/i.test(p)) {
       return {
-        warning: `npm prefix is "${p}" — global installs here require Administrator every time.`,
+        warning: `npm prefix is "${p}" and is not writable from this process.`,
         switchSteps: [
-          'Switch to a user-local prefix to avoid the prompt forever:',
-          '  • npm config set prefix "$env:USERPROFILE\\AppData\\Roaming\\npm"',
-          '  • [Environment]::SetEnvironmentVariable("Path", "$env:USERPROFILE\\AppData\\Roaming\\npm;" + [Environment]::GetEnvironmentVariable("Path", "User"), "User")',
-          '  • Close + reopen PowerShell.',
+          'Use the shell or environment manager that owns this existing prefix.',
+          'Aiden will not change npm configuration, PATH, or privileges.',
         ],
       };
     }
@@ -131,15 +124,11 @@ export function detectStalePrefix(opts: {
   // POSIX risk: /usr or /usr/local without write access.
   const risky = p === '/usr' || p === '/usr/local' || p.startsWith('/usr/');
   if (risky && !opts.writable) {
-    const shell  = detectShell(env);
-    const rcFile = rcFileFor(shell, opts.home);
     return {
       warning: `npm prefix is "${p}" — global installs here require sudo every time.`,
       switchSteps: [
-        'Switch to a user-local prefix to avoid sudo forever:',
-        `  • npm config set prefix "${opts.home}/.npm-global"`,
-        `  • echo 'export PATH="${opts.home}/.npm-global/bin:$PATH"' >> ${rcFile}`,
-        `  • source ${rcFile}`,
+        'Use the shell or environment manager that owns this existing prefix.',
+        'Aiden will not change npm configuration, PATH, or privileges.',
       ],
     };
   }

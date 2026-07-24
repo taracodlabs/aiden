@@ -565,6 +565,7 @@ export function bootSourceLabel(
 }
 
 export class ChatSession implements ChatSessionLike {
+  private updateExitRequested = false;
   history: Message[] = [];
   private sessionId: string | null = null;
   private currentProviderId: string;
@@ -868,6 +869,7 @@ export class ChatSession implements ChatSessionLike {
 
     // 2. Boxed startup card.
     await this.renderStartupCard();
+    if (this.updateExitRequested) return;
 
     // 3. Optional SIGINT / SIGTERM handlers.
     //
@@ -3590,6 +3592,7 @@ export class ChatSession implements ChatSessionLike {
       display.write('\n');
       await this.maybeShowBootUpdatePrompt();
     } catch { /* never let the update prompt crash boot */ }
+    if (this.updateExitRequested) return;
 
     // ONB1 slice 9 — one-time first-run hint banner. Renders below
     // the boot card on the very first session after a successful
@@ -3674,49 +3677,102 @@ export class ChatSession implements ChatSessionLike {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const cu = require('../../core/v4/update/checkUpdate') as typeof import('../../core/v4/update/checkUpdate');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const md = require('../../core/v4/update/installMethodDetect') as typeof import('../../core/v4/update/installMethodDetect');
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ss = require('../../core/v4/update/skipState') as typeof import('../../core/v4/update/skipState');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const bp = require('./updateBootPrompt') as typeof import('./updateBootPrompt');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ei = require('../../core/v4/update/executeInstall') as typeof import('../../core/v4/update/executeInstall');
     // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const ip = require('../../core/v4/update/installPreflight') as typeof import('../../core/v4/update/installPreflight');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const fb = require('../../core/v4/update/failureBackoff') as typeof import('../../core/v4/update/failureBackoff');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const ver = require('../../core/version') as { VERSION: string };
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const wh = require('../../core/v4/update/windowsUpdateHelper') as typeof import('../../core/v4/update/windowsUpdateHelper');
+
+    if (process.platform === 'win32') {
+      const prior = await wh.consumeWindowsUpdateResult(this.opts.paths.root);
+      if (prior?.success) {
+        this.opts.display.success(`Update completed: aiden-runtime ${prior.targetVersion} is installed.`);
+        await cu.updateCacheFile(this.opts.paths, (current) => fb.clearUpdateFailure(current));
+      } else if (prior) {
+        this.opts.display.warn(
+          `The prepared update to ${prior.targetVersion} did not complete (${prior.kind}). ` +
+          'Aiden is still usable; run /update install to retry.',
+        );
+        await cu.updateCacheFile(
+          this.opts.paths,
+          (current) => fb.applyUpdateFailure(current, prior.targetVersion),
+        );
+      }
+    }
 
     const status = await cu.checkForUpdate({ paths: this.opts.paths, installedVersion: ver.VERSION });
-    if (!status.updateAvailable || !status.latest || status.skipped) return;
+    if (
+      !status.updateAvailable ||
+      !status.latest ||
+      status.skipped ||
+      status.failureBackoffActive
+    ) return;
 
-    const method = md.detectInstallMethod();
+    const plan = await ip.inspectUpdateInstall({ targetVersion: status.latest });
     const choice = await bp.showBootUpdatePrompt({
-      status, method,
+      status, plan,
       display: { write: (s) => this.opts.display.write(s), dim: (s) => this.opts.display.dim(s) },
     });
 
     if (choice === 'install') {
-      if (method.inProcessInstallSupported) {
+      if (plan.installAllowed) {
         // v4.9.1 — drive a live progress bar off the executor's
         // phase callback. The bar degrades cleanly on non-TTY, NO_COLOR,
         // and dumb terminals — see cli/v4/ui/progressBar.ts.
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const pb = require('./ui/progressBar') as typeof import('./ui/progressBar');
-        const bar = pb.startProgressBar({
-          label:  `Installing aiden-runtime ${status.latest}...`,
-          phases: ['spawning', 'resolving', 'downloading', 'extracting', 'verifying', 'installed'],
+        const bar = pb.startPhaseIndicator({
+          label:  `Updating aiden-runtime ${status.latest} in ${plan.prefix}...`,
+          phases: ['preparing update', 'installing', 'verifying', 'complete'],
         });
-        const result = await ei.executeInstall({
-          packageSpec: `aiden-runtime@${status.latest}`,
-          onPhase: (p) => { bar.setPhase(p); bar.setPercent(pb.npmInstallPhasePercent(p)); },
-        });
-        if (result.success) {
-          bar.complete(`aiden-runtime ${result.installedVersion ?? status.latest} installed. Restart Aiden to apply: type /quit then re-run \`aiden\`.`);
-        } else {
-          bar.fail('Install failed.');
-          this.opts.display.warn(result.error ?? 'Install failed (no error message).');
+        const controller = new AbortController();
+        const cancel = (): void => controller.abort();
+        process.once('SIGINT', cancel);
+        let result;
+        try {
+          result = await ei.executeInstall({
+            targetVersion: status.latest,
+            plan,
+            signal: controller.signal,
+            updateStateDir: this.opts.paths.root,
+            onPhase: (phase) => bar.setPhase(phase),
+          });
+        } finally {
+          process.removeListener('SIGINT', cancel);
         }
-      } else {
-        this.opts.display.write(`To update, run:\n  ${method.updateCommand(status.latest)}\n`);
+        if (result.success) {
+          if (result.scheduled) {
+            bar.complete(
+              `Update prepared for ${status.latest}. Aiden will close so Windows can replace the running package. Re-run \`aiden\` after npm completes.`,
+            );
+            this.updateExitRequested = true;
+          } else {
+            bar.complete(`aiden-runtime ${result.installedVersion ?? status.latest} installed. Restart Aiden to apply: type /quit then re-run \`aiden\`.`);
+            await cu.updateCacheFile(this.opts.paths, (current) => fb.clearUpdateFailure(current));
+          }
+        } else {
+          if (result.kind === 'cancelled') bar.cancel('Update cancelled.');
+          else bar.fail('Update failed.');
+          this.opts.display.warn(result.error ?? 'Install failed (no error message).');
+          await cu.updateCacheFile(
+            this.opts.paths,
+            (current) => fb.applyUpdateFailure(current, status.latest!),
+          );
+        }
       }
+    } else if (choice === 'unavailable') {
+      await cu.updateCacheFile(
+        this.opts.paths,
+        (current) => fb.applyUpdateFailure(current, status.latest!),
+      );
     } else if (choice === 'skip') {
       await cu.updateCacheFile(this.opts.paths, (current) => ss.applySkip(current, status.latest!));
       this.opts.display.dim(`  skipped ${status.latest}. Boot prompt resumes when a newer version ships.`);
