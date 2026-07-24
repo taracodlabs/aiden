@@ -1,3 +1,66 @@
+## v4.16.0 — 2026-07-24
+
+### Overview
+
+**Aiden v4.16.0 — Durable Autonomy Foundation**
+
+Aiden now has a durable autonomy foundation that remembers work, preserves input, rejects stale execution, recovers safely, and keeps the operator in control.
+
+### Durable Jobs and Attempts
+
+- Existing task and run records now act as durable Job and Attempt authorities across interactive, one-shot, API, Workbench, daemon, channel, schedule, child, and MCP entry points.
+- Authoritative lifecycle state and ordered events commit together, with compare-and-set versions, leases, generations, and fencing protecting every transition.
+- Terminal Job and Attempt states are immutable, and completion can be accepted only from the current execution authority.
+
+### Recovery and stale-result safety
+
+- Interrupted work can be recovered conservatively through a new Attempt and generation instead of reviving stale execution.
+- Stale generations, leases, tool results, evidence, approval decisions, and completion writes are rejected.
+- Parent cancellation durably cancels active child Jobs and physically stops attached runtimes and descendant process trees.
+
+### Durable input and operator controls
+
+- Ordinary input, queued follow-ups, steering, pause, resume, cancel, and interrupt commands are persisted beneath the existing terminal input owner.
+- Queued and claimed input restores after restart with stable ordering, claim, consume, idempotency, and stale-generation checks.
+- Resume creates a new Attempt and generation while preserving the Job's durable history.
+
+### Exact-action approval safety
+
+- Immutable policy snapshots and durable approvals bind each decision to the final normalized action, ToolCall, Attempt, generation, and lease fence.
+- Action-changing hooks run before approval, and canonical paths and policy are revalidated immediately before execution.
+- Unattended mutating MCP work fails closed with a durable approval requirement when no approval channel is available.
+
+### Terminal experience
+
+- A boxed fixed composer stays available while providers stream and tools run, including queue mode for multiple follow-up messages.
+- Hardware cursor placement follows the draft insertion point, wrapped drafts grow upward, and resize or modal restoration preserves the surface.
+- Provider, model, context use, and elapsed time remain in a separate status strip beneath the composer.
+
+### Packaging and compatibility
+
+- The existing CLI, Workbench, API, daemon, channel, child, and MCP interfaces retain their public compatibility while sharing the new durable authority.
+- Provider routing, token-efficiency controls, usage accounting, compression, and state restoration remain compatible with v4.15.1.
+- The package continues to support Node 22, Windows, macOS, and Linux through the existing distribution paths.
+
+### Validation evidence
+
+- Node 22 focused validation covers Job and Attempt lifecycle, durable input and controls, exact-action approvals, recovery, Workbench, MCP, composer geometry, cursor behavior, and Windows ConPTY flows: 496 tests passed and 1 skipped.
+- The deterministic suite passed 6,825 tests with 39 skipped; the integration suite passed 39 tests with 7 skipped.
+- Packaged global and fresh package-runner smokes cover startup, a controlled provider response, a harmless file-read tool cycle, `/usage`, compression, exit, restart, and restored state.
+- Typecheck, production build, package-content inspection, and release hygiene scans also gate the release branch.
+
+### Upgrade instructions
+
+```bash
+npm install -g aiden-runtime@4.16.0
+```
+
+Restart Aiden after upgrading. Existing configuration and state are migrated through the normal startup path; no manual data conversion is required.
+
+Windows users upgrading from v4.15.x may need to run the npm upgrade manually. The hardened in-app updater becomes active after v4.16.0 is installed.
+
+---
+
 ## v4.15.1 — 2026-07-22
 
 ### Provider reliability
