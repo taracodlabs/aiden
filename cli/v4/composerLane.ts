@@ -371,8 +371,8 @@ export class BottomRegion {
 
   private reanchor(): void {
     if (!this.active) return;
-    this.lastFrame = '';
     const previousRows = this.laneRows;
+    this.lastFrame = '';
     this.laneRows = 0;
     this.sink.write(`${RESTORE_TRANSCRIPT}${ESC}[r${this.clearOwnedRows(previousRows)}`);
     this.paintAll();
