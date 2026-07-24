@@ -15,6 +15,7 @@ import {
 } from '../util/spawnCommand';
 
 const PROBE_TIMEOUT_MS = 8_000;
+type PathApi = typeof path.win32;
 
 export type InstallProvenance =
   | 'npm-global'
@@ -77,20 +78,25 @@ export interface InstallInspectionOptions {
   spawnImpl?: typeof defaultSpawn;
 }
 
-function currentPackagePath(input: DetectInstallMethodInput): string | undefined {
+function pathApi(platform: NodeJS.Platform): PathApi {
+  return platform === 'win32' ? path.win32 : path.posix;
+}
+
+function currentPackagePath(input: DetectInstallMethodInput, platform: NodeJS.Platform): string | undefined {
   const haystack = `${input.moduleDir ?? ''}\n${input.argvScript ?? ''}`;
   const match = haystack.match(/(^|[\r\n])(.+?[/\\]node_modules[/\\]aiden-runtime)\b/i);
-  return match?.[2] ? path.normalize(match[2]) : undefined;
+  return match?.[2] ? pathApi(platform).normalize(match[2]) : undefined;
 }
 
 function equivalentOrInside(candidate: string, root: string, platform: NodeJS.Platform): boolean {
+  const paths = pathApi(platform);
   const normalize = (value: string): string => {
-    const resolved = path.resolve(value).replace(/[\\/]+$/, '');
+    const resolved = paths.resolve(value).replace(/[\\/]+$/, '');
     return platform === 'win32' ? resolved.toLowerCase() : resolved;
   };
   const a = normalize(candidate);
   const b = normalize(root);
-  return a === b || a.startsWith(`${b}${path.sep}`);
+  return a === b || a.startsWith(`${b}${paths.sep}`);
 }
 
 async function defaultWritableProbe(directory: string): Promise<boolean> {
@@ -174,22 +180,24 @@ function manualPlan(
 }
 
 async function defaultSourceCheckout(input: DetectInstallMethodInput): Promise<boolean> {
+  const platform = input.platform ?? process.platform;
+  const paths = pathApi(platform);
   const starts = [
-    input.argvScript ? path.dirname(input.argvScript) : '',
+    input.argvScript ? paths.dirname(input.argvScript) : '',
     input.moduleDir ?? '',
   ].filter(Boolean);
   for (const start of starts) {
-    let cursor = path.resolve(start);
+    let cursor = paths.resolve(start);
     for (let depth = 0; depth < 10; depth += 1) {
       try {
         const [git, pkg] = await Promise.all([
-          fs.stat(path.join(cursor, '.git')),
-          fs.readFile(path.join(cursor, 'package.json'), 'utf8'),
+          fs.stat(paths.join(cursor, '.git')),
+          fs.readFile(paths.join(cursor, 'package.json'), 'utf8'),
         ]);
         const parsed = JSON.parse(pkg) as { name?: unknown };
         if (git && parsed.name === 'aiden-runtime') return true;
       } catch { /* keep walking */ }
-      const parent = path.dirname(cursor);
+      const parent = paths.dirname(cursor);
       if (parent === cursor) break;
       cursor = parent;
     }
@@ -201,6 +209,7 @@ export async function inspectUpdateInstall(
   options: InstallInspectionOptions,
 ): Promise<UpdateInstallPlan> {
   const platform = options.platform ?? process.platform;
+  const paths = pathApi(platform);
   const env = options.env ?? process.env;
   const home = options.home ?? os.homedir();
   const detectionInput: DetectInstallMethodInput = {
@@ -267,8 +276,8 @@ export async function inspectUpdateInstall(
   if (
     prefixResult.exitCode !== 0 ||
     rootResult.exitCode !== 0 ||
-    !path.isAbsolute(prefix) ||
-    !path.isAbsolute(globalRoot)
+    !paths.isAbsolute(prefix) ||
+    !paths.isAbsolute(globalRoot)
   ) {
     return {
       ...manualPlan(options.targetVersion, 'npm-global', 'prefix-resolution-failed', [
@@ -278,8 +287,8 @@ export async function inspectUpdateInstall(
     };
   }
 
-  const packagePath = path.join(globalRoot, 'aiden-runtime');
-  const runningPackage = currentPackagePath(detectionInput);
+  const packagePath = paths.join(globalRoot, 'aiden-runtime');
+  const runningPackage = currentPackagePath(detectionInput, platform);
   if (!runningPackage || !equivalentOrInside(runningPackage, packagePath, platform)) {
     if (detected.method === 'npm-local') {
       return {
