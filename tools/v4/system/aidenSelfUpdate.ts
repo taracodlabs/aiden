@@ -37,12 +37,13 @@ import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { VERSION as INSTALLED_VERSION } from '../../../core/version';
 import { checkForUpdate } from '../../../core/v4/update/checkUpdate';
 import { executeInstall } from '../../../core/v4/update/executeInstall';
+import { inspectUpdateInstall } from '../../../core/v4/update/installPreflight';
 
 export const aidenSelfUpdateTool: ToolHandler = {
   schema: {
     name: 'aiden_self_update',
     description:
-      'Update Aiden to the latest version via npm install -g aiden-runtime@latest. ' +
+      'Update Aiden through its verified installation method. ' +
       'TWO-STEP CONFIRMATION REQUIRED: first call with confirm:false to check status ' +
       'and surface to the user; only call with confirm:true AFTER the user explicitly ' +
       'agrees in their next message ("yes update", "go ahead", "do it"). NEVER call ' +
@@ -131,9 +132,8 @@ export const aidenSelfUpdateTool: ToolHandler = {
         stage:   'status',
         message:
           `Update available: v${status.installed} → v${status.latest}. ` +
-          `Confirm by saying "yes update" or "go ahead". This runs ` +
-          `\`npm install -g aiden-runtime@latest\` and you'll need to ` +
-          `restart Aiden after.`,
+          'Confirm by saying "yes update" or "go ahead". Aiden will first ' +
+          'verify the active installation target and its writability.',
         installed:       status.installed,
         latest:          status.latest,
         updateAvailable: true,
@@ -162,8 +162,34 @@ export const aidenSelfUpdateTool: ToolHandler = {
       };
     }
 
-    const result = await executeInstall();
+    const plan = await inspectUpdateInstall({ targetVersion: status.latest });
+    if (!plan.installAllowed) {
+      return {
+        success: false,
+        stage: 'preflight',
+        error: plan.guidance.join('\n'),
+        installed: status.installed,
+        latestSeen: status.latest,
+        provenance: plan.provenance,
+      };
+    }
+    const result = await executeInstall({
+      targetVersion: status.latest,
+      plan,
+      updateStateDir: ctx.paths.root,
+    });
     if (result.success) {
+      if (result.scheduled) {
+        return {
+          success: true,
+          stage: 'prepared',
+          message:
+            `Update ${status.latest} is prepared. Type /quit so Windows can replace ` +
+            'the running package, then re-run `aiden`.',
+          installed: status.installed,
+          targetVersion: status.latest,
+        };
+      }
       const v = result.installedVersion ?? status.latest;
       return {
         success: true,

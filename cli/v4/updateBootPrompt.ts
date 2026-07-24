@@ -39,13 +39,13 @@
  */
 
 import type { UpdateStatus } from '../../core/v4/update/checkUpdate';
-import type { InstallMethodResult } from '../../core/v4/update/installMethodDetect';
+import type { UpdateInstallPlan } from '../../core/v4/update/installPreflight';
 
-export type UpdatePromptChoice = 'install' | 'skip' | 'later';
+export type UpdatePromptChoice = 'install' | 'skip' | 'later' | 'unavailable';
 
 export interface BootUpdatePromptInput {
   status:       UpdateStatus;
-  method:       InstallMethodResult;
+  plan:         UpdateInstallPlan;
   /**
    * Display sink. Just needs `.write(s)` and `.dim(s)` (matches the
    * minimal surface other boot-time renderers use).
@@ -66,6 +66,8 @@ export interface BootUpdatePromptInput {
   stdin?:       NodeJS.ReadStream;
   /** Override `process.stdin.isTTY`. */
   isTTY?:       boolean;
+  /** Responsive rendering seam. */
+  columns?:     number;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -76,9 +78,10 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  */
 export function renderBootUpdateBox(
   status: UpdateStatus,
-  method: InstallMethodResult,
+  plan: UpdateInstallPlan,
+  columns: number = process.stdout.columns ?? 80,
 ): string[] {
-  const innerWidth = 60;
+  const innerWidth = Math.max(38, Math.min(60, columns - 2));
   const pad = (s: string): string => {
     const visible = s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
     const len = visible.length;
@@ -99,8 +102,16 @@ export function renderBootUpdateBox(
     lines.push('│' + pad(`  What's new: ${status.releaseNotes}`) + '│');
   }
   lines.push(blank);
-  lines.push('│' + pad(`  Update now? (y/n/later)`) + '│');
-  lines.push('│' + pad(`    y       — update via ${method.method}`) + '│');
+  if (plan.installAllowed) {
+    lines.push('│' + pad('  Update now? (y/n/later)') + '│');
+    lines.push('│' + pad(`    y       — install to ${plan.prefix ?? 'verified npm prefix'}`) + '│');
+  } else {
+    lines.push('│' + pad('  In-app update unavailable for this installation.') + '│');
+    for (const detail of plan.guidance.slice(0, 2)) {
+      lines.push('│' + pad(`  ${detail}`) + '│');
+    }
+    lines.push('│' + pad('  Choose n to skip this version, or later to be reminded.') + '│');
+  }
   lines.push('│' + pad(`    n       — skip ${status.latest} (don't ask again)`) + '│');
   lines.push('│' + pad(`    later   — remind me next session (default in 5s)`) + '│');
   lines.push(blank);
@@ -127,9 +138,14 @@ export async function showBootUpdatePrompt(
   if (input.status.skipped) return 'later';
 
   // Render the box.
-  for (const line of renderBootUpdateBox(input.status, input.method)) {
+  for (const line of renderBootUpdateBox(input.status, input.plan, input.columns)) {
     input.display.write(line + '\n');
   }
+
+  // A non-installable provenance is informational, not a blocking
+  // consent prompt. In particular, never accept `y` when preflight
+  // could not prove a writable npm-global target.
+  if (!input.plan.installAllowed) return 'unavailable';
 
   const timeoutMs = input.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const stdin = input.stdin ?? process.stdin;
@@ -154,6 +170,7 @@ function captureSingleKey(
     let done = false;
     const wasRaw = stdin.isRaw === true;
     const wasPaused = stdin.isPaused();
+    let timer: NodeJS.Timeout;
 
     const cleanup = (): void => {
       if (done) return;
@@ -185,7 +202,7 @@ function captureSingleKey(
       return;
     }
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       cleanup();
       resolve('later');
     }, timeoutMs);

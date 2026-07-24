@@ -26,6 +26,8 @@ import { VERSION as INSTALLED_VERSION } from '../../../core/version';
 import { checkForUpdate, updateCacheFile, compareVersions } from '../../../core/v4/update/checkUpdate';
 import { executeInstall } from '../../../core/v4/update/executeInstall';
 import { detectInstallMethod } from '../../../core/v4/update/installMethodDetect';
+import { inspectUpdateInstall } from '../../../core/v4/update/installPreflight';
+import { applyUpdateFailure, clearUpdateFailure } from '../../../core/v4/update/failureBackoff';
 import { applySkip, clearSkip } from '../../../core/v4/update/skipState';
 
 async function printStatus(ctx: SlashCommandContext): Promise<void> {
@@ -85,30 +87,54 @@ async function runInstall(ctx: SlashCommandContext): Promise<void> {
   }
 
   ctx.display.write(
-    `Installing aiden-runtime v${status.latest} (current: v${status.installed})…\n`,
+    `Checking installation target for aiden-runtime v${status.latest}…\n`,
   );
+
+  const plan = await inspectUpdateInstall({ targetVersion: status.latest });
+  if (!plan.installAllowed) {
+    for (const line of plan.guidance) ctx.display.warn(line);
+    await updateCacheFile(ctx.paths, (current) =>
+      applyUpdateFailure(current, status.latest!));
+    return;
+  }
+  ctx.display.write(`  target prefix: ${plan.prefix}\n`);
 
   // v4.8.1 Slice 2 — reuse the v4.8.0 sliding-block shimmer indicator
   // so the user sees motion while npm install runs (typically 5–15s
   // on a warm cache, longer on cold). The indicator paints to a TTY
   // only — non-TTY callers (CI, pipes) see the static "Installing…"
   // line above and the result row below, no shimmer.
-  const indicator = ctx.display.activityIndicator('updating');
+  const indicator = ctx.display.activityIndicator('preparing update');
   let result;
   try {
-    result = await executeInstall();
+    result = await executeInstall({
+      targetVersion: status.latest,
+      plan,
+      updateStateDir: ctx.paths.root,
+      onPhase: (phase) => indicator.resume(phase),
+    });
   } finally {
     indicator.stop();
   }
 
   if (result.success) {
+    if (result.scheduled) {
+      ctx.display.write(
+        `\n  ✓ Update prepared for v${status.latest}. ` +
+        'Type /quit so Windows can replace the running package, then re-run `aiden`.\n',
+      );
+      return;
+    }
     const v = result.installedVersion ?? status.latest;
     ctx.display.write(`\n  ✓ aiden-runtime v${v} installed.\n`);
     ctx.display.dim('Restart Aiden to apply: type /quit then re-run `aiden`.');
+    await updateCacheFile(ctx.paths, (current) => clearUpdateFailure(current));
     return;
   }
 
   ctx.display.write(`\n  ✗ Update failed: ${result.error ?? 'no error message'}\n`);
+  await updateCacheFile(ctx.paths, (current) =>
+    applyUpdateFailure(current, status.latest!));
 }
 
 // ── v4.5 update system — skip + auto subcommands ───────────────────────────
