@@ -57,6 +57,8 @@ npm install -g aiden-runtime@4.16.0
 
 Restart Aiden after upgrading. Existing configuration and state are migrated through the normal startup path; no manual data conversion is required.
 
+Windows users upgrading from v4.15.x may need to run the npm upgrade manually. The hardened in-app updater becomes active after v4.16.0 is installed.
+
 ---
 
 ## v4.15.1 — 2026-07-22
