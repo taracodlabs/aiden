@@ -24,7 +24,7 @@ function fakeChild(stdoutLines: string[], stderrLines: string[], exitCode: numbe
 }
 
 describe('executeInstall — phase callback', () => {
-  it('emits spawning → downloading → verifying → installed on success', async () => {
+  it('emits truthful indeterminate lifecycle phases on success', async () => {
     const phases: string[] = [];
     const spawnImpl = vi.fn(() => fakeChild(
       ['npm http fetch GET 200 https://registry', 'added 247 packages in 4s', '+ aiden-runtime@4.9.1'],
@@ -38,10 +38,10 @@ describe('executeInstall — phase callback', () => {
     });
     expect(r.success).toBe(true);
     expect(r.installedVersion).toBe('4.9.1');
-    expect(phases[0]).toBe('spawning');
-    expect(phases).toContain('downloading');
+    expect(phases[0]).toBe('preparing update');
+    expect(phases).toContain('installing');
     expect(phases).toContain('verifying');
-    expect(phases[phases.length - 1]).toBe('installed');
+    expect(phases[phases.length - 1]).toBe('complete');
   });
 });
 
@@ -56,8 +56,8 @@ describe('executeInstall — EPERM produces platform-correct hints', () => {
       platform: 'win32', home: 'C:\\Users\\x',
     });
     expect(r.success).toBe(false);
-    expect(r.error).toMatch(/Administrator/);
-    expect(r.error).toMatch(/\$env:USERPROFILE/);
+    expect(r.kind).toBe('permission');
+    expect(r.error).not.toMatch(/Administrator/);
     expect(r.error).not.toMatch(/sudo/);
     expect(r.error).not.toMatch(/^export /m);
   });
@@ -71,8 +71,8 @@ describe('executeInstall — EPERM produces platform-correct hints', () => {
       platform: 'darwin', home: '/Users/x', env: { SHELL: '/bin/zsh' },
     });
     expect(r.success).toBe(false);
-    expect(r.error).toMatch(/sudo/);
-    expect(r.error).toMatch(/\.zshrc/);
+    expect(r.kind).toBe('permission');
+    expect(r.error).not.toMatch(/sudo/);
     expect(r.error).not.toMatch(/PowerShell/);
     expect(r.error).not.toMatch(/\$env:USERPROFILE/);
   });

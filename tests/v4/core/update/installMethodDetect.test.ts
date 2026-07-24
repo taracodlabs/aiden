@@ -56,14 +56,14 @@ describe('detectInstallMethod', () => {
     expect(r.updateCommand('4.5.1')).toMatch(/cd .+ && npm install aiden-runtime@4\.5\.1/);
   });
 
-  it('falls back to unknown when no markers match', () => {
+  it('detects a live TypeScript CLI as a source checkout', () => {
     const r = detectInstallMethod({
       moduleDir: '/some/dev/checkout/aiden',
       argvScript: '/some/dev/checkout/aiden/cli/v4/aidenCLI.ts',
       env: {},
     });
-    expect(r.method).toBe('unknown');
+    expect(r.method).toBe('source');
     expect(r.inProcessInstallSupported).toBe(false);
-    expect(r.updateCommand('4.5.1')).toMatch(/npm install -g aiden-runtime@4\.5\.1/);
+    expect(r.updateCommand('4.5.1')).toMatch(/source checkout/);
   });
 });

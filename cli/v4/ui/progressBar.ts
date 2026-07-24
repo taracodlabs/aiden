@@ -39,6 +39,13 @@ export interface ProgressBar {
   fail(message: string): void;
 }
 
+export interface PhaseIndicator {
+  setPhase(name: string): void;
+  complete(message: string): void;
+  fail(message: string): void;
+  cancel(message: string): void;
+}
+
 const DEFAULT_WIDTH   = 28;
 const DEFAULT_TICK_MS = 100;
 /** Minimum elapsed before we paint anything — avoids flicker on sub-300ms ops. */
@@ -172,6 +179,82 @@ export function startProgressBar(opts: ProgressBarOptions): ProgressBar {
     setPercent(p: number)    { percent = p;  if (!mode.animated) paint(); },
     complete(message: string){ close('✓', ANSI_SUCCESS, message); },
     fail(message: string)    { close('✗', ANSI_ERROR,   message); },
+  };
+}
+
+/**
+ * Indeterminate phase indicator for operations whose underlying tool
+ * exposes lifecycle phases but no measurable completion percentage.
+ */
+export function startPhaseIndicator(opts: ProgressBarOptions): PhaseIndicator {
+  const out = opts.out ?? process.stdout;
+  const env = opts.env ?? process.env;
+  const tickMs = opts.tickMs ?? 120;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const isTTY = opts.isTTY ?? Boolean((out as any).isTTY);
+  const mode = detectRenderMode(isTTY, env);
+  const startedAt = Date.now();
+  const frames = mode.blocks ? ['◐', '◓', '◑', '◒'] : ['|', '/', '-', '\\'];
+  let frame = 0;
+  let phase = opts.phases[0] ?? 'working';
+  let painted = false;
+  let closed = false;
+
+  const write = (value: string): void => {
+    try { out.write(value); } catch { /* output failure must not break update */ }
+  };
+  const format = (): string => {
+    const elapsed = `${((Date.now() - startedAt) / 1_000).toFixed(1)}s`;
+    const glyph = frames[frame++ % frames.length];
+    return mode.color
+      ? `${ANSI_BRAND}${glyph}${ANSI_RESET} ${phase}  ${ANSI_MUTED}${elapsed}${ANSI_RESET}`
+      : `${glyph} ${phase}  ${elapsed}`;
+  };
+  const paint = (): void => {
+    if (closed) return;
+    const line = format();
+    if (mode.animated) {
+      if (!painted) {
+        write(ANSI_HIDE_CURSOR);
+        painted = true;
+      }
+      write(ANSI_CLEAR_LINE + line);
+    } else {
+      write(line + '\n');
+    }
+  };
+  const onSigint = (): void => {
+    if (mode.animated && painted) write(ANSI_CLEAR_LINE + ANSI_SHOW_CURSOR);
+  };
+  if (mode.animated) process.once('SIGINT', onSigint);
+
+  write(`${mode.color ? ANSI_MUTED : ''}${opts.label}${mode.color ? ANSI_RESET : ''}\n`);
+  paint();
+  const timer = mode.animated ? setInterval(paint, tickMs) : null;
+  timer?.unref?.();
+
+  const close = (icon: string, color: string, message: string): void => {
+    if (closed) return;
+    closed = true;
+    if (timer) clearInterval(timer);
+    process.removeListener('SIGINT', onSigint);
+    if (mode.animated && painted) write(ANSI_CLEAR_LINE);
+    const line = mode.color
+      ? `${color}${icon}${ANSI_RESET} ${message}`
+      : `${icon} ${message}`;
+    write(line + '\n');
+    if (mode.animated) write(ANSI_SHOW_CURSOR);
+  };
+
+  return {
+    setPhase(name: string) {
+      if (closed || name === phase) return;
+      phase = name;
+      paint();
+    },
+    complete(message: string) { close('✓', ANSI_SUCCESS, message); },
+    fail(message: string) { close('✗', ANSI_ERROR, message); },
+    cancel(message: string) { close('!', ANSI_MUTED, message); },
   };
 }
 

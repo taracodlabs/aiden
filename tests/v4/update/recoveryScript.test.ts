@@ -30,7 +30,8 @@ describe('writeRecoveryScript', () => {
     expect(p).toBe(path.join(home, '.aiden', 'update-recovery.ps1'));
     const body = await fs.readFile(p, 'utf8');
     expect(body).toContain('npm install -g aiden-runtime@latest');
-    expect(body).toContain('Administrator PowerShell');
+    expect(body).toContain('configured npm prefix');
+    expect(body).not.toContain('Administrator PowerShell');
     // CRLF line endings on Windows script.
     expect(body).toContain('\r\n');
   });
@@ -43,7 +44,8 @@ describe('writeRecoveryScript', () => {
     const body = await fs.readFile(p, 'utf8');
     expect(body.startsWith('#!/usr/bin/env bash')).toBe(true);
     expect(body).toContain('npm install -g aiden-runtime@latest');
-    expect(body).toContain('sudo $0');
+    expect(body).toContain('configured npm prefix');
+    expect(body).not.toContain('sudo $0');
     // Mode check is best-effort — chmod is a noop on platforms that
     // don't support it. Just confirm the file exists.
     const st = await fs.stat(p);

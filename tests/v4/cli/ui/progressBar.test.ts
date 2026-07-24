@@ -9,6 +9,7 @@ import {
   detectRenderMode,
   renderLine,
   startProgressBar,
+  startPhaseIndicator,
   detectNpmPhase,
   npmInstallPhasePercent,
 } from '../../../../cli/v4/ui/progressBar';
@@ -147,5 +148,43 @@ describe('startProgressBar — stream behavior', () => {
     const len = cap.chunks.join('').length;
     bar.complete('twice');
     expect(cap.chunks.join('').length).toBe(len);
+  });
+});
+
+describe('startPhaseIndicator — truthful indeterminate updater status', () => {
+  it('renders phases without a fabricated numeric percentage', () => {
+    const cap = captureStream();
+    const indicator = startPhaseIndicator({
+      label: 'Updating aiden-runtime 4.16.0',
+      phases: ['checking installation', 'installing', 'verifying'],
+      out: cap.stream,
+      isTTY: false,
+      env: {},
+    });
+    indicator.setPhase('installing');
+    indicator.setPhase('verifying');
+    indicator.complete('Update verified.');
+    const output = stripAnsi(cap.chunks.join(''));
+    expect(output).toContain('checking installation');
+    expect(output).toContain('installing');
+    expect(output).toContain('verifying');
+    expect(output).not.toMatch(/\b\d+%/);
+  });
+
+  it('stops its only timer exactly once on cancellation', () => {
+    const cap = captureStream();
+    const indicator = startPhaseIndicator({
+      label: 'Updating',
+      phases: ['installing'],
+      out: cap.stream,
+      isTTY: true,
+      env: { NO_COLOR: '1' },
+      tickMs: 5,
+    });
+    indicator.cancel('Update cancelled.');
+    const atCancel = cap.chunks.length;
+    indicator.cancel('duplicate');
+    indicator.setPhase('verifying');
+    expect(cap.chunks.length).toBe(atCancel);
   });
 });

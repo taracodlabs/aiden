@@ -12,26 +12,28 @@ import {
 } from '../../../../core/v4/update/platformInstructions';
 
 describe('permissionDeniedInstructions — Windows', () => {
-  const win = permissionDeniedInstructions({ platform: 'win32', home: 'C:\\Users\\shiva' });
-  it('headline names Administrator (not sudo)', () => {
-    expect(win.headline).toMatch(/Administrator/);
-    expect(win.headline).not.toMatch(/sudo/);
+  const win = permissionDeniedInstructions({
+    platform: 'win32',
+    home: 'C:\\Users\\shiva',
+    prefix: 'C:\\Program Files\\nodejs',
   });
-  it('uses $env:USERPROFILE — not ~/', () => {
-    const steps = win.steps.join('\n');
-    expect(steps).toMatch(/\$env:USERPROFILE/);
-    expect(steps).not.toMatch(/~\//);
+  it('reports the actual prefix without assuming elevation', () => {
+    expect(win.headline).toContain('C:\\Program Files\\nodejs');
+    expect(win.headline).not.toMatch(/Administrator|sudo/);
   });
-  it('uses PowerShell setter, not bash export', () => {
+  it('does not invent a replacement prefix', () => {
     const steps = win.steps.join('\n');
-    expect(steps).toMatch(/\[Environment\]::SetEnvironmentVariable/);
+    expect(steps).not.toMatch(/\$env:USERPROFILE|~\//);
+  });
+  it('does not alter PATH or npm configuration', () => {
+    const steps = win.steps.join('\n');
+    expect(steps).not.toMatch(/\[Environment\]::SetEnvironmentVariable/);
+    expect(steps).not.toMatch(/config set prefix/);
     expect(steps).not.toMatch(/^export /m);
-    expect(steps).not.toMatch(/echo .* >> .*rc/);
   });
-  it('shows BOTH options: Admin one-shot AND user-local prefix', () => {
+  it('provides a precise manual retry', () => {
     const steps = win.steps.join('\n');
-    expect(steps).toMatch(/Option 1.*elevated/i);
-    expect(steps).toMatch(/Option 2.*user-local/i);
+    expect(steps).toContain('npm install -g aiden-runtime@latest');
   });
 });
 
@@ -39,14 +41,12 @@ describe('permissionDeniedInstructions — darwin/zsh', () => {
   const mac = permissionDeniedInstructions({
     platform: 'darwin', home: '/Users/shiva', env: { SHELL: '/bin/zsh' },
   });
-  it('headline names sudo (not Administrator)', () => {
-    expect(mac.headline).toMatch(/sudo/);
-    expect(mac.headline).not.toMatch(/Administrator/);
+  it('does not assume sudo or Administrator', () => {
+    expect(mac.headline).not.toMatch(/sudo|Administrator/);
   });
-  it('uses bash export syntax, recommends .zshrc', () => {
+  it('does not rewrite shell configuration', () => {
     const steps = mac.steps.join('\n');
-    expect(steps).toMatch(/export PATH/);
-    expect(steps).toMatch(/\.zshrc/);
+    expect(steps).not.toMatch(/export PATH|\.zshrc/);
     expect(steps).not.toMatch(/PowerShell/);
     expect(steps).not.toMatch(/\$env:/);
   });
@@ -59,10 +59,9 @@ describe('permissionDeniedInstructions — linux/bash', () => {
   const lin = permissionDeniedInstructions({
     platform: 'linux', home: '/home/shiva', env: { SHELL: '/bin/bash' },
   });
-  it('uses bash export + recommends .bashrc', () => {
+  it('does not rewrite bash configuration', () => {
     const steps = lin.steps.join('\n');
-    expect(steps).toMatch(/export PATH/);
-    expect(steps).toMatch(/\.bashrc/);
+    expect(steps).not.toMatch(/export PATH|\.bashrc/);
     expect(steps).not.toMatch(/PowerShell/);
   });
   it('detects bash shell', () => {
@@ -88,7 +87,8 @@ describe('detectStalePrefix', () => {
       writable: false, home: 'C:\\Users\\shiva',
     });
     expect(r).not.toBeNull();
-    expect(r!.warning).toMatch(/Administrator every time/);
+    expect(r!.warning).toMatch(/not writable/);
+    expect(r!.switchSteps.join('\n')).not.toMatch(/Administrator|config set prefix/);
   });
   it('Windows + user-local prefix → no warning', () => {
     const r = detectStalePrefix({
@@ -104,7 +104,7 @@ describe('detectStalePrefix', () => {
     });
     expect(r).not.toBeNull();
     expect(r!.warning).toMatch(/sudo every time/);
-    expect(r!.switchSteps.join('\n')).toMatch(/\.zshrc/);
+    expect(r!.switchSteps.join('\n')).not.toMatch(/\.zshrc|config set prefix/);
   });
   it('Linux + /usr + not writable → warns', () => {
     const r = detectStalePrefix({
@@ -112,7 +112,7 @@ describe('detectStalePrefix', () => {
       home: '/home/shiva', env: { SHELL: '/bin/bash' },
     });
     expect(r).not.toBeNull();
-    expect(r!.switchSteps.join('\n')).toMatch(/\.bashrc/);
+    expect(r!.switchSteps.join('\n')).not.toMatch(/\.bashrc|config set prefix/);
   });
   it('Mac + /usr/local but writable → no warning', () => {
     const r = detectStalePrefix({

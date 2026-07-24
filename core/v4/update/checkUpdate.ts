@@ -68,6 +68,10 @@ export interface UpdateCacheShape {
    * `core/v4/update/skipState.ts::isVersionSkipped`.
    */
   skippedVersion?: string;
+  /** Automatic retry backoff after a failed or rejected install attempt. */
+  failedVersion?: string;
+  failureCount?: number;
+  retryAfter?: number;
 }
 
 export interface UpdateStatus {
@@ -105,6 +109,9 @@ export interface UpdateStatus {
    * boot prompt MUST suppress when this is true.
    */
   skipped:       boolean;
+  /** True only for automatic boot prompting; manual /update still retries. */
+  failureBackoffActive?: boolean;
+  failureBackoffUntil?: number;
 }
 
 export interface CheckUpdateOptions {
@@ -279,6 +286,11 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
       typeof cached.skippedVersion === 'string' &&
       cached.latest !== null &&
       safeCompare(cached.skippedVersion, cached.latest) >= 0;
+    const failureBackoffActive =
+      typeof cached.failedVersion === 'string' &&
+      cached.failedVersion === cached.latest &&
+      typeof cached.retryAfter === 'number' &&
+      now < cached.retryAfter;
     return {
       installed,
       latest: cached.latest,
@@ -288,6 +300,8 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
       releaseNotes: cached.releaseNotes,
       releaseUrl:   cached.releaseUrl,
       skipped,
+      failureBackoffActive,
+      failureBackoffUntil: cached.retryAfter,
     };
   }
 
@@ -310,6 +324,9 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
     releaseNotes:   cached?.releaseNotes,
     releaseUrl:     cached?.releaseUrl,
     skippedVersion: cached?.skippedVersion,
+    failedVersion:  cached?.failedVersion,
+    failureCount:   cached?.failureCount,
+    retryAfter:     cached?.retryAfter,
   });
 
   const updateAvailable = latest !== null && safeCompare(latest, installed) > 0;
@@ -317,6 +334,11 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
     typeof cached?.skippedVersion === 'string' &&
     latest !== null &&
     safeCompare(cached.skippedVersion, latest) >= 0;
+  const failureBackoffActive =
+    typeof cached?.failedVersion === 'string' &&
+    cached.failedVersion === latest &&
+    typeof cached.retryAfter === 'number' &&
+    now < cached.retryAfter;
   return {
     installed,
     latest,
@@ -326,6 +348,8 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
     releaseNotes: cached?.releaseNotes,
     releaseUrl:   cached?.releaseUrl,
     skipped,
+    failureBackoffActive,
+    failureBackoffUntil: cached?.retryAfter,
   };
 }
 

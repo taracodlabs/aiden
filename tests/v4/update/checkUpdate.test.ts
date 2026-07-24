@@ -151,4 +151,29 @@ describe('checkForUpdate', () => {
     });
     expect(calls).toBe(2);
   });
+
+  it('marks only the same failed version as automatically backed off', async () => {
+    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
+    await ensureAidenDirsExist(paths);
+    const now = 10_000;
+    await fs.writeFile(
+      path.join(tmpRoot, '.update_check.json'),
+      JSON.stringify({
+        ts: now,
+        latest: '4.16.0',
+        installed: '4.15.1',
+        failedVersion: '4.16.0',
+        failureCount: 1,
+        retryAfter: now + 60_000,
+      }),
+    );
+    const status = await checkForUpdate({
+      paths,
+      installedVersion: '4.15.1',
+      now: () => now + 1,
+    });
+    expect(status.updateAvailable).toBe(true);
+    expect(status.failureBackoffActive).toBe(true);
+    expect(status.skipped).toBe(false);
+  });
 });
