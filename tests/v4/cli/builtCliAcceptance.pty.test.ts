@@ -457,7 +457,16 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     let output = '';
     let state = 'boot';
     const completion = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout>;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      timeout = setTimeout(() => finish(new Error(
         `busy queue timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
       )), 45_000);
       child!.onData((chunk) => {
@@ -478,9 +487,17 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           typeLikeKeyboard(child!, '/queue');
         } else if (state === 'queue-check' && /queue is empty/i.test(plain)) {
           state = 'done';
-          clearTimeout(timeout);
-          resolve();
+          finish();
         }
+      });
+      child!.onExit(({ exitCode }) => {
+        if (state === 'done') {
+          if (exitCode !== 0) {
+            finish(new Error(`busy queue exited with non-zero code ${exitCode}`));
+          }
+          return;
+        }
+        finish(new Error(`busy queue exited with ${exitCode} while state was ${state}`));
       });
     });
     await completion;
@@ -528,7 +545,16 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     let state = 'boot';
     let interruptedAt = 0;
     const completion = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout>;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      timeout = setTimeout(() => finish(new Error(
         `approval cancellation timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
       )), 45_000);
       child!.onData((chunk) => {
@@ -547,8 +573,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           typeLikeKeyboard(child!, '/queue');
         } else if (state === 'queue' && /queue is empty/i.test(plain)) {
           state = 'done';
-          clearTimeout(timeout);
-          resolve();
+          finish();
         }
       });
     });
@@ -602,9 +627,22 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     let modalEnd = 0;
     const providerAnimationPrefixes: string[] = [];
     const completion = new Promise<void>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(
+      const readyPhrases = ['Type your message', 'normal after resize', 'NORMAL AFTER RESIZE'];
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        if (error) reject(error);
+        else resolve();
+      };
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout>;
+      timeout = setTimeout(() => finish(new Error(
         `resize acceptance timeout (${state}):\n${stripAnsi(output).slice(-12000)}`,
       )), 50_000);
+      const isBootReady = (plain: string, readyCount: number): boolean => (
+        readyCount >= 1 || readyPhrases.some((phrase) => plain.includes(phrase))
+      );
       child!.onData((chunk) => {
         if (state === 'provider' || state === 'resizing') {
           for (const line of stripAnsi(chunk).split(/\r?\n/)) {
@@ -615,7 +653,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         output += chunk;
         const plain = stripAnsi(output);
         const readyCount = output.split(COMPOSER_READY_TOKEN).length - 1;
-        if (state === 'boot' && readyCount >= 1) {
+        if (state === 'boot' && isBootReady(plain, readyCount)) {
           state = 'provider';
           typeLikeKeyboard(child!, 'request resize approval');
         } else if (state === 'provider' && plain.includes('calling provider')) {
@@ -632,13 +670,21 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         } else if (state === 'denying' && plain.includes('RESIZE APPROVAL COMPLETE') && readyCount >= 2) {
           state = 'normal';
           typeLikeKeyboard(child!, 'normal after resize');
-        } else if (state === 'normal' && plain.includes('NORMAL AFTER RESIZE') && readyCount >= 3) {
+        } else if (state === 'normal' && /normal after resize/i.test(plain) && readyCount >= 3) {
           state = 'queue';
           setTimeout(() => child!.write('/queue\r'), 150);
         } else if (state === 'queue' && /queue is empty/i.test(plain)) {
           state = 'done';
-          clearTimeout(timeout);
-          resolve();
+          finish();
+        }
+      });
+      child!.onExit(({ exitCode }) => {
+        if (state !== 'done') {
+          finish(new Error(`resize test exited with ${exitCode} while state was ${state}`));
+          return;
+        }
+        if (exitCode !== 0) {
+          finish(new Error(`resize test exited with non-zero code ${exitCode}`));
         }
       });
     });
