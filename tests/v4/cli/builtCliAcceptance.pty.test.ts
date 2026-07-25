@@ -634,7 +634,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           typeLikeKeyboard(child!, 'normal after resize');
         } else if (state === 'normal' && plain.includes('NORMAL AFTER RESIZE') && readyCount >= 3) {
           state = 'queue';
-          typeLikeKeyboard(child!, '/queue');
+          setTimeout(() => child!.write('/queue\r'), 150);
         } else if (state === 'queue' && /queue is empty/i.test(plain)) {
           state = 'done';
           clearTimeout(timeout);
