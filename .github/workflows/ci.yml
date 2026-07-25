@@ -68,11 +68,29 @@ jobs:
         run: npx ts-node scripts/smoke-v4.1-cross-platform-runtime.ts
 
       - name: Run vitest (excludes live-network integration suite)
+        if: runner.os != 'Windows'
         # Live-API tests in tests/v4/integration/* are gated behind the
         # AIDEN_LIVE_* env vars (unset above). The exclude is belt + braces
         # so a stray network call does not accidentally hit a real provider
         # in the matrix.
         run: npx vitest run --exclude='tests/v4/integration/**'
+
+      - name: Run vitest non-PTY (excludes live-network integration suite)
+        if: runner.os == 'Windows'
+        run: npx vitest run --exclude='tests/v4/integration/**' --exclude='tests/**/*.pty.test.ts'
+
+      - name: Run Windows PTY tests serially
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ptyTests = Get-ChildItem -Path tests -Recurse -Filter *.pty.test.ts -File |
+            Sort-Object FullName |
+            ForEach-Object { $_.FullName }
+          if (-not $ptyTests) {
+            Write-Error "No PTY tests discovered."
+            exit 1
+          }
+          npx vitest run --maxWorkers=1 --fileParallelism=false @ptyTests
 
   security:
     name: Security scan
