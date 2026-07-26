@@ -42,6 +42,19 @@ describe('PromptBuilder', () => {
     expect(out).toContain('/test/cwd');
   });
 
+  it('1b. exposes the authoritative temporary directory without requiring a shell lookup', async () => {
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      cwd: 'C:\\work area',
+      platform: 'windows',
+      tempDir: 'C:\\Users\\test user\\AppData\\Local\\Temp',
+      skipFilesystem: true,
+    });
+    expect(out).toContain('Temporary directory: C:\\Users\\test user\\AppData\\Local\\Temp');
+    expect(out).toContain('Use this path directly; do not run a shell command to discover it.');
+  });
+
   it('2. SOUL.md slot loaded if file exists', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-pb-soul-'));
     await fs.writeFile(path.join(root, 'SOUL.md'), 'I am Aiden, a custom soul.');

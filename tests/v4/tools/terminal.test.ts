@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import { shellExecTool } from '../../../tools/v4/terminal/shellExec';
-import { localBackendExecute } from '../../../tools/v4/backends/local';
+import { buildLocalShellInvocation, localBackendExecute } from '../../../tools/v4/backends/local';
 import {
   dockerBackendExecute,
   isDockerAvailable,
@@ -40,6 +40,42 @@ describe('shell_exec — schema', () => {
 });
 
 describe('localBackend', () => {
+  it('preserves PowerShell source exactly at the process boundary', () => {
+    const source = `Write-Output '$env:TEMP'; Write-Output \"quoted\"; Write-Output \`tick; Write-Output '₹ $ literal'`;
+    const invocation = buildLocalShellInvocation(source, 'win32');
+    expect(invocation.executable).toBe('powershell.exe');
+    expect(invocation.args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-EncodedCommand']);
+    expect(Buffer.from(invocation.args[3], 'base64').toString('utf16le')).toBe(source);
+  });
+
+  it('keeps an explicit nested PowerShell command out of an outer PowerShell parser', () => {
+    for (const executable of ['powershell', 'powershell.exe', 'pwsh', 'pwsh.exe']) {
+      const command = `${executable} -NoProfile -Command \"$env:TEMP; $env:LOCALAPPDATA\"`;
+      expect(buildLocalShellInvocation(command, 'win32')).toEqual({
+        executable: 'cmd.exe',
+        args: ['/d', '/s', '/c', command],
+        detached: false,
+      });
+    }
+  });
+
+  it.runIf(isWin)('executes direct environment lookups and special characters on Windows', async () => {
+    const marker = `space path 'single' \"double\" \`tick; Unicode-世界; literal-$`;
+    const direct = await localBackendExecute({
+      command: `Write-Output $env:TEMP; Write-Output $env:LOCALAPPDATA; Write-Output '${marker.replace(/'/g, "''")}'`,
+    });
+    expect(direct.exitCode).toBe(0);
+    expect(direct.stdout).toContain(process.env.TEMP);
+    expect(direct.stdout).toContain(process.env.LOCALAPPDATA);
+    expect(direct.stdout).toContain(marker);
+  });
+
+  it.runIf(isWin)('executes a nested Windows PowerShell environment lookup literally', async () => {
+    const nested = await localBackendExecute({ command: 'powershell -NoProfile -Command "$env:TEMP"' });
+    expect(nested.exitCode).toBe(0);
+    expect(nested.stdout.trim()).toBe(process.env.TEMP);
+  });
+
   it('2. executes a simple command', async () => {
     const r = await localBackendExecute({ command: echoCmd('hello-shell') });
     expect(r.exitCode).toBe(0);

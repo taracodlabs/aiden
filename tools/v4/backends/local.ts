@@ -42,6 +42,37 @@ export interface ShellExecResult {
 
 const DEFAULT_TIMEOUT = 30_000;
 
+export interface LocalShellInvocation {
+  executable: string;
+  args: string[];
+  detached: boolean;
+}
+
+const WINDOWS_SHELL_COMMAND = /^\s*(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/iu;
+
+/** Build a host-shell invocation without interpolating into another shell. */
+export function buildLocalShellInvocation(
+  command: string,
+  platform: NodeJS.Platform = process.platform,
+): LocalShellInvocation {
+  if (platform !== 'win32') {
+    return { executable: 'bash', args: ['-lc', command], detached: true };
+  }
+  // An explicit nested PowerShell command must not pass through an outer
+  // PowerShell parser, which would expand `$env:*` before the child sees it.
+  if (WINDOWS_SHELL_COMMAND.test(command)) {
+    return { executable: 'cmd.exe', args: ['/d', '/s', '/c', command], detached: false };
+  }
+  // EncodedCommand preserves quotes, Unicode, backticks, semicolons, and
+  // literal dollar signs across the native process boundary.
+  const encoded = Buffer.from(command, 'utf16le').toString('base64');
+  return {
+    executable: 'powershell.exe',
+    args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],
+    detached: false,
+  };
+}
+
 export interface LocalBackendCallbacks {
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
   /** Turn-scoped abort signal. On abort the child's whole process TREE is
@@ -100,15 +131,16 @@ export async function localBackendExecute(
       reportMissingContext('subprocess', 'shellExec');
       baseEnv = process.env;
     }
+    const invocation = buildLocalShellInvocation(command);
     const child = isWin
-      ? spawn('powershell.exe', ['-NoProfile', '-Command', command], {
+      ? spawn(invocation.executable, invocation.args, {
           cwd: args.cwd,
           env: { ...baseEnv, ...(args.env ?? {}) },
         })
       // POSIX: `detached` makes the child its own process-group leader so
       // killProcessTree can reap the GROUP (`kill(-pid)`). Windows uses
       // `taskkill /t` and needs no group. Not unref'd — we still await it.
-      : spawn('bash', ['-lc', command], {
+      : spawn(invocation.executable, invocation.args, {
           cwd: args.cwd,
           env: { ...baseEnv, ...(args.env ?? {}) },
           detached: true,
