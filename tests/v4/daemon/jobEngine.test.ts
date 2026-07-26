@@ -718,13 +718,13 @@ describe('ToolCall and SideEffect identity', () => {
       effectId: 'side_effect:tool_reconcile', expectedJobStateVersion: jobVersion,
       outcome: 'unknown', confidence: 'low', evidence: { exists: true },
       retryRecommendation: 'human_review', humanResolutionRequired: true,
-      producer: 'test', idempotencyKey: 'reconcile-1',
+      producer: 'test', idempotencyKey: 'reconcile-1', now: 1_000,
     }).applied).toBe(true);
     expect(engine.recordEffectReconciliation({
       effectId: 'side_effect:tool_reconcile', expectedJobStateVersion: jobVersion,
       outcome: 'occurred', confidence: 'high', evidence: { contentSha256: 'digest' },
       retryRecommendation: 'do_not_retry', humanResolutionRequired: false,
-      producer: 'test', idempotencyKey: 'reconcile-2',
+      producer: 'test', idempotencyKey: 'reconcile-2', now: 1_000,
     }).applied).toBe(true);
 
     expect(engine.listEffectReconciliations('side_effect:tool_reconcile')).toMatchObject([

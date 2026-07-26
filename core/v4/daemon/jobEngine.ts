@@ -2385,7 +2385,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
                 outcome, confidence, evidence_json, retry_recommendation,
                 human_resolution_required, created_at
            FROM effect_reconciliations WHERE effect_id = ?
-          ORDER BY created_at ASC, reconciliation_id ASC`,
+          ORDER BY created_at ASC, rowid ASC`,
       ).all(effectId) as Array<{
         reconciliation_id: string; effect_id: string; job_id: string; attempt_id: string;
         generation: number; outcome: EffectReconciliationOutcome; confidence: EffectReconciliationConfidence;
