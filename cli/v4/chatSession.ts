@@ -81,9 +81,11 @@ import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import type { ConfigManager } from '../../core/v4/config';
 import type { PersonalityManager } from '../../core/v4/personality';
 import {
-  runWithJobExecutionContext,
-  type JobExecutionContext,
-} from '../../core/v4/daemon/jobExecutionContext';
+  executeDurableJob,
+  DurableJobAuthorityLostError,
+  type DurableJobDisposition,
+  type DurableJobHandle,
+} from '../../core/v4/daemon/jobLifecycle';
 import type { ProviderCallUsageContext } from '../../providers/v4/types';
 import type { PluginLoader } from '../../core/v4/plugins/pluginLoader';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
@@ -147,6 +149,11 @@ import {
   renderStartupNoticeLines,
   type StartupNotice,
 } from './startupNotices';
+
+interface ChatTurnLifecycleContext {
+  handle: DurableJobHandle;
+  finalization?: DurableJobDisposition;
+}
 
 /**
  * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
@@ -1682,6 +1689,71 @@ export class ChatSession implements ChatSessionLike {
   }
 
   private async runAgentTurn(userInput: string, inputAlreadyPersisted = false): Promise<void> {
+    const jobEngine = this.opts.jobEngine;
+    if (!jobEngine || this.opts.unconfigured) {
+      await this.runAgentTurnBody(userInput, inputAlreadyPersisted);
+      return;
+    }
+    const instanceId = this.opts.replInstanceId;
+    const sessionId = this.sessionId;
+    if (!instanceId || !sessionId) {
+      throw new Error('Durable Job admission requires an instance and session identity');
+    }
+
+    let lifecycleContext: ChatTurnLifecycleContext | null = null;
+    try {
+      await executeDurableJob({
+        engine: jobEngine,
+        ownerId: instanceId,
+        controlAuthority: this.opts.jobControlAuthority,
+        admission: {
+          entryPoint: 'interactive',
+          source: 'repl',
+          sessionId,
+          workspaceId: process.cwd(),
+          instanceId,
+          idempotencyNamespace: `interactive:${sessionId}`,
+          goal: userInput,
+          title: userInput,
+          channelId: 'repl',
+        },
+        initialInput: !inputAlreadyPersisted && this.opts.jobControlAuthority
+          ? {
+            sessionId,
+            channelId: 'repl',
+            source: 'tui',
+            kind: 'message',
+            content: userInput,
+            idempotencyNamespace: `interactive-input:${sessionId}`,
+            idempotencyKey: `initial:${this.durableInputOrdinal++}`,
+          }
+          : undefined,
+        execute: async (handle) => {
+          lifecycleContext = { handle };
+          await this.runAgentTurnBody(userInput, inputAlreadyPersisted, lifecycleContext);
+          return lifecycleContext;
+        },
+        finalize: (context) => context.finalization ?? ({
+          status: 'failed',
+          outcome: 'failed',
+          finishReason: 'missing_finalization',
+          evidence: { reason: 'turn completed without an authoritative finalization' },
+        }),
+      });
+    } catch (error) {
+      if (error instanceof DurableJobAuthorityLostError && lifecycleContext) {
+        const status = jobEngine.getJob(lifecycleContext.handle.jobId)?.status;
+        if (status === 'cancelled' || status === 'paused') return;
+      }
+      throw error;
+    }
+  }
+
+  private async runAgentTurnBody(
+    userInput: string,
+    inputAlreadyPersisted = false,
+    lifecycleContext?: ChatTurnLifecycleContext,
+  ): Promise<void> {
     // v4.11 Slice B — snapshot pre-turn history for /undo (in-memory,
     // bounded). Captured before any mutation; `this.history` is only
     // reassigned at end-of-turn, so this copy is the true pre-turn state.
@@ -1757,6 +1829,11 @@ export class ChatSession implements ChatSessionLike {
     const turnId    = ++this.nextTurnId;
     this.queueGuidanceShown = false;
     const turnAbort = new AbortController();
+    const abortFromLifecycle = (): void => {
+      if (!turnAbort.signal.aborted) turnAbort.abort(lifecycleContext?.handle.signal.reason);
+    };
+    if (lifecycleContext?.handle.signal.aborted) abortFromLifecycle();
+    else lifecycleContext?.handle.signal.addEventListener('abort', abortFromLifecycle, { once: true });
     this.currentAbortController = turnAbort;
     this.activeTurnId           = turnId;
 
@@ -1802,7 +1879,7 @@ export class ChatSession implements ChatSessionLike {
           if (word === '/resume') {
             let durableResumed = true;
             const target = this.activeDurableTarget;
-            if (target && this.opts.jobControlAuthority && jobEngine && replInstanceId) {
+            if (target && this.opts.jobControlAuthority && lifecycleContext && replInstanceId) {
               try {
                 const resumed = this.opts.jobControlAuthority.commands.resume({
                   jobId: target.jobId,
@@ -1811,64 +1888,25 @@ export class ChatSession implements ChatSessionLike {
                   idempotencyNamespace: `tui-control:${this.sessionId}`,
                   idempotencyKey: `resume:${target.attemptId}:${++this.durableInputOrdinal}`,
                 });
-                const lease = jobEngine.claimAttempt({
-                  attemptId: resumed.attemptId,
-                  ownerId: replInstanceId,
-                  ttlMs: 45_000,
-                });
-                if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
-                  throw new Error(`resumed Attempt lease unavailable: ${lease.conflict ?? 'unknown'}`);
-                }
-                const attemptRunning = jobEngine.transitionAttempt({
-                  attemptId: resumed.attemptId,
-                  expectedStateVersion: lease.stateVersion,
-                  generation: lease.generation,
-                  fenceToken: lease.fenceToken,
-                  to: 'running',
-                  eventIdempotencyKey: `attempt-running:${resumed.attemptId}:${lease.generation}`,
-                  producer: 'repl',
-                });
-                const resumedJob = jobEngine.getJob(target.jobId);
-                if (!attemptRunning.applied || attemptRunning.stateVersion === undefined || !resumedJob) {
-                  throw new Error('resumed Attempt start rejected');
-                }
-                const jobRunning = jobEngine.transitionJob({
+                lifecycleContext.handle.resumeAttempt({
                   jobId: target.jobId,
                   attemptId: resumed.attemptId,
-                  generation: lease.generation,
-                  fenceToken: lease.fenceToken,
-                  expectedStateVersion: resumedJob.stateVersion,
-                  to: 'running',
-                  eventIdempotencyKey: `job-running:${target.jobId}:${lease.generation}`,
-                  producer: 'repl',
+                  runId: resumed.runId,
+                  reused: resumed.duplicate,
                 });
-                if (!jobRunning.applied || jobRunning.stateVersion === undefined) {
-                  throw new Error('resumed Job start rejected');
-                }
-                detachRuntimeControl?.();
-                jobAttemptId = resumed.attemptId;
-                replRunId = resumed.runId;
-                jobGeneration = lease.generation;
-                jobFenceToken = lease.fenceToken;
-                attemptStateVersion = attemptRunning.stateVersion;
-                jobStateVersion = jobRunning.stateVersion;
+                jobAttemptId = lifecycleContext.handle.attemptId;
+                replRunId = lifecycleContext.handle.runId;
+                jobGeneration = lifecycleContext.handle.generation;
                 this.activeDurableTarget = {
                   jobId: target.jobId,
-                  attemptId: resumed.attemptId,
-                  generation: lease.generation,
+                  attemptId: lifecycleContext.handle.attemptId,
+                  generation: lifecycleContext.handle.generation,
                 };
-                detachRuntimeControl = this.opts.jobControlAuthority.runtime.attach(resumed.attemptId, turnAbort);
-                if (jobExecutionContextRef) {
-                  jobExecutionContextRef.attemptId = resumed.attemptId;
-                  jobExecutionContextRef.generation = lease.generation;
-                  jobExecutionContextRef.fenceToken = lease.fenceToken;
-                }
                 if (providerUsageContextRef) {
-                  providerUsageContextRef.runId = resumed.runId;
-                  providerUsageContextRef.attemptId = resumed.attemptId;
-                  providerUsageContextRef.attemptGeneration = lease.generation;
+                  providerUsageContextRef.runId = lifecycleContext.handle.runId;
+                  providerUsageContextRef.attemptId = lifecycleContext.handle.attemptId;
+                  providerUsageContextRef.attemptGeneration = lifecycleContext.handle.generation;
                 }
-                startJobLeaseHeartbeat();
               } catch (error) {
                 durableResumed = false;
                 try { this.opts.display.warn(`  resume failed: ${error instanceof Error ? error.message : String(error)}`); } catch { /* defensive */ }
@@ -2023,154 +2061,27 @@ export class ChatSession implements ChatSessionLike {
     // etc.) must NOT crash the REPL — every persistence call here is
     // wrapped in try/catch and reduces to a logged warning. The
     // user-facing turn still runs.
-    let replRunId: number | null = null;
-    let replTaskId: string | null = null;
+    let replRunId: number | null = lifecycleContext?.handle.runId ?? null;
+    let replTaskId: string | null = lifecycleContext?.handle.jobId ?? null;
     const replRunStore       = this.opts.replRunStore;
     const replInstanceId     = this.opts.replInstanceId;
     const replParentRunRef   = this.opts.replParentRunRef;
     const jobEngine          = this.opts.jobEngine;
-    let jobAttemptId: string | null = null;
-    let jobGeneration: number | null = null;
-    let jobFenceToken: string | null = null;
-    let jobStateVersion = 0;
-    let attemptStateVersion = 0;
-    let detachRuntimeControl: (() => void) | null = null;
-    let jobExecutionContextRef: JobExecutionContext | null = null;
+    let jobAttemptId: string | null = lifecycleContext?.handle.attemptId ?? null;
+    let jobGeneration: number | null = lifecycleContext?.handle.generation ?? null;
     let providerUsageContextRef: ProviderCallUsageContext | null = null;
-    let jobLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
-    const stopJobLeaseHeartbeat = (): void => {
-      if (jobLeaseHeartbeat !== null) {
-        clearInterval(jobLeaseHeartbeat);
-        jobLeaseHeartbeat = null;
-      }
-    };
-    const startJobLeaseHeartbeat = (): void => {
-      stopJobLeaseHeartbeat();
-      if (!jobEngine || !replInstanceId) return;
-      jobLeaseHeartbeat = setInterval(() => {
-        if (!jobAttemptId || jobGeneration === null || !jobFenceToken || turnAbort.signal.aborted) return;
-        const renewed = jobEngine.renewAttemptLease({
-          attemptId: jobAttemptId,
-          ownerId: replInstanceId,
-          generation: jobGeneration,
-          fenceToken: jobFenceToken,
-          ttlMs: 45_000,
-        });
-        if (!renewed.applied || renewed.stateVersion === undefined) {
-          stopJobLeaseHeartbeat();
-          turnAbort.abort(new Error(`Durable Attempt lease renewal failed: ${renewed.conflict ?? 'unknown'}`));
-          return;
-        }
-        attemptStateVersion = renewed.stateVersion;
-      }, 15_000);
-      jobLeaseHeartbeat.unref?.();
-    };
+    void inputAlreadyPersisted;
 
-    if (jobEngine) {
-      if (!replInstanceId || !this.sessionId) {
-        throw new Error('Durable Job admission requires an instance and session identity');
-      }
-      const admitted = jobEngine.submitJob({
-        entryPoint: 'interactive',
-        source: 'repl',
-        sessionId: this.sessionId,
-        workspaceId: process.cwd(),
-        instanceId: replInstanceId,
-        idempotencyNamespace: `interactive:${this.sessionId}`,
-        goal: userInput,
-        title: userInput,
-        channelId: 'repl',
-      });
-      replRunId = admitted.runId;
-      replTaskId = admitted.jobId;
-      jobAttemptId = admitted.attemptId;
-      if (this.opts.jobControlAuthority && !inputAlreadyPersisted) {
-        const durableInput = this.opts.jobControlAuthority.inputs.receive({
-          jobId: admitted.jobId,
-          targetAttemptId: admitted.attemptId,
-          targetGeneration: 1,
-          sessionId: this.sessionId,
-          channelId: 'repl',
-          source: 'tui',
-          kind: 'message',
-          content: userInput,
-          idempotencyNamespace: `interactive-input:${this.sessionId}`,
-          idempotencyKey: `job:${admitted.jobId}:initial`,
-        });
-        const claimed = this.opts.jobControlAuthority.inputs.claimNext({
-          jobId: admitted.jobId,
-          attemptId: admitted.attemptId,
-          generation: 1,
-          inputId: durableInput.record.inputId,
-          kinds: ['message'],
-        });
-        if (!claimed) throw new Error(`Initial durable input claim failed: ${durableInput.record.inputId}`);
-        const consumed = this.opts.jobControlAuthority.inputs.consume({
-          inputId: durableInput.record.inputId,
-          attemptId: admitted.attemptId,
-          generation: 1,
-        });
-        if (!consumed.applied && !consumed.duplicate) {
-          throw new Error(`Initial durable input consume failed: ${durableInput.record.inputId}`);
-        }
-      }
+    if (lifecycleContext) {
       if (replParentRunRef) {
         replParentRunRef.runId = replRunId;
         replParentRunRef.sessionId = this.sessionId;
       }
-      const lease = jobEngine.claimAttempt({
-        attemptId: admitted.attemptId,
-        ownerId: replInstanceId,
-        ttlMs: 45_000,
-      });
-      if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
-        throw new Error(`Durable Attempt lease unavailable: ${lease.conflict ?? 'unknown'}`);
-      }
-      jobFenceToken = lease.fenceToken;
-      jobGeneration = lease.generation;
-      attemptStateVersion = lease.stateVersion;
-      const attemptRunning = jobEngine.transitionAttempt({
-        attemptId: admitted.attemptId,
-        expectedStateVersion: attemptStateVersion,
-        generation: jobGeneration,
-        fenceToken: jobFenceToken,
-        to: 'running',
-        eventIdempotencyKey: `attempt-running:${admitted.attemptId}:${jobGeneration}`,
-        producer: 'repl',
-      });
-      if (!attemptRunning.applied || attemptRunning.stateVersion === undefined) {
-        throw new Error(`Durable Attempt start rejected: ${attemptRunning.conflict ?? 'unknown'}`);
-      }
-      attemptStateVersion = attemptRunning.stateVersion;
-      const jobRunning = jobEngine.transitionJob({
-        jobId: admitted.jobId,
-        attemptId: admitted.attemptId,
-        generation: jobGeneration,
-        fenceToken: jobFenceToken,
-        expectedStateVersion: jobStateVersion,
-        to: 'running',
-        eventIdempotencyKey: `job-running:${admitted.jobId}:${jobGeneration}`,
-        producer: 'repl',
-      });
-      if (!jobRunning.applied || jobRunning.stateVersion === undefined) {
-        throw new Error(`Durable Job start rejected: ${jobRunning.conflict ?? 'unknown'}`);
-      }
-      jobStateVersion = jobRunning.stateVersion;
       this.activeDurableTarget = {
-        jobId: admitted.jobId,
-        attemptId: admitted.attemptId,
-        generation: jobGeneration,
+        jobId: lifecycleContext.handle.jobId,
+        attemptId: lifecycleContext.handle.attemptId,
+        generation: lifecycleContext.handle.generation,
       };
-      jobExecutionContextRef = {
-        engine: jobEngine,
-        jobId: admitted.jobId,
-        attemptId: admitted.attemptId,
-        generation: jobGeneration,
-        fenceToken: jobFenceToken,
-        producer: 'repl',
-      };
-      detachRuntimeControl = this.opts.jobControlAuthority?.runtime.attach(admitted.attemptId, turnAbort) ?? null;
-      startJobLeaseHeartbeat();
     } else if (replRunStore && replInstanceId && this.sessionId) {
       try {
         replRunId = replRunStore.create({
@@ -2577,7 +2488,7 @@ export class ChatSession implements ChatSessionLike {
           const target = this.activeDurableTarget;
           if (target && this.opts.jobControlAuthority && this.duringTurnInput.isPaused()) {
             const paused = this.opts.jobControlAuthority.commands.applyPendingAtBoundary({ jobId: target.jobId });
-            if (paused.applied) stopJobLeaseHeartbeat();
+            if (paused.applied) lifecycleContext?.handle.pauseAtBoundary();
           }
           await this.duringTurnInput.waitWhilePaused(sig);
         },
@@ -2705,11 +2616,7 @@ export class ChatSession implements ChatSessionLike {
             })
           : undefined,
       }));
-      const result = await (
-        jobExecutionContextRef
-          ? runWithJobExecutionContext(jobExecutionContextRef, runAgent)
-          : runAgent()
-      );
+      const result = await runAgent();
       if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && replRunId !== null) {
         currentProviderAttemptLedger()?.reconcileJobLinkage({
           taskId: replTaskId,
@@ -2860,48 +2767,17 @@ export class ChatSession implements ChatSessionLike {
           err instanceof Error ? err.message : String(err));
       }
 
-      if (jobEngine && replTaskId !== null && jobAttemptId && jobGeneration !== null && jobFenceToken && _fin) {
-        stopJobLeaseHeartbeat();
-        const attemptTerminal =
-          result.finishReason === 'stop' ? 'succeeded' :
-          result.finishReason === 'interrupted' ? 'cancelled' :
-          'failed';
-        const attemptFinal = jobEngine.transitionAttempt({
-          attemptId: jobAttemptId,
-          expectedStateVersion: attemptStateVersion,
-          generation: jobGeneration,
-          fenceToken: jobFenceToken,
-          to: attemptTerminal,
-          eventIdempotencyKey: `attempt-final:${jobAttemptId}:${jobGeneration}`,
-          producer: 'repl',
-          finishReason: result.finishReason,
-        });
-        if (!attemptFinal.applied || attemptFinal.stateVersion === undefined) {
-          throw new Error(`Durable Attempt finalization rejected: ${attemptFinal.conflict ?? 'unknown'}`);
-        }
-        attemptStateVersion = attemptFinal.stateVersion;
-        const jobStatus =
-          result.finishReason === 'interrupted' ? 'cancelled' :
-          _fin.status === 'completed' || _fin.status === 'completed_unverified' ? 'completed' :
-          'failed';
-        const jobFinal = jobEngine.finalizeJob({
-          jobId: replTaskId,
-          attemptId: jobAttemptId,
-          generation: jobGeneration,
-          fenceToken: jobFenceToken,
-          expectedStateVersion: jobStateVersion,
-          status: jobStatus,
+      if (lifecycleContext && _fin) {
+        const cancelled = result.finishReason === 'interrupted';
+        const completed = _fin.status === 'completed' || _fin.status === 'completed_unverified';
+        lifecycleContext.finalization = {
+          status: cancelled ? 'cancelled' : completed ? 'completed' : 'failed',
+          attemptStatus: cancelled ? 'cancelled' : completed ? 'succeeded' : 'failed',
           outcome: _fin.status,
           finishReason: result.finishReason,
           evidence: _fin.evidence,
           jobCard: _fin.jobCard,
-          eventIdempotencyKey: `job-final:${replTaskId}:${jobGeneration}`,
-          producer: 'repl',
-        });
-        if (!jobFinal.applied || jobFinal.stateVersion === undefined) {
-          throw new Error(`Durable Job finalization rejected: ${jobFinal.conflict ?? 'unknown'}`);
-        }
-        jobStateVersion = jobFinal.stateVersion;
+        };
       }
 
       if (!jobEngine && replTaskStore && replTaskId !== null && _fin) {
@@ -3181,7 +3057,15 @@ export class ChatSession implements ChatSessionLike {
         (err instanceof Error && err.name === 'AbortError') ||
         turnAbort.signal.aborted;
       if (_abortHit) {
-        stopJobLeaseHeartbeat();
+        if (lifecycleContext) {
+          lifecycleContext.finalization = {
+            status: 'cancelled',
+            attemptStatus: 'cancelled',
+            outcome: 'cancelled',
+            finishReason: 'interrupted',
+            evidence: { reason: 'interrupted' },
+          };
+        }
         // v4.11 regression patch — stop the indicator BEFORE printing
         // the dim line so the setInterval can't paint a stray
         // "calling provider… (Ns)" line on top of our cancel
@@ -3196,36 +3080,6 @@ export class ChatSession implements ChatSessionLike {
         if (replParentRunRef) {
           replParentRunRef.runId     = null;
           replParentRunRef.sessionId = null;
-        }
-        if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && jobFenceToken) {
-          const attemptCancelled = jobEngine.transitionAttempt({
-            attemptId: jobAttemptId,
-            expectedStateVersion: attemptStateVersion,
-            generation: jobGeneration,
-            fenceToken: jobFenceToken,
-            to: 'cancelled',
-            eventIdempotencyKey: `attempt-cancelled:${jobAttemptId}:${jobGeneration}`,
-            producer: 'repl',
-            finishReason: 'interrupted',
-          });
-          if (attemptCancelled.applied && attemptCancelled.stateVersion !== undefined) {
-            attemptStateVersion = attemptCancelled.stateVersion;
-          }
-          const jobCancelled = jobEngine.transitionJob({
-            jobId: replTaskId,
-            attemptId: jobAttemptId,
-            generation: jobGeneration,
-            fenceToken: jobFenceToken,
-            expectedStateVersion: jobStateVersion,
-            to: 'cancelled',
-            eventIdempotencyKey: `job-cancelled:${replTaskId}:${jobGeneration}`,
-            producer: 'repl',
-            finishReason: 'interrupted',
-            terminalOutcome: 'cancelled',
-          });
-          if (jobCancelled.applied && jobCancelled.stateVersion !== undefined) {
-            jobStateVersion = jobCancelled.stateVersion;
-          }
         }
         if (!jobEngine && replRunStore && replRunId !== null) {
           try {
@@ -3251,36 +3105,14 @@ export class ChatSession implements ChatSessionLike {
       // Visible in `aiden runs list` as a failed top-level row so
       // operators can correlate a chat error with whatever children
       // it had already kicked off this turn.
-      stopJobLeaseHeartbeat();
-      if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && jobFenceToken) {
-        const attemptFailed = jobEngine.transitionAttempt({
-          attemptId: jobAttemptId,
-          expectedStateVersion: attemptStateVersion,
-          generation: jobGeneration,
-          fenceToken: jobFenceToken,
-          to: 'failed',
-          eventIdempotencyKey: `attempt-failed:${jobAttemptId}:${jobGeneration}`,
-          producer: 'repl',
+      if (lifecycleContext) {
+        lifecycleContext.finalization = {
+          status: 'failed',
+          attemptStatus: 'failed',
+          outcome: 'failed',
           finishReason: 'error',
-        });
-        if (attemptFailed.applied && attemptFailed.stateVersion !== undefined) {
-          attemptStateVersion = attemptFailed.stateVersion;
-        }
-        const jobFailed = jobEngine.transitionJob({
-          jobId: replTaskId,
-          attemptId: jobAttemptId,
-          generation: jobGeneration,
-          fenceToken: jobFenceToken,
-          expectedStateVersion: jobStateVersion,
-          to: 'failed',
-          eventIdempotencyKey: `job-failed:${replTaskId}:${jobGeneration}`,
-          producer: 'repl',
-          finishReason: 'error',
-          terminalOutcome: 'failed',
-        });
-        if (jobFailed.applied && jobFailed.stateVersion !== undefined) {
-          jobStateVersion = jobFailed.stateVersion;
-        }
+          evidence: { errorClass: err instanceof Error ? err.name : 'Error' },
+        };
       }
       if (!jobEngine && replRunStore && replRunId !== null) {
         try {
@@ -3367,7 +3199,6 @@ export class ChatSession implements ChatSessionLike {
         }
       } catch { /* defensive */ }
     } finally {
-      stopJobLeaseHeartbeat();
       if (p2aHeartbeat) clearInterval(p2aHeartbeat);
       emitP2aDiag('turn.finally.start', {
         aborted: turnAbort.signal.aborted,
@@ -3383,8 +3214,7 @@ export class ChatSession implements ChatSessionLike {
         activityTimers: this.opts.callbacks.activityTimerCount?.() ?? 0,
         modalPauseDepth: this.opts.callbacks.activityModalPauseDepth?.() ?? 0,
       });
-      detachRuntimeControl?.();
-      detachRuntimeControl = null;
+      lifecycleContext?.handle.signal.removeEventListener('abort', abortFromLifecycle);
       if (this.activeDurableTarget?.attemptId === jobAttemptId) this.activeDurableTarget = null;
       // v4.11 Slice 3 — release the per-turn cancel handles. ORDER
       // MATTERS:

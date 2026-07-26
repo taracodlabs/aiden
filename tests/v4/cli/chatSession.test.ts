@@ -15,6 +15,9 @@ import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { Message } from '../../../providers/v4/types';
 import { DuringTurnInput } from '../../../cli/v4/duringTurnInput';
+import Database from 'better-sqlite3';
+import { runMigrations } from '../../../core/v4/daemon/db/migrations';
+import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 
 function mkDisplay() {
   const chunks: string[] = [];
@@ -734,32 +737,40 @@ describe('ChatSession durable Job admission', () => {
         compressionEvents: [], auxiliaryUsage: [],
       } as never;
     });
-    const jobEngine = {
-      submitJob: vi.fn(() => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('instance_job', 1, 'localhost', ?, ?, '4.16.1')`,
+    ).run(now, now);
+    const jobEngine = createJobEngine({ db });
+    const submitJob = jobEngine.submitJob.bind(jobEngine);
+    const claimAttempt = jobEngine.claimAttempt.bind(jobEngine);
+    const transitionAttempt = jobEngine.transitionAttempt.bind(jobEngine);
+    const transitionJob = jobEngine.transitionJob.bind(jobEngine);
+    const finalizeJob = jobEngine.finalizeJob.bind(jobEngine);
+    vi.spyOn(jobEngine, 'submitJob').mockImplementation((command) => {
         order.push('submit');
-        return { jobId: 'task_job', attemptId: 'attempt_job', runId: 41, reused: false };
-      }),
-      claimAttempt: vi.fn(() => {
+        return submitJob(command);
+      });
+    vi.spyOn(jobEngine, 'claimAttempt').mockImplementation((command) => {
         order.push('claim');
-        return {
-          acquired: true, applied: true, leaseId: 'lease_job',
-          fenceToken: 'fence_job', generation: 1, stateVersion: 1,
-        };
-      }),
-      transitionAttempt: vi.fn((command: { to: string }) => {
+        return claimAttempt(command);
+      });
+    vi.spyOn(jobEngine, 'transitionAttempt').mockImplementation((command) => {
         order.push(`attempt:${command.to}`);
-        return { applied: true, stateVersion: command.to === 'running' ? 2 : 3 };
-      }),
-      transitionJob: vi.fn((command: { to: string }) => {
+        return transitionAttempt(command);
+      });
+    vi.spyOn(jobEngine, 'transitionJob').mockImplementation((command) => {
         order.push(`job:${command.to}`);
-        return { applied: true, stateVersion: 1 };
-      }),
-      finalizeJob: vi.fn(() => {
+        return transitionJob(command);
+      });
+    vi.spyOn(jobEngine, 'finalizeJob').mockImplementation((command) => {
         order.push('job:finalized');
-        return { applied: true, stateVersion: 2 };
-      }),
-      renewAttemptLease: vi.fn(() => ({ applied: true, stateVersion: 3 })),
-    };
+        return finalizeJob(command);
+      });
     const ref: { runId: number | null; sessionId: string | null } = { runId: null, sessionId: null };
     const session = new ChatSession(buildOpts({
       agent: agent as never,
@@ -769,7 +780,14 @@ describe('ChatSession durable Job admission', () => {
       jobEngine: jobEngine as never,
     }));
 
-    await session.run();
+    let eventTypes: string[] = [];
+    try {
+      await session.run();
+      const [job] = jobEngine.listJobs({ sessionId: 'sess-abc-123' });
+      if (job) eventTypes = jobEngine.listEvents(job.id).map((event) => event.type);
+    } finally {
+      db.close();
+    }
 
     expect(order.slice(0, 5)).toEqual([
       'submit', 'claim', 'attempt:running', 'job:running', 'provider',
@@ -781,9 +799,13 @@ describe('ChatSession durable Job admission', () => {
       goal: 'hello',
     }));
     expect(jobEngine.transitionAttempt).toHaveBeenCalledWith(expect.objectContaining({
-      attemptId: 'attempt_job', generation: 1, fenceToken: 'fence_job',
+      generation: 1,
     }));
     expect(jobEngine.finalizeJob).toHaveBeenCalledTimes(1);
+    expect(eventTypes).toEqual([
+      'job.submitted', 'attempt.created', 'attempt.leased', 'attempt.running',
+      'job.running', 'attempt.succeeded', 'job.finalized',
+    ]);
     expect(ref.runId).toBeNull();
   });
 

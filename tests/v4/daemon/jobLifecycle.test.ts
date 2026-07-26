@@ -10,6 +10,7 @@ import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine, type JobEngine } from '../../../core/v4/daemon/jobEngine';
 import { executeDurableJob } from '../../../core/v4/daemon/jobLifecycle';
 import { currentJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
+import { createJobControlAuthority } from '../../../core/v4/daemon/jobControlAuthority';
 
 describe('executeDurableJob', () => {
   let db: Database.Database;
@@ -82,8 +83,12 @@ describe('executeDurableJob', () => {
 
   it('aborts active work when lease renewal loses authority', async () => {
     let sawAbort = false;
+    const authorityLosingEngine: JobEngine = {
+      ...engine,
+      renewAttemptLease: () => ({ applied: false, conflict: 'stale_fence' }),
+    };
     const execution = executeDurableJob({
-      engine,
+      engine: authorityLosingEngine,
       ownerId: 'instance_lifecycle',
       leaseTtlMs: 3_000,
       admission: {
@@ -101,17 +106,224 @@ describe('executeDurableJob', () => {
         status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {},
       }),
     });
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    const job = engine.listJobs({ sessionId: 'session_lease_loss' })[0]!;
-    engine.cancelJob({
-      jobId: job.id,
-      reason: 'test cancellation',
-      producer: 'test',
-      eventIdempotencyKey: 'cancel-lease-loss',
-    });
-
     await expect(execution).rejects.toThrow(/lease renewal failed/i);
     expect(sawAbort).toBe(true);
-    expect(engine.getJob(job.id)?.status).toBe('cancelled');
+    const job = engine.listJobs({ sessionId: 'session_lease_loss' })[0]!;
+    expect(engine.getJob(job.id)?.status).toBe('running');
+    expect(engine.getAttempt(job.activeAttemptId!)?.status).toBe('running');
+  });
+
+  it('adopts an already admitted Job without creating a parallel lifecycle', async () => {
+    const admitted = engine.submitJob({
+      entryPoint: 'test', source: 'test', sessionId: 'session_adopted',
+      instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+      idempotencyKey: 'request_adopted', requestFingerprint: 'fingerprint_adopted', goal: 'adopt work',
+    });
+
+    const execution = await executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      admission: { existing: admitted, source: 'test' },
+      execute: async () => 'done',
+      finalize: async () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: { verified: true },
+      }),
+    });
+
+    expect(execution).toMatchObject({
+      jobId: admitted.jobId,
+      attemptId: admitted.attemptId,
+      runId: admitted.runId,
+    });
+    expect(engine.listJobs({ sessionId: 'session_adopted' })).toHaveLength(1);
+    expect(engine.listAttempts(admitted.jobId)).toHaveLength(1);
+    expect(engine.listEvents(admitted.jobId).map((event) => event.type)).toEqual([
+      'job.submitted', 'attempt.created', 'attempt.leased', 'attempt.running',
+      'job.running', 'attempt.succeeded', 'job.finalized',
+    ]);
+  });
+
+  it('persists and consumes initial input under the exact claimed Attempt', async () => {
+    const controlAuthority = createJobControlAuthority({ db, jobEngine: engine });
+    let inputObservedDuringExecution: string | null = null;
+
+    const execution = await executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      controlAuthority,
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_input',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_input', requestFingerprint: 'fingerprint_input', goal: 'consume input',
+      },
+      initialInput: {
+        sessionId: 'session_input', source: 'test', kind: 'message', content: 'durable request',
+        idempotencyNamespace: 'lifecycle-input', idempotencyKey: 'request_input',
+      },
+      execute: async (handle) => {
+        inputObservedDuringExecution = handle.initialInput?.content ?? null;
+        expect(handle.initialInput).toMatchObject({
+          jobId: handle.jobId,
+          claimedByAttemptId: handle.attemptId,
+          claimedGeneration: handle.generation,
+          state: 'consumed',
+        });
+        return 'done';
+      },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: { verified: true },
+      }),
+    });
+
+    expect(inputObservedDuringExecution).toBe('durable request');
+    expect(controlAuthority.inputs.listPending(execution.jobId)).toEqual([]);
+    expect(engine.listEvents(execution.jobId).map((event) => event.type)).toContain('input.consumed');
+  });
+
+  it('attaches cancellation to the active Attempt and detaches exactly once on cleanup', async () => {
+    const controlAuthority = createJobControlAuthority({ db, jobEngine: engine });
+    let handleDuringExecution: { jobId: string; attemptId: string; generation: number } | null = null;
+    let sawAbort = false;
+
+    const running = executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      controlAuthority,
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_cancel',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_cancel', requestFingerprint: 'fingerprint_cancel', goal: 'cancel work',
+      },
+      execute: async (handle) => {
+        handleDuringExecution = handle;
+        expect(controlAuthority.runtime.isAttached(handle.attemptId)).toBe(true);
+        await new Promise<void>((_resolve, reject) => {
+          handle.signal.addEventListener('abort', () => {
+            sawAbort = true;
+            reject(handle.signal.reason);
+          }, { once: true });
+        });
+        return 'unreachable';
+      },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {},
+      }),
+    });
+
+    while (!handleDuringExecution) await new Promise((resolve) => setTimeout(resolve, 0));
+    const active = handleDuringExecution as { jobId: string; attemptId: string; generation: number };
+    const cancelled = controlAuthority.commands.request({
+      jobId: active.jobId,
+      attemptId: active.attemptId,
+      generation: active.generation,
+      kind: 'cancel',
+      source: 'test',
+      reason: 'test cancellation',
+      idempotencyNamespace: 'lifecycle-control',
+      idempotencyKey: 'cancel_active',
+    });
+
+    expect(cancelled).toMatchObject({ persisted: true, applied: true });
+    await expect(running).rejects.toBeTruthy();
+    expect(sawAbort).toBe(true);
+    expect(engine.getJob(active.jobId)?.status).toBe('cancelled');
+    expect(controlAuthority.runtime.isAttached(active.attemptId)).toBe(false);
+  });
+
+  it('emits one ordered phase trace and finalizes once', async () => {
+    const phases: string[] = [];
+    let finalizations = 0;
+    const instrumentedEngine: JobEngine = {
+      ...engine,
+      finalizeJob(command) {
+        finalizations += 1;
+        return engine.finalizeJob(command);
+      },
+    };
+
+    await executeDurableJob({
+      engine: instrumentedEngine,
+      ownerId: 'instance_lifecycle',
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_phases',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_phases', requestFingerprint: 'fingerprint_phases', goal: 'trace work',
+      },
+      onPhase: (event) => phases.push(event.phase),
+      execute: async () => 'done',
+      finalize: async () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: { verified: true },
+      }),
+    });
+
+    expect(phases).toEqual([
+      'admitted', 'leased', 'running', 'executing', 'verifying', 'settled', 'cleanup',
+    ]);
+    expect(finalizations).toBe(1);
+  });
+
+  it('rebinds one active execution to a resumed Attempt with a new generation and fence', async () => {
+    const controlAuthority = createJobControlAuthority({ db, jobEngine: engine });
+    let firstAttemptId = '';
+    let resumedAttemptId = '';
+
+    const execution = await executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      controlAuthority,
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_resume',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_resume', requestFingerprint: 'fingerprint_resume', goal: 'resume work',
+      },
+      execute: async (handle) => {
+        firstAttemptId = handle.attemptId;
+        controlAuthority.commands.request({
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+          kind: 'pause',
+          source: 'test',
+          idempotencyNamespace: 'lifecycle-control',
+          idempotencyKey: 'pause-active',
+        });
+        expect(controlAuthority.commands.applyPendingAtBoundary({ jobId: handle.jobId })).toMatchObject({
+          applied: true,
+          kind: 'pause',
+        });
+        handle.pauseAtBoundary();
+
+        const resumed = controlAuthority.commands.resume({
+          jobId: handle.jobId,
+          source: 'test',
+          instanceId: 'instance_lifecycle',
+          idempotencyNamespace: 'lifecycle-control',
+          idempotencyKey: 'resume-active',
+        });
+        handle.resumeAttempt({
+          jobId: handle.jobId,
+          attemptId: resumed.attemptId,
+          runId: resumed.runId,
+          reused: resumed.duplicate,
+        });
+        resumedAttemptId = handle.attemptId;
+        expect(handle.generation).toBe(2);
+        expect(currentJobExecutionContext()).toMatchObject({
+          attemptId: resumed.attemptId,
+          generation: 2,
+          fenceToken: handle.fenceToken,
+        });
+        return 'done';
+      },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: { verified: true },
+      }),
+    });
+
+    expect(execution.attemptId).toBe(resumedAttemptId);
+    expect(firstAttemptId).not.toBe(resumedAttemptId);
+    expect(engine.getAttempt(firstAttemptId)?.status).toBe('cancelled');
+    expect(engine.getAttempt(resumedAttemptId)?.status).toBe('succeeded');
+    expect(engine.getJob(execution.jobId)?.status).toBe('completed');
   });
 });

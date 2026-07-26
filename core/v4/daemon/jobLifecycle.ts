@@ -3,8 +3,19 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  */
 
-import { runWithJobExecutionContext } from './jobExecutionContext';
-import type { JobEngine, SubmitJobCommand } from './jobEngine';
+import { runWithJobExecutionContext, type JobExecutionContext } from './jobExecutionContext';
+import type {
+  AdmissionResult,
+  AttemptRecord,
+  JobEngine,
+  JobRecord,
+  SubmitJobCommand,
+} from './jobEngine';
+import type {
+  DurableInputRecord,
+  JobControlAuthority,
+  ReceiveInputCommand,
+} from './jobControlAuthority';
 
 export interface DurableJobHandle {
   jobId: string;
@@ -13,10 +24,14 @@ export interface DurableJobHandle {
   generation: number;
   fenceToken: string;
   signal: AbortSignal;
+  initialInput?: DurableInputRecord;
+  pauseAtBoundary(): void;
+  resumeAttempt(admission: AdmissionResult): void;
 }
 
 export interface DurableJobFinalization {
   status: 'completed' | 'failed' | 'cancelled';
+  attemptStatus?: 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
   outcome: string;
   finishReason: string;
   evidence: unknown;
@@ -27,6 +42,47 @@ export interface DurableJobFinalization {
     permissions?: Record<string, unknown> | null;
     constraints?: Record<string, unknown> | null;
   };
+}
+
+export interface DurableJobUncertainDisposition {
+  status: 'unknown' | 'blocked';
+  outcome: string;
+  finishReason: string;
+  evidence: unknown;
+}
+
+export type DurableJobDisposition = DurableJobFinalization | DurableJobUncertainDisposition;
+
+export interface ExistingDurableJobAdmission {
+  existing: AdmissionResult;
+  source: string;
+}
+
+export interface RecoveryDurableJobAdmission {
+  recovery: Parameters<JobEngine['createRecoveryAttempt']>[0];
+  source: string;
+}
+
+export type DurableJobAdmission =
+  | SubmitJobCommand
+  | ExistingDurableJobAdmission
+  | RecoveryDurableJobAdmission;
+
+export type DurableJobLifecyclePhase =
+  | 'admitted'
+  | 'leased'
+  | 'running'
+  | 'executing'
+  | 'verifying'
+  | 'settled'
+  | 'cleanup';
+
+export interface DurableJobLifecyclePhaseEvent {
+  phase: DurableJobLifecyclePhase;
+  jobId: string;
+  attemptId: string;
+  runId: number;
+  generation?: number;
 }
 
 export interface DurableJobExecutionResult<T> extends DurableJobHandle {
@@ -40,16 +96,135 @@ export class DurableJobLifecycleError extends Error {
   }
 }
 
-export async function executeDurableJob<T>(options: {
+export class DurableJobDuplicateAdmissionError extends DurableJobLifecycleError {
+  constructor(readonly admission: AdmissionResult) {
+    super('Durable Job admission already exists', admission);
+    this.name = 'DurableJobDuplicateAdmissionError';
+  }
+}
+
+export class DurableJobAuthorityLostError extends DurableJobLifecycleError {
+  constructor(message: string, handle?: Partial<DurableJobHandle>) {
+    super(message, handle);
+    this.name = 'DurableJobAuthorityLostError';
+  }
+}
+
+export interface ExecuteDurableJobOptions<T> {
   engine: JobEngine;
   ownerId: string;
-  admission: SubmitJobCommand;
+  admission: DurableJobAdmission;
   execute: (handle: DurableJobHandle) => Promise<T>;
-  finalize: (value: T) => DurableJobFinalization;
+  finalize: (value: T, handle: DurableJobHandle) => DurableJobDisposition | Promise<DurableJobDisposition>;
+  classifyError?: (
+    error: unknown,
+    handle: DurableJobHandle,
+  ) => DurableJobDisposition | null | Promise<DurableJobDisposition | null>;
+  controlAuthority?: JobControlAuthority;
+  initialInput?: Omit<ReceiveInputCommand, 'jobId' | 'targetAttemptId' | 'targetGeneration'>;
   leaseTtlMs?: number;
+  controlPollMs?: number;
   onLeaseLost?: (error: DurableJobLifecycleError) => void;
-}): Promise<DurableJobExecutionResult<T>> {
-  const admitted = options.engine.submitJob(options.admission);
+  onPhase?: (event: DurableJobLifecyclePhaseEvent) => void;
+}
+
+function isExistingAdmission(admission: DurableJobAdmission): admission is ExistingDurableJobAdmission {
+  return 'existing' in admission;
+}
+
+function isRecoveryAdmission(admission: DurableJobAdmission): admission is RecoveryDurableJobAdmission {
+  return 'recovery' in admission;
+}
+
+function producerFor(admission: DurableJobAdmission): string {
+  return admission.source;
+}
+
+export function admitDurableJob(engine: JobEngine, admission: DurableJobAdmission): AdmissionResult {
+  if (isRecoveryAdmission(admission)) {
+    return {
+      ...engine.createRecoveryAttempt(admission.recovery),
+      jobId: admission.recovery.jobId,
+      reused: false,
+    };
+  }
+  if (!isExistingAdmission(admission)) return engine.submitJob(admission);
+  const { existing } = admission;
+  const job = engine.getJob(existing.jobId);
+  const attempt = engine.getAttempt(existing.attemptId);
+  if (!job || !attempt || attempt.jobId !== job.id || attempt.rowId !== existing.runId) {
+    throw new DurableJobLifecycleError('Existing durable admission does not identify one Job and Attempt', existing);
+  }
+  if (job.activeAttemptId !== attempt.id) {
+    throw new DurableJobLifecycleError('Existing durable admission is not the active Attempt', existing);
+  }
+  return existing;
+}
+
+function isAttemptTerminal(attempt: AttemptRecord | null): boolean {
+  return attempt !== null && /^(succeeded|completed|failed|cancelled|timed_out|crashed|unknown|interrupted)$/.test(attempt.status);
+}
+
+function isJobTerminal(job: JobRecord | null): boolean {
+  return job !== null && /^(cancelled|completed|failed|dead_letter|completed_unverified|verification_failed|abandoned)$/.test(job.status);
+}
+
+function assertAuthority(engine: JobEngine, handle: DurableJobHandle): { attempt: AttemptRecord; job: JobRecord } {
+  const attempt = engine.getAttempt(handle.attemptId);
+  const job = engine.getJob(handle.jobId);
+  if (
+    !attempt
+    || !job
+    || attempt.jobId !== handle.jobId
+    || attempt.generation !== handle.generation
+    || attempt.fenceToken !== handle.fenceToken
+    || attempt.leaseOwner === null
+    || job.activeAttemptId !== handle.attemptId
+    || isAttemptTerminal(attempt)
+    || isJobTerminal(job)
+  ) {
+    throw new DurableJobAuthorityLostError('Durable lifecycle authority was lost before settlement', handle);
+  }
+  return { attempt, job };
+}
+
+function notifyPhase(
+  callback: ExecuteDurableJobOptions<unknown>['onPhase'],
+  phase: DurableJobLifecyclePhase,
+  identity: Pick<AdmissionResult, 'jobId' | 'attemptId' | 'runId'>,
+  generation?: number,
+): void {
+  if (!callback) return;
+  callback({
+    phase,
+    jobId: identity.jobId,
+    attemptId: identity.attemptId,
+    runId: identity.runId,
+    generation,
+  });
+}
+
+export async function executeDurableJob<T>(
+  options: ExecuteDurableJobOptions<T>,
+): Promise<DurableJobExecutionResult<T>> {
+  const producer = producerFor(options.admission);
+  const admitted = admitDurableJob(options.engine, options.admission);
+  notifyPhase(options.onPhase, 'admitted', admitted);
+  if (!isExistingAdmission(options.admission) && !isRecoveryAdmission(options.admission) && admitted.reused) {
+    throw new DurableJobDuplicateAdmissionError(admitted);
+  }
+
+  const receivedInput = options.initialInput
+    ? options.controlAuthority?.inputs.receive({
+      ...options.initialInput,
+      jobId: admitted.jobId,
+      targetAttemptId: admitted.attemptId,
+    })
+    : null;
+  if (options.initialInput && !options.controlAuthority) {
+    throw new DurableJobLifecycleError('Durable initial input requires JobControlAuthority', admitted);
+  }
+
   const leaseTtlMs = Math.max(3_000, options.leaseTtlMs ?? 45_000);
   const lease = options.engine.claimAttempt({
     attemptId: admitted.attemptId,
@@ -62,156 +237,377 @@ export async function executeDurableJob<T>(options: {
       admitted,
     );
   }
+  notifyPhase(options.onPhase, 'leased', admitted, lease.generation);
+
   const leaseAbort = new AbortController();
-  const handle: DurableJobHandle = {
+  const handle = {
     jobId: admitted.jobId,
     attemptId: admitted.attemptId,
     runId: admitted.runId,
     generation: lease.generation,
     fenceToken: lease.fenceToken,
     signal: leaseAbort.signal,
-  };
-  let attemptStateVersion = lease.stateVersion;
-  let jobStateVersion = options.engine.getJob(handle.jobId)?.stateVersion ?? 0;
-  const attemptStarted = options.engine.transitionAttempt({
-    attemptId: handle.attemptId,
-    expectedStateVersion: attemptStateVersion,
-    generation: handle.generation,
-    fenceToken: handle.fenceToken,
-    to: 'running',
-    eventIdempotencyKey: `attempt-running:${handle.attemptId}:${handle.generation}`,
-    producer: options.admission.source,
-  });
-  if (!attemptStarted.applied || attemptStarted.stateVersion === undefined) {
-    throw new DurableJobLifecycleError(
-      `Durable Attempt start rejected: ${attemptStarted.conflict ?? 'unknown'}`,
-      handle,
-    );
-  }
-  attemptStateVersion = attemptStarted.stateVersion;
-  const jobStarted = options.engine.transitionJob({
+  } as DurableJobHandle;
+  const executionContext: JobExecutionContext = {
+    engine: options.engine,
     jobId: handle.jobId,
     attemptId: handle.attemptId,
     generation: handle.generation,
     fenceToken: handle.fenceToken,
-    expectedStateVersion: jobStateVersion,
-    to: 'running',
-    eventIdempotencyKey: `job-running:${handle.jobId}:${handle.generation}`,
-    producer: options.admission.source,
-  });
-  if (!jobStarted.applied || jobStarted.stateVersion === undefined) {
-    throw new DurableJobLifecycleError(
-      `Durable Job start rejected: ${jobStarted.conflict ?? 'unknown'}`,
-      handle,
-    );
-  }
-  jobStateVersion = jobStarted.stateVersion;
-
+    producer,
+  };
+  let attemptStateVersion = lease.stateVersion;
+  let jobStateVersion = options.engine.getJob(handle.jobId)?.stateVersion ?? 0;
+  let detachRuntime = options.controlAuthority?.runtime.attach(handle.attemptId, leaseAbort) ?? null;
   let leaseLost: DurableJobLifecycleError | null = null;
-  const heartbeat = setInterval(() => {
-    const renewed = options.engine.renewAttemptLease({
-      attemptId: handle.attemptId,
-      ownerId: options.ownerId,
-      generation: handle.generation,
-      fenceToken: handle.fenceToken,
-      ttlMs: leaseTtlMs,
-    });
-    if (!renewed.applied || renewed.stateVersion === undefined) {
-      clearInterval(heartbeat);
-      leaseLost = new DurableJobLifecycleError(
-        `Durable Attempt lease renewal failed: ${renewed.conflict ?? 'unknown'}`,
-        handle,
-      );
-      leaseAbort.abort(leaseLost);
-      options.onLeaseLost?.(leaseLost);
-      return;
-    }
-    attemptStateVersion = renewed.stateVersion;
-  }, Math.max(1_000, Math.floor(leaseTtlMs / 3)));
-  heartbeat.unref?.();
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let controlWatcher: ReturnType<typeof setInterval> | null = null;
+
+  const stopHeartbeat = (): void => {
+    if (heartbeat) clearInterval(heartbeat);
+    heartbeat = null;
+  };
+
+  const startHeartbeat = (): void => {
+    stopHeartbeat();
+    heartbeat = setInterval(() => {
+      const renewed = options.engine.renewAttemptLease({
+        attemptId: handle.attemptId,
+        ownerId: options.ownerId,
+        generation: handle.generation,
+        fenceToken: handle.fenceToken,
+        ttlMs: leaseTtlMs,
+      });
+      if (!renewed.applied || renewed.stateVersion === undefined) {
+        stopHeartbeat();
+        leaseLost = new DurableJobAuthorityLostError(
+          `Durable Attempt lease renewal failed: ${renewed.conflict ?? 'unknown'}`,
+          handle,
+        );
+        leaseAbort.abort(leaseLost);
+        options.onLeaseLost?.(leaseLost);
+        return;
+      }
+      attemptStateVersion = renewed.stateVersion;
+    }, Math.max(1_000, Math.floor(leaseTtlMs / 3)));
+    heartbeat.unref?.();
+  };
+
+  Object.defineProperties(handle, {
+    pauseAtBoundary: {
+      enumerable: false,
+      value: (): void => {
+        const attempt = options.engine.getAttempt(handle.attemptId);
+        const job = options.engine.getJob(handle.jobId);
+        if (
+          !attempt
+          || !job
+          || attempt.jobId !== handle.jobId
+          || attempt.generation !== handle.generation
+          || attempt.status !== 'waiting'
+          || attempt.leaseOwner !== null
+          || attempt.fenceToken !== null
+          || job.status !== 'paused'
+          || job.activeAttemptId !== handle.attemptId
+        ) {
+          throw new DurableJobLifecycleError(
+            'Durable lifecycle pause boundary does not match the active paused Attempt',
+            handle,
+          );
+        }
+        stopHeartbeat();
+        detachRuntime?.();
+        detachRuntime = null;
+        attemptStateVersion = attempt.stateVersion;
+        jobStateVersion = job.stateVersion;
+      },
+    },
+    resumeAttempt: {
+      enumerable: false,
+      value: (nextAdmission: AdmissionResult): void => {
+        if (nextAdmission.jobId !== handle.jobId) {
+          throw new DurableJobLifecycleError('Resumed Attempt belongs to a different Job', nextAdmission);
+        }
+        const queuedAttempt = options.engine.getAttempt(nextAdmission.attemptId);
+        const queuedJob = options.engine.getJob(handle.jobId);
+        if (
+          !queuedAttempt
+          || !queuedJob
+          || queuedAttempt.jobId !== handle.jobId
+          || queuedAttempt.rowId !== nextAdmission.runId
+          || queuedAttempt.status !== 'queued'
+          || queuedJob.status !== 'queued'
+          || queuedJob.activeAttemptId !== nextAdmission.attemptId
+        ) {
+          throw new DurableJobLifecycleError(
+            'Resumed durable admission is not the active queued Attempt',
+            nextAdmission,
+          );
+        }
+
+        const resumedLease = options.engine.claimAttempt({
+          attemptId: nextAdmission.attemptId,
+          ownerId: options.ownerId,
+          ttlMs: leaseTtlMs,
+        });
+        if (
+          !resumedLease.acquired
+          || !resumedLease.fenceToken
+          || resumedLease.generation === undefined
+          || resumedLease.stateVersion === undefined
+        ) {
+          throw new DurableJobLifecycleError(
+            `Resumed durable Attempt lease rejected: ${resumedLease.conflict ?? 'unknown'}`,
+            nextAdmission,
+          );
+        }
+
+        const attemptStarted = options.engine.transitionAttempt({
+          attemptId: nextAdmission.attemptId,
+          expectedStateVersion: resumedLease.stateVersion,
+          generation: resumedLease.generation,
+          fenceToken: resumedLease.fenceToken,
+          to: 'running',
+          eventIdempotencyKey: `attempt-running:${nextAdmission.attemptId}:${resumedLease.generation}`,
+          producer,
+        });
+        if (!attemptStarted.applied || attemptStarted.stateVersion === undefined) {
+          throw new DurableJobLifecycleError(
+            `Resumed durable Attempt start rejected: ${attemptStarted.conflict ?? 'unknown'}`,
+            nextAdmission,
+          );
+        }
+        const currentJob = options.engine.getJob(handle.jobId);
+        if (!currentJob || currentJob.activeAttemptId !== nextAdmission.attemptId) {
+          throw new DurableJobLifecycleError('Resumed durable Job authority changed before start', nextAdmission);
+        }
+        const jobStarted = options.engine.transitionJob({
+          jobId: handle.jobId,
+          attemptId: nextAdmission.attemptId,
+          generation: resumedLease.generation,
+          fenceToken: resumedLease.fenceToken,
+          expectedStateVersion: currentJob.stateVersion,
+          to: 'running',
+          eventIdempotencyKey: `job-running:${handle.jobId}:${resumedLease.generation}`,
+          producer,
+        });
+        if (!jobStarted.applied || jobStarted.stateVersion === undefined) {
+          throw new DurableJobLifecycleError(
+            `Resumed durable Job start rejected: ${jobStarted.conflict ?? 'unknown'}`,
+            nextAdmission,
+          );
+        }
+
+        detachRuntime?.();
+        handle.attemptId = nextAdmission.attemptId;
+        handle.runId = nextAdmission.runId;
+        handle.generation = resumedLease.generation;
+        handle.fenceToken = resumedLease.fenceToken;
+        executionContext.attemptId = handle.attemptId;
+        executionContext.generation = handle.generation;
+        executionContext.fenceToken = handle.fenceToken;
+        attemptStateVersion = attemptStarted.stateVersion;
+        jobStateVersion = jobStarted.stateVersion;
+        leaseLost = null;
+        detachRuntime = options.controlAuthority?.runtime.attach(handle.attemptId, leaseAbort) ?? null;
+        startHeartbeat();
+      },
+    },
+  });
 
   try {
-    const value = await runWithJobExecutionContext({
-      engine: options.engine,
-      jobId: handle.jobId,
-      attemptId: handle.attemptId,
-      generation: handle.generation,
-      fenceToken: handle.fenceToken,
-      producer: options.admission.source,
-    }, () => options.execute(handle));
-    if (leaseLost) throw leaseLost;
-
-    const finalization = options.finalize(value);
-    const attemptStatus = finalization.status === 'completed'
-      ? 'succeeded'
-      : finalization.status === 'cancelled' ? 'cancelled' : 'failed';
-    const attemptFinished = options.engine.transitionAttempt({
+    const attemptStarted = options.engine.transitionAttempt({
       attemptId: handle.attemptId,
       expectedStateVersion: attemptStateVersion,
       generation: handle.generation,
       fenceToken: handle.fenceToken,
-      to: attemptStatus,
-      eventIdempotencyKey: `attempt-${attemptStatus}:${handle.attemptId}:${handle.generation}`,
-      producer: options.admission.source,
-      finishReason: finalization.finishReason,
+      to: 'running',
+      eventIdempotencyKey: `attempt-running:${handle.attemptId}:${handle.generation}`,
+      producer,
     });
-    if (!attemptFinished.applied) {
+    if (!attemptStarted.applied || attemptStarted.stateVersion === undefined) {
       throw new DurableJobLifecycleError(
-        `Durable Attempt finalization rejected: ${attemptFinished.conflict ?? 'unknown'}`,
+        `Durable Attempt start rejected: ${attemptStarted.conflict ?? 'unknown'}`,
         handle,
       );
     }
-    const jobFinished = options.engine.finalizeJob({
+    attemptStateVersion = attemptStarted.stateVersion;
+    const jobStarted = options.engine.transitionJob({
       jobId: handle.jobId,
       attemptId: handle.attemptId,
       generation: handle.generation,
       fenceToken: handle.fenceToken,
       expectedStateVersion: jobStateVersion,
-      status: finalization.status,
-      outcome: finalization.outcome,
-      finishReason: finalization.finishReason,
-      evidence: finalization.evidence,
-      jobCard: finalization.jobCard,
-      eventIdempotencyKey: `job-finalized:${handle.jobId}:${handle.generation}`,
-      producer: options.admission.source,
+      to: 'running',
+      eventIdempotencyKey: `job-running:${handle.jobId}:${handle.generation}`,
+      producer,
     });
-    if (!jobFinished.applied) {
+    if (!jobStarted.applied || jobStarted.stateVersion === undefined) {
       throw new DurableJobLifecycleError(
-        `Durable Job finalization rejected: ${jobFinished.conflict ?? 'unknown'}`,
+        `Durable Job start rejected: ${jobStarted.conflict ?? 'unknown'}`,
         handle,
       );
     }
-    return { ...handle, value };
-  } catch (error) {
-    if (!options.engine.getAttempt(handle.attemptId)?.status.match(/^(succeeded|failed|cancelled|timed_out|crashed|unknown)$/)) {
-      const attemptFailed = options.engine.transitionAttempt({
+    jobStateVersion = jobStarted.stateVersion;
+
+    if (receivedInput && options.controlAuthority) {
+      const claimed = options.controlAuthority.inputs.claimNext({
+        jobId: handle.jobId,
         attemptId: handle.attemptId,
-        expectedStateVersion: attemptStateVersion,
         generation: handle.generation,
-        fenceToken: handle.fenceToken,
-        to: 'failed',
-        eventIdempotencyKey: `attempt-failed:${handle.attemptId}:${handle.generation}`,
-        producer: options.admission.source,
-        finishReason: 'error',
+        inputId: receivedInput.record.inputId,
       });
-      if (attemptFailed.applied) {
-        options.engine.finalizeJob({
-          jobId: handle.jobId,
-          attemptId: handle.attemptId,
-          generation: handle.generation,
-          fenceToken: handle.fenceToken,
-          expectedStateVersion: jobStateVersion,
-          status: 'failed',
-          outcome: 'failed',
-          finishReason: 'error',
-          evidence: { errorClass: error instanceof Error ? error.name : 'Error' },
-          eventIdempotencyKey: `job-finalized:${handle.jobId}:${handle.generation}`,
-          producer: options.admission.source,
-        });
+      if (!claimed) {
+        throw new DurableJobLifecycleError('Durable initial input could not be claimed by the active Attempt', handle);
       }
+      const consumed = options.controlAuthority.inputs.consume({
+        inputId: claimed.inputId,
+        attemptId: handle.attemptId,
+        generation: handle.generation,
+      });
+      if (!consumed.applied && !consumed.duplicate) {
+        throw new DurableJobLifecycleError(
+          `Durable initial input could not be consumed: ${consumed.conflict ?? 'unknown'}`,
+          handle,
+        );
+      }
+      handle.initialInput = options.controlAuthority.inputs.get(claimed.inputId) ?? claimed;
+    }
+
+    startHeartbeat();
+
+    controlWatcher = setInterval(() => {
+      if (leaseAbort.signal.aborted) return;
+      const status = options.engine.getJob(handle.jobId)?.status;
+      if (status === 'cancelled' || status === 'cancelling') {
+        leaseAbort.abort(new Error('Durable Job cancellation requested'));
+      }
+    }, Math.max(25, options.controlPollMs ?? 250));
+    controlWatcher.unref?.();
+
+    notifyPhase(options.onPhase, 'running', handle, handle.generation);
+    notifyPhase(options.onPhase, 'executing', handle, handle.generation);
+    const value = await runWithJobExecutionContext(executionContext, () => options.execute(handle));
+    if (leaseLost) throw leaseLost;
+    assertAuthority(options.engine, handle);
+
+    notifyPhase(options.onPhase, 'verifying', handle, handle.generation);
+    const finalization = await options.finalize(value, handle);
+    if (leaseLost) throw leaseLost;
+    const authority = assertAuthority(options.engine, handle);
+    attemptStateVersion = authority.attempt.stateVersion;
+    jobStateVersion = authority.job.stateVersion;
+    settle(options.engine, handle, finalization, attemptStateVersion, jobStateVersion, producer);
+    notifyPhase(options.onPhase, 'settled', handle, handle.generation);
+    return Object.assign(handle, { value });
+  } catch (error) {
+    if (leaseLost || error instanceof DurableJobAuthorityLostError) throw error;
+    const attempt = options.engine.getAttempt(handle.attemptId);
+    const job = options.engine.getJob(handle.jobId);
+    if (!isAttemptTerminal(attempt) && !isJobTerminal(job)) {
+      const disposition = await options.classifyError?.(error, handle) ?? {
+        status: 'failed' as const,
+        outcome: 'failed',
+        finishReason: 'error',
+        evidence: { errorClass: error instanceof Error ? error.name : 'Error' },
+      };
+      const authority = assertAuthority(options.engine, handle);
+      settle(
+        options.engine,
+        handle,
+        disposition,
+        authority.attempt.stateVersion,
+        authority.job.stateVersion,
+        producer,
+      );
+      notifyPhase(options.onPhase, 'settled', handle, handle.generation);
     }
     throw error;
   } finally {
-    clearInterval(heartbeat);
+    stopHeartbeat();
+    if (controlWatcher) clearInterval(controlWatcher);
+    controlWatcher = null;
+    detachRuntime?.();
+    detachRuntime = null;
+    notifyPhase(options.onPhase, 'cleanup', handle, handle.generation);
+  }
+}
+
+function settle(
+  engine: JobEngine,
+  handle: DurableJobHandle,
+  finalization: DurableJobDisposition,
+  attemptStateVersion: number,
+  jobStateVersion: number,
+  producer: string,
+): void {
+  const attemptStatus = 'attemptStatus' in finalization && finalization.attemptStatus
+    ? finalization.attemptStatus
+    : finalization.status === 'completed'
+    ? 'succeeded'
+    : finalization.status === 'cancelled'
+      ? 'cancelled'
+      : finalization.status === 'unknown' || finalization.status === 'blocked'
+        ? 'unknown'
+        : 'failed';
+  const attemptFinished = engine.transitionAttempt({
+    attemptId: handle.attemptId,
+    expectedStateVersion: attemptStateVersion,
+    generation: handle.generation,
+    fenceToken: handle.fenceToken,
+    to: attemptStatus,
+    eventIdempotencyKey: `attempt-${attemptStatus}:${handle.attemptId}:${handle.generation}`,
+    producer,
+    finishReason: finalization.finishReason,
+  });
+  if (!attemptFinished.applied) {
+    throw new DurableJobLifecycleError(
+      `Durable Attempt finalization rejected: ${attemptFinished.conflict ?? 'unknown'}`,
+      handle,
+    );
+  }
+
+  if (finalization.status === 'unknown' || finalization.status === 'blocked') {
+    const jobFinished = engine.transitionJob({
+      jobId: handle.jobId,
+      attemptId: handle.attemptId,
+      generation: handle.generation,
+      fenceToken: handle.fenceToken,
+      expectedStateVersion: jobStateVersion,
+      to: finalization.status,
+      eventIdempotencyKey: `job-${finalization.status}:${handle.jobId}:${handle.generation}`,
+      producer,
+      finishReason: finalization.finishReason,
+      terminalOutcome: finalization.outcome,
+      payload: { evidence: finalization.evidence },
+    });
+    if (!jobFinished.applied) {
+      throw new DurableJobLifecycleError(
+        `Durable Job uncertainty transition rejected: ${jobFinished.conflict ?? 'unknown'}`,
+        handle,
+      );
+    }
+    return;
+  }
+
+  const jobFinished = engine.finalizeJob({
+    jobId: handle.jobId,
+    attemptId: handle.attemptId,
+    generation: handle.generation,
+    fenceToken: handle.fenceToken,
+    expectedStateVersion: jobStateVersion,
+    status: finalization.status,
+    outcome: finalization.outcome,
+    finishReason: finalization.finishReason,
+    evidence: finalization.evidence,
+    jobCard: 'jobCard' in finalization ? finalization.jobCard : undefined,
+    eventIdempotencyKey: `job-finalized:${handle.jobId}:${handle.generation}`,
+    producer,
+  });
+  if (!jobFinished.applied) {
+    throw new DurableJobLifecycleError(
+      `Durable Job finalization rejected: ${jobFinished.conflict ?? 'unknown'}`,
+      handle,
+    );
   }
 }

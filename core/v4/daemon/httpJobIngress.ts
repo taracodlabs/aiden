@@ -9,6 +9,11 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 
 import type { JobEngine } from './jobEngine';
 import { runWithJobExecutionContext } from './jobExecutionContext';
+import {
+  DurableJobDuplicateAdmissionError,
+  executeDurableJob,
+  type DurableJobHandle,
+} from './jobLifecycle';
 
 export interface HttpJobCoordinatorOptions {
   engine: JobEngine;
@@ -23,17 +28,15 @@ export interface HttpJobRouteOptions {
 
 interface ActiveHttpJob {
   token: string;
-  jobId: string;
-  attemptId: string;
-  runId: number;
-  generation: number;
-  fenceToken: string;
-  jobStateVersion: number;
-  attemptStateVersion: number;
+  handle: DurableJobHandle;
   producer: string;
-  heartbeat: ReturnType<typeof setInterval>;
-  settled: boolean;
   loanConsumed: boolean;
+}
+
+interface HttpExecutionOutcome {
+  reason: 'finish' | 'close';
+  statusCode: number;
+  responseFinished: boolean;
 }
 
 const TOKEN_HEADER = 'x-aiden-internal-job-token';
@@ -63,7 +66,7 @@ export function createHttpJobCoordinator(options: HttpJobCoordinatorOptions): Ht
   const leaseTtlMs = options.leaseTtlMs ?? 60_000;
   const active = new Map<string, ActiveHttpJob>();
 
-  const installProjection = (res: Response, handle: ActiveHttpJob): void => {
+  const installProjection = (res: Response, handle: DurableJobHandle): void => {
     res.setHeader('X-Aiden-Job-Id', handle.jobId);
     res.setHeader('X-Aiden-Attempt-Id', handle.attemptId);
     res.setHeader('X-Aiden-Run-Id', String(handle.runId));
@@ -77,43 +80,6 @@ export function createHttpJobCoordinator(options: HttpJobCoordinatorOptions): Ht
       }
       return originalJson(body);
     }) as Response['json'];
-  };
-
-  const settle = (handle: ActiveHttpJob, res: Response, reason: 'finish' | 'close'): void => {
-    if (handle.settled) return;
-    handle.settled = true;
-    clearInterval(handle.heartbeat);
-    active.delete(handle.token);
-
-    const interrupted = reason === 'close' && !res.writableFinished;
-    const failed = res.statusCode >= 400;
-    const attemptStatus = interrupted ? 'cancelled' : failed ? 'failed' : 'succeeded';
-    const jobStatus = interrupted ? 'cancelled' : failed ? 'failed' : 'completed';
-    const finishReason = interrupted ? 'client_disconnected' : failed ? 'http_error' : 'stop';
-    const attempt = options.engine.transitionAttempt({
-      attemptId: handle.attemptId,
-      expectedStateVersion: handle.attemptStateVersion,
-      generation: handle.generation,
-      fenceToken: handle.fenceToken,
-      to: attemptStatus,
-      eventIdempotencyKey: `http-attempt-final:${handle.attemptId}:${handle.generation}`,
-      producer: handle.producer,
-      finishReason,
-    });
-    if (!attempt.applied) return;
-    options.engine.finalizeJob({
-      jobId: handle.jobId,
-      attemptId: handle.attemptId,
-      generation: handle.generation,
-      fenceToken: handle.fenceToken,
-      expectedStateVersion: handle.jobStateVersion,
-      status: jobStatus,
-      outcome: jobStatus,
-      finishReason,
-      evidence: { httpStatus: res.statusCode, responseFinished: res.writableFinished },
-      eventIdempotencyKey: `http-job-final:${handle.jobId}:${handle.generation}`,
-      producer: handle.producer,
-    });
   };
 
   const middleware = (route: HttpJobRouteOptions): RequestHandler => (
@@ -132,12 +98,12 @@ export function createHttpJobCoordinator(options: HttpJobCoordinatorOptions): Ht
         res.status(409).json({ error: 'internal_job_token_consumed' });
         return;
       }
-      const attempt = options.engine.getAttempt(borrowed.attemptId);
+      const attempt = options.engine.getAttempt(borrowed.handle.attemptId);
       if (
         !attempt
-        || attempt.jobId !== borrowed.jobId
-        || attempt.generation !== borrowed.generation
-        || attempt.fenceToken !== borrowed.fenceToken
+        || attempt.jobId !== borrowed.handle.jobId
+        || attempt.generation !== borrowed.handle.generation
+        || attempt.fenceToken !== borrowed.handle.fenceToken
         || attempt.leaseExpiresAt === null
         || attempt.leaseExpiresAt <= Date.now()
       ) {
@@ -145,22 +111,25 @@ export function createHttpJobCoordinator(options: HttpJobCoordinatorOptions): Ht
         return;
       }
       borrowed.loanConsumed = true;
-      installProjection(res, borrowed);
+      installProjection(res, borrowed.handle);
       runWithJobExecutionContext({
         engine: options.engine,
-        jobId: borrowed.jobId,
-        attemptId: borrowed.attemptId,
-        generation: borrowed.generation,
-        fenceToken: borrowed.fenceToken,
+        jobId: borrowed.handle.jobId,
+        attemptId: borrowed.handle.attemptId,
+        generation: borrowed.handle.generation,
+        fenceToken: borrowed.handle.fenceToken,
         producer: borrowed.producer,
       }, () => next());
       return;
     }
 
-    try {
-      const fingerprint = digestRequest(req);
-      const suppliedKey = req.header('idempotency-key')?.trim();
-      const admitted = options.engine.submitJob({
+    const fingerprint = digestRequest(req);
+    const suppliedKey = req.header('idempotency-key')?.trim();
+    void executeDurableJob<HttpExecutionOutcome>({
+      engine: options.engine,
+      ownerId: options.instanceId,
+      leaseTtlMs,
+      admission: {
         entryPoint: route.entryPoint,
         source: route.source,
         sessionId: sessionIdFor(req),
@@ -169,101 +138,80 @@ export function createHttpJobCoordinator(options: HttpJobCoordinatorOptions): Ht
         idempotencyKey: suppliedKey || undefined,
         requestFingerprint: fingerprint,
         goal: `${route.entryPoint} request ${fingerprint.slice(0, 16)}`,
-      });
-      if (admitted.reused) {
-        const existing = options.engine.getJob(admitted.jobId);
+      },
+      execute: (handle) => new Promise<HttpExecutionOutcome>((resolve, reject) => {
+        const token = randomUUID();
+        const activeHandle: ActiveHttpJob = {
+          token,
+          handle,
+          producer: route.source,
+          loanConsumed: false,
+        };
+        active.set(token, activeHandle);
+        installProjection(res, handle);
+        (res.locals as Record<string, unknown>).durableJobToken = token;
+
+        let settled = false;
+        const settle = (reason: HttpExecutionOutcome['reason']): void => {
+          if (settled) return;
+          settled = true;
+          active.delete(token);
+          resolve({ reason, statusCode: res.statusCode, responseFinished: res.writableFinished });
+        };
+        res.once('finish', () => settle('finish'));
+        res.once('close', () => settle('close'));
+        try {
+          next();
+        } catch (error) {
+          active.delete(token);
+          reject(error);
+        }
+      }),
+      finalize: (outcome) => {
+        const interrupted = outcome.reason === 'close' && !outcome.responseFinished;
+        const failed = outcome.statusCode >= 400;
+        if (interrupted) {
+          return {
+            status: 'cancelled',
+            outcome: 'cancelled',
+            finishReason: 'client_disconnected',
+            evidence: { httpStatus: outcome.statusCode, responseFinished: false },
+          };
+        }
+        if (failed) {
+          return {
+            status: 'failed',
+            outcome: 'failed',
+            finishReason: 'http_error',
+            evidence: { httpStatus: outcome.statusCode, responseFinished: outcome.responseFinished },
+          };
+        }
+        return {
+          status: 'completed',
+          outcome: 'completed_unverified',
+          finishReason: 'http_response_completed',
+          evidence: {
+            httpStatus: outcome.statusCode,
+            responseFinished: outcome.responseFinished,
+            verification: 'compatibility_response_only',
+          },
+        };
+      },
+    }).catch((error: unknown) => {
+      if (error instanceof DurableJobDuplicateAdmissionError) {
+        if (res.headersSent) return;
+        const existing = options.engine.getJob(error.admission.jobId);
         res.status(existing?.terminalAt === null ? 202 : 200).json({
           accepted: true,
           duplicate: true,
-          job_id: admitted.jobId,
-          attempt_id: admitted.attemptId,
-          run_id: admitted.runId,
+          job_id: error.admission.jobId,
+          attempt_id: error.admission.attemptId,
+          run_id: error.admission.runId,
         });
         return;
       }
-      const lease = options.engine.claimAttempt({
-        attemptId: admitted.attemptId,
-        ownerId: options.instanceId,
-        ttlMs: leaseTtlMs,
-      });
-      if (!lease.acquired || lease.generation === undefined || !lease.fenceToken || lease.stateVersion === undefined) {
-        res.status(409).json({ error: 'job_lease_unavailable' });
-        return;
-      }
-      const attemptRunning = options.engine.transitionAttempt({
-        attemptId: admitted.attemptId,
-        expectedStateVersion: lease.stateVersion,
-        generation: lease.generation,
-        fenceToken: lease.fenceToken,
-        to: 'running',
-        eventIdempotencyKey: `http-attempt-running:${admitted.attemptId}:${lease.generation}`,
-        producer: route.source,
-      });
-      if (!attemptRunning.applied || attemptRunning.stateVersion === undefined) {
-        res.status(409).json({ error: 'job_attempt_start_rejected' });
-        return;
-      }
-      const jobRunning = options.engine.transitionJob({
-        jobId: admitted.jobId,
-        attemptId: admitted.attemptId,
-        generation: lease.generation,
-        fenceToken: lease.fenceToken,
-        expectedStateVersion: 0,
-        to: 'running',
-        eventIdempotencyKey: `http-job-running:${admitted.jobId}:${lease.generation}`,
-        producer: route.source,
-      });
-      if (!jobRunning.applied || jobRunning.stateVersion === undefined) {
-        res.status(409).json({ error: 'job_start_rejected' });
-        return;
-      }
-
-      const token = randomUUID();
-      const handle: ActiveHttpJob = {
-        token,
-        jobId: admitted.jobId,
-        attemptId: admitted.attemptId,
-        runId: admitted.runId,
-        generation: lease.generation,
-        fenceToken: lease.fenceToken,
-        jobStateVersion: jobRunning.stateVersion,
-        attemptStateVersion: attemptRunning.stateVersion,
-        producer: route.source,
-        heartbeat: undefined as unknown as ReturnType<typeof setInterval>,
-        settled: false,
-        loanConsumed: false,
-      };
-      handle.heartbeat = setInterval(() => {
-        const renewed = options.engine.renewAttemptLease({
-          attemptId: handle.attemptId,
-          ownerId: options.instanceId,
-          generation: handle.generation,
-          fenceToken: handle.fenceToken,
-          ttlMs: leaseTtlMs,
-        });
-        if (!renewed.applied || renewed.stateVersion === undefined) {
-          clearInterval(handle.heartbeat);
-          return;
-        }
-        handle.attemptStateVersion = renewed.stateVersion;
-      }, Math.max(1_000, Math.floor(leaseTtlMs / 3)));
-      handle.heartbeat.unref?.();
-      active.set(token, handle);
-      installProjection(res, handle);
-      res.once('finish', () => settle(handle, res, 'finish'));
-      res.once('close', () => settle(handle, res, 'close'));
-      (res.locals as Record<string, unknown>).durableJobToken = token;
-      runWithJobExecutionContext({
-        engine: options.engine,
-        jobId: handle.jobId,
-        attemptId: handle.attemptId,
-        generation: handle.generation,
-        fenceToken: handle.fenceToken,
-        producer: handle.producer,
-      }, () => next());
-    } catch (error) {
-      next(error);
-    }
+      if (!res.headersSent) next(error);
+    });
   };
 
   return {
