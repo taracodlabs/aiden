@@ -464,6 +464,7 @@ export class ToolRegistry {
         toolCallId: string;
         actionDigest: string;
         policySnapshotId: string;
+        effectId: string | null;
         riskTier: string;
       } | undefined;
       let preparedToolCall: PreparedDurableToolCall | null | undefined;
@@ -719,6 +720,7 @@ export class ToolRegistry {
               jobId: jobContext.jobId,
               attemptId: jobContext.attemptId,
               generation: jobContext.generation,
+              fenceToken: jobContext.fenceToken,
               toolCallId: persistedToolCallId,
               effectId: preparedToolCall?.effectId ?? null,
               toolName: call.name,
@@ -742,6 +744,7 @@ export class ToolRegistry {
             actionDigest: normalized.actionDigest,
             policySnapshotId: normalized.policySnapshot.policySnapshotId,
             riskTier: effectiveTier ?? 'caution',
+            effectId: preparedToolCall?.effectId ?? null,
           };
         }
         if (!context.approvalEngine) {
@@ -861,6 +864,7 @@ export class ToolRegistry {
               : approvalDecision?.state === 'interrupted' ? 'cancelled' : 'denied',
             decidedBy: 'user',
             decisionChannel: 'interactive',
+            decisionScope: approvalDecision?.scope ?? 'once',
           });
         }
         if (!allowed) {
@@ -1093,6 +1097,7 @@ export class ToolRegistry {
           generation: jobContext.generation,
           fenceToken: jobContext.fenceToken,
           toolCallId: durableApproval.toolCallId,
+          effectId: durableApproval.effectId,
           actionDigest: current.actionDigest,
           policySnapshotId: current.policySnapshot.policySnapshotId,
         });

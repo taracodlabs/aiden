@@ -49,6 +49,8 @@ export interface NormalizedAction {
   policySnapshot: PolicySnapshot;
 }
 
+export type ApprovalScope = 'once' | 'session' | 'permanent';
+
 export interface ApprovalRecord {
   approvalId: string;
   jobId: string;
@@ -61,8 +63,10 @@ export interface ApprovalRecord {
   riskTier: string;
   actionDigest: string;
   policySnapshotId: string;
+  fenceDigest: string | null;
   state: 'created' | 'displayed' | 'approved' | 'denied' | 'expired' | 'cancelled' | 'invalidated' | 'executed' | 'stale_rejected';
   decision: string | null;
+  decisionScope: ApprovalScope | null;
   requestedAt: number;
   displayedAt: number | null;
   decidedAt: number | null;
@@ -76,6 +80,7 @@ export interface ActionAuthority {
     jobId: string;
     attemptId: string;
     generation: number;
+    fenceToken: string;
     toolCallId: string;
     effectId?: string | null;
     toolName: string;
@@ -97,7 +102,7 @@ export interface ActionAuthority {
     policySnapshotId: string;
     decision: 'approved' | 'denied' | 'cancelled';
     decisionInputId?: string | null;
-    decisionScope?: string | null;
+    decisionScope?: ApprovalScope | null;
     decidedBy: string;
     decisionChannel: string;
     now?: number;
@@ -110,6 +115,7 @@ export interface ActionAuthority {
     generation: number;
     fenceToken: string;
     toolCallId: string;
+    effectId: string | null;
     actionDigest: string;
     policySnapshotId: string;
     now?: number;
@@ -129,8 +135,10 @@ interface ApprovalRow {
   risk_tier: string;
   action_digest: string;
   policy_snapshot_id: string;
+  fence_token_digest: string | null;
   state: ApprovalRecord['state'];
   decision: string | null;
+  decision_scope: ApprovalScope | null;
   requested_at: number;
   displayed_at: number | null;
   decided_at: number | null;
@@ -286,8 +294,10 @@ function mapApproval(row: ApprovalRow): ApprovalRecord {
     riskTier: row.risk_tier,
     actionDigest: row.action_digest,
     policySnapshotId: row.policy_snapshot_id,
+    fenceDigest: row.fence_token_digest,
     state: row.state,
     decision: row.decision,
+    decisionScope: row.decision_scope,
     requestedAt: row.requested_at,
     displayedAt: row.displayed_at,
     decidedAt: row.decided_at,
@@ -354,14 +364,16 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
 
   return {
     request(command) {
+      const now = command.now ?? Date.now();
       const job = jobEngine.getJob(command.jobId);
       const attempt = jobEngine.getAttempt(command.attemptId);
       if (
         !job || !attempt || job.activeAttemptId !== command.attemptId ||
         attempt.jobId !== command.jobId || attempt.generation !== command.generation ||
-        ['cancelled', 'completed', 'failed', 'dead_letter'].includes(job.status)
+        attempt.fenceToken !== command.fenceToken || attempt.leaseExpiresAt === null || attempt.leaseExpiresAt <= now ||
+        ['cancelled', 'completed', 'failed', 'dead_letter', 'completed_unverified', 'verification_failed', 'abandoned'].includes(job.status)
       ) {
-        throw new Error('Approval target has a stale generation');
+        throw new Error('Approval target has a stale generation or fence');
       }
       if (command.effectId) {
         const effect = db.prepare(
@@ -379,7 +391,6 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
         ) as { key: string } | undefined;
         if (!effect) throw new Error('Approval Effect binding mismatch or stale generation');
       }
-      const now = command.now ?? Date.now();
       const transaction = db.transaction(() => {
         persistPolicy(command.normalized.policySnapshot, now);
         const sequence = (db.prepare(
@@ -390,9 +401,9 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
           `INSERT INTO approvals (
              approval_id, job_id, attempt_id, generation, tool_call_id, effect_id,
              request_sequence, tool_name, risk_tier, risk_reasons_json,
-             normalized_execution_plan, action_digest, policy_snapshot_id,
+             normalized_execution_plan, action_digest, policy_snapshot_id, fence_token_digest,
              state, requested_at, expires_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?)`,
         ).run(
           approvalId,
           command.jobId,
@@ -407,6 +418,7 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
           stableJson(command.normalized.plan),
           command.normalized.actionDigest,
           command.normalized.policySnapshot.policySnapshotId,
+          sha(command.fenceToken),
           now,
           command.expiresAt ?? null,
         );
@@ -443,7 +455,7 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
         if (!record) throw new Error('Approval not found');
         const job = jobEngine.getJob(command.jobId);
         const attempt = jobEngine.getAttempt(command.attemptId);
-        if (!job || ['cancelled', 'completed', 'failed', 'dead_letter'].includes(job.status)) {
+        if (!job || ['cancelled', 'completed', 'failed', 'dead_letter', 'completed_unverified', 'verification_failed', 'abandoned'].includes(job.status)) {
           throw new Error('Terminal Job rejects approval decisions');
         }
         if (
@@ -522,10 +534,24 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
         if (
           record.jobId !== command.jobId || record.attemptId !== command.attemptId ||
           record.generation !== command.generation || record.toolCallId !== command.toolCallId ||
+          record.effectId !== command.effectId || record.fenceDigest !== sha(command.fenceToken) ||
           record.actionDigest !== command.actionDigest || record.policySnapshotId !== command.policySnapshotId
         ) {
           this.invalidate(command.approvalId, 'approved action changed or binding mismatch', command.now);
           return { authorized: false, reason: 'approved action changed or binding mismatch' };
+        }
+        if (record.effectId) {
+          const effect = db.prepare(
+            `SELECT se.key
+               FROM side_effect_ledger se
+               JOIN tool_calls tc ON tc.tool_call_id = se.tool_call_id
+              WHERE se.key = ? AND se.job_id = ? AND se.attempt_id = ?
+                AND se.generation = ? AND tc.tool_call_id = ? AND tc.side_effect_id = se.key`,
+          ).get(record.effectId, record.jobId, record.attemptId, record.generation, record.toolCallId);
+          if (!effect) {
+            this.invalidate(command.approvalId, 'approval Effect binding changed', command.now);
+            return { authorized: false, reason: 'approval Effect binding changed' };
+          }
         }
         if (record.expiresAt !== null && record.expiresAt <= now) {
           db.prepare(`UPDATE approvals SET state = 'expired', invalidated_at = ? WHERE approval_id = ? AND state = 'approved'`)

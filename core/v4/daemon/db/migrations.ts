@@ -1272,6 +1272,13 @@ function applyV25(db: Database.Database): void {
   `);
 }
 
+/** Bind each durable Approval to the exact lease fence that requested it. */
+function applyV26(db: Database.Database): void {
+  addMissingColumns(db, 'approvals', [
+    ['fence_token_digest', 'TEXT'],
+  ]);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1298,6 +1305,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 23, name: 'append-only effect reconciliation', apply: applyV23 },
   { version: 24, name: 'durable execution graph', apply: applyV24 },
   { version: 25, name: 'durable waits and continuations', apply: applyV25 },
+  { version: 26, name: 'exact approval fence binding', apply: applyV26 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

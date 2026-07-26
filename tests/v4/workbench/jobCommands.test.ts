@@ -143,6 +143,9 @@ describe('Workbench durable Job commands', () => {
   it('resolves a durable approval by exact ID without treating ordinary input as consent', () => {
     const value = commands();
     const admitted = value.enqueue.enqueue({ message: 'write a file', sessionId: 'workbench-session' });
+    const lease = value.jobEngine.claimAttempt({
+      attemptId: admitted.attemptId, ownerId: 'workbench_test', ttlMs: 60_000,
+    });
     const actionAuthority = createActionAuthority({ db, jobEngine: value.jobEngine });
     const normalized = normalizeExecutionPlan({
       toolName: 'file_write', args: { path: 'result.txt' }, cwd: process.cwd(),
@@ -154,7 +157,7 @@ describe('Workbench durable Job commands', () => {
       },
     });
     const pending = actionAuthority.request({
-      jobId: admitted.jobId, attemptId: admitted.attemptId, generation: 1,
+      jobId: admitted.jobId, attemptId: admitted.attemptId, generation: 1, fenceToken: lease.fenceToken!,
       toolCallId: 'workbench-tool', toolName: 'file_write', riskTier: 'caution',
       riskReasons: [], normalized,
     });

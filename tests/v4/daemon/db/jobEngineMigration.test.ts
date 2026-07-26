@@ -144,6 +144,7 @@ describe('durable Job and Attempt migration', () => {
     expect([...columns('job_wait_events')]).toEqual(expect.arrayContaining([
       'wait_event_id', 'wait_id', 'job_id', 'type', 'payload_json', 'idempotency_key',
     ]));
+    expect([...columns('approvals')]).toContain('fence_token_digest');
   });
 
   it('backfills stable Attempt identities and deterministic per-Job event order', () => {

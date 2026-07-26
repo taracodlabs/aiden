@@ -204,6 +204,7 @@ export interface ToolApprovalDecision {
   state: ToolApprovalDecisionState;
   approved: boolean;
   reason?: string;
+  scope?: 'once' | 'session' | 'permanent';
 }
 
 export type ToolActivityPhase =

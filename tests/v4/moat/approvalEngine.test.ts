@@ -64,6 +64,34 @@ describe('ApprovalEngine — manual mode', () => {
     expect(await engine.checkApproval(writeReq())).toBe(false);
   });
 
+  it('reports one-time, session, and permanent grants as distinct scopes', async () => {
+    const once = new ApprovalEngine('manual', { promptUser: async () => 'allow' });
+    await expect(once.checkApprovalDetailed(writeReq())).resolves.toMatchObject({
+      approved: true, scope: 'once',
+    });
+
+    const sessionPrompt = vi.fn(async () => 'allow_session' as const);
+    const session = new ApprovalEngine('manual', { promptUser: sessionPrompt });
+    await expect(session.checkApprovalDetailed(writeReq())).resolves.toMatchObject({
+      approved: true, scope: 'session',
+    });
+    await expect(session.checkApprovalDetailed(writeReq())).resolves.toMatchObject({
+      approved: true, scope: 'session',
+    });
+    expect(sessionPrompt).toHaveBeenCalledOnce();
+
+    const permanentPrompt = vi.fn(async () => 'allow_always' as const);
+    const permanent = new ApprovalEngine('manual', { promptUser: permanentPrompt });
+    await expect(permanent.checkApprovalDetailed(writeReq())).resolves.toMatchObject({
+      approved: true, scope: 'permanent',
+    });
+    permanent.resetSession();
+    await expect(permanent.checkApprovalDetailed(writeReq())).resolves.toMatchObject({
+      approved: true, scope: 'permanent',
+    });
+    expect(permanentPrompt).toHaveBeenCalledOnce();
+  });
+
   it('4. allow_session adds to session allowlist; subsequent calls auto-allow', async () => {
     const promptUser = vi
       .fn()
