@@ -137,6 +137,13 @@ describe('durable Job and Attempt migration', () => {
     expect([...columns('execution_node_attempts')]).toEqual(expect.arrayContaining([
       'node_execution_id', 'node_id', 'attempt_id', 'generation', 'state', 'output_ref',
     ]));
+    expect([...columns('job_waits')]).toEqual(expect.arrayContaining([
+      'wait_id', 'job_id', 'attempt_id', 'generation', 'sequence', 'graph_node_key', 'kind',
+      'state', 'deadline_at', 'external_key', 'resolved_by_input_id', 'resolution_ref',
+    ]));
+    expect([...columns('job_wait_events')]).toEqual(expect.arrayContaining([
+      'wait_event_id', 'wait_id', 'job_id', 'type', 'payload_json', 'idempotency_key',
+    ]));
   });
 
   it('backfills stable Attempt identities and deterministic per-Job event order', () => {

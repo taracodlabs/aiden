@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 
 import type { JobEngine, TransitionResult } from './jobEngine';
+import type { JobControlAuthority } from './jobControlAuthority';
 import type { DurableEffectDescriptor } from '../effectContract';
 
 export interface JobExecutionContext {
@@ -17,6 +18,7 @@ export interface JobExecutionContext {
   generation: number;
   fenceToken: string;
   producer: string;
+  controlAuthority?: JobControlAuthority;
 }
 
 const storage = new AsyncLocalStorage<JobExecutionContext>();

@@ -468,6 +468,7 @@ export class ToolRegistry {
       } | undefined;
       let preparedToolCall: PreparedDurableToolCall | null | undefined;
       let effectDescriptor: DurableEffectDescriptor | undefined;
+      let approvalWaitId: string | null = null;
       const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
         try { onActivity?.({ phase, at: Date.now(), attempt, timing }); } catch { /* observational */ }
       };
@@ -759,6 +760,25 @@ export class ToolRegistry {
             error: `Approval required: ${durableApproval?.approvalId ?? 'interactive approval channel unavailable'}`,
           }, 'blocked');
         }
+        if (jobContext?.controlAuthority) {
+          try {
+            approvalWaitId = jobContext.controlAuthority.waits.create({
+              jobId: jobContext.jobId,
+              attemptId: jobContext.attemptId,
+              generation: jobContext.generation,
+              kind: 'approval',
+              payloadRef: durableApproval?.approvalId ?? null,
+              producer: jobContext.producer,
+              idempotencyNamespace: `approval-wait:${jobContext.jobId}`,
+              idempotencyKey: durableApproval?.approvalId ?? call.id,
+            }).record.waitId;
+          } catch (error) {
+            return finish({
+              id: call.id, name: call.name, result: null,
+              error: `Approval wait could not be persisted: ${error instanceof Error ? error.message : String(error)}`,
+            }, 'blocked');
+          }
+        }
         timing.approvalStartedAt = Date.now();
         emit('awaiting_approval');
         let allowed: boolean;
@@ -798,6 +818,12 @@ export class ToolRegistry {
           const terminal = signal?.aborted
             ? 'cancelled'
             : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
+          if (approvalWaitId && jobContext?.controlAuthority) {
+            jobContext.controlAuthority.waits.cancel({
+              waitId: approvalWaitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+              producer: jobContext.producer, idempotencyKey: `approval-prompt-ended:${call.id}`,
+            });
+          }
           try {
             recordDurableToolApproval({
               prepared: preparedToolCall ?? null,
@@ -809,6 +835,19 @@ export class ToolRegistry {
           return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);
         }
         timing.approvalEndedAt = Date.now();
+        if (approvalWaitId && jobContext?.controlAuthority) {
+          const waitResult = jobContext.controlAuthority.waits.resolve({
+            waitId: approvalWaitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+            producer: jobContext.producer, idempotencyKey: `approval-decision:${call.id}`,
+            resolutionRef: `approval:${approvalDecision?.state ?? (allowed ? 'approved' : 'denied')}`,
+          });
+          if (allowed && !waitResult.applied && !waitResult.duplicate) {
+            return finish({
+              id: call.id, name: call.name, result: null,
+              error: `Approval wait settlement rejected: ${waitResult.conflict ?? 'unknown'}`,
+            }, 'blocked');
+          }
+        }
         if (durableApproval && context.actionAuthority && jobContext) {
           context.actionAuthority.decide({
             approvalId: durableApproval.approvalId,
@@ -959,7 +998,48 @@ export class ToolRegistry {
           mutates: effectiveMutates,
           effect: effectDescriptor,
           prepared: preparedToolCall,
-          execute: () => handler.execute(a, signal ? { ...context, signal } : context),
+          execute: async () => {
+            const jobContext = currentJobExecutionContext();
+            const interactive = isExclusiveToolInteraction(handler.interaction);
+            let waitId: string | null = null;
+            if (interactive && jobContext?.controlAuthority) {
+              waitId = jobContext.controlAuthority.waits.create({
+                jobId: jobContext.jobId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                kind: handler.interaction?.decision === 'batch_approval' ? 'approval' : 'clarification',
+                producer: jobContext.producer,
+                idempotencyNamespace: `interaction-wait:${jobContext.jobId}`,
+                idempotencyKey: `${jobContext.attemptId}:${call.id}`,
+              }).record.waitId;
+            }
+            try {
+              const value = await handler.execute(a, signal ? { ...context, signal } : context);
+              if (waitId && jobContext?.controlAuthority) {
+                const status = value && typeof value === 'object'
+                  ? String((value as Record<string, unknown>).status ?? '') : '';
+                if (status === 'cancelled' || status === 'interrupted') {
+                  jobContext.controlAuthority.waits.cancel({
+                    waitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                    producer: jobContext.producer, idempotencyKey: `interaction-cancelled:${call.id}`,
+                  });
+                } else {
+                  jobContext.controlAuthority.waits.resolve({
+                    waitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                    producer: jobContext.producer, idempotencyKey: `interaction-resolved:${call.id}`,
+                    resolutionRef: `interaction:${status || 'completed'}`,
+                  });
+                }
+              }
+              return value;
+            } catch (error) {
+              if (waitId && jobContext?.controlAuthority) {
+                jobContext.controlAuthority.waits.cancel({
+                  waitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                  producer: jobContext.producer, idempotencyKey: `interaction-failed:${call.id}`,
+                });
+              }
+              throw error;
+            }
+          },
         });
 
       // ── P1B-2B — FAIL-SAFE pre-state snapshot (shadow, non-authoritative) ──

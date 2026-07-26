@@ -1222,6 +1222,56 @@ function applyV24(db: Database.Database): void {
   `);
 }
 
+/** Durable waits and their append-only resolution history. */
+function applyV25(db: Database.Database): void {
+  addMissingColumns(db, 'tasks', [
+    ['next_wait_sequence', 'INTEGER NOT NULL DEFAULT 1'],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_waits (
+      wait_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      sequence INTEGER NOT NULL,
+      graph_node_key TEXT,
+      kind TEXT NOT NULL,
+      state TEXT NOT NULL,
+      deadline_at INTEGER,
+      external_key TEXT,
+      payload_ref TEXT,
+      resolved_by_input_id TEXT,
+      resolution_ref TEXT,
+      idempotency_namespace TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (resolved_by_input_id) REFERENCES durable_inputs(input_id) ON DELETE SET NULL,
+      UNIQUE (idempotency_namespace, idempotency_key),
+      UNIQUE (job_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_waits_pending
+      ON job_waits(job_id, state, deadline_at, sequence);
+    CREATE INDEX IF NOT EXISTS idx_job_waits_external
+      ON job_waits(job_id, external_key, state) WHERE external_key IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS job_wait_events (
+      wait_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wait_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      producer TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (wait_id) REFERENCES job_waits(wait_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (wait_id, idempotency_key)
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1247,6 +1297,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 22, name: 'durable effect contracts', apply: applyV22 },
   { version: 23, name: 'append-only effect reconciliation', apply: applyV23 },
   { version: 24, name: 'durable execution graph', apply: applyV24 },
+  { version: 25, name: 'durable waits and continuations', apply: applyV25 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

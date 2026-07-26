@@ -280,6 +280,30 @@ describe('durable Job input and control authority', () => {
     }).applied).toBe(true);
   });
 
+  it('requeues an untargeted claimed input for the new recovery generation exactly once', () => {
+    const received = controls.inputs.receive({
+      jobId: admission.jobId, sessionId: 'session-1', source: 'tui', kind: 'follow_up',
+      content: 'continue after crash', idempotencyNamespace: 'tui:recovery', idempotencyKey: 'follow-up',
+    });
+    expect(controls.inputs.claimNext({
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1,
+    })?.inputId).toBe(received.record.inputId);
+    db.prepare('UPDATE runs SET lease_expires_at = 1 WHERE attempt_id = ?').run(admission.attemptId);
+    jobs.claimAttempt({ attemptId: admission.attemptId, ownerId: 'expired', ttlMs: 1, now: 0 });
+    const recovery = jobs.recoverExpiredAttempts({ now: 2, instanceId: 'instance-2', producer: 'test', maxCrashes: 3 })[0]!;
+    const attempt = jobs.getAttempt(recovery.recoveryAttemptId!)!;
+    const restored = createJobControlAuthority({ db, jobEngine: createJobEngine({ db }) });
+    expect(restored.inputs.claimNext({
+      jobId: admission.jobId, attemptId: attempt.id, generation: attempt.generation,
+    })?.inputId).toBe(received.record.inputId);
+    expect(restored.inputs.consume({
+      inputId: received.record.inputId, attemptId: attempt.id, generation: attempt.generation,
+    }).applied).toBe(true);
+    expect(restored.inputs.consume({
+      inputId: received.record.inputId, attemptId: attempt.id, generation: attempt.generation,
+    })).toMatchObject({ applied: false, duplicate: true });
+  });
+
   it('projects input lifecycle by reference without copying content into Job events', () => {
     const secretLikeContent = 'ordinary input with private material';
     const received = controls.inputs.receive({

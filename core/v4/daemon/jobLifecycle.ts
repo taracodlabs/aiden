@@ -255,6 +255,7 @@ export async function executeDurableJob<T>(
     generation: handle.generation,
     fenceToken: handle.fenceToken,
     producer,
+    controlAuthority: options.controlAuthority,
   };
   let attemptStateVersion = lease.stateVersion;
   let jobStateVersion = options.engine.getJob(handle.jobId)?.stateVersion ?? 0;

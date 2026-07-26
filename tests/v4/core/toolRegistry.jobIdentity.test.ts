@@ -15,6 +15,7 @@ import {
 import type { JobEngine } from '../../../core/v4/daemon/jobEngine';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
+import { createJobControlAuthority } from '../../../core/v4/daemon/jobControlAuthority';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import { ToolRegistry } from '../../../core/v4/toolRegistry';
 import { createActionAuthority, type ActionAuthority, type NormalizedAction, type PolicySnapshotInput } from '../../../core/v4/actionAuthority';
@@ -34,6 +35,81 @@ const TEST_EFFECT_CONTRACT = {
 };
 
 describe('ToolRegistry durable execution identity', () => {
+  it('persists and settles waits around approval and exclusive interaction', async () => {
+    const db = new Database(':memory:');
+    try {
+      db.pragma('foreign_keys = ON');
+      runMigrations(db);
+      db.prepare(
+        `INSERT INTO daemon_instances (instance_id, pid, hostname, started_at, last_heartbeat, version)
+         VALUES ('instance-waits', 1, 'test', 1, 1, 'test')`,
+      ).run();
+      const engine = createJobEngine({ db });
+      const admission = engine.submitJob({
+        entryPoint: 'test', source: 'test', sessionId: 'session-waits', instanceId: 'instance-waits',
+        idempotencyNamespace: 'test', idempotencyKey: 'interaction-waits', goal: 'wait durably',
+      });
+      const lease = engine.claimAttempt({ attemptId: admission.attemptId, ownerId: 'test', ttlMs: 60_000 });
+      engine.transitionAttempt({
+        attemptId: admission.attemptId, expectedStateVersion: lease.stateVersion!, generation: lease.generation!,
+        fenceToken: lease.fenceToken!, to: 'running', eventIdempotencyKey: 'attempt-running', producer: 'test',
+      });
+      engine.transitionJob({
+        jobId: admission.jobId, attemptId: admission.attemptId, generation: lease.generation!,
+        fenceToken: lease.fenceToken!, expectedStateVersion: 0, to: 'running',
+        eventIdempotencyKey: 'job-running', producer: 'test',
+      });
+      const controls = createJobControlAuthority({ db, jobEngine: engine });
+      const observed: string[] = [];
+      const registry = new ToolRegistry();
+      registry.register({
+        schema: { name: 'approval_write', description: 'writes', inputSchema: { type: 'object' } },
+        category: 'write', riskTier: 'caution', mutates: true, toolset: 'misc',
+        effectContract: TEST_EFFECT_CONTRACT,
+        async execute() { return { ok: true }; },
+      });
+      registry.register({
+        schema: { name: 'interactive_read', description: 'asks', inputSchema: { type: 'object' } },
+        category: 'read', riskTier: 'safe', mutates: false, toolset: 'misc',
+        interaction: { mode: 'exclusive_modal', decision: 'clarification', cancellation: 'cancelled' },
+        async execute() {
+          observed.push(...controls.waits.listPending(admission.jobId).map((wait) => wait.kind));
+          return { ok: true, status: 'completed' };
+        },
+      });
+      const execute = registry.buildExecutor({
+        cwd: process.cwd(), paths: resolveAidenPaths({ rootOverride: 'C:/tmp/aiden-job-waits' }),
+        approvalEngine: new ApprovalEngine('manual', {
+          promptUser: async () => {
+            observed.push(...controls.waits.listPending(admission.jobId).map((wait) => wait.kind));
+            return 'allow';
+          },
+        }),
+      });
+      const context = {
+        engine, jobId: admission.jobId, attemptId: admission.attemptId,
+        generation: lease.generation!, fenceToken: lease.fenceToken!, producer: 'test',
+        controlAuthority: controls,
+      };
+
+      expect((await runWithJobExecutionContext(context, () => execute({
+        id: 'approval-call', name: 'approval_write', arguments: {},
+      }))).error).toBeUndefined();
+      expect((await runWithJobExecutionContext(context, () => execute({
+        id: 'interaction-call', name: 'interactive_read', arguments: {},
+      }))).error).toBeUndefined();
+
+      expect(observed).toEqual(['approval', 'clarification']);
+      expect(controls.waits.listPending(admission.jobId)).toEqual([]);
+      expect(db.prepare('SELECT kind, state FROM job_waits ORDER BY sequence').all()).toEqual([
+        { kind: 'approval', state: 'satisfied' },
+        { kind: 'clarification', state: 'satisfied' },
+      ]);
+    } finally {
+      db.close();
+    }
+  });
+
   it('links a requested Effect to the exact approval before dispatch', async () => {
     const db = new Database(':memory:');
     try {
