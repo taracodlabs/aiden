@@ -697,6 +697,12 @@ export class ChatSession implements ChatSessionLike {
   setBusyMode(mode: BusyEnterMode): void { this.duringTurnInput.setMode(mode); }
   getBusyMode(): BusyEnterMode { return this.duringTurnInput.getMode(); }
   listQueue(): string[] { return this.duringTurnInput.peek(); }
+  listQueueEntries(): Array<{ inputId: string | null; message: string }> {
+    return this.duringTurnInput.peek().map((message, index) => ({
+      inputId: this.durableQueueInputIds[index] ?? null,
+      message,
+    }));
+  }
   clearQueue(): number {
     if (this.sessionId && this.opts.jobControlAuthority) {
       const pending = this.opts.jobControlAuthority.inputs.listPendingForSession(this.sessionId);
@@ -1147,9 +1153,7 @@ export class ChatSession implements ChatSessionLike {
     try {
       while (iter < max) {
         iter += 1;
-        // Phase 26.2.3 — turn boundary rule. The boot card already ends
-        // with a rule + blank, so suppress on the very first iteration.
-        if (iter > 1) this.opts.display.printTurnSeparator();
+        // Composer acquisition intentionally emits no transition rule.
         let input: string;
         let inputAlreadyPersisted = false;
         let queuedDurableInputId: string | undefined;
@@ -1219,6 +1223,7 @@ export class ChatSession implements ChatSessionLike {
             prompt: (msg: string) => promptApi.readLine(msg),
           });
           if (result.exit) {
+            this.opts.display.dim('Finalizing session…');
             // Phase v4.1.2 alive-core / Phase v4.1.2-memory-AB:
             // auto-trigger session distillation on /quit when the
             // session was substantive (≥3 user turns). SIGINT and
@@ -1247,28 +1252,22 @@ export class ChatSession implements ChatSessionLike {
             }
             // v4.12 PM.1 — /quit is session-end: reap background spawns too.
             try { this.opts.processRegistry?.cleanup(); } catch { /* best-effort reap */ }
+            this.opts.display.dim('Goodbye.');
             break;
           }
           if (result.clearHistory) this.history = [];
-          // v4.11 Slice C — /retry re-dispatch. The command already
-          // reverted the last turn and handed back its prompt; run it as
-          // a normal fresh turn (with the same bottom rule the direct
-          // chat path emits below).
+          // /retry re-dispatches a normal turn. Completed output owns the
+          // separator; acquiring another composer never adds one.
           if (typeof result.rerun === 'string' && result.rerun.length > 0) {
-            this.opts.display.write(`  ${this.opts.display.rule()}\n`);
             await this.runAgentTurn(result.rerun);
+          } else {
+            this.opts.display.printTurnSeparator();
           }
           // Phase 23.6 — v3 doesn't print a status footer after slash
           // commands; the footer belongs to agent turns only.
           continue;
         }
 
-        // v4.9.0 pre-ship UI: BOTTOM rule of the prompt zone. The TOP
-        // rule fires at `printTurnSeparator()` above (iter > 1). This
-        // bottom rule fires only when actual content goes to the LLM —
-        // slash commands + empty input + /quit all `continue` above and
-        // never reach this line, matching the task's edge-case spec.
-        this.opts.display.write(`  ${this.opts.display.rule()}\n`);
         await this.runAgentTurn(input, inputAlreadyPersisted, queuedDurableInputId);
       }
     } finally {
@@ -1354,9 +1353,16 @@ export class ChatSession implements ChatSessionLike {
       userTurns,
       unconfigured: !!this.opts.unconfigured,
       memoryPath,
+      disabled:
+        process.env.AIDEN_SESSION_DISTILLATION === '0'
+        || (this.opts.config as { getValue?: <T>(key: string, fallback?: T) => T })
+          .getValue?.<boolean>('memory.session_distillation', true) === false,
     });
     if (gate.fire === false) {
       switch (gate.reason) {
+        case 'disabled':
+          this.opts.display.dim('Skipping session summary — disabled by configuration.');
+          return;
         case 'short':
           this.opts.display.dim(
             `Skipping session summary — only ${userTurns} user turn(s), need ${SESSION_SUMMARY_MIN_TURNS}+.`,
@@ -2798,6 +2804,7 @@ export class ChatSession implements ChatSessionLike {
           : null;
       let _fin: ReturnType<typeof computeTaskFinalization> | undefined;
       let _taskOutcome: TaskOutcomePresentation | undefined;
+      let durableProofVerdict: ReturnType<NonNullable<typeof jobEngine>['proof']['finalize']> | undefined;
       try {
         _fin = computeTaskFinalization(
           {
@@ -2816,12 +2823,56 @@ export class ChatSession implements ChatSessionLike {
             },
           },
         );
-        _taskOutcome = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
-          finalization: _fin,
-          trace: result.toolCallTrace,
-          finishReason: result.finishReason,
-          ...(replTaskId != null ? { taskId: String(replTaskId) } : {}),
-        }));
+        if (lifecycleContext && jobEngine?.proof.hasRequiredClaims(lifecycleContext.handle.jobId)) {
+          durableProofVerdict = jobEngine.proof.finalize({
+            jobId: lifecycleContext.handle.jobId,
+            attemptId: lifecycleContext.handle.attemptId,
+            generation: lifecycleContext.handle.generation,
+            fenceToken: lifecycleContext.handle.fenceToken,
+            cancelled: result.finishReason === 'interrupted',
+          });
+          const summary = durableProofVerdict.summary as {
+            verifiedClaims?: number; failedClaims?: number; unknownClaims?: number;
+          };
+          const proofEvidence = jobEngine.proof.listEvidence(lifecycleContext.handle.jobId)
+            .filter((item) => item.attemptId === lifecycleContext!.handle.attemptId
+              && item.generation === lifecycleContext!.handle.generation
+              && !item.late);
+          const verifiedHandle = {
+            tool: 'durable_proof', kind: 'note' as const,
+            value: `${proofEvidence.length} linked evidence record${proofEvidence.length === 1 ? '' : 's'}`,
+            verified: true,
+          };
+          const proofOutcome = durableProofVerdict.verdict === 'verified'
+            ? { kind: 'verified' as const, handles: [verifiedHandle] as const }
+            : durableProofVerdict.verdict === 'failed'
+              ? { kind: 'failed' as const, failures: [{ tool: 'durable_proof', reason: 'a required claim failed' }] as const }
+              : { kind: 'unverifiable' as const, reason: 'required claims remain unresolved' };
+          _taskOutcome = mapTaskOutcomePresentation({
+            status: durableProofVerdict.verdict === 'failed' ? 'verification_failed'
+              : durableProofVerdict.verdict === 'verified' ? 'completed' : 'completed_unverified',
+            outcome: proofOutcome,
+            finishReason: result.finishReason,
+            ...(replTaskId != null ? { taskId: String(replTaskId) } : {}),
+            evidenceCount: proofEvidence.filter((item) => item.verificationResult === 'verified').length,
+            toolCallCount: result.toolCallTrace?.length ?? 0,
+            executionStarted: true,
+            cancelled: durableProofVerdict.verdict === 'cancelled',
+            partial: durableProofVerdict.verdict === 'partially_verified',
+            requiredEvidenceGap: durableProofVerdict.verdict === 'unknown',
+            meaningfulEvidenceRequirement: true,
+            requiredCompletedCount: summary.verifiedClaims ?? 0,
+            requiredFailedCount: summary.failedClaims ?? 0,
+            requiredUnresolvedCount: summary.unknownClaims ?? 0,
+          });
+        } else {
+          _taskOutcome = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
+            finalization: _fin,
+            trace: result.toolCallTrace,
+            finishReason: result.finishReason,
+            ...(replTaskId != null ? { taskId: String(replTaskId) } : {}),
+          }));
+        }
         result.taskOutcome = _taskOutcome;
       } catch (err) {
         // eslint-disable-next-line no-console
@@ -2831,13 +2882,20 @@ export class ChatSession implements ChatSessionLike {
 
       if (lifecycleContext && _fin) {
         const cancelled = result.finishReason === 'interrupted';
-        const completed = _fin.status === 'completed' || _fin.status === 'completed_unverified';
+        const proofVerdict = durableProofVerdict?.verdict;
+        const completed = proofVerdict === 'verified'
+          || (!proofVerdict && (_fin.status === 'completed' || _fin.status === 'completed_unverified'));
+        const uncertain = proofVerdict === 'unknown' || proofVerdict === 'partially_verified';
         lifecycleContext.finalization = {
-          status: cancelled ? 'cancelled' : completed ? 'completed' : 'failed',
-          attemptStatus: cancelled ? 'cancelled' : completed ? 'succeeded' : 'failed',
-          outcome: _fin.status,
+          status: cancelled || proofVerdict === 'cancelled' ? 'cancelled'
+            : uncertain ? 'unknown' : completed ? 'completed' : 'failed',
+          attemptStatus: cancelled || proofVerdict === 'cancelled' ? 'cancelled'
+            : uncertain ? 'unknown' : completed ? 'succeeded' : 'failed',
+          outcome: proofVerdict ?? _fin.status,
           finishReason: result.finishReason,
-          evidence: _fin.evidence,
+          evidence: durableProofVerdict
+            ? jobEngine?.proof.exportJson(lifecycleContext.handle.jobId) ?? _fin.evidence
+            : _fin.evidence,
           jobCard: _fin.jobCard,
         };
       }

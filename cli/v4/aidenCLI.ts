@@ -1808,7 +1808,15 @@ export async function buildAgentRuntime(
   await pluginLoader.fireHook('onActivate');
   for (const plugin of pluginLoader.getRegistry().list()) {
     if (plugin.status === 'pending-grant' || plugin.status === 'suspended') {
-      recordStartupNotice(buildPluginGrantNotice(plugin.manifest.name));
+      recordStartupNotice(buildPluginGrantNotice(plugin.manifest.name, {
+        activeProvider: providerId,
+        providedProviders: plugin.manifest.providers,
+        capabilities: [
+          ...plugin.manifest.tools,
+          ...plugin.manifest.skills,
+          ...plugin.manifest.providers.filter((candidate) => candidate !== providerId),
+        ],
+      }));
     }
   }
 

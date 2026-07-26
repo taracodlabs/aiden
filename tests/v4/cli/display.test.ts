@@ -321,7 +321,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     // A completed row IS now written on non-TTY so log scrollback
     // records the action + duration.
     expect(out.length).toBeGreaterThan(0);
-    expect(stripAnsi(out)).toContain('fetching');
+    expect(stripAnsi(out)).toContain('completed');
     expect(stripAnsi(out)).toContain('220ms');
   });
 
@@ -336,7 +336,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     const second = chunks.join('');
     // Erase ANSI (running row removed) AND a new completed row written.
     expect(second).toMatch(/\x1b\[1A\x1b\[2K\r/);
-    expect(stripAnsi(second)).toContain('fetching');
+    expect(stripAnsi(second)).toContain('completed');
     expect(stripAnsi(second)).toContain('180ms');
   });
 
@@ -550,7 +550,29 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     const row = d.toolRow('shell_exec', { command: 'echo ok' }, () => snapshot);
     chunks.length = 0;
     row.finish?.(snapshot);
-    expect(stripAnsi(chunks.join(''))).toContain(expected);
+    const rendered = stripAnsi(chunks.join(''));
+    expect(rendered).toContain(expected);
+    expect(rendered).not.toMatch(/\b(?:running|writing|calling|waiting)\b/u);
+  });
+
+  it.each([
+    ['failed', 'failed'],
+    ['blocked', 'blocked'],
+    ['degraded', 'partial'],
+    ['unknown', 'unknown'],
+  ] as const)('replaces the active tool verb for %s terminal rows', (terminalClassification, expected) => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    const snapshot: ActivitySnapshot = {
+      phase: 'terminal', phaseElapsedMs: 0, lifecycleElapsedMs: 2_000,
+      approvalWaitMs: 0, executionDurationMs: 1_500, verificationDurationMs: 0,
+      retryBackoffMs: 0, attemptCount: 1, terminalClassification,
+    };
+    const row = d.toolRow('file_write', { path: 'result.txt' }, () => snapshot);
+    chunks.length = 0;
+    row.finish?.(snapshot);
+    const rendered = stripAnsi(chunks.join(''));
+    expect(rendered).toContain(expected);
+    expect(rendered).not.toMatch(/\b(?:running|writing|calling|waiting)\b/u);
   });
 
   it('keeps the primary outcome and execution duration at narrow width', () => {
@@ -815,7 +837,7 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.toolRow('open_url', { url: 'https://example.com/x' }).fail(1500);
     const flat = stripAnsi(chunks.join(''));
     expect(flat).toMatch(/┊/);
-    expect(flat).toMatch(/fetching/);
+    expect(flat).toMatch(/failed/);
     expect(flat).toMatch(/fail 1\.5s/);
   });
 
@@ -883,8 +905,8 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     const flat = stripAnsi(chunks.join(''));
     // Must NOT contain the literal "{}" — the v4.1.4-media fix.
     expect(flat).not.toMatch(/\{\}/);
-    // Must still contain the verb (it's the trail's identity anchor).
-    expect(flat).toMatch(/media\s/);
+    // Must still contain the terminal state (the settled trail's identity anchor).
+    expect(flat).toMatch(/failed\s/);
   });
 
   it('media_transport row previews target arg (not raw JSON)', () => {
@@ -922,8 +944,8 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     // 'foo' → fallback verb 'calling' (7 chars), padded to 12
     d.toolRow('foo', { query: 'q' }).fail(10);
     const flat = stripAnsi(chunks.join(''));
-    // "calling" padded to 12 => 5 trailing spaces before the detail
-    expect(flat).toMatch(/calling {5}/);
+    // "failed" padded to 12 => 6 trailing spaces before the detail.
+    expect(flat).toMatch(/failed {6,}/);
   });
 });
 

@@ -31,4 +31,29 @@ describe('/queue', () => {
     expect(writes[0].length).toBeLessThanOrEqual(106);
     expect(listQueue()).toEqual([stored]);
   });
+
+  it('shows each durable input identity without changing FIFO content', async () => {
+    const writes: string[] = [];
+    const entries = [
+      { inputId: 'input_first-identity', message: 'QUEUE ONE' },
+      { inputId: 'input_second-identity', message: 'QUEUE TWO' },
+    ];
+    await queue.handler({
+      args: [],
+      display: {
+        info: vi.fn(), dim: vi.fn(), success: vi.fn(), warn: vi.fn(),
+        write: vi.fn((text: string) => { writes.push(text); }),
+      },
+      session: {
+        listQueue: vi.fn(() => entries.map((entry) => entry.message)),
+        listQueueEntries: vi.fn(() => entries),
+        clearQueue: vi.fn(() => 0),
+      },
+    } as never);
+
+    expect(writes).toEqual([
+      '  1. [input_first-identity] QUEUE ONE\n',
+      '  2. [input_second-identity] QUEUE TWO\n',
+    ]);
+  });
 });

@@ -38,13 +38,17 @@ export const queue: SlashCommand = {
       ctx.display.success(n > 0 ? `Cleared ${n} queued message${n === 1 ? '' : 's'}.` : 'Queue was already empty.');
       return {};
     }
-    const items = session.listQueue();
+    const items = session.listQueueEntries?.()
+      ?? session.listQueue().map((message) => ({ inputId: null, message }));
     if (items.length === 0) {
       ctx.display.info('Type-next queue is empty. Type while a turn runs to queue a message (see /busy).');
       return {};
     }
     ctx.display.info(`Type-next queue (${items.length}) — runs in order after the current turn:`);
-    items.forEach((m, i) => ctx.display.write(`  ${i + 1}. ${formatQueuePreview(m)}\n`));
+    items.forEach((entry, i) => {
+      const identity = entry.inputId ? `[${entry.inputId}] ` : '';
+      ctx.display.write(`  ${i + 1}. ${identity}${formatQueuePreview(entry.message)}\n`);
+    });
     ctx.display.dim('Run /queue clear to empty it.');
     return {};
   },

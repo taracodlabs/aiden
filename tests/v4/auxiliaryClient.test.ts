@@ -71,6 +71,26 @@ describe('AuxiliaryClient', () => {
     expect(u.risk_assess.calls).toBe(2);
   });
 
+  it('attributes shutdown distillation to the provider-attempt usage ledger', async () => {
+    const adapter = new StubAdapter();
+    const c = new AuxiliaryClient({
+      defaultProvider: 'p',
+      defaultModel: 'm',
+      adapter,
+      warn: () => {},
+    });
+
+    await c.call({ purpose: 'session_summary', prompt: 'summarize the session' });
+
+    expect(adapter.calls).toHaveLength(1);
+    expect(adapter.calls[0]?.usageContext).toMatchObject({
+      entryPoint: 'auxiliary',
+      purpose: 'distillation',
+      providerConfigured: 'p',
+      modelConfigured: 'm',
+    });
+  });
+
   it('3. default maxTokens is 200', async () => {
     const adapter = new StubAdapter();
     const c = new AuxiliaryClient({
