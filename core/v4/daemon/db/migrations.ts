@@ -1434,6 +1434,24 @@ function applyV30(db: Database.Database): void {
   `);
 }
 
+/** Cover the ordered kernel projection and active-Job query paths. */
+function applyV31(db: Database.Database): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_status_created_id
+      ON tasks(status, created_at, id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_session_created_id
+      ON tasks(session_id, created_at, id);
+    CREATE INDEX IF NOT EXISTS idx_side_effect_job_created
+      ON side_effect_ledger(job_id, attempted_at, key);
+    CREATE INDEX IF NOT EXISTS idx_child_job_contracts_parent_created
+      ON child_job_contracts(parent_job_id, created_at, child_job_id);
+    CREATE INDEX IF NOT EXISTS idx_job_claims_job_created
+      ON job_claims(job_id, created_at, claim_id);
+    CREATE INDEX IF NOT EXISTS idx_job_evidence_job_created
+      ON job_evidence(job_id, captured_at, evidence_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1465,6 +1483,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 28, name: 'durable budgets and capabilities', apply: applyV28 },
   { version: 29, name: 'durable claims evidence and verdicts', apply: applyV29 },
   { version: 30, name: 'durable Job event cursors', apply: applyV30 },
+  { version: 31, name: 'kernel projection query indexes', apply: applyV31 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
