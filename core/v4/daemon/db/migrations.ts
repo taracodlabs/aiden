@@ -1305,6 +1305,52 @@ function applyV27(db: Database.Database): void {
   `);
 }
 
+/** Durable budget balances, debits, and least-privilege capability snapshots. */
+function applyV28(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_budgets (
+      job_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      limit_value REAL,
+      used_value REAL NOT NULL DEFAULT 0,
+      has_unknown_usage INTEGER NOT NULL DEFAULT 0,
+      state_version INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (job_id, kind),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS job_budget_debits (
+      debit_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      amount REAL,
+      certainty TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (job_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_budget_debits_attempt
+      ON job_budget_debits(attempt_id, generation, created_at);
+    CREATE TABLE IF NOT EXISTS job_capability_sets (
+      job_id TEXT PRIMARY KEY,
+      allowed_tools_json TEXT NOT NULL,
+      allowed_paths_json TEXT NOT NULL,
+      allowed_hosts_json TEXT NOT NULL,
+      allowed_applications_json TEXT NOT NULL,
+      allowed_connections_json TEXT NOT NULL,
+      allowed_accounts_json TEXT NOT NULL,
+      allowed_workers_json TEXT NOT NULL,
+      allowed_effect_kinds_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1333,6 +1379,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 25, name: 'durable waits and continuations', apply: applyV25 },
   { version: 26, name: 'exact approval fence binding', apply: applyV26 },
   { version: 27, name: 'durable child Job contracts', apply: applyV27 },
+  { version: 28, name: 'durable budgets and capabilities', apply: applyV28 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

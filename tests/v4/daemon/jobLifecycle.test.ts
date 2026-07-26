@@ -113,6 +113,31 @@ describe('executeDurableJob', () => {
     expect(engine.getAttempt(job.activeAttemptId!)?.status).toBe('running');
   });
 
+  it('expires a durable runtime budget while execution is waiting and records actual elapsed use', async () => {
+    const execution = executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_runtime_budget',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_runtime_budget', requestFingerprint: 'fingerprint_runtime_budget',
+        goal: 'wait beyond budget', resourcePolicy: { budgets: { runtime_ms: 5 } },
+      },
+      execute: async (handle) => new Promise<string>((resolve) => {
+        handle.signal.addEventListener('abort', () => resolve('aborted'), { once: true });
+      }),
+      finalize: () => ({ status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {} }),
+    });
+
+    await expect(execution).rejects.toThrow(/runtime_ms/);
+    const job = engine.listJobs({ sessionId: 'session_runtime_budget' })[0]!;
+    expect(job.status).toBe('failed');
+    expect(engine.resources.getBudgets(job.id)).toMatchObject([
+      { kind: 'runtime_ms', limit: 5, hasUnknownUsage: false },
+    ]);
+    expect(engine.resources.getBudgets(job.id)[0]!.used).toBeGreaterThanOrEqual(5);
+  });
+
   it('adopts an already admitted Job without creating a parallel lifecycle', async () => {
     const admitted = engine.submitJob({
       entryPoint: 'test', source: 'test', sessionId: 'session_adopted',

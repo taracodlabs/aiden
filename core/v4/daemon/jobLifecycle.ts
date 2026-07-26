@@ -110,6 +110,13 @@ export class DurableJobAuthorityLostError extends DurableJobLifecycleError {
   }
 }
 
+export class DurableJobBudgetExceededError extends DurableJobLifecycleError {
+  constructor(readonly budgetKind: string, handle?: Partial<DurableJobHandle>) {
+    super(`Durable Job budget exhausted: ${budgetKind}`, handle);
+    this.name = 'DurableJobBudgetExceededError';
+  }
+}
+
 export interface ExecuteDurableJobOptions<T> {
   engine: JobEngine;
   ownerId: string;
@@ -263,6 +270,9 @@ export async function executeDurableJob<T>(
   let leaseLost: DurableJobLifecycleError | null = null;
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let controlWatcher: ReturnType<typeof setInterval> | null = null;
+  let runtimeBudgetTimer: ReturnType<typeof setTimeout> | null = null;
+  let runtimeBudgetExpired = false;
+  const executionStartedAt = Date.now();
 
   const stopHeartbeat = (): void => {
     if (heartbeat) clearInterval(heartbeat);
@@ -477,6 +487,17 @@ export async function executeDurableJob<T>(
 
     startHeartbeat();
 
+    const runtimeBudget = options.engine.resources.getBudgets(handle.jobId)
+      .find((budget) => budget.kind === 'runtime_ms');
+    if (runtimeBudget?.limit !== null && runtimeBudget !== undefined) {
+      const remaining = Math.max(0, runtimeBudget.limit - runtimeBudget.used);
+      runtimeBudgetTimer = setTimeout(() => {
+        runtimeBudgetExpired = true;
+        leaseAbort.abort(new DurableJobBudgetExceededError('runtime_ms', handle));
+      }, remaining);
+      runtimeBudgetTimer.unref?.();
+    }
+
     controlWatcher = setInterval(() => {
       if (leaseAbort.signal.aborted) return;
       const status = options.engine.getJob(handle.jobId)?.status;
@@ -489,6 +510,7 @@ export async function executeDurableJob<T>(
     notifyPhase(options.onPhase, 'running', handle, handle.generation);
     notifyPhase(options.onPhase, 'executing', handle, handle.generation);
     const value = await runWithJobExecutionContext(executionContext, () => options.execute(handle));
+    if (runtimeBudgetExpired) throw new DurableJobBudgetExceededError('runtime_ms', handle);
     if (leaseLost) throw leaseLost;
     assertAuthority(options.engine, handle);
 
@@ -525,6 +547,23 @@ export async function executeDurableJob<T>(
     }
     throw error;
   } finally {
+    if (runtimeBudgetTimer) clearTimeout(runtimeBudgetTimer);
+    runtimeBudgetTimer = null;
+    if (options.engine.resources.getBudgets(handle.jobId).some((budget) => budget.kind === 'runtime_ms')) {
+      try {
+        options.engine.resources.debit({
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+          fenceToken: handle.fenceToken,
+          kind: 'runtime_ms',
+          amount: Math.max(0, Date.now() - executionStartedAt),
+          certainty: 'confirmed',
+          idempotencyKey: `runtime:${handle.attemptId}:${handle.generation}`,
+          enforceLimit: false,
+        });
+      } catch { /* stale authority cannot spend after replacement */ }
+    }
     stopHeartbeat();
     if (controlWatcher) clearInterval(controlWatcher);
     controlWatcher = null;

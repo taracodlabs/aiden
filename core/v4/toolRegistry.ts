@@ -28,6 +28,8 @@
  * Status: PHASE 8.
  */
 
+import { resolve as resolvePath } from 'node:path';
+
 import type {
   ToolSchema,
   ToolCallRequest,
@@ -586,6 +588,46 @@ export class ToolRegistry {
         args,
         context.cwd ?? process.cwd(),
       );
+      const resourceAuthority = durableJobContext?.engine.resources;
+      if (durableJobContext && resourceAuthority) {
+        if (!resourceAuthority.authorize({ jobId: durableJobContext.jobId, kind: 'tool', value: call.name })) {
+          return finish({ id: call.id, name: call.name, result: null, error: 'Tool is outside this Job capability boundary' }, 'blocked');
+        }
+        for (const key of ['path', 'from', 'to', 'source', 'destination']) {
+          const value = args[key];
+          if (
+            typeof value === 'string' && value.length > 0
+            && !resourceAuthority.authorize({
+              jobId: durableJobContext.jobId,
+              kind: 'path',
+              value: resolvePath(context.cwd ?? process.cwd(), value),
+            })
+          ) {
+            return finish({ id: call.id, name: call.name, result: null, error: 'Path is outside this Job capability boundary' }, 'blocked');
+          }
+        }
+        if (
+          effectiveMutates
+          && !resourceAuthority.authorize({ jobId: durableJobContext.jobId, kind: 'effect', value: preliminaryEffect.kind })
+        ) {
+          return finish({ id: call.id, name: call.name, result: null, error: 'Effect is outside this Job capability boundary' }, 'blocked');
+        }
+        if (resourceAuthority.getBudgets(durableJobContext.jobId).some((budget) => budget.kind === 'tool_calls')) {
+          const debit = resourceAuthority.debit({
+            jobId: durableJobContext.jobId,
+            attemptId: durableJobContext.attemptId,
+            generation: durableJobContext.generation,
+            fenceToken: durableJobContext.fenceToken,
+            kind: 'tool_calls',
+            amount: 1,
+            certainty: 'confirmed',
+            idempotencyKey: `tool-call:${call.id}`,
+          });
+          if (debit.exhausted) {
+            return finish({ id: call.id, name: call.name, result: null, error: 'Tool-call budget exhausted' }, 'blocked');
+          }
+        }
+      }
       const approvalGated = effectiveMutates && preliminaryEffect.approvalRequirement !== 'none' && (
         context.approvalEngine !== undefined || (context.actionAuthority !== undefined && durableJobContext !== undefined)
       );
@@ -1004,6 +1046,22 @@ export class ToolRegistry {
           prepared: preparedToolCall,
           execute: async () => {
             const jobContext = currentJobExecutionContext();
+            if (
+              effectiveMutates && jobContext
+              && jobContext.engine.resources.getBudgets(jobContext.jobId).some((budget) => budget.kind === 'effects')
+            ) {
+              const debit = jobContext.engine.resources.debit({
+                jobId: jobContext.jobId,
+                attemptId: jobContext.attemptId,
+                generation: jobContext.generation,
+                fenceToken: jobContext.fenceToken,
+                kind: 'effects',
+                amount: 1,
+                certainty: 'confirmed',
+                idempotencyKey: `effect:${call.id}`,
+              });
+              if (debit.exhausted) throw new Error('Effect budget exhausted');
+            }
             const interactive = isExclusiveToolInteraction(handler.interaction);
             let waitId: string | null = null;
             if (interactive && jobContext?.controlAuthority) {

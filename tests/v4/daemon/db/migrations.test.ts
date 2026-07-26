@@ -47,6 +47,9 @@ describe('runMigrations', () => {
     expect(names).toContain('restart_failure_counts');
     expect(names).toContain('triggers');
     expect(names).toContain('child_job_contracts');
+    expect(names).toContain('job_budgets');
+    expect(names).toContain('job_budget_debits');
+    expect(names).toContain('job_capability_sets');
   });
 
   it('enforces trigger_events UNIQUE(source, idempotency_key) when key present', () => {

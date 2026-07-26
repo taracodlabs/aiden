@@ -18,6 +18,8 @@ import type {
   EffectRetryRecommendation,
 } from '../effectReconciliation';
 import { createExecutionGraphAuthority, type ExecutionGraphAuthority } from './executionGraph';
+import { createJobResourceAuthority, type JobResourceAuthority } from './jobResourceAuthority';
+import type { JobBudgetKind, JobCapabilities } from './jobResourceAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -101,6 +103,10 @@ export interface SubmitJobCommand {
     allowedResources: Record<string, unknown>;
     budget: Record<string, unknown>;
   };
+  resourcePolicy?: {
+    budgets?: Partial<Record<JobBudgetKind, number | null>>;
+    capabilities?: JobCapabilities;
+  };
 }
 
 export interface ChildJobContractRecord {
@@ -170,6 +176,7 @@ export interface LeaseResult extends TransitionResult {
 
 export interface JobEngine {
   readonly graph: ExecutionGraphAuthority;
+  readonly resources: JobResourceAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -595,6 +602,7 @@ function parseRecord(raw: string | null | undefined): Record<string, unknown> {
 export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   const { db } = opts;
   const graph = createExecutionGraphAuthority(db);
+  const resources = createJobResourceAuthority(db);
 
   const getJobRow = (jobId: string): JobSqlRow | undefined => db.prepare(
     `SELECT id, status, state_version, active_attempt_id, root_job_id,
@@ -808,6 +816,14 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         type: 'worker.assigned', producer: command.source,
         idempotencyKey: `worker-assigned:${jobId}`,
         payload: { workerId: command.childContract.workerId, parentJobId: command.parentJobId },
+      });
+    }
+    if (command.resourcePolicy) {
+      resources.configure({
+        jobId,
+        budgets: command.resourcePolicy.budgets,
+        capabilities: command.resourcePolicy.capabilities,
+        now,
       });
     }
     return { jobId, attemptId, runId, reused: false };
@@ -2218,6 +2234,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
 
   return {
     graph,
+    resources,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);

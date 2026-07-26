@@ -26,7 +26,7 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { buildChildAgent, ProviderNotFoundError } from './childBuilder';
+import { buildChildAgent, ProviderNotFoundError, SUBAGENT_BLOCKED_TOOL_NAMES } from './childBuilder';
 import type { ChildBuilderDeps } from './childBuilder';
 // v4.12.1 Pillar 3 — evidence-required subagent reports. The child's own
 // tool trace is run through the SAME verify-before-done gate the REPL/daemon
@@ -239,6 +239,16 @@ export async function spawnSubAgent(
         durationMs: Date.now() - startedAt,
       });
     }
+    const parentToolsets = deps.parentProfileToolsets ? [...deps.parentProfileToolsets] : undefined;
+    const requestedToolsets = spec.toolsets?.length ? spec.toolsets : undefined;
+    const selectedToolsets = parentToolsets && requestedToolsets
+      ? parentToolsets.filter((toolset) => requestedToolsets.includes(toolset))
+      : requestedToolsets ?? parentToolsets;
+    const effectiveToolsets = selectedToolsets?.length === 0 ? parentToolsets : selectedToolsets;
+    const allowedTools = deps.toolRegistry
+      .getSchemas(effectiveToolsets, 'repl', deps.parentExcludeToolsets ? [...deps.parentExcludeToolsets] : undefined)
+      .map((schema) => schema.name)
+      .filter((name) => !SUBAGENT_BLOCKED_TOOL_NAMES.has(name));
     try {
       const execution = await executeDurableJob({
         engine: deps.jobEngine,
@@ -264,6 +274,20 @@ export async function spawnSubAgent(
               maxIterations,
               timeoutMs,
               providerAttempts: spec.providerAttemptBudgets ?? null,
+            },
+          },
+          resourcePolicy: {
+            budgets: {
+              runtime_ms: timeoutMs,
+              model_calls: maxIterations,
+              tool_calls: maxIterations,
+              effects: maxIterations,
+              output_bytes: null,
+            },
+            capabilities: {
+              tools: allowedTools,
+              paths: [deps.parentToolContext.cwd],
+              workers: [`${deps.instanceId}:${childSessionId}`],
             },
           },
         },
