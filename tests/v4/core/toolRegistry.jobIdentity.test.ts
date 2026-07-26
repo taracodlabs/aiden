@@ -34,6 +34,16 @@ const TEST_EFFECT_CONTRACT = {
   target: () => 'fixture-target',
 };
 
+function resourceAuthorityMock() {
+  return {
+    resources: {
+      authorize: vi.fn(() => true),
+      getBudgets: vi.fn(() => []),
+      debit: vi.fn(() => ({ applied: true })),
+    },
+  };
+}
+
 describe('ToolRegistry durable execution identity', () => {
   it('persists and settles waits around approval and exclusive interaction', async () => {
     const db = new Database(':memory:');
@@ -182,6 +192,7 @@ describe('ToolRegistry durable execution identity', () => {
   it('persists and starts a mutating ToolCall before the handler executes', async () => {
     const order: string[] = [];
     const engine = {
+      ...resourceAuthorityMock(),
       prepareToolCall: vi.fn(() => { order.push('prepared'); return { applied: true, effectId: 'effect_1' }; }),
       startToolCall: vi.fn(() => { order.push('started'); return { applied: true }; }),
       completeToolCall: vi.fn(() => { order.push('completed'); return { applied: true }; }),
@@ -252,6 +263,7 @@ describe('ToolRegistry durable execution identity', () => {
   it('scopes a repeated provider ToolCall id to each durable Attempt', async () => {
     const persisted = new Map<string, { attemptId: string; verification?: string }>();
     const engine = {
+      ...resourceAuthorityMock(),
       prepareToolCall: vi.fn((command: { toolCallId: string; attemptId: string }) => {
         if (persisted.has(command.toolCallId)) return { applied: false, conflict: 'illegal_transition' };
         persisted.set(command.toolCallId, { attemptId: command.attemptId });
@@ -299,6 +311,7 @@ describe('ToolRegistry durable execution identity', () => {
   it('does not execute when durable preparation rejects a stale fence', async () => {
     const handler = vi.fn(async () => ({ ok: true }));
     const engine = {
+      ...resourceAuthorityMock(),
       prepareToolCall: vi.fn(() => ({ applied: false, conflict: 'stale_fence' })),
       startToolCall: vi.fn(),
       completeToolCall: vi.fn(),
@@ -329,6 +342,7 @@ describe('ToolRegistry durable execution identity', () => {
     const order: string[] = [];
     const handler = vi.fn(async () => ({ ok: true }));
     const engine = {
+      ...resourceAuthorityMock(),
       prepareToolCall: vi.fn(() => { order.push('effect'); return { applied: true, effectId: 'effect_exact' }; }),
       resolveToolCallApproval: vi.fn(() => { order.push('effect-blocked'); return { applied: true }; }),
       startToolCall: vi.fn(),
@@ -372,6 +386,7 @@ describe('ToolRegistry durable execution identity', () => {
   it('records verified read-only shell execution without a mutation Effect', async () => {
     const handler = vi.fn(async () => ({ ok: true }));
     const engine = {
+      ...resourceAuthorityMock(),
       prepareToolCall: vi.fn(() => ({ applied: true })),
       startToolCall: vi.fn(() => ({ applied: true })),
       completeToolCall: vi.fn(() => ({ applied: true })),
@@ -402,6 +417,7 @@ describe('ToolRegistry durable execution identity', () => {
 
   it('retains an unknown Effect when a mutating handler throws', async () => {
     const engine = {
+      ...resourceAuthorityMock(),
       prepareToolCall: vi.fn(() => ({ applied: true, effectId: 'effect_failure' })),
       startToolCall: vi.fn(() => ({ applied: true })),
       completeToolCall: vi.fn(() => ({ applied: true })),
@@ -431,6 +447,7 @@ describe('ToolRegistry durable execution identity', () => {
   it('recomputes policy and action identity immediately before execution', async () => {
     const handler = vi.fn(async () => ({ ok: true }));
     const engine = {
+      ...resourceAuthorityMock(),
       prepareToolCall: vi.fn(() => ({ applied: true })),
       resolveToolCallApproval: vi.fn(() => ({ applied: true })),
       startToolCall: vi.fn(),
