@@ -18,6 +18,7 @@ import { DuringTurnInput } from '../../../cli/v4/duringTurnInput';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
+import { createJobControlAuthority } from '../../../core/v4/daemon/jobControlAuthority';
 
 function mkDisplay() {
   const chunks: string[] = [];
@@ -725,6 +726,54 @@ describe('ChatSession — v4.6 Phase 2Q-B REPL parent-run row', () => {
 });
 
 describe('ChatSession durable Job admission', () => {
+  it('cancels staged continuation Jobs when the durable queue is cleared', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('instance_job', 1, 'localhost', ?, ?, '4.16.1')`,
+    ).run(now, now);
+    const jobEngine = createJobEngine({ db });
+    const controls = createJobControlAuthority({ db, jobEngine });
+    const staged = jobEngine.submitJob({
+      entryPoint: 'interactive', source: 'repl', sessionId: 'session_queue_clear',
+      instanceId: 'instance_job', idempotencyNamespace: 'queue-clear',
+      idempotencyKey: 'staged-job', goal: 'queued message',
+    });
+    const input = controls.inputs.receive({
+      jobId: staged.jobId,
+      targetAttemptId: staged.attemptId,
+      sessionId: 'session_queue_clear',
+      source: 'tui',
+      kind: 'message',
+      content: 'queued message',
+      idempotencyNamespace: 'queue-clear-input',
+      idempotencyKey: 'staged-input',
+    });
+    const session = new ChatSession(buildOpts({
+      jobEngine: jobEngine as never,
+      jobControlAuthority: controls,
+    }));
+    const internals = session as unknown as {
+      sessionId: string;
+      duringTurnInput: DuringTurnInput;
+      durableQueueInputIds: string[];
+    };
+    internals.sessionId = 'session_queue_clear';
+    internals.duringTurnInput.enqueue('queued message');
+    internals.durableQueueInputIds.push(input.record.inputId);
+
+    try {
+      expect(session.clearQueue()).toBe(1);
+      expect(jobEngine.getJob(staged.jobId)?.status).toBe('cancelled');
+      expect(controls.inputs.get(input.record.inputId)?.state).toBe('cancelled');
+    } finally {
+      db.close();
+    }
+  });
+
   it('creates and leases the Job Attempt before the first provider call', async () => {
     const order: string[] = [];
     const { agent } = mkAgent({ finalContent: 'ok' });
