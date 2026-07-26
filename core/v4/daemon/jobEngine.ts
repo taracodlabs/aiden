@@ -6,6 +6,11 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import type { Db } from './db/connection';
+import type {
+  EffectApprovalRequirement,
+  EffectClassification,
+  EffectRetrySafety,
+} from '../effectContract';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -96,6 +101,8 @@ export interface TransitionResult {
   stateVersion?: number;
   conflict?: TransitionConflict;
   duplicate?: boolean;
+  effectId?: string;
+  existingToolCallId?: string;
 }
 
 export interface LeaseResult extends TransitionResult {
@@ -229,7 +236,33 @@ export interface JobEngine {
     normalizedArgsDigest: string;
     riskTier: string;
     mutates: boolean;
+    effect?: {
+      classification: Exclude<EffectClassification, 'read_only'>;
+      kind: string;
+      target: string | null;
+      retrySafety: EffectRetrySafety;
+      idempotencySupported: boolean;
+      idempotencyKey: string | null;
+      reconciliationSupported: boolean;
+      verificationSupported: boolean;
+      approvalRequirement: EffectApprovalRequirement;
+      approvalState: 'not_required' | 'pending';
+      sensitiveFields: readonly string[];
+      redactionRules: readonly string[];
+      trusted: boolean;
+    };
     modelCallId?: string | null;
+    producer: string;
+    now?: number;
+  }): TransitionResult;
+  resolveToolCallApproval(command: {
+    toolCallId: string;
+    attemptId: string;
+    generation: number;
+    fenceToken: string;
+    state: 'not_required' | 'pending' | 'approved' | 'denied' | 'interrupted' | 'timed_out' | 'blocked';
+    approvalId?: string | null;
+    actionDigest?: string | null;
     producer: string;
     now?: number;
   }): TransitionResult;
@@ -1281,11 +1314,31 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         && existing.tool_name === command.toolName
         && existing.normalized_args_digest === command.normalizedArgsDigest;
       return sameIdentity
-        ? { applied: false, duplicate: true }
+        ? { applied: false, duplicate: true, effectId: existing.side_effect_id ?? undefined, existingToolCallId: existing.tool_call_id }
         : { applied: false, conflict: 'illegal_transition' };
     }
 
-    const now = Date.now();
+    if (command.mutates && !command.effect) {
+      return { applied: false, conflict: 'illegal_transition' };
+    }
+    if (command.effect?.idempotencyKey) {
+      const prior = db.prepare(
+        `SELECT key, tool_call_id FROM side_effect_ledger
+          WHERE job_id = ? AND idempotency_key = ?`,
+      ).get(command.jobId, command.effect.idempotencyKey) as {
+        key: string; tool_call_id: string;
+      } | undefined;
+      if (prior) {
+        return {
+          applied: false,
+          duplicate: true,
+          effectId: prior.key,
+          existingToolCallId: prior.tool_call_id,
+        };
+      }
+    }
+
+    const now = command.now ?? Date.now();
     const sideEffectId = command.mutates ? `side_effect:${command.toolCallId}` : null;
     db.prepare(
       `INSERT INTO tool_calls (
@@ -1308,14 +1361,20 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       now,
     );
     if (sideEffectId) {
+      const effect = command.effect!;
       const ordinal = db.prepare(
         'SELECT COUNT(*) + 1 AS ordinal FROM side_effect_ledger WHERE job_id = ?',
       ).get(command.jobId) as { ordinal: number };
       db.prepare(
         `INSERT INTO side_effect_ledger (
            key, task_id, step, tool, args_hash, status, attempted_at,
-           job_id, attempt_id, generation, tool_call_id, effect_state
-         ) VALUES (?, ?, ?, ?, ?, 'attempting', ?, ?, ?, ?, ?, 'prepared')`,
+           job_id, attempt_id, generation, tool_call_id, effect_state,
+           effect_classification, effect_kind, target, retry_safety,
+           idempotency_key, idempotency_supported, reconciliation_supported,
+           verification_supported, approval_requirement, approval_state,
+           sensitive_fields_json, redaction_rules_json, updated_at
+         ) VALUES (?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?, 'requested',
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
       ).run(
         sideEffectId,
         command.jobId,
@@ -1327,6 +1386,19 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         command.attemptId,
         command.generation,
         command.toolCallId,
+        effect.classification,
+        effect.kind,
+        effect.target,
+        effect.retrySafety,
+        effect.idempotencyKey,
+        effect.idempotencySupported ? 1 : 0,
+        effect.reconciliationSupported ? 1 : 0,
+        effect.verificationSupported ? 1 : 0,
+        effect.approvalRequirement,
+        effect.approvalState,
+        JSON.stringify(effect.sensitiveFields),
+        JSON.stringify(effect.redactionRules),
+        now,
       );
     }
     appendEvent({
@@ -1335,11 +1407,92 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       attemptId: command.attemptId,
       generation: command.generation,
       type: 'tool_call.prepared',
-      payload: { toolCallId: command.toolCallId, toolName: command.toolName, mutates: command.mutates },
+      payload: {
+        toolCallId: command.toolCallId,
+        effectId: sideEffectId,
+        toolName: command.toolName,
+        mutates: command.mutates,
+        effectKind: command.effect?.kind ?? null,
+        effectClassification: command.effect?.classification ?? 'read_only',
+      },
       producer: command.producer,
       idempotencyKey: `tool-call-prepared:${command.toolCallId}`,
     });
-    return { applied: true };
+    if (sideEffectId) {
+      appendEvent({
+        jobId: command.jobId,
+        runId: attempt.id,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        type: 'effect.requested',
+        payload: {
+          toolCallId: command.toolCallId,
+          effectId: sideEffectId,
+          effectKind: command.effect!.kind,
+          effectClassification: command.effect!.classification,
+        },
+        producer: command.producer,
+        idempotencyKey: `effect-requested:${command.toolCallId}`,
+      });
+    }
+    return { applied: true, effectId: sideEffectId ?? undefined };
+  }).immediate;
+
+  const resolveToolCallApprovalTx = db.transaction((
+    command: Parameters<JobEngine['resolveToolCallApproval']>[0],
+  ): TransitionResult => {
+    const attempt = activeFence(command.attemptId, command.generation, command.fenceToken, command.now);
+    const toolCall = getToolCallRow(command.toolCallId);
+    if (!attempt || !toolCall || toolCall.attempt_id !== command.attemptId || toolCall.generation !== command.generation) {
+      return { applied: false, conflict: 'stale_fence' };
+    }
+    if (!toolCall.side_effect_id) return { applied: false, conflict: 'illegal_transition' };
+    const row = db.prepare(
+      'SELECT approval_state FROM side_effect_ledger WHERE key = ?',
+    ).get(toolCall.side_effect_id) as { approval_state: string } | undefined;
+    if (!row) return { applied: false, conflict: 'not_found' };
+    if (row.approval_state === command.state) return { applied: false, duplicate: true, effectId: toolCall.side_effect_id };
+    if (
+      ['approved', 'denied', 'interrupted', 'timed_out', 'blocked'].includes(row.approval_state)
+      && !(row.approval_state === 'approved' && command.state === 'blocked')
+    ) {
+      return { applied: false, conflict: 'terminal_state' };
+    }
+    const now = command.now ?? Date.now();
+    const changed = db.prepare(
+      `UPDATE side_effect_ledger
+          SET approval_state = ?, approval_id = ?, action_digest = ?,
+              effect_state = CASE WHEN ? = 'approved' THEN 'approved' ELSE effect_state END,
+              updated_at = ?
+        WHERE key = ? AND attempt_id = ? AND generation = ?
+          AND approval_state IN ('not_required','pending')`,
+    ).run(
+      command.state,
+      command.approvalId ?? null,
+      command.actionDigest ?? null,
+      command.state,
+      now,
+      toolCall.side_effect_id,
+      command.attemptId,
+      command.generation,
+    );
+    if (changed.changes !== 1) return { applied: false, conflict: 'illegal_transition' };
+    appendEvent({
+      jobId: toolCall.job_id,
+      runId: attempt.id,
+      attemptId: command.attemptId,
+      generation: command.generation,
+      type: `effect.approval.${command.state}`,
+      payload: {
+        toolCallId: command.toolCallId,
+        effectId: toolCall.side_effect_id,
+        approvalId: command.approvalId ?? null,
+        actionDigest: command.actionDigest ?? null,
+      },
+      producer: command.producer,
+      idempotencyKey: `effect-approval:${command.toolCallId}:${command.state}`,
+    });
+    return { applied: true, effectId: toolCall.side_effect_id };
   }).immediate;
 
   const startToolCallTx = db.transaction((command: Parameters<JobEngine['startToolCall']>[0]): TransitionResult => {
@@ -1350,6 +1503,14 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     }
     if (toolCall.state === 'started') return { applied: false, duplicate: true };
     if (toolCall.state !== 'prepared') return { applied: false, conflict: 'illegal_transition' };
+    if (toolCall.side_effect_id) {
+      const effect = db.prepare(
+        'SELECT approval_state FROM side_effect_ledger WHERE key = ?',
+      ).get(toolCall.side_effect_id) as { approval_state: string } | undefined;
+      if (!effect || !['approved', 'not_required'].includes(effect.approval_state)) {
+        return { applied: false, conflict: 'illegal_transition' };
+      }
+    }
     const now = Date.now();
     const changed = db.prepare(
       `UPDATE tool_calls SET state = 'started', started_at = ?, updated_at = ?
@@ -1358,9 +1519,9 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     if (changed.changes !== 1) return { applied: false, conflict: 'illegal_transition' };
     if (toolCall.side_effect_id) {
       db.prepare(
-        `UPDATE side_effect_ledger SET effect_state = 'started'
-          WHERE key = ? AND attempt_id = ? AND generation = ? AND effect_state = 'prepared'`,
-      ).run(toolCall.side_effect_id, command.attemptId, command.generation);
+        `UPDATE side_effect_ledger SET effect_state = 'started', status = 'attempting', updated_at = ?
+          WHERE key = ? AND attempt_id = ? AND generation = ? AND effect_state IN ('requested','approved')`,
+      ).run(now, toolCall.side_effect_id, command.attemptId, command.generation);
     }
     appendEvent({
       jobId: toolCall.job_id,
@@ -1372,6 +1533,18 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       producer: command.producer,
       idempotencyKey: `tool-call-started:${command.toolCallId}`,
     });
+    if (toolCall.side_effect_id) {
+      appendEvent({
+        jobId: toolCall.job_id,
+        runId: attempt.id,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        type: 'effect.started',
+        payload: { toolCallId: command.toolCallId, effectId: toolCall.side_effect_id },
+        producer: command.producer,
+        idempotencyKey: `effect-started:${command.toolCallId}`,
+      });
+    }
     return { applied: true };
   }).immediate;
 
@@ -1406,11 +1579,14 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       const sideEffectState = command.sideEffectState ?? (command.state === 'completed' ? 'committed' : 'unknown');
       db.prepare(
         `UPDATE side_effect_ledger
-            SET effect_state = ?, status = ?, confirmed_at = CASE WHEN ? = 'committed' THEN ? ELSE confirmed_at END
+            SET effect_state = ?, status = ?, result_ref = ?, updated_at = ?,
+                confirmed_at = CASE WHEN ? = 'committed' THEN ? ELSE confirmed_at END
           WHERE key = ? AND attempt_id = ? AND generation = ? AND effect_state = 'started'`,
       ).run(
         sideEffectState,
         sideEffectState === 'committed' ? 'confirmed' : sideEffectState,
+        command.resultRef ?? null,
+        now,
         sideEffectState,
         now,
         toolCall.side_effect_id,
@@ -1428,6 +1604,35 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       producer: command.producer,
       idempotencyKey: `tool-call-${command.state}:${command.toolCallId}`,
     });
+    if (toolCall.side_effect_id) {
+      const effectState = command.sideEffectState ?? (command.state === 'completed' ? 'committed' : 'unknown');
+      appendEvent({
+        jobId: toolCall.job_id,
+        runId: attempt.id,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        type: 'effect.result_received',
+        payload: {
+          toolCallId: command.toolCallId,
+          effectId: toolCall.side_effect_id,
+          effectState,
+          resultRef: command.resultRef ?? null,
+        },
+        producer: command.producer,
+        idempotencyKey: `effect-result:${command.toolCallId}`,
+      });
+      appendEvent({
+        jobId: toolCall.job_id,
+        runId: attempt.id,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        type: effectState === 'unknown' ? 'effect.unknown'
+          : effectState === 'committed' ? 'effect.succeeded' : 'effect.failed',
+        payload: { toolCallId: command.toolCallId, effectId: toolCall.side_effect_id },
+        producer: command.producer,
+        idempotencyKey: `effect-terminal:${command.toolCallId}:${effectState}`,
+      });
+    }
     return { applied: true };
   }).immediate;
 
@@ -1719,6 +1924,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     renewAttemptLease: renewAttemptTx,
     createRecoveryAttempt: recoveryTx,
     prepareToolCall: prepareToolCallTx,
+    resolveToolCallApproval: resolveToolCallApprovalTx,
     startToolCall: startToolCallTx,
     completeToolCall: completeToolCallTx,
     attachToolVerification: attachToolVerificationTx,

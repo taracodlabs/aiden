@@ -53,7 +53,7 @@ describe('durable input and approval migration', () => {
       'approvals',
     ]));
     expect(tableNames()).not.toContain('jobs');
-    expect(db.prepare('SELECT version FROM schema_version WHERE id = 1').get()).toEqual({ version: 21 });
+    expect(db.prepare('SELECT version FROM schema_version WHERE id = 1').get()).toEqual({ version: LATEST_SCHEMA_VERSION });
   });
 
   it('is idempotent when the additive migration is applied repeatedly', () => {

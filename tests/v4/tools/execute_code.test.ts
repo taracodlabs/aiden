@@ -38,7 +38,7 @@ describe('execute_code', () => {
   it('1. is registered as an execute toolset, mutates=false', () => {
     expect(executeCodeTool.schema.name).toBe('execute_code');
     expect(executeCodeTool.category).toBe('execute');
-    expect(executeCodeTool.mutates).toBe(false);
+    expect(executeCodeTool.mutates).toBe(true);
     expect(executeCodeTool.toolset).toBe('execute');
   });
 

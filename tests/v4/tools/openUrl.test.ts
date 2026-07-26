@@ -88,6 +88,6 @@ describe('open_url — execute() validation surface', () => {
     expect(openUrlTool.schema.name).toBe('open_url');
     expect(openUrlTool.schema.inputSchema.required).toEqual(['url']);
     expect(openUrlTool.toolset).toBe('web');
-    expect(openUrlTool.mutates).toBe(false);
+    expect(openUrlTool.mutates).toBe(true);
   });
 });

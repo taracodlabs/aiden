@@ -73,9 +73,19 @@ export const executeCodeTool: ToolHandler = {
     },
   },
   category: 'execute',
-  mutates: false,
+  mutates: true,
   toolset: 'execute',
   riskTier: 'caution',   // v4.4 Phase 1
+  buildPreview(args) {
+    return {
+      tool: 'execute_code',
+      args: { code: '[redacted]', timeoutMs: args.timeoutMs },
+      riskTier: 'caution',
+      sideEffects: [{ type: 'shell_command', command: '[python code]', cwd: process.cwd(), backend: 'local' }],
+      detectedRisks: ['Code can change local state or access the network.'],
+      summary: 'Would execute the supplied code in a local Python process.',
+    };
+  },
   async execute(args) {
     const code = String(args.code ?? '');
     if (!code.trim()) {

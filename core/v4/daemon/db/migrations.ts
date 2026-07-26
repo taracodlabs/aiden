@@ -1062,6 +1062,47 @@ function applyV21(db: Database.Database): void {
   `);
 }
 
+/** Extend the existing SideEffect ledger with explicit execution contracts. */
+function applyV22(db: Database.Database): void {
+  addMissingColumns(db, 'side_effect_ledger', [
+    ['effect_classification',      "TEXT NOT NULL DEFAULT 'unknown_mutation'"],
+    ['effect_kind',                "TEXT NOT NULL DEFAULT 'unknown'"],
+    ['retry_safety',               "TEXT NOT NULL DEFAULT 'never_automatic'"],
+    ['idempotency_key',            'TEXT'],
+    ['idempotency_supported',      'INTEGER NOT NULL DEFAULT 0'],
+    ['reconciliation_supported',   'INTEGER NOT NULL DEFAULT 0'],
+    ['verification_supported',     'INTEGER NOT NULL DEFAULT 0'],
+    ['approval_requirement',       "TEXT NOT NULL DEFAULT 'always'"],
+    ['approval_state',             "TEXT NOT NULL DEFAULT 'not_required'"],
+    ['approval_id',                'TEXT'],
+    ['action_digest',              'TEXT'],
+    ['sensitive_fields_json',      "TEXT NOT NULL DEFAULT '[]'"],
+    ['redaction_rules_json',       "TEXT NOT NULL DEFAULT '[]'"],
+    ['result_ref',                 'TEXT'],
+    ['updated_at',                 'INTEGER'],
+  ]);
+  addMissingColumns(db, 'approvals', [
+    ['effect_id', 'TEXT'],
+  ]);
+  db.exec(`
+    UPDATE side_effect_ledger
+       SET updated_at = COALESCE(updated_at, confirmed_at, attempted_at),
+           effect_classification = CASE
+             WHEN effect_classification = 'unknown_mutation' AND effect_state IN ('committed','started')
+               THEN 'unsafe_mutation'
+             ELSE effect_classification
+           END;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_side_effect_job_idempotency
+      ON side_effect_ledger(job_id, idempotency_key)
+      WHERE job_id IS NOT NULL AND idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_side_effect_recovery
+      ON side_effect_ledger(effect_state, retry_safety, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_approvals_effect
+      ON approvals(effect_id, state)
+      WHERE effect_id IS NOT NULL;
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1084,6 +1125,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 19, name: 'v4.12.1 — side-effect idempotency ledger',        sql: V19_SQL },
   { version: 20, name: 'v4.15.1 — durable Job and Attempt foundation',    apply: applyV20 },
   { version: 21, name: 'v4.15.1 - durable input and approval authority', apply: applyV21 },
+  { version: 22, name: 'durable effect contracts', apply: applyV22 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

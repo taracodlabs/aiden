@@ -12,10 +12,7 @@
  * context across all browser tools — no fresh browser is launched
  * per call. The screenshot file lives under `workspace/screenshots/`.
  *
- * Read-only because no DOM is mutated, even though the underlying
- * browser process is long-lived. The navigation tools (browserNavigate/
- * Click/Fill/Type/Scroll) DO mutate observable state and are gated by the
- * approval engine; this screenshot is not.
+ * Capturing does not mutate the page, but it does persist an artifact.
  *
  * Status: PHASE 7. Read-only.
  */
@@ -35,9 +32,16 @@ const _browserScreenshotTool: ToolHandler = {
     },
   },
   category: 'browser',
-  mutates: false,
+  mutates: true,
   toolset: 'browser',
   riskTier: 'safe',   // v4.4 Phase 1
+  buildPreview() {
+    return {
+      tool: 'browser_screenshot', args: {}, riskTier: 'safe',
+      sideEffects: [{ type: 'create_file', path: 'workspace/screenshots/<timestamp>.png', bytes: 0 }],
+      detectedRisks: [], summary: 'Would capture the current page to a workspace screenshot artifact.',
+    };
+  },
   async execute() {
     const r = await pwScreenshot();
     if (r.ok) return { success: true, path: r.path };

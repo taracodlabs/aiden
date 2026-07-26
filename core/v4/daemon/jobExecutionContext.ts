@@ -7,6 +7,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 
 import type { JobEngine, TransitionResult } from './jobEngine';
+import type { DurableEffectDescriptor } from '../effectContract';
 
 export interface JobExecutionContext {
   engine: JobEngine;
@@ -71,10 +72,88 @@ export class DurableToolCallConflictError extends Error {
   }
 }
 
+export interface PreparedDurableToolCall {
+  toolCallId: string;
+  effectId: string | null;
+  mutates: boolean;
+}
+
 function requireApplied(operation: string, result: TransitionResult): void {
   if (!result.applied && !result.duplicate) {
     throw new DurableToolCallConflictError(operation, result);
   }
+}
+
+export function prepareDurableToolCall(command: {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  riskTier: string;
+  mutates: boolean;
+  effect?: DurableEffectDescriptor;
+  approvalState?: 'not_required' | 'pending';
+}): PreparedDurableToolCall | null {
+  const context = currentJobExecutionContext();
+  if (!context) return null;
+  const toolCallId = durableToolCallId(context, command.toolCallId);
+  const argsDigest = normalizedArgsDigest(command.args);
+  const effect = command.mutates ? command.effect : undefined;
+  const result = context.engine.prepareToolCall({
+    toolCallId,
+    jobId: context.jobId,
+    attemptId: context.attemptId,
+    generation: context.generation,
+    fenceToken: context.fenceToken,
+    modelCallId: command.toolCallId,
+    toolName: command.toolName,
+    normalizedArgsDigest: argsDigest,
+    riskTier: command.riskTier,
+    mutates: command.mutates,
+    effect: effect && effect.classification !== 'read_only' ? {
+      classification: effect.classification,
+      kind: effect.kind,
+      target: effect.target,
+      retrySafety: effect.retrySafety,
+      idempotencySupported: effect.idempotencySupported,
+      idempotencyKey: effect.idempotencySupported
+        ? createHash('sha256').update(`${command.toolName}\0${argsDigest}`).digest('hex')
+        : null,
+      reconciliationSupported: effect.reconciliationSupported,
+      verificationSupported: effect.verificationSupported,
+      approvalRequirement: effect.approvalRequirement,
+      approvalState: command.approvalState ?? 'not_required',
+      sensitiveFields: effect.sensitiveFields,
+      redactionRules: effect.redactionRules,
+      trusted: effect.trusted,
+    } : undefined,
+    producer: context.producer,
+  });
+  if (result.duplicate && command.mutates) {
+    throw new DurableToolCallConflictError('duplicate mutation', result);
+  }
+  requireApplied('prepare', result);
+  return { toolCallId, effectId: result.effectId ?? null, mutates: command.mutates };
+}
+
+export function recordDurableToolApproval(command: {
+  prepared: PreparedDurableToolCall | null;
+  state: 'not_required' | 'pending' | 'approved' | 'denied' | 'interrupted' | 'timed_out' | 'blocked';
+  approvalId?: string | null;
+  actionDigest?: string | null;
+}): void {
+  if (!command.prepared?.effectId) return;
+  const context = currentJobExecutionContext();
+  if (!context) return;
+  requireApplied('approval', context.engine.resolveToolCallApproval({
+    toolCallId: command.prepared.toolCallId,
+    attemptId: context.attemptId,
+    generation: context.generation,
+    fenceToken: context.fenceToken,
+    state: command.state,
+    approvalId: command.approvalId,
+    actionDigest: command.actionDigest,
+    producer: context.producer,
+  }));
 }
 
 export async function executeWithDurableToolCall<T>(command: {
@@ -83,27 +162,17 @@ export async function executeWithDurableToolCall<T>(command: {
   args: Record<string, unknown>;
   riskTier: string;
   mutates: boolean;
+  effect?: DurableEffectDescriptor;
+  prepared?: PreparedDurableToolCall | null;
   execute: () => Promise<T>;
   isSuccessful?: (result: T) => boolean;
 }): Promise<T> {
   const context = currentJobExecutionContext();
   if (!context) return command.execute();
 
-  const toolCallId = durableToolCallId(context, command.toolCallId);
-
-  requireApplied('prepare', context.engine.prepareToolCall({
-    toolCallId,
-    jobId: context.jobId,
-    attemptId: context.attemptId,
-    generation: context.generation,
-    fenceToken: context.fenceToken,
-    modelCallId: command.toolCallId,
-    toolName: command.toolName,
-    normalizedArgsDigest: normalizedArgsDigest(command.args),
-    riskTier: command.riskTier,
-    mutates: command.mutates,
-    producer: context.producer,
-  }));
+  const prepared = command.prepared ?? prepareDurableToolCall(command);
+  if (!prepared) return command.execute();
+  const toolCallId = prepared.toolCallId;
   requireApplied('start', context.engine.startToolCall({
     toolCallId,
     attemptId: context.attemptId,

@@ -467,6 +467,99 @@ describe('Attempt leases and fencing', () => {
 });
 
 describe('ToolCall and SideEffect identity', () => {
+  const effect = {
+    classification: 'reconcilable_mutation' as const,
+    kind: 'filesystem.write',
+    target: 'C:/workspace/result.txt',
+    retrySafety: 'reconcile_before_retry' as const,
+    idempotencySupported: true,
+    idempotencyKey: 'effect-idem-1',
+    reconciliationSupported: true,
+    verificationSupported: true,
+    approvalRequirement: 'policy' as const,
+    approvalState: 'pending' as const,
+    sensitiveFields: ['content', 'apiKey'],
+    redactionRules: ['digest_arguments', 'omit_sensitive_values'],
+    trusted: true,
+  };
+
+  it('persists a secret-free requested Effect and approval state before execution starts', () => {
+    const admitted = submit();
+    const lease = engine.claimAttempt({ attemptId: admitted.attemptId, ownerId: 'owner_a', ttlMs: 30_000 });
+    const prepared = engine.prepareToolCall({
+      toolCallId: 'tool_call_requested',
+      jobId: admitted.jobId,
+      attemptId: admitted.attemptId,
+      generation: lease.generation!,
+      fenceToken: lease.fenceToken!,
+      toolName: 'file_write',
+      normalizedArgsDigest: 'digest-secret-not-present',
+      riskTier: 'caution',
+      mutates: true,
+      effect,
+      producer: 'test',
+    });
+
+    expect(prepared).toMatchObject({ applied: true, effectId: 'side_effect:tool_call_requested' });
+    const row = db.prepare('SELECT * FROM side_effect_ledger WHERE tool_call_id = ?')
+      .get('tool_call_requested') as Record<string, unknown>;
+    expect(row).toMatchObject({
+      effect_state: 'requested',
+      approval_state: 'pending',
+      effect_classification: 'reconcilable_mutation',
+      effect_kind: 'filesystem.write',
+      retry_safety: 'reconcile_before_retry',
+      target: 'C:/workspace/result.txt',
+      idempotency_key: 'effect-idem-1',
+      reconciliation_supported: 1,
+      verification_supported: 1,
+    });
+    expect(JSON.stringify(row)).not.toContain('apiKey-value');
+
+    expect(engine.resolveToolCallApproval({
+      toolCallId: 'tool_call_requested',
+      attemptId: admitted.attemptId,
+      generation: lease.generation!,
+      fenceToken: lease.fenceToken!,
+      state: 'approved',
+      approvalId: 'approval_exact',
+      actionDigest: 'action_exact',
+      producer: 'test',
+    }).applied).toBe(true);
+    expect(db.prepare(
+      'SELECT approval_state, approval_id, action_digest FROM side_effect_ledger WHERE tool_call_id = ?',
+    ).get('tool_call_requested')).toEqual({
+      approval_state: 'approved', approval_id: 'approval_exact', action_digest: 'action_exact',
+    });
+  });
+
+  it('does not create or execute a second Effect for one Job idempotency key', () => {
+    const admitted = submit();
+    const lease = engine.claimAttempt({ attemptId: admitted.attemptId, ownerId: 'owner_a', ttlMs: 30_000 });
+    const base = {
+      jobId: admitted.jobId,
+      attemptId: admitted.attemptId,
+      generation: lease.generation!,
+      fenceToken: lease.fenceToken!,
+      toolName: 'file_write',
+      normalizedArgsDigest: 'same-digest',
+      riskTier: 'caution',
+      mutates: true,
+      effect,
+      producer: 'test',
+    };
+
+    expect(engine.prepareToolCall({ ...base, toolCallId: 'tool_call_idem_1' })).toMatchObject({ applied: true });
+    expect(engine.prepareToolCall({ ...base, toolCallId: 'tool_call_idem_2' })).toMatchObject({
+      applied: false,
+      duplicate: true,
+      existingToolCallId: 'tool_call_idem_1',
+    });
+    expect(db.prepare(
+      'SELECT COUNT(*) AS count FROM side_effect_ledger WHERE job_id = ? AND idempotency_key = ?',
+    ).get(admitted.jobId, effect.idempotencyKey)).toEqual({ count: 1 });
+  });
+
   it('persists prepared, started, and committed mutating execution under the active fence', () => {
     const admitted = submit();
     const lease = engine.claimAttempt({ attemptId: admitted.attemptId, ownerId: 'owner_a', ttlMs: 30_000 });
@@ -490,6 +583,7 @@ describe('ToolCall and SideEffect identity', () => {
       normalizedArgsDigest: 'digest_1',
       riskTier: 'caution',
       mutates: true,
+      effect: { ...effect, approvalState: 'not_required' },
       producer: 'test',
     }).applied).toBe(true);
     expect(engine.startToolCall({
@@ -530,6 +624,15 @@ describe('ToolCall and SideEffect identity', () => {
     expect(db.prepare('SELECT effect_state FROM side_effect_ledger WHERE tool_call_id = ?').get('tool_call_1')).toEqual({
       effect_state: 'committed',
     });
+    expect(engine.listEvents(admitted.jobId).map((event) => event.type)).toEqual(expect.arrayContaining([
+      'tool_call.prepared',
+      'effect.requested',
+      'tool_call.started',
+      'effect.started',
+      'tool_call.completed',
+      'effect.result_received',
+      'effect.succeeded',
+    ]));
   });
 
   it('rejects a stale ToolCall result after the Attempt is reclaimed', () => {
@@ -548,6 +651,7 @@ describe('ToolCall and SideEffect identity', () => {
       normalizedArgsDigest: 'digest_stale',
       riskTier: 'caution',
       mutates: true,
+      effect: { ...effect, idempotencyKey: 'effect-stale', approvalState: 'not_required' },
       producer: 'test',
     });
     recoverExpired(base + 11);

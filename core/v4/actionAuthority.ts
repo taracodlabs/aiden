@@ -55,6 +55,7 @@ export interface ApprovalRecord {
   attemptId: string;
   generation: number;
   toolCallId: string;
+  effectId: string | null;
   requestSequence: number;
   toolName: string;
   riskTier: string;
@@ -76,6 +77,7 @@ export interface ActionAuthority {
     attemptId: string;
     generation: number;
     toolCallId: string;
+    effectId?: string | null;
     toolName: string;
     riskTier: string;
     riskReasons: string[];
@@ -121,6 +123,7 @@ interface ApprovalRow {
   attempt_id: string;
   generation: number;
   tool_call_id: string;
+  effect_id: string | null;
   request_sequence: number;
   tool_name: string;
   risk_tier: string;
@@ -277,6 +280,7 @@ function mapApproval(row: ApprovalRow): ApprovalRecord {
     attemptId: row.attempt_id,
     generation: row.generation,
     toolCallId: row.tool_call_id,
+    effectId: row.effect_id,
     requestSequence: row.request_sequence,
     toolName: row.tool_name,
     riskTier: row.risk_tier,
@@ -337,6 +341,7 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
       payload: {
         approvalId: record.approvalId,
         toolCallId: record.toolCallId,
+        effectId: record.effectId,
         actionDigest: record.actionDigest,
         policySnapshotId: record.policySnapshotId,
         state: record.state,
@@ -358,6 +363,22 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
       ) {
         throw new Error('Approval target has a stale generation');
       }
+      if (command.effectId) {
+        const effect = db.prepare(
+          `SELECT se.key
+             FROM side_effect_ledger se
+             JOIN tool_calls tc ON tc.tool_call_id = se.tool_call_id
+            WHERE se.key = ? AND se.job_id = ? AND se.attempt_id = ?
+              AND se.generation = ? AND tc.tool_call_id = ?`,
+        ).get(
+          command.effectId,
+          command.jobId,
+          command.attemptId,
+          command.generation,
+          command.toolCallId,
+        ) as { key: string } | undefined;
+        if (!effect) throw new Error('Approval Effect binding mismatch or stale generation');
+      }
       const now = command.now ?? Date.now();
       const transaction = db.transaction(() => {
         persistPolicy(command.normalized.policySnapshot, now);
@@ -367,17 +388,18 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
         const approvalId = makeId('approval');
         db.prepare(
           `INSERT INTO approvals (
-             approval_id, job_id, attempt_id, generation, tool_call_id,
+             approval_id, job_id, attempt_id, generation, tool_call_id, effect_id,
              request_sequence, tool_name, risk_tier, risk_reasons_json,
              normalized_execution_plan, action_digest, policy_snapshot_id,
              state, requested_at, expires_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?)`,
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'created', ?, ?)`,
         ).run(
           approvalId,
           command.jobId,
           command.attemptId,
           command.generation,
           command.toolCallId,
+          command.effectId ?? null,
           sequence,
           command.toolName,
           command.riskTier,

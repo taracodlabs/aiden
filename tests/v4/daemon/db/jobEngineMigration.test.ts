@@ -114,7 +114,12 @@ describe('durable Job and Attempt migration', () => {
     ]));
     expect([...columns('side_effect_ledger')]).toEqual(expect.arrayContaining([
       'job_id', 'attempt_id', 'generation', 'tool_call_id', 'effect_state',
+      'effect_classification', 'effect_kind', 'retry_safety', 'idempotency_key',
+      'idempotency_supported', 'reconciliation_supported', 'verification_supported',
+      'approval_requirement', 'approval_state', 'approval_id', 'action_digest',
+      'sensitive_fields_json', 'redaction_rules_json', 'result_ref', 'updated_at',
     ]));
+    expect([...columns('approvals')]).toContain('effect_id');
   });
 
   it('backfills stable Attempt identities and deterministic per-Job event order', () => {

@@ -61,9 +61,17 @@ export const screenshotTool: ToolHandler = {
     },
   },
   category: 'read',
-  mutates: false,
+  mutates: true,
   toolset: 'system',
   riskTier: 'safe',   // v4.4 Phase 1
+  buildPreview(_args, ctx) {
+    return {
+      tool: 'screenshot', args: {}, riskTier: 'safe',
+      sideEffects: [{ type: 'create_file', path: path.join(ctx.paths.root, 'screenshots', '<timestamp>.png'), bytes: 0 }],
+      detectedRisks: ['The captured image may contain private on-screen information.'],
+      summary: 'Would capture the primary display to a local screenshot artifact.',
+    };
+  },
   async execute(_args, ctx) {
     if (!isWindows()) return windowsOnlyError('screenshot');
     if (!ctx.paths) {

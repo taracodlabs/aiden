@@ -77,9 +77,20 @@ export const openUrlTool: ToolHandler = {
     },
   },
   category: 'network',
-  mutates: false,
+  mutates: true,
   toolset: 'web',
   riskTier: 'safe',   // v4.4 Phase 1
+  buildPreview(args) {
+    const url = typeof args.url === 'string' ? args.url : '';
+    return {
+      tool: 'open_url',
+      args: { url },
+      riskTier: 'safe',
+      sideEffects: [{ type: 'app_control', action: 'open_url', target: url }],
+      detectedRisks: [],
+      summary: `Would open ${url || 'the requested URL'} in the default browser.`,
+    };
+  },
   async execute(args) {
     const url = String(args.url ?? '').trim();
     if (!isLaunchableUrl(url)) {

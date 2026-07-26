@@ -137,17 +137,30 @@ describe('final action and durable Approval authority', () => {
       riskTier: 'caution',
       policy,
     });
+    const prepared = jobs.prepareToolCall({
+      toolCallId: 'tool-call-1', jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, fenceToken, toolName: 'file_write', normalizedArgsDigest: 'fixture-digest',
+      riskTier: 'caution', mutates: true, producer: 'test',
+      effect: {
+        classification: 'reconcilable_mutation', kind: 'filesystem.write', target: 'result.txt',
+        retrySafety: 'reconcile_before_retry', idempotencySupported: false, idempotencyKey: null,
+        reconciliationSupported: true, verificationSupported: true, approvalRequirement: 'policy',
+        approvalState: 'pending', sensitiveFields: ['content'], redactionRules: ['digest_arguments'], trusted: true,
+      },
+    });
     const approval = actions.request({
       jobId: admission.jobId,
       attemptId: admission.attemptId,
       generation: 1,
       toolCallId: 'tool-call-1',
+      effectId: prepared.effectId,
       toolName: 'file_write',
       riskTier: 'caution',
       riskReasons: ['filesystem write'],
       normalized,
       expiresAt: Date.now() + 60_000,
     });
+    expect(approval.effectId).toBe('side_effect:tool-call-1');
     expect(actions.listPending(admission.jobId)).toHaveLength(1);
     expect(actions.decide({
       approvalId: approval.approvalId,

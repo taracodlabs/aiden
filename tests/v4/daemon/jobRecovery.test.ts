@@ -13,6 +13,21 @@ describe('durable Job recovery', () => {
   let db: Database.Database;
   let engine: JobEngine;
   let sequence = 0;
+  const effect = {
+    classification: 'unsafe_mutation' as const,
+    kind: 'fixture.external',
+    target: 'fixture-target',
+    retrySafety: 'never_automatic' as const,
+    idempotencySupported: false,
+    idempotencyKey: null,
+    reconciliationSupported: false,
+    verificationSupported: false,
+    approvalRequirement: 'policy' as const,
+    approvalState: 'not_required' as const,
+    sensitiveFields: [] as string[],
+    redactionRules: ['digest_arguments'],
+    trusted: true,
+  };
 
   beforeEach(() => {
     db = new Database(':memory:');
@@ -66,7 +81,7 @@ describe('durable Job recovery', () => {
       toolCallId: 'tool_unknown', jobId: expired.jobId, attemptId: expired.attemptId,
       generation: expired.generation!, fenceToken: expired.fenceToken!,
       toolName: 'external_send', normalizedArgsDigest: 'digest', riskTier: 'dangerous',
-      mutates: true, producer: 'test', now: expired.base + 1,
+      mutates: true, effect, producer: 'test', now: expired.base + 1,
     });
     engine.startToolCall({
       toolCallId: 'tool_unknown', attemptId: expired.attemptId,
@@ -109,7 +124,7 @@ describe('durable Job recovery', () => {
       toolCallId: 'tool_prepared_only', jobId: expired.jobId, attemptId: expired.attemptId,
       generation: expired.generation!, fenceToken: expired.fenceToken!,
       toolName: 'file_write', normalizedArgsDigest: 'prepared-digest', riskTier: 'caution',
-      mutates: true, producer: 'test', now: expired.base + 1,
+      mutates: true, effect, producer: 'test', now: expired.base + 1,
     });
 
     expect(engine.recoverExpiredAttempts({
@@ -123,7 +138,7 @@ describe('durable Job recovery', () => {
       toolCallId: 'tool_committed', jobId: expired.jobId, attemptId: expired.attemptId,
       generation: expired.generation!, fenceToken: expired.fenceToken!,
       toolName: 'file_write', normalizedArgsDigest: 'committed-digest', riskTier: 'caution',
-      mutates: true, producer: 'test', now: expired.base + 1,
+      mutates: true, effect, producer: 'test', now: expired.base + 1,
     });
     engine.startToolCall({
       toolCallId: 'tool_committed', attemptId: expired.attemptId,

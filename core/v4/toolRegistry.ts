@@ -66,7 +66,11 @@ import {
   currentDurableToolCallId,
   currentJobExecutionContext,
   executeWithDurableToolCall,
+  prepareDurableToolCall,
+  recordDurableToolApproval,
+  type PreparedDurableToolCall,
 } from './daemon/jobExecutionContext';
+import { describeToolEffect, type DurableEffectDescriptor } from './effectContract';
 import {
   normalizeExecutionPlan,
   type ActionAuthority,
@@ -248,6 +252,8 @@ export interface ToolHandler {
    * the `checkApproval` call site below.
    */
   effects?: import('../../moat/approvalEngine').ToolEffects;
+  /** Durable mutation semantics used by the canonical ToolCall/Effect authority. */
+  effectContract?: import('./effectContract').ToolEffectContract;
   /**
    * v4.6 Phase 1 — the execution contexts in which this tool is
    * visible to the LLM. Default behaviour (when the field is
@@ -460,6 +466,8 @@ export class ToolRegistry {
         policySnapshotId: string;
         riskTier: string;
       } | undefined;
+      let preparedToolCall: PreparedDurableToolCall | null | undefined;
+      let effectDescriptor: DurableEffectDescriptor | undefined;
       const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
         try { onActivity?.({ phase, at: Date.now(), attempt, timing }); } catch { /* observational */ }
       };
@@ -570,9 +578,48 @@ export class ToolRegistry {
       // a forgotten declaration must not become a silent bypass.
       const assumeMutates = handler.mutates ?? true;
       const durableJobContext = currentJobExecutionContext();
+      const effectiveMutates = assumeMutates && !readOnlyShell;
+      const preliminaryEffect = describeToolEffect(
+        effectiveMutates ? handler : { ...handler, mutates: false },
+        args,
+      );
+      const approvalGated = effectiveMutates && preliminaryEffect.approvalRequirement !== 'none' && (
+        context.approvalEngine !== undefined || (context.actionAuthority !== undefined && durableJobContext !== undefined)
+      );
+      effectDescriptor = preliminaryEffect;
+      if (effectiveMutates && durableJobContext) {
+        try {
+          preparedToolCall = prepareDurableToolCall({
+            toolCallId: call.id,
+            toolName: call.name,
+            args,
+            riskTier: handler.riskTier ?? 'caution',
+            mutates: true,
+            effect: effectDescriptor,
+            approvalState: approvalGated ? 'pending' : 'not_required',
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return finish({ id: call.id, name: call.name, result: null, error: message }, 'blocked');
+        }
+      }
       if (
-        assumeMutates && !readOnlyShell &&
-        (context.approvalEngine || (context.actionAuthority && durableJobContext))
+        effectiveMutates && durableJobContext &&
+        (!effectDescriptor.trusted || effectDescriptor.approvalRequirement === 'always') &&
+        !context.approvalEngine && !context.actionAuthority
+      ) {
+        try { recordDurableToolApproval({ prepared: preparedToolCall ?? null, state: 'blocked' }); } catch { /* durable conflict is reported below */ }
+        return finish({
+          id: call.id,
+          name: call.name,
+          result: null,
+          error: effectDescriptor.trusted
+            ? 'Interactive approval is required for this mutation'
+            : 'Mutating tool has no trusted effect contract and cannot run unattended',
+        }, 'blocked');
+      }
+      if (
+        approvalGated
       ) {
         // Pre-classify shell_exec commands so smart-mode has a tier.
         let riskTier: 'safe' | 'caution' | 'dangerous' | undefined;
@@ -664,16 +711,28 @@ export class ToolRegistry {
             },
           });
           const persistedToolCallId = currentDurableToolCallId(call.id) ?? call.id;
-          const record = context.actionAuthority.request({
-            jobId: jobContext.jobId,
-            attemptId: jobContext.attemptId,
-            generation: jobContext.generation,
-            toolCallId: persistedToolCallId,
-            toolName: call.name,
-            riskTier: effectiveTier ?? 'caution',
-            riskReasons: reason ? [reason] : [],
-            normalized,
-          });
+          let record: ReturnType<ActionAuthority['request']>;
+          try {
+            record = context.actionAuthority.request({
+              jobId: jobContext.jobId,
+              attemptId: jobContext.attemptId,
+              generation: jobContext.generation,
+              toolCallId: persistedToolCallId,
+              effectId: preparedToolCall?.effectId ?? null,
+              toolName: call.name,
+              riskTier: effectiveTier ?? 'caution',
+              riskReasons: reason ? [reason] : [],
+              normalized,
+            });
+          } catch (error) {
+            try { recordDurableToolApproval({ prepared: preparedToolCall ?? null, state: 'blocked' }); } catch { /* binding failure remains authoritative */ }
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: error instanceof Error ? error.message : String(error),
+            }, 'blocked');
+          }
           if (context.approvalEngine) context.actionAuthority.markDisplayed(record.approvalId);
           durableApproval = {
             approvalId: record.approvalId,
@@ -684,6 +743,14 @@ export class ToolRegistry {
           };
         }
         if (!context.approvalEngine) {
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: 'blocked',
+              approvalId: durableApproval?.approvalId,
+              actionDigest: durableApproval?.actionDigest,
+            });
+          } catch { /* the approval error remains authoritative */ }
           return finish({
             id: call.id,
             name: call.name,
@@ -730,6 +797,14 @@ export class ToolRegistry {
           const terminal = signal?.aborted
             ? 'cancelled'
             : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: signal?.aborted ? 'interrupted' : terminal === 'timed_out' ? 'timed_out' : 'blocked',
+              approvalId: durableApproval?.approvalId,
+              actionDigest: durableApproval?.actionDigest,
+            });
+          } catch { /* the prompt failure remains authoritative */ }
           return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);
         }
         timing.approvalEndedAt = Date.now();
@@ -749,6 +824,16 @@ export class ToolRegistry {
           });
         }
         if (!allowed) {
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: approvalDecision?.state === 'interrupted'
+                ? 'interrupted'
+                : approvalDecision?.state === 'blocked' ? 'blocked' : 'denied',
+              approvalId: durableApproval?.approvalId,
+              actionDigest: durableApproval?.actionDigest,
+            });
+          } catch { /* the approval decision remains authoritative */ }
           if (approvalDecision?.state === 'interrupted') {
             return finish({
               id: call.id,
@@ -776,6 +861,21 @@ export class ToolRegistry {
             result: null,
             error: `Tool execution denied by approval engine — ${why}`,
           }, signal?.aborted ? 'cancelled' : 'denied');
+        }
+        try {
+          recordDurableToolApproval({
+            prepared: preparedToolCall ?? null,
+            state: 'approved',
+            approvalId: durableApproval?.approvalId,
+            actionDigest: durableApproval?.actionDigest,
+          });
+        } catch (error) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: error instanceof Error ? error.message : String(error),
+          }, 'blocked');
         }
       }
 
@@ -855,7 +955,9 @@ export class ToolRegistry {
           toolName: call.name,
           args: a,
           riskTier: handler.riskTier ?? (handler.mutates === false ? 'safe' : 'caution'),
-          mutates: handler.mutates ?? true,
+          mutates: effectiveMutates,
+          effect: effectDescriptor,
+          prepared: preparedToolCall,
           execute: () => handler.execute(a, signal ? { ...context, signal } : context),
         });
 
@@ -914,6 +1016,14 @@ export class ToolRegistry {
           policySnapshotId: current.policySnapshot.policySnapshotId,
         });
         if (!authorization.authorized) {
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: 'blocked',
+              approvalId: durableApproval.approvalId,
+              actionDigest: durableApproval.actionDigest,
+            });
+          } catch { /* authorization failure remains authoritative */ }
           return finish({
             id: call.id,
             name: call.name,
