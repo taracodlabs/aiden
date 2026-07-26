@@ -20,6 +20,7 @@ import type {
 import { createExecutionGraphAuthority, type ExecutionGraphAuthority } from './executionGraph';
 import { createJobResourceAuthority, type JobResourceAuthority } from './jobResourceAuthority';
 import type { JobBudgetKind, JobCapabilities } from './jobResourceAuthority';
+import { createJobProofAuthority, type JobProofAuthority } from './jobProofAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -177,6 +178,7 @@ export interface LeaseResult extends TransitionResult {
 export interface JobEngine {
   readonly graph: ExecutionGraphAuthority;
   readonly resources: JobResourceAuthority;
+  readonly proof: JobProofAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -603,6 +605,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   const { db } = opts;
   const graph = createExecutionGraphAuthority(db);
   const resources = createJobResourceAuthority(db);
+  const proof = createJobProofAuthority(db);
 
   const getJobRow = (jobId: string): JobSqlRow | undefined => db.prepare(
     `SELECT id, status, state_version, active_attempt_id, root_job_id,
@@ -1094,6 +1097,12 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
     }
     if (command.status === 'completed') {
+      if (proof.hasRequiredClaims(command.jobId)) {
+        const verdict = proof.getVerdict(command.jobId);
+        if (!verdict || (command.outcome === 'verified' && verdict.verdict !== 'verified')) {
+          return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
+        }
+      }
       const unresolvedChild = db.prepare(
         `SELECT 1 FROM child_job_contracts c
           JOIN tasks child ON child.id = c.child_job_id
@@ -2235,6 +2244,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   return {
     graph,
     resources,
+    proof,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);

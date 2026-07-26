@@ -1,0 +1,260 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ */
+
+import { createHash, randomBytes } from 'node:crypto';
+
+import type { Db } from './db/connection';
+
+export type ClaimCategory = 'contract' | 'observed' | 'courtesy';
+export type ClaimState = 'unverified' | 'verified' | 'failed' | 'unknown';
+export type FinalVerdict = 'verified' | 'partially_verified' | 'failed' | 'unknown' | 'cancelled';
+
+export interface ClaimRecord {
+  claimId: string;
+  jobId: string;
+  attemptId: string | null;
+  generation: number | null;
+  category: ClaimCategory;
+  statement: string;
+  required: boolean;
+  state: ClaimState;
+}
+
+export interface EvidenceRecord {
+  evidenceId: string;
+  jobId: string;
+  attemptId: string;
+  generation: number;
+  effectId: string | null;
+  source: string;
+  producer: string;
+  capturedAt: number;
+  observedAt: number;
+  freshUntil: number | null;
+  integritySha256: string;
+  coverage: 'full' | 'partial' | 'unknown';
+  verificationResult: ClaimState;
+  payload: unknown;
+  late: boolean;
+}
+
+export interface JobVerdictRecord {
+  jobId: string;
+  attemptId: string;
+  generation: number;
+  verdict: FinalVerdict;
+  summary: Record<string, unknown>;
+  finalizedAt: number;
+}
+
+export interface JobProofAuthority {
+  createClaim(command: {
+    jobId: string; attemptId?: string | null; generation?: number | null;
+    category: ClaimCategory; statement: string; required?: boolean; now?: number;
+  }): ClaimRecord;
+  recordEvidence(command: {
+    jobId: string; attemptId: string; generation: number; fenceToken: string;
+    effectId?: string | null; source: string; producer: string; observedAt: number;
+    freshUntil?: number | null; coverage: 'full' | 'partial' | 'unknown';
+    verificationResult: ClaimState; payload: unknown; now?: number;
+  }): EvidenceRecord;
+  checkClaim(command: {
+    claimId: string; attemptId: string; generation: number; evidenceIds: string[];
+    state: Exclude<ClaimState, 'unverified'>; now?: number;
+  }): ClaimRecord;
+  listClaims(jobId: string): ClaimRecord[];
+  listEvidence(jobId: string): EvidenceRecord[];
+  hasRequiredClaims(jobId: string): boolean;
+  finalize(command: {
+    jobId: string; attemptId: string; generation: number; fenceToken: string;
+    cancelled?: boolean; now?: number;
+  }): JobVerdictRecord;
+  getVerdict(jobId: string): JobVerdictRecord | null;
+  exportJson(jobId: string): Record<string, unknown>;
+  exportMarkdown(jobId: string): string;
+}
+
+type ClaimRow = {
+  claim_id: string; job_id: string; attempt_id: string | null; generation: number | null;
+  category: ClaimCategory; statement: string; required: number; state: ClaimState;
+};
+type EvidenceRow = {
+  evidence_id: string; job_id: string; attempt_id: string; generation: number; effect_id: string | null;
+  source: string; producer: string; captured_at: number; observed_at: number; fresh_until: number | null;
+  integrity_sha256: string; coverage: EvidenceRecord['coverage']; verification_result: ClaimState;
+  payload_json: string; late: number;
+};
+
+const id = (prefix: string): string => `${prefix}_${randomBytes(12).toString('hex')}`;
+const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const mapClaim = (row: ClaimRow): ClaimRecord => ({
+  claimId: row.claim_id, jobId: row.job_id, attemptId: row.attempt_id, generation: row.generation,
+  category: row.category, statement: row.statement, required: row.required === 1, state: row.state,
+});
+const mapEvidence = (row: EvidenceRow): EvidenceRecord => ({
+  evidenceId: row.evidence_id, jobId: row.job_id, attemptId: row.attempt_id,
+  generation: row.generation, effectId: row.effect_id, source: row.source, producer: row.producer,
+  capturedAt: row.captured_at, observedAt: row.observed_at, freshUntil: row.fresh_until,
+  integritySha256: row.integrity_sha256, coverage: row.coverage,
+  verificationResult: row.verification_result, payload: JSON.parse(row.payload_json), late: row.late === 1,
+});
+
+export function createJobProofAuthority(db: Db): JobProofAuthority {
+  const assertAttempt = (jobId: string, attemptId: string, generation: number, fenceToken?: string): void => {
+    const row = db.prepare(
+      `SELECT r.generation, r.fence_token FROM runs r WHERE r.task_id = ? AND r.attempt_id = ?`,
+    ).get(jobId, attemptId) as { generation: number; fence_token: string | null } | undefined;
+    if (!row || row.generation !== generation || (fenceToken !== undefined && row.fence_token !== fenceToken)) {
+      throw new Error('Evidence authority does not match the producing Attempt');
+    }
+  };
+  const getVerdict = (jobId: string): JobVerdictRecord | null => {
+    const row = db.prepare('SELECT * FROM job_verdicts WHERE job_id = ?').get(jobId) as {
+      job_id: string; attempt_id: string; generation: number; verdict: FinalVerdict;
+      summary_json: string; finalized_at: number;
+    } | undefined;
+    return row ? {
+      jobId: row.job_id, attemptId: row.attempt_id, generation: row.generation,
+      verdict: row.verdict, summary: JSON.parse(row.summary_json) as Record<string, unknown>, finalizedAt: row.finalized_at,
+    } : null;
+  };
+  const listClaims = (jobId: string): ClaimRecord[] => (
+    db.prepare('SELECT * FROM job_claims WHERE job_id = ? ORDER BY created_at, claim_id').all(jobId) as ClaimRow[]
+  ).map(mapClaim);
+  const listEvidence = (jobId: string): EvidenceRecord[] => (
+    db.prepare('SELECT * FROM job_evidence WHERE job_id = ? ORDER BY captured_at, evidence_id').all(jobId) as EvidenceRow[]
+  ).map(mapEvidence);
+
+  const authority: JobProofAuthority = {
+    createClaim(command) {
+      if (!db.prepare('SELECT 1 FROM tasks WHERE id = ?').get(command.jobId)) throw new Error('Job not found');
+      if (command.attemptId && command.generation !== null && command.generation !== undefined) {
+        assertAttempt(command.jobId, command.attemptId, command.generation);
+      }
+      const claimId = id('claim');
+      db.prepare(
+        `INSERT INTO job_claims
+           (claim_id, job_id, attempt_id, generation, category, statement, required, state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified', ?)`,
+      ).run(
+        claimId, command.jobId, command.attemptId ?? null, command.generation ?? null,
+        command.category, command.statement, command.required === true ? 1 : 0, command.now ?? Date.now(),
+      );
+      return authority.listClaims(command.jobId).find((claim) => claim.claimId === claimId)!;
+    },
+    recordEvidence(command) {
+      assertAttempt(command.jobId, command.attemptId, command.generation, command.fenceToken);
+      const now = command.now ?? Date.now();
+      const payloadJson = JSON.stringify(command.payload ?? null);
+      const evidenceId = id('evidence');
+      const late = getVerdict(command.jobId) !== null;
+      db.transaction(() => {
+        db.prepare(
+          `INSERT INTO job_evidence (
+             evidence_id, job_id, attempt_id, generation, effect_id, source, producer,
+             captured_at, observed_at, fresh_until, integrity_sha256, coverage,
+             verification_result, payload_json, late
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          evidenceId, command.jobId, command.attemptId, command.generation, command.effectId ?? null,
+          command.source, command.producer, now, command.observedAt, command.freshUntil ?? null,
+          digest(command.payload ?? null), command.coverage, command.verificationResult, payloadJson, late ? 1 : 0,
+        );
+        if (late) db.prepare(
+          `INSERT INTO proof_reviews (job_id, evidence_id, reason, created_at) VALUES (?, ?, 'late evidence', ?)`,
+        ).run(command.jobId, evidenceId, now);
+      }).immediate();
+      return authority.listEvidence(command.jobId).find((evidence) => evidence.evidenceId === evidenceId)!;
+    },
+    checkClaim(command) {
+      const claim = db.prepare('SELECT * FROM job_claims WHERE claim_id = ?').get(command.claimId) as ClaimRow | undefined;
+      if (!claim) throw new Error('Claim not found');
+      if (getVerdict(claim.job_id)) throw new Error('Final verdict is immutable');
+      assertAttempt(claim.job_id, command.attemptId, command.generation);
+      const now = command.now ?? Date.now();
+      db.transaction(() => {
+        for (const evidenceId of command.evidenceIds) {
+          const evidence = db.prepare('SELECT * FROM job_evidence WHERE evidence_id = ?').get(evidenceId) as EvidenceRow | undefined;
+          if (!evidence || evidence.job_id !== claim.job_id || evidence.attempt_id !== command.attemptId || evidence.generation !== command.generation) {
+            throw new Error('Stale or unrelated evidence cannot prove this claim');
+          }
+          if (evidence.fresh_until !== null && evidence.fresh_until < now) throw new Error('Stale evidence cannot prove a claim');
+          db.prepare('INSERT OR IGNORE INTO claim_evidence (claim_id, evidence_id, created_at) VALUES (?, ?, ?)')
+            .run(command.claimId, evidenceId, now);
+        }
+        db.prepare('UPDATE job_claims SET state = ?, attempt_id = ?, generation = ?, checked_at = ? WHERE claim_id = ?')
+          .run(command.state, command.attemptId, command.generation, now, command.claimId);
+      }).immediate();
+      return authority.listClaims(claim.job_id).find((item) => item.claimId === command.claimId)!;
+    },
+    listClaims,
+    listEvidence,
+    hasRequiredClaims(jobId) {
+      return db.prepare("SELECT 1 FROM job_claims WHERE job_id = ? AND category = 'contract' AND required = 1 LIMIT 1")
+        .get(jobId) !== undefined;
+    },
+    finalize(command) {
+      const existing = getVerdict(command.jobId);
+      if (existing) return existing;
+      assertAttempt(command.jobId, command.attemptId, command.generation, command.fenceToken);
+      const claims = listClaims(command.jobId).filter((claim) => claim.category === 'contract' && claim.required);
+      const evidence = listEvidence(command.jobId).filter(
+        (item) => item.attemptId === command.attemptId && item.generation === command.generation && !item.late,
+      );
+      const unresolvedEffect = db.prepare(
+        `SELECT 1 FROM side_effect_ledger WHERE job_id = ?
+          AND effect_state IN ('unknown','partial','started') LIMIT 1`,
+      ).get(command.jobId) !== undefined;
+      const verifiedCount = claims.filter((claim) => claim.state === 'verified').length;
+      const failedCount = claims.filter((claim) => claim.state === 'failed').length;
+      const unknownCount = claims.filter((claim) => claim.state === 'unknown' || claim.state === 'unverified').length;
+      const incompleteCoverage = evidence.some((item) => item.coverage !== 'full' || item.verificationResult === 'unknown');
+      let verdict: FinalVerdict;
+      if (command.cancelled) verdict = 'cancelled';
+      else if (unresolvedEffect || unknownCount > 0 || incompleteCoverage) verdict = verifiedCount > 0 ? 'partially_verified' : 'unknown';
+      else if (failedCount > 0) verdict = verifiedCount > 0 ? 'partially_verified' : 'failed';
+      else if (claims.length > 0 && verifiedCount === claims.length) verdict = 'verified';
+      else verdict = 'unknown';
+      const now = command.now ?? Date.now();
+      const summary = { requiredClaims: claims.length, verifiedClaims: verifiedCount, failedClaims: failedCount, unknownClaims: unknownCount };
+      db.prepare(
+        `INSERT INTO job_verdicts (job_id, attempt_id, generation, verdict, summary_json, finalized_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run(command.jobId, command.attemptId, command.generation, verdict, JSON.stringify(summary), now);
+      return getVerdict(command.jobId)!;
+    },
+    getVerdict,
+    exportJson(jobId) {
+      const job = db.prepare('SELECT id, goal, status, terminal_outcome, finish_reason FROM tasks WHERE id = ?').get(jobId);
+      if (!job) throw new Error('Job not found');
+      const rows = (table: string, order: string): unknown[] => db.prepare(`SELECT * FROM ${table} WHERE job_id = ? ORDER BY ${order}`).all(jobId);
+      return {
+        job,
+        graph: db.prepare('SELECT * FROM execution_graphs WHERE job_id = ?').get(jobId) ?? null,
+        attempts: db.prepare('SELECT attempt_id, attempt_number, generation, status, finish_reason FROM runs WHERE task_id = ? ORDER BY attempt_number').all(jobId),
+        approvals: rows('approvals', 'rowid'),
+        effects: rows('side_effect_ledger', 'attempted_at'),
+        claims: listClaims(jobId),
+        evidence: listEvidence(jobId),
+        verdict: getVerdict(jobId),
+      };
+    },
+    exportMarkdown(jobId) {
+      const proof = authority.exportJson(jobId) as {
+        job: { goal: string }; claims: ClaimRecord[]; evidence: EvidenceRecord[]; verdict: JobVerdictRecord | null;
+      };
+      const lines = [
+        '# Aiden Proof', '', `Goal: ${proof.job.goal}`, '',
+        `Verdict: ${proof.verdict?.verdict ?? 'not finalized'}`, '',
+        '## Claims',
+        ...proof.claims.map((claim) => `- [${claim.state}] ${claim.statement}`),
+        '', '## Evidence',
+        ...proof.evidence.map((evidence) => `- ${evidence.evidenceId}: ${evidence.source} (${evidence.verificationResult}, ${evidence.coverage})`),
+      ];
+      return `${lines.join('\n')}\n`;
+    },
+  };
+  return authority;
+}

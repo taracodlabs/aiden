@@ -50,6 +50,10 @@ describe('runMigrations', () => {
     expect(names).toContain('job_budgets');
     expect(names).toContain('job_budget_debits');
     expect(names).toContain('job_capability_sets');
+    expect(names).toContain('job_claims');
+    expect(names).toContain('job_evidence');
+    expect(names).toContain('job_verdicts');
+    expect(names).toContain('proof_reviews');
   });
 
   it('enforces trigger_events UNIQUE(source, idempotency_key) when key present', () => {

@@ -1351,6 +1351,73 @@ function applyV28(db: Database.Database): void {
   `);
 }
 
+/** Attempt-attributed claims, evidence, immutable verdicts, and late-review history. */
+function applyV29(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_claims (
+      claim_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT,
+      generation INTEGER,
+      category TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      required INTEGER NOT NULL DEFAULT 0,
+      state TEXT NOT NULL DEFAULT 'unverified',
+      created_at INTEGER NOT NULL,
+      checked_at INTEGER,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_claims_job
+      ON job_claims(job_id, category, required, created_at);
+    CREATE TABLE IF NOT EXISTS job_evidence (
+      evidence_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      effect_id TEXT,
+      source TEXT NOT NULL,
+      producer TEXT NOT NULL,
+      captured_at INTEGER NOT NULL,
+      observed_at INTEGER NOT NULL,
+      fresh_until INTEGER,
+      integrity_sha256 TEXT NOT NULL,
+      coverage TEXT NOT NULL,
+      verification_result TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      late INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_evidence_attempt
+      ON job_evidence(job_id, attempt_id, generation, captured_at);
+    CREATE TABLE IF NOT EXISTS claim_evidence (
+      claim_id TEXT NOT NULL,
+      evidence_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (claim_id, evidence_id),
+      FOREIGN KEY (claim_id) REFERENCES job_claims(claim_id) ON DELETE CASCADE,
+      FOREIGN KEY (evidence_id) REFERENCES job_evidence(evidence_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS job_verdicts (
+      job_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      verdict TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      finalized_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS proof_reviews (
+      review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id TEXT NOT NULL,
+      evidence_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (evidence_id) REFERENCES job_evidence(evidence_id) ON DELETE CASCADE
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1380,6 +1447,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 26, name: 'exact approval fence binding', apply: applyV26 },
   { version: 27, name: 'durable child Job contracts', apply: applyV27 },
   { version: 28, name: 'durable budgets and capabilities', apply: applyV28 },
+  { version: 29, name: 'durable claims evidence and verdicts', apply: applyV29 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
