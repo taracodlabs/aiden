@@ -129,6 +129,7 @@ export interface ExecuteDurableJobOptions<T> {
   ) => DurableJobDisposition | null | Promise<DurableJobDisposition | null>;
   controlAuthority?: JobControlAuthority;
   initialInput?: Omit<ReceiveInputCommand, 'jobId' | 'targetAttemptId' | 'targetGeneration'>;
+  existingInitialInputId?: string;
   leaseTtlMs?: number;
   controlPollMs?: number;
   onLeaseLost?: (error: DurableJobLifecycleError) => void;
@@ -221,6 +222,13 @@ export async function executeDurableJob<T>(
     throw new DurableJobDuplicateAdmissionError(admitted);
   }
 
+  if (options.initialInput && options.existingInitialInputId) {
+    throw new DurableJobLifecycleError('Durable initial input must be new or existing, not both', admitted);
+  }
+  if ((options.initialInput || options.existingInitialInputId) && !options.controlAuthority) {
+    throw new DurableJobLifecycleError('Durable initial input requires JobControlAuthority', admitted);
+  }
+
   const receivedInput = options.initialInput
     ? options.controlAuthority?.inputs.receive({
       ...options.initialInput,
@@ -228,8 +236,17 @@ export async function executeDurableJob<T>(
       targetAttemptId: admitted.attemptId,
     })
     : null;
-  if (options.initialInput && !options.controlAuthority) {
-    throw new DurableJobLifecycleError('Durable initial input requires JobControlAuthority', admitted);
+  const initialInput = receivedInput?.record
+    ?? (options.existingInitialInputId
+      ? options.controlAuthority?.inputs.get(options.existingInitialInputId) ?? null
+      : null);
+  if (options.existingInitialInputId && (
+    !initialInput
+    || initialInput.jobId !== admitted.jobId
+    || (initialInput.targetAttemptId !== null && initialInput.targetAttemptId !== admitted.attemptId)
+    || !['queued', 'claimed'].includes(initialInput.state)
+  )) {
+    throw new DurableJobLifecycleError('Existing durable initial input does not match the admitted Job', admitted);
   }
 
   const leaseTtlMs = Math.max(3_000, options.leaseTtlMs ?? 45_000);
@@ -461,12 +478,12 @@ export async function executeDurableJob<T>(
     }
     jobStateVersion = jobStarted.stateVersion;
 
-    if (receivedInput && options.controlAuthority) {
+    if (initialInput && options.controlAuthority) {
       const claimed = options.controlAuthority.inputs.claimNext({
         jobId: handle.jobId,
         attemptId: handle.attemptId,
         generation: handle.generation,
-        inputId: receivedInput.record.inputId,
+        inputId: initialInput.inputId,
       });
       if (!claimed) {
         throw new DurableJobLifecycleError('Durable initial input could not be claimed by the active Attempt', handle);

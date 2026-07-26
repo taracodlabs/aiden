@@ -205,6 +205,58 @@ describe('executeDurableJob', () => {
     expect(engine.listEvents(execution.jobId).map((event) => event.type)).toContain('input.consumed');
   });
 
+  it('adopts a previously queued Job and consumes its existing input exactly once', async () => {
+    const controlAuthority = createJobControlAuthority({ db, jobEngine: engine });
+    const admitted = engine.submitJob({
+      entryPoint: 'interactive', source: 'repl', sessionId: 'session_queued',
+      instanceId: 'instance_lifecycle', idempotencyNamespace: 'queued-turn',
+      idempotencyKey: 'queued-job', requestFingerprint: 'queued-fingerprint', goal: 'queued work',
+    });
+    const received = controlAuthority.inputs.receive({
+      jobId: admitted.jobId,
+      targetAttemptId: admitted.attemptId,
+      sessionId: 'session_queued',
+      source: 'tui',
+      kind: 'message',
+      content: 'queued durable request',
+      idempotencyNamespace: 'queued-input',
+      idempotencyKey: 'queued-message',
+    });
+    const restoredControls = createJobControlAuthority({ db, jobEngine: createJobEngine({ db }) });
+
+    const execution = await executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      controlAuthority: restoredControls,
+      admission: { existing: admitted, source: 'repl' },
+      existingInitialInputId: received.record.inputId,
+      execute: async (handle) => {
+        expect(handle.initialInput).toMatchObject({
+          inputId: received.record.inputId,
+          jobId: admitted.jobId,
+          claimedByAttemptId: admitted.attemptId,
+          claimedGeneration: 1,
+          state: 'consumed',
+          content: 'queued durable request',
+        });
+        return 'done';
+      },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: { verified: true },
+      }),
+    });
+
+    expect(execution.initialInput?.inputId).toBe(received.record.inputId);
+    expect(restoredControls.inputs.listPending(admitted.jobId)).toEqual([]);
+    expect(engine.listJobs({ sessionId: 'session_queued' })).toHaveLength(1);
+    expect(engine.listEvents(admitted.jobId).filter((event) => event.type === 'input.consumed')).toHaveLength(1);
+    expect(restoredControls.inputs.consume({
+      inputId: received.record.inputId,
+      attemptId: admitted.attemptId,
+      generation: 1,
+    })).toMatchObject({ applied: false, duplicate: true });
+  });
+
   it('attaches cancellation to the active Attempt and detaches exactly once on cleanup', async () => {
     const controlAuthority = createJobControlAuthority({ db, jobEngine: engine });
     let handleDuringExecution: { jobId: string; attemptId: string; generation: number } | null = null;

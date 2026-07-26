@@ -81,8 +81,10 @@ import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import type { ConfigManager } from '../../core/v4/config';
 import type { PersonalityManager } from '../../core/v4/personality';
 import {
+  admitDurableJob,
   executeDurableJob,
   DurableJobAuthorityLostError,
+  type DurableJobAdmission,
   type DurableJobDisposition,
   type DurableJobHandle,
 } from '../../core/v4/daemon/jobLifecycle';
@@ -696,7 +698,24 @@ export class ChatSession implements ChatSessionLike {
   getBusyMode(): BusyEnterMode { return this.duringTurnInput.getMode(); }
   listQueue(): string[] { return this.duringTurnInput.peek(); }
   clearQueue(): number {
-    if (this.sessionId) this.opts.jobControlAuthority?.inputs.cancelPendingForSession(this.sessionId);
+    if (this.sessionId && this.opts.jobControlAuthority) {
+      const pending = this.opts.jobControlAuthority.inputs.listPendingForSession(this.sessionId);
+      this.opts.jobControlAuthority.inputs.cancelPendingForSession(this.sessionId);
+      for (const record of pending) {
+        const job = this.opts.jobEngine?.getJob(record.jobId);
+        if (job?.status !== 'queued') continue;
+        this.opts.jobControlAuthority.commands.request({
+          jobId: record.jobId,
+          attemptId: record.targetAttemptId,
+          generation: record.targetGeneration,
+          kind: 'cancel',
+          source: 'tui',
+          reason: 'queued input cleared',
+          idempotencyNamespace: `queue-clear:${this.sessionId}`,
+          idempotencyKey: record.inputId,
+        });
+      }
+    }
     this.durableQueueInputIds.length = 0;
     return this.duringTurnInput.clear();
   }
@@ -1133,6 +1152,7 @@ export class ChatSession implements ChatSessionLike {
         if (iter > 1) this.opts.display.printTurnSeparator();
         let input: string;
         let inputAlreadyPersisted = false;
+        let queuedDurableInputId: string | undefined;
         // v4.12.1 Slice 2a — idle boundary: run a message the user queued
         // WHILE the previous turn was busy before blocking on fresh input.
         // Echo it so a queued message never fires invisibly.
@@ -1140,29 +1160,7 @@ export class ChatSession implements ChatSessionLike {
         if (queuedNext !== null) {
           inputAlreadyPersisted = true;
           const durableInputId = this.durableQueueInputIds.shift();
-          if (durableInputId && this.opts.jobControlAuthority) {
-            const record = this.opts.jobControlAuthority.inputs.get(durableInputId);
-            if (record?.targetAttemptId && record.targetGeneration !== null) {
-              const claimed = this.opts.jobControlAuthority.inputs.claimNext({
-                jobId: record.jobId,
-                attemptId: record.targetAttemptId,
-                generation: record.targetGeneration,
-                inputId: durableInputId,
-                kinds: ['message'],
-              });
-              if (!claimed || claimed.inputId !== durableInputId) {
-                throw new Error(`Durable queued input claim failed: ${durableInputId}`);
-              }
-              const consumed = this.opts.jobControlAuthority.inputs.consume({
-                inputId: durableInputId,
-                attemptId: record.targetAttemptId,
-                generation: record.targetGeneration,
-              });
-              if (!consumed.applied && !consumed.duplicate) {
-                throw new Error(`Durable queued input consume failed: ${durableInputId}`);
-              }
-            }
-          }
+          queuedDurableInputId = durableInputId;
           try { this.opts.display.dim(`▸ running queued: ${queuedNext}`); } catch { /* defensive */ }
           input = queuedNext;
           // Fall through to the slash/agent dispatch below with this input.
@@ -1271,7 +1269,7 @@ export class ChatSession implements ChatSessionLike {
         // slash commands + empty input + /quit all `continue` above and
         // never reach this line, matching the task's edge-case spec.
         this.opts.display.write(`  ${this.opts.display.rule()}\n`);
-        await this.runAgentTurn(input, inputAlreadyPersisted);
+        await this.runAgentTurn(input, inputAlreadyPersisted, queuedDurableInputId);
       }
     } finally {
       try { this.opts.display.releaseBottomRegion(); } catch { /* defensive */ }
@@ -1688,7 +1686,11 @@ export class ChatSession implements ChatSessionLike {
     }
   }
 
-  private async runAgentTurn(userInput: string, inputAlreadyPersisted = false): Promise<void> {
+  private async runAgentTurn(
+    userInput: string,
+    inputAlreadyPersisted = false,
+    queuedDurableInputId?: string,
+  ): Promise<void> {
     const jobEngine = this.opts.jobEngine;
     if (!jobEngine || this.opts.unconfigured) {
       await this.runAgentTurnBody(userInput, inputAlreadyPersisted);
@@ -1701,22 +1703,67 @@ export class ChatSession implements ChatSessionLike {
     }
 
     let lifecycleContext: ChatTurnLifecycleContext | null = null;
-    try {
-      await executeDurableJob({
-        engine: jobEngine,
-        ownerId: instanceId,
-        controlAuthority: this.opts.jobControlAuthority,
-        admission: {
+    let admission: DurableJobAdmission = {
+      entryPoint: 'interactive',
+      source: 'repl',
+      sessionId,
+      workspaceId: process.cwd(),
+      instanceId,
+      idempotencyNamespace: `interactive:${sessionId}`,
+      goal: userInput,
+      title: userInput,
+      channelId: 'repl',
+    };
+    if (queuedDurableInputId) {
+      const controls = this.opts.jobControlAuthority;
+      let record = controls?.inputs.get(queuedDurableInputId);
+      if (!controls || !record) {
+        throw new Error(`Durable queued input admission is unavailable: ${queuedDurableInputId}`);
+      }
+      let attempt = record.targetAttemptId
+        ? jobEngine.getAttempt(record.targetAttemptId)
+        : null;
+      const targetJob = jobEngine.getJob(record.jobId);
+      if (!attempt || attempt.jobId !== record.jobId || targetJob?.activeAttemptId !== attempt.id) {
+        const continued = admitDurableJob(jobEngine, {
           entryPoint: 'interactive',
           source: 'repl',
           sessionId,
           workspaceId: process.cwd(),
           instanceId,
-          idempotencyNamespace: `interactive:${sessionId}`,
+          idempotencyNamespace: `interactive-queue-recovery:${sessionId}`,
+          idempotencyKey: `queued-input:${queuedDurableInputId}`,
           goal: userInput,
           title: userInput,
           channelId: 'repl',
+        });
+        record = controls.inputs.retarget({
+          inputId: queuedDurableInputId,
+          jobId: continued.jobId,
+          attemptId: continued.attemptId,
+          source: 'repl',
+        }).record;
+        attempt = jobEngine.getAttempt(continued.attemptId);
+      }
+      if (!attempt || attempt.jobId !== record.jobId) {
+        throw new Error(`Durable queued input continuation is unavailable: ${queuedDurableInputId}`);
+      }
+      admission = {
+        existing: {
+          jobId: record.jobId,
+          attemptId: attempt.id,
+          runId: attempt.rowId,
+          reused: true,
         },
+        source: 'repl',
+      };
+    }
+    try {
+      await executeDurableJob({
+        engine: jobEngine,
+        ownerId: instanceId,
+        controlAuthority: this.opts.jobControlAuthority,
+        admission,
         initialInput: !inputAlreadyPersisted && this.opts.jobControlAuthority
           ? {
             sessionId,
@@ -1728,6 +1775,7 @@ export class ChatSession implements ChatSessionLike {
             idempotencyKey: `initial:${this.durableInputOrdinal++}`,
           }
           : undefined,
+        existingInitialInputId: queuedDurableInputId,
         execute: async (handle) => {
           lifecycleContext = { handle };
           await this.runAgentTurnBody(userInput, inputAlreadyPersisted, lifecycleContext);
@@ -1943,10 +1991,24 @@ export class ChatSession implements ChatSessionLike {
                 idempotencyKey: `interrupt:${target.attemptId}:${ordinal}`,
               });
             } else {
+              const queuedAdmission = jobEngine && replInstanceId && this.sessionId
+                ? admitDurableJob(jobEngine, {
+                  entryPoint: 'interactive',
+                  source: 'repl',
+                  sessionId: this.sessionId,
+                  workspaceId: process.cwd(),
+                  instanceId: replInstanceId,
+                  idempotencyNamespace: `interactive-queue:${this.sessionId}`,
+                  idempotencyKey: `queued:${target.jobId}:${target.attemptId}:${ordinal}`,
+                  goal: submission,
+                  title: submission,
+                  channelId: 'repl',
+                })
+                : null;
               const received = this.opts.jobControlAuthority.inputs.receive({
-                jobId: target.jobId,
-                targetAttemptId: target.attemptId,
-                targetGeneration: target.generation,
+                jobId: queuedAdmission?.jobId ?? target.jobId,
+                targetAttemptId: queuedAdmission?.attemptId ?? target.attemptId,
+                targetGeneration: queuedAdmission ? null : target.generation,
                 sessionId: this.sessionId!,
                 channelId: 'repl',
                 source: 'tui',

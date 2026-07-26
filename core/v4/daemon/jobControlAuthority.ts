@@ -58,6 +58,13 @@ export interface InputAuthorityStore {
   listPending(jobId: string): DurableInputRecord[];
   listPendingForSession(sessionId: string): DurableInputRecord[];
   cancelPendingForSession(sessionId: string, now?: number): number;
+  retarget(command: {
+    inputId: string;
+    jobId: string;
+    attemptId: string;
+    source: string;
+    now?: number;
+  }): { record: DurableInputRecord; applied: boolean; duplicate?: boolean };
   claimNext(command: {
     jobId: string;
     attemptId: string;
@@ -423,6 +430,62 @@ export function createJobControlAuthority(options: CreateJobControlAuthorityOpti
     return claimed;
   }).immediate;
 
+  const retargetTx = db.transaction((command: {
+    inputId: string;
+    jobId: string;
+    attemptId: string;
+    source: string;
+    now?: number;
+  }): { record: DurableInputRecord; applied: boolean; duplicate?: boolean } => {
+    const row = db.prepare('SELECT * FROM durable_inputs WHERE input_id = ?')
+      .get(command.inputId) as InputRow | undefined;
+    if (!row) throw new Error('Durable input not found');
+    if (!['queued', 'claimed'].includes(row.state)) {
+      throw new Error('Only pending durable input can be retargeted');
+    }
+    if (row.job_id === command.jobId && row.target_attempt_id === command.attemptId) {
+      return { record: mapInput(row), applied: false, duplicate: true };
+    }
+    const job = jobEngine.getJob(command.jobId);
+    const attempt = jobEngine.getAttempt(command.attemptId);
+    if (!job || !attempt || attempt.jobId !== job.id || job.activeAttemptId !== attempt.id) {
+      throw new Error('Durable input continuation target is unavailable');
+    }
+    if (['cancelled', 'completed', 'failed', 'dead_letter', 'completed_unverified', 'verification_failed', 'abandoned'].includes(job.status)) {
+      throw new Error('Durable input continuation target is terminal');
+    }
+    const now = command.now ?? Date.now();
+    const allocated = db.prepare(
+      `UPDATE tasks SET next_input_sequence = next_input_sequence + 1, updated_at = ?
+        WHERE id = ? RETURNING next_input_sequence - 1 AS sequence`,
+    ).get(now, command.jobId) as { sequence: number } | undefined;
+    if (!allocated) throw new Error('Durable input continuation target disappeared');
+    const changed = db.prepare(
+      `UPDATE durable_inputs
+          SET job_id = ?, target_attempt_id = ?, target_generation = NULL,
+              sequence = ?, state = 'queued', claimed_by_attempt_id = NULL,
+              claimed_generation = NULL, claimed_at = NULL, updated_at = ?
+        WHERE input_id = ? AND state IN ('queued','claimed')`,
+    ).run(command.jobId, command.attemptId, allocated.sequence, now, command.inputId);
+    if (changed.changes !== 1) throw new Error('Durable input changed during continuation retarget');
+    const record = getInput(command.inputId)!;
+    appendReferenceEvent({
+      jobId: command.jobId,
+      attemptId: command.attemptId,
+      generation: attempt.generation,
+      type: 'input.retargeted',
+      producer: command.source,
+      idempotencyKey: `input:${command.inputId}:retargeted:${command.jobId}`,
+      payload: {
+        inputId: command.inputId,
+        kind: record.kind,
+        sequence: record.sequence,
+        state: record.state,
+      },
+    });
+    return { record, applied: true };
+  }).immediate;
+
   const consumeTx = db.transaction((command: { inputId: string; attemptId: string; generation: number; now?: number }) => {
     const row = db.prepare('SELECT * FROM durable_inputs WHERE input_id = ?').get(command.inputId) as InputRow | undefined;
     if (!row) return { applied: false, conflict: 'not_found' as const };
@@ -468,6 +531,7 @@ export function createJobControlAuthority(options: CreateJobControlAuthorityOpti
           WHERE session_id = ? AND state IN ('queued','claimed')`,
       ).run(now, sessionId).changes;
     },
+    retarget: retargetTx,
     claimNext: claimTx,
     consume: consumeTx,
   };
