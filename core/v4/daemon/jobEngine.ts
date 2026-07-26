@@ -17,6 +17,7 @@ import type {
   EffectReconciliationOutcome,
   EffectRetryRecommendation,
 } from '../effectReconciliation';
+import { createExecutionGraphAuthority, type ExecutionGraphAuthority } from './executionGraph';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -146,6 +147,7 @@ export interface LeaseResult extends TransitionResult {
 }
 
 export interface JobEngine {
+  readonly graph: ExecutionGraphAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -544,6 +546,7 @@ function parseArray(raw: string | null | undefined): unknown[] {
 
 export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   const { db } = opts;
+  const graph = createExecutionGraphAuthority(db);
 
   const getJobRow = (jobId: string): JobSqlRow | undefined => db.prepare(
     `SELECT id, status, state_version, active_attempt_id, root_job_id,
@@ -935,6 +938,12 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
             AND effect_state IN ('unknown','partial','started','committed') LIMIT 1`,
       ).get(command.jobId);
       if (unresolved) return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
+      const unfinishedGraph = db.prepare(
+        `SELECT 1 FROM execution_graphs g
+          JOIN execution_graph_nodes n ON n.graph_id = g.graph_id
+         WHERE g.job_id = ? AND g.state = 'active' AND n.state <> 'succeeded' LIMIT 1`,
+      ).get(command.jobId);
+      if (unfinishedGraph) return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
     }
     if (
       !ATTEMPT_TERMINAL.has(attempt.status)
@@ -2054,6 +2063,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   }).immediate;
 
   return {
+    graph,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);
@@ -2133,8 +2143,18 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     },
     appendJobEvent: appendJobEventTx,
     transitionJob: transitionJobTx,
-    finalizeJob: finalizeJobTx,
-    cancelJob: cancelJobTx,
+    finalizeJob(command) {
+      const result = finalizeJobTx(command);
+      if (result.applied) {
+        graph.settle(command.jobId, command.status, command.producer, `graph-settled:${command.eventIdempotencyKey}`, command.now);
+      }
+      return result;
+    },
+    cancelJob(command) {
+      const result = cancelJobTx(command);
+      if (result.applied) graph.settle(command.jobId, 'cancelled', command.producer, `graph-cancelled:${command.eventIdempotencyKey}`, command.now);
+      return result;
+    },
     pauseJob: pauseJobTx,
     resumeJob: resumeJobTx,
     transitionAttempt: transitionAttemptTx,

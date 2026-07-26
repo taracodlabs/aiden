@@ -127,6 +127,16 @@ describe('durable Job and Attempt migration', () => {
       'outcome', 'confidence', 'evidence_json', 'retry_recommendation',
       'human_resolution_required', 'idempotency_key', 'created_at',
     ]));
+    expect([...columns('execution_graphs')]).toEqual(expect.arrayContaining([
+      'graph_id', 'job_id', 'plan_digest', 'state', 'version', 'next_event_sequence',
+    ]));
+    expect([...columns('execution_graph_nodes')]).toEqual(expect.arrayContaining([
+      'node_id', 'node_key', 'graph_id', 'job_id', 'kind', 'state', 'ordinal',
+      'output_ref', 'verification_ref', 'requires_verification', 'state_version',
+    ]));
+    expect([...columns('execution_node_attempts')]).toEqual(expect.arrayContaining([
+      'node_execution_id', 'node_id', 'attempt_id', 'generation', 'state', 'output_ref',
+    ]));
   });
 
   it('backfills stable Attempt identities and deterministic per-Job event order', () => {

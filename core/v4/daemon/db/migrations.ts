@@ -1137,6 +1137,91 @@ function applyV23(db: Database.Database): void {
   `);
 }
 
+/** Durable dependency graph and append-only node execution history. */
+function applyV24(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS execution_graphs (
+      graph_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL UNIQUE,
+      plan_digest TEXT NOT NULL,
+      state TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      next_event_sequence INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS execution_graph_nodes (
+      node_id TEXT PRIMARY KEY,
+      node_key TEXT NOT NULL,
+      graph_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      state TEXT NOT NULL,
+      label TEXT,
+      input_ref TEXT,
+      output_ref TEXT,
+      verification_ref TEXT,
+      requires_verification INTEGER NOT NULL DEFAULT 0,
+      ordinal INTEGER NOT NULL,
+      state_version INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (graph_id, node_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_graph_nodes_state
+      ON execution_graph_nodes(graph_id, state, ordinal);
+    CREATE TABLE IF NOT EXISTS execution_graph_edges (
+      graph_id TEXT NOT NULL,
+      from_node_id TEXT NOT NULL,
+      to_node_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (graph_id, from_node_id, to_node_id),
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (from_node_id) REFERENCES execution_graph_nodes(node_id) ON DELETE CASCADE,
+      FOREIGN KEY (to_node_id) REFERENCES execution_graph_nodes(node_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_graph_edges_target
+      ON execution_graph_edges(graph_id, to_node_id);
+    CREATE TABLE IF NOT EXISTS execution_node_attempts (
+      node_execution_id TEXT PRIMARY KEY,
+      graph_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      output_ref TEXT,
+      verification_ref TEXT,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (node_id) REFERENCES execution_graph_nodes(node_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (node_id, attempt_id, generation)
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_node_attempts_active
+      ON execution_node_attempts(job_id, state, started_at);
+    CREATE TABLE IF NOT EXISTS execution_graph_events (
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      graph_id TEXT NOT NULL,
+      graph_sequence INTEGER NOT NULL,
+      job_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      producer TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (graph_id, graph_sequence),
+      UNIQUE (graph_id, idempotency_key)
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1161,6 +1246,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 21, name: 'v4.15.1 - durable input and approval authority', apply: applyV21 },
   { version: 22, name: 'durable effect contracts', apply: applyV22 },
   { version: 23, name: 'append-only effect reconciliation', apply: applyV23 },
+  { version: 24, name: 'durable execution graph', apply: applyV24 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
