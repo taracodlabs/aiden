@@ -726,6 +726,54 @@ describe('ChatSession — v4.6 Phase 2Q-B REPL parent-run row', () => {
 });
 
 describe('ChatSession durable Job admission', () => {
+  it('uses a fresh durable input identity after restarting the same session', async () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    for (const instanceId of ['instance_first', 'instance_restart']) {
+      db.prepare(
+        `INSERT INTO daemon_instances
+           (instance_id, pid, hostname, started_at, last_heartbeat, version)
+         VALUES (?, 1, 'localhost', ?, ?, '4.16.1')`,
+      ).run(instanceId, now, now);
+    }
+    const jobEngine = createJobEngine({ db });
+    const controls = createJobControlAuthority({ db, jobEngine });
+
+    try {
+      for (const [instanceId, input] of [
+        ['instance_first', 'first turn'],
+        ['instance_restart', 'restart turn'],
+      ] as const) {
+        const { agent } = mkAgent({ finalContent: 'ok' });
+        const session = new ChatSession(buildOpts({
+          agent: agent as never,
+          promptApi: mkPromptApi({ inputs: [input, '/quit'] }),
+          replInstanceId: instanceId,
+          jobEngine: jobEngine as never,
+          jobControlAuthority: controls,
+        }));
+        await session.run();
+        expect(agent.runConversation).toHaveBeenCalledTimes(1);
+      }
+
+      const inputs = db.prepare(
+        `SELECT content, idempotency_key
+           FROM durable_inputs
+          ORDER BY created_at, input_id`,
+      ).all() as Array<{ content: string; idempotency_key: string }>;
+      expect(inputs).toHaveLength(2);
+      expect(inputs.map((record) => record.content).sort()).toEqual(['first turn', 'restart turn']);
+      expect(new Set(inputs.map((record) => record.idempotency_key)).size).toBe(2);
+      expect(inputs.map((record) => record.idempotency_key)).toEqual(expect.arrayContaining([
+        'initial:instance_first:0',
+        'initial:instance_restart:0',
+      ]));
+    } finally {
+      db.close();
+    }
+  });
+
   it('cancels staged continuation Jobs when the durable queue is cleared', () => {
     const db = new Database(':memory:');
     runMigrations(db);

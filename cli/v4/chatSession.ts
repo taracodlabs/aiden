@@ -1772,7 +1772,7 @@ export class ChatSession implements ChatSessionLike {
             kind: 'message',
             content: userInput,
             idempotencyNamespace: `interactive-input:${sessionId}`,
-            idempotencyKey: `initial:${this.durableInputOrdinal++}`,
+            idempotencyKey: `initial:${instanceId}:${this.durableInputOrdinal++}`,
           }
           : undefined,
         existingInitialInputId: queuedDurableInputId,
