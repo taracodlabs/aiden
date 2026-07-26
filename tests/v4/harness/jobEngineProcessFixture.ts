@@ -25,6 +25,16 @@ function send(message: Record<string, unknown>): void {
   process.send?.(message);
 }
 
+function sendAsync(message: Record<string, unknown>): Promise<void> {
+  return new Promise((resolve) => {
+    if (!process.send) {
+      resolve();
+      return;
+    }
+    process.send(message, () => resolve());
+  });
+}
+
 function finish(message: Record<string, unknown>): void {
   if (!process.send) return;
   process.send(message, () => process.disconnect());
@@ -104,7 +114,8 @@ async function main(): Promise<void> {
         producer: 'process-test',
         now: payload.now,
       });
-      send({ type: 'claimed', result: { lease, started } });
+      await sendAsync({ type: 'claimed', result: { lease, started } });
+      if (db.open) db.close();
       process.exit(17);
     }
 
@@ -151,7 +162,8 @@ async function main(): Promise<void> {
         producer: 'process-test',
         now: (payload.now ?? Date.now()) + 2,
       });
-      send({ type: 'tool_started', result: { lease, attempt, prepared, started } });
+      await sendAsync({ type: 'tool_started', result: { lease, attempt, prepared, started } });
+      if (db.open) db.close();
       process.exit(17);
     }
 
@@ -181,7 +193,7 @@ async function main(): Promise<void> {
     });
     finish({ type: 'result', result });
   } finally {
-    db.close();
+    if (db.open) db.close();
   }
 }
 

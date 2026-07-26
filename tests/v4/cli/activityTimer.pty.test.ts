@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import path from 'node:path';
 import * as pty from 'node-pty';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 function stripAnsi(value: string): string {
   return value
@@ -23,16 +24,29 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
       env: { ...process.env, FORCE_COLOR: '0', NO_COLOR: '1', AIDEN_UI_ICONS: '0' },
     });
     let raw = '';
-    child.onData((chunk) => { raw += chunk; });
-    setTimeout(() => child.resize(44, 20), 1_100);
-    setTimeout(() => child.resize(90, 20), 2_600);
+    let currentWidth = 48;
+    const screen = new TerminalScreen(currentWidth, 20);
+    const dataSubscription = child.onData((chunk) => {
+      raw += chunk;
+      screen.write(chunk);
+    });
+    const resizeTo = (cols: number): void => {
+      currentWidth = cols;
+      screen.resize(cols, 20);
+      child.resize(cols, 20);
+    };
+    const firstResize = setTimeout(() => resizeTo(44), 1_100);
+    const secondResize = setTimeout(() => resizeTo(90), 2_600);
     await new Promise<void>((resolve, reject) => {
       const timeout = setTimeout(() => {
         child.kill();
         reject(new Error(`activity fixture timeout:\n${JSON.stringify(raw)}`));
       }, 20_000);
       child.onExit(({ exitCode }) => {
+        clearTimeout(firstResize);
+        clearTimeout(secondResize);
         clearTimeout(timeout);
+        dataSubscription.dispose();
         if (exitCode === 0) resolve();
         else reject(new Error(`activity fixture exited ${exitCode}:\n${JSON.stringify(raw)}`));
       });
@@ -50,9 +64,11 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
       expect((frame.match(/running/g) ?? []).length).toBeLessThanOrEqual(1);
     }
     expect(frames.filter((frame) => frame.includes('running')).length).toBeGreaterThanOrEqual(4);
-    const activityCursorRows = [...raw.matchAll(/\x1b\[(H|(\d+);1H)([^\r\n]*(?:calling|running)[^\r\n]*)/g)]
-      .map((match) => match[2] === undefined ? 1 : Number(match[2]));
-    expect(new Set(activityCursorRows).size, JSON.stringify(raw)).toBeLessThanOrEqual(2);
+    const finalActivityLines = screen.lines().filter((line) => line.includes('calling') || line.includes('running'));
+    expect(finalActivityLines.length, JSON.stringify({ finalActivityLines, raw })).toBeLessThanOrEqual(1);
+    for (const line of finalActivityLines) {
+      expect(line.length, JSON.stringify({ line, raw })).toBeLessThanOrEqual(currentWidth);
+    }
     const settledAt = raw.indexOf('__ACTIVITY_SETTLED__');
     expect(settledAt).toBeGreaterThan(0);
     expect(raw.slice(settledAt)).not.toContain('running');

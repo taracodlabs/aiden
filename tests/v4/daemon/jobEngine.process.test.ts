@@ -20,6 +20,7 @@ const fixture = resolve(__dirname, '../harness/jobEngineProcessFixture.ts');
 let directory: string;
 let dbPath: string;
 let children: ChildProcess[];
+const closedChildren = new WeakSet<ChildProcess>();
 
 function startWorker(payload: Record<string, unknown>): ChildProcess {
   const encoded = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
@@ -27,6 +28,7 @@ function startWorker(payload: Record<string, unknown>): ChildProcess {
     execArgv: ['-r', 'ts-node/register/transpile-only'],
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
+  child.once('close', () => closedChildren.add(child));
   children.push(child);
   return child;
 }
@@ -34,7 +36,8 @@ function startWorker(payload: Record<string, unknown>): ChildProcess {
 function message(child: ChildProcess, type: string): Promise<WorkerMessage> {
   return new Promise((resolveMessage, reject) => {
     let stderr = '';
-    child.stderr?.on('data', (chunk) => { stderr += String(chunk); });
+    const onStderr = (chunk: Buffer): void => { stderr += String(chunk); };
+    child.stderr?.on('data', onStderr);
     const onMessage = (value: unknown): void => {
       const parsed = value as WorkerMessage;
       if (parsed.type === 'error') {
@@ -53,6 +56,7 @@ function message(child: ChildProcess, type: string): Promise<WorkerMessage> {
     const cleanup = (): void => {
       child.off('message', onMessage);
       child.off('exit', onExit);
+      child.stderr?.off('data', onStderr);
     };
     child.on('message', onMessage);
     child.on('exit', onExit);
@@ -60,12 +64,15 @@ function message(child: ChildProcess, type: string): Promise<WorkerMessage> {
 }
 
 function waitForExit(child: ChildProcess): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  if (closedChildren.has(child)) return Promise.resolve();
   return new Promise<void>((resolveExit) => {
-    const onExit = (): void => { resolveExit(); };
-    child.once('exit', onExit);
-    if (child.exitCode !== null || child.signalCode !== null) {
-      child.off('exit', onExit);
+    const onClose = (): void => {
+      closedChildren.add(child);
+      resolveExit();
+    };
+    child.once('close', onClose);
+    if (closedChildren.has(child)) {
+      child.off('close', onClose);
       resolveExit();
     }
   });
