@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { win32 } from 'node:path';
 
 import {
   UNKNOWN_MUTATION_EFFECT_CONTRACT,
@@ -80,7 +80,7 @@ describe('durable tool effect contracts', () => {
     );
 
     expect(descriptor.reconciliationData).toEqual({
-      path: join('C:\\workspace', 'result.txt'),
+      path: win32.join('C:\\workspace', 'result.txt'),
       expectedContentSha256: createHash('sha256').update(content).digest('hex'),
       expectedSize: Buffer.byteLength(content),
     });

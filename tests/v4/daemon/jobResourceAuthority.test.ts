@@ -129,5 +129,8 @@ describe('JobResourceAuthority', () => {
     expect(jobs.resources.authorize({
       jobId: job.jobId, kind: 'path', value: 'C:\\workspace\\safe\\..\\escape.txt',
     })).toBe(false);
+    expect(jobs.resources.authorize({
+      jobId: job.jobId, kind: 'path', value: 'c:\\WORKSPACE\\safe\\nested\\case-insensitive.txt',
+    })).toBe(true);
   });
 });

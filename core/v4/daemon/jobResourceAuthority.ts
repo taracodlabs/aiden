@@ -4,8 +4,8 @@
  */
 
 import { randomBytes } from 'node:crypto';
-import { resolve, sep } from 'node:path';
 
+import { isPortablePathWithin, resolvePortablePath } from '../portablePath';
 import type { Db } from './db/connection';
 
 export type JobBudgetKind =
@@ -86,7 +86,9 @@ function parseList(raw: string): string[] {
 function normalizeCapabilities(value: JobCapabilities = {}): Required<JobCapabilities> {
   return {
     tools: value.tools === undefined ? ['*'] : [...value.tools],
-    paths: value.paths === undefined ? ['*'] : [...value.paths].map((path) => resolve(path)),
+    paths: value.paths === undefined
+      ? ['*']
+      : [...value.paths].map((path) => path === '*' ? path : resolvePortablePath(process.cwd(), path)),
     hosts: value.hosts === undefined ? ['*'] : [...value.hosts].map((host) => host.toLowerCase()),
     applications: value.applications === undefined ? ['*'] : [...value.applications],
     connections: value.connections === undefined ? ['*'] : [...value.connections],
@@ -132,7 +134,7 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
               const parentValues = parseList(parent[column]!);
               const childValues = capabilities[`${kind === 'effect' ? 'effectKinds' : `${kind}s`}` as keyof JobCapabilities] ?? [];
               const exceedsParent = !parentValues.includes('*') && (kind === 'path'
-                ? childValues.some((item) => item === '*' || !parentValues.some((root) => item === root || item.startsWith(`${root}${sep}`)))
+                ? childValues.some((item) => item === '*' || !parentValues.some((root) => isPortablePathWithin(item, root)))
                 : childValues.some((item) => item === '*' || !parentValues.includes(item)));
               if (exceedsParent) {
                 throw new Error(`Child ${kind} capability exceeds parent boundary`);
@@ -232,8 +234,8 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
       if (allowed.includes('*')) return true;
       if (allowed.length === 0) return false;
       if (command.kind === 'path') {
-        const candidate = resolve(command.value);
-        return allowed.some((root) => candidate === root || candidate.startsWith(`${root}${sep}`));
+        const candidate = resolvePortablePath(process.cwd(), command.value);
+        return allowed.some((root) => isPortablePathWithin(candidate, root));
       }
       if (command.kind === 'host') return allowed.includes(command.value.toLowerCase());
       return allowed.includes(command.value);

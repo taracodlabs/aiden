@@ -4,9 +4,9 @@
  */
 
 import { createHash } from 'node:crypto';
-import { resolve } from 'node:path';
 
 import type { ToolEffectContract } from '../../core/v4/effectContract';
+import { resolvePortablePath } from '../../core/v4/portablePath';
 import type { ToolHandler } from '../../core/v4/toolRegistry';
 
 type ContractOptions = Omit<ToolEffectContract, 'target'> & {
@@ -36,7 +36,7 @@ const FILE_WRITE = contract({
   approvalRequirement: 'policy', sensitiveFields: ['content', 'patch'],
   redactionRules: ['digest_arguments', 'omit_sensitive_values'], targetFields: ['path'],
   reconciliationData(args, cwd) {
-    const path = typeof args.path === 'string' ? resolve(cwd, args.path) : null;
+    const path = typeof args.path === 'string' ? resolvePortablePath(cwd, args.path) : null;
     const content = typeof args.content === 'string' ? args.content : null;
     if (!path || content === null) return null;
     return {
