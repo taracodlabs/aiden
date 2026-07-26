@@ -1418,6 +1418,22 @@ function applyV29(db: Database.Database): void {
   `);
 }
 
+/** Durable cursors for replayable Job-event consumers. */
+function applyV30(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_event_cursors (
+      consumer_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      last_sequence INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (consumer_id, job_id),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_event_cursors_job
+      ON job_event_cursors(job_id, last_sequence);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1448,6 +1464,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 27, name: 'durable child Job contracts', apply: applyV27 },
   { version: 28, name: 'durable budgets and capabilities', apply: applyV28 },
   { version: 29, name: 'durable claims evidence and verdicts', apply: applyV29 },
+  { version: 30, name: 'durable Job event cursors', apply: applyV30 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

@@ -21,6 +21,7 @@ import { createExecutionGraphAuthority, type ExecutionGraphAuthority } from './e
 import { createJobResourceAuthority, type JobResourceAuthority } from './jobResourceAuthority';
 import type { JobBudgetKind, JobCapabilities } from './jobResourceAuthority';
 import { createJobProofAuthority, type JobProofAuthority } from './jobProofAuthority';
+import { createJobEventProjectionAuthority, type JobEventProjectionAuthority } from './jobEventProjection';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -179,6 +180,7 @@ export interface JobEngine {
   readonly graph: ExecutionGraphAuthority;
   readonly resources: JobResourceAuthority;
   readonly proof: JobProofAuthority;
+  readonly projection: JobEventProjectionAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -601,11 +603,28 @@ function parseRecord(raw: string | null | undefined): Record<string, unknown> {
   }
 }
 
+const SENSITIVE_EVENT_KEY = /(?:authorization|api[_-]?key|token|secret|password|credential|cookie)/i;
+function redactEventPayload(value: unknown, key = '', depth = 0): unknown {
+  if (SENSITIVE_EVENT_KEY.test(key)) return '[redacted]';
+  if (depth > 5) return '[truncated]';
+  if (Array.isArray(value)) return value.slice(0, 100).map((item) => redactEventPayload(item, '', depth + 1));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .slice(0, 100)
+      .map(([nestedKey, nested]) => [nestedKey, redactEventPayload(nested, nestedKey, depth + 1)]));
+  }
+  if (typeof value === 'string' && /(?:bearer\s+[a-z0-9._-]{12,}|(?:sk|gsk|ghp)_[a-z0-9_-]{12,})/i.test(value)) {
+    return '[redacted]';
+  }
+  return value;
+}
+
 export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   const { db } = opts;
   const graph = createExecutionGraphAuthority(db);
   const resources = createJobResourceAuthority(db);
   const proof = createJobProofAuthority(db);
+  const projection = createJobEventProjectionAuthority(db);
 
   const getJobRow = (jobId: string): JobSqlRow | undefined => db.prepare(
     `SELECT id, status, state_version, active_attempt_id, root_job_id,
@@ -681,7 +700,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     ).get(event.runId) as { run_sequence: number } | undefined;
     if (!runSequence) throw new Error(`Attempt row not found: ${event.runId}`);
     const now = Date.now();
-    const payload = JSON.stringify(event.payload ?? null);
+    const payload = JSON.stringify(redactEventPayload(event.payload ?? null));
     const inserted = db.prepare(
       `INSERT INTO run_events (
          run_id, session_id, seq, ts, category, kind, name, payload,
@@ -2245,6 +2264,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     graph,
     resources,
     proof,
+    projection,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);

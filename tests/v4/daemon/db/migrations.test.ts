@@ -54,6 +54,7 @@ describe('runMigrations', () => {
     expect(names).toContain('job_evidence');
     expect(names).toContain('job_verdicts');
     expect(names).toContain('proof_reviews');
+    expect(names).toContain('job_event_cursors');
   });
 
   it('enforces trigger_events UNIQUE(source, idempotency_key) when key present', () => {
