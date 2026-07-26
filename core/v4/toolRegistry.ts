@@ -1283,6 +1283,7 @@ export class ToolRegistry {
         const message = err instanceof Error ? err.message : String(err);
         const terminal = signal?.aborted
           ? 'cancelled'
+          : preparedToolCall?.mutates ? 'unknown'
           : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
         executionAttempt.terminalResult = terminal;
         return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);

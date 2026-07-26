@@ -147,6 +147,23 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
     recordEvidence(command) {
       assertAttempt(command.jobId, command.attemptId, command.generation, command.fenceToken);
       const now = command.now ?? Date.now();
+      if (command.effectId) {
+        const effect = db.prepare(
+          `SELECT job_id, attempt_id, generation, attempted_at
+             FROM side_effect_ledger WHERE key = ?`,
+        ).get(command.effectId) as {
+          job_id: string; attempt_id: string; generation: number; attempted_at: number;
+        } | undefined;
+        if (!effect
+          || effect.job_id !== command.jobId
+          || effect.attempt_id !== command.attemptId
+          || effect.generation !== command.generation) {
+          throw new Error('Evidence does not match the linked Effect authority');
+        }
+        if (command.observedAt < effect.attempted_at) {
+          throw new Error('Evidence must be observed after the linked Effect began');
+        }
+      }
       const payloadJson = JSON.stringify(command.payload ?? null);
       const evidenceId = id('evidence');
       const late = getVerdict(command.jobId) !== null;
@@ -175,14 +192,22 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       assertAttempt(claim.job_id, command.attemptId, command.generation);
       const now = command.now ?? Date.now();
       db.transaction(() => {
+        const linkedEvidence: EvidenceRow[] = [];
         for (const evidenceId of command.evidenceIds) {
           const evidence = db.prepare('SELECT * FROM job_evidence WHERE evidence_id = ?').get(evidenceId) as EvidenceRow | undefined;
           if (!evidence || evidence.job_id !== claim.job_id || evidence.attempt_id !== command.attemptId || evidence.generation !== command.generation) {
             throw new Error('Stale or unrelated evidence cannot prove this claim');
           }
           if (evidence.fresh_until !== null && evidence.fresh_until < now) throw new Error('Stale evidence cannot prove a claim');
+          linkedEvidence.push(evidence);
           db.prepare('INSERT OR IGNORE INTO claim_evidence (claim_id, evidence_id, created_at) VALUES (?, ?, ?)')
             .run(command.claimId, evidenceId, now);
+        }
+        if (command.state === 'verified' && (
+          linkedEvidence.length === 0
+          || linkedEvidence.some((item) => item.verification_result !== 'verified' || item.coverage !== 'full')
+        )) {
+          throw new Error('Verified claims require complete verified evidence');
         }
         db.prepare('UPDATE job_claims SET state = ?, attempt_id = ?, generation = ?, checked_at = ? WHERE claim_id = ?')
           .run(command.state, command.attemptId, command.generation, now, command.claimId);
@@ -238,6 +263,12 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
         effects: rows('side_effect_ledger', 'attempted_at'),
         claims: listClaims(jobId),
         evidence: listEvidence(jobId),
+        claimEvidence: db.prepare(
+          `SELECT ce.claim_id AS claimId, ce.evidence_id AS evidenceId, ce.created_at AS createdAt
+             FROM claim_evidence ce
+             JOIN job_claims c ON c.claim_id = ce.claim_id
+            WHERE c.job_id = ? ORDER BY ce.created_at, ce.claim_id, ce.evidence_id`,
+        ).all(jobId),
         verdict: getVerdict(jobId),
       };
     },

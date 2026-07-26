@@ -222,7 +222,8 @@ export type ToolTerminalClassification =
   | 'blocked'
   | 'denied'
   | 'cancelled'
-  | 'timed_out';
+  | 'timed_out'
+  | 'unknown';
 
 export interface ToolExecutionAttemptTiming {
   attempt: number;

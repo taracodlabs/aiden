@@ -79,6 +79,7 @@ export interface PreparedDurableToolCall {
   toolCallId: string;
   effectId: string | null;
   mutates: boolean;
+  effect?: DurableEffectDescriptor;
 }
 
 function requireApplied(operation: string, result: TransitionResult): void {
@@ -156,7 +157,80 @@ export function prepareDurableToolCall(command: {
     throw new DurableToolCallConflictError('duplicate mutation', result);
   }
   requireApplied('prepare', result);
-  return { toolCallId, effectId: result.effectId ?? null, mutates: command.mutates };
+  return {
+    toolCallId,
+    effectId: result.effectId ?? null,
+    mutates: command.mutates,
+    ...(effect ? { effect } : {}),
+  };
+}
+
+function captureDurableFileProof(
+  context: JobExecutionContext,
+  prepared: PreparedDurableToolCall,
+): void {
+  const effect = prepared.effect;
+  if (!prepared.effectId || effect?.kind !== 'filesystem.write' || !effect.verificationSupported) return;
+  const expected = effect.reconciliationData;
+  const target = expected?.path;
+  const claim = context.engine.proof.createClaim({
+    jobId: context.jobId,
+    attemptId: context.attemptId,
+    generation: context.generation,
+    category: 'contract',
+    statement: `file write matches requested content: ${effect.target ?? target ?? 'target'}`,
+    required: true,
+  });
+  let payload: Record<string, unknown> = { path: target ?? effect.target, exists: false, exact: false };
+  let verificationResult: 'verified' | 'failed' | 'unknown' = 'unknown';
+  let coverage: 'full' | 'unknown' = 'unknown';
+  try {
+    if (!target || !existsSync(target)) {
+      payload = { ...payload, exists: false };
+      verificationResult = 'failed';
+      coverage = 'full';
+    } else {
+      const bytes = readFileSync(target);
+      const stat = statSync(target);
+      const contentSha256 = createHash('sha256').update(bytes).digest('hex');
+      const exact = expected?.expectedContentSha256 !== undefined
+        && expected.expectedSize !== undefined
+        && contentSha256 === expected.expectedContentSha256
+        && stat.size === expected.expectedSize;
+      payload = { path: target, exists: true, size: stat.size, contentSha256, exact };
+      verificationResult = exact ? 'verified' : 'failed';
+      coverage = 'full';
+    }
+  } catch (error) {
+    payload = {
+      path: target ?? effect.target,
+      exists: null,
+      exact: null,
+      captureError: error instanceof Error ? error.name : 'Error',
+    };
+  }
+  const observedAt = Date.now();
+  const evidence = context.engine.proof.recordEvidence({
+    jobId: context.jobId,
+    attemptId: context.attemptId,
+    generation: context.generation,
+    fenceToken: context.fenceToken,
+    effectId: prepared.effectId,
+    source: 'filesystem.readback',
+    producer: context.producer,
+    observedAt,
+    freshUntil: observedAt + 60_000,
+    coverage,
+    verificationResult,
+    payload,
+  });
+  context.engine.proof.checkClaim({
+    claimId: claim.claimId,
+    attemptId: context.attemptId,
+    generation: context.generation,
+    evidenceIds: [evidence.evidenceId],
+    state: verificationResult,
+  });
 }
 
 export function recordDurableToolApproval(command: {
@@ -218,6 +292,7 @@ export async function executeWithDurableToolCall<T>(command: {
       resultRef: opaqueReference('tool-result', result),
       producer: context.producer,
     }));
+    if (succeeded) captureDurableFileProof(context, prepared);
     return result;
   } catch (error) {
     const completion = context.engine.completeToolCall({

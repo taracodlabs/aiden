@@ -39,6 +39,22 @@ function activeJob(key: string) {
 }
 
 describe('JobProofAuthority', () => {
+  const unsafeEffect = {
+    classification: 'unsafe_mutation' as const,
+    kind: 'fixture.external',
+    target: 'fixture-target',
+    retrySafety: 'never_automatic' as const,
+    idempotencySupported: false,
+    idempotencyKey: null,
+    reconciliationSupported: false,
+    verificationSupported: false,
+    approvalRequirement: 'policy' as const,
+    approvalState: 'not_required' as const,
+    sensitiveFields: [] as string[],
+    redactionRules: ['digest_arguments'],
+    trusted: true,
+  };
+
   it('turns a clean execution with wrong observed result into a failed verdict', () => {
     const job = activeJob('wrong-result');
     const claim = jobs.proof.createClaim({
@@ -141,5 +157,112 @@ describe('JobProofAuthority', () => {
     expect(json).toMatchObject({ job: { id: job.jobId, goal: 'goal export' } });
     expect(markdown).toContain('# Aiden Proof');
     expect(markdown).toContain('explanatory note');
+  });
+
+  it('does not let failed non-contract evidence poison satisfied required claims', () => {
+    const job = activeJob('recovered-helper');
+    const claim = jobs.proof.createClaim({
+      jobId: job.jobId, category: 'contract', statement: 'required artifact is exact', required: true,
+    });
+    jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+      source: 'helper', producer: 'test', observedAt: 400, coverage: 'full',
+      verificationResult: 'failed', payload: { optional: true }, now: 401,
+    });
+    const required = jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+      source: 'filesystem.readback', producer: 'test', observedAt: 402, coverage: 'full',
+      verificationResult: 'verified', payload: { path: 'artifact', exact: true }, now: 403,
+    });
+    jobs.proof.checkClaim({
+      claimId: claim.claimId, attemptId: job.attemptId, generation: job.generation,
+      evidenceIds: [required.evidenceId], state: 'verified', now: 404,
+    });
+
+    expect(jobs.proof.finalize({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation,
+      fenceToken: job.fenceToken, now: 405,
+    }).verdict).toBe('verified');
+  });
+
+  it('keeps an unresolved unsafe Effect from producing a verified verdict', () => {
+    const job = activeJob('unsafe-unknown');
+    const claim = jobs.proof.createClaim({
+      jobId: job.jobId, category: 'contract', statement: 'required artifact is exact', required: true,
+    });
+    const evidence = jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+      source: 'filesystem.readback', producer: 'test', observedAt: 450, coverage: 'full',
+      verificationResult: 'verified', payload: { exact: true }, now: 451,
+    });
+    jobs.proof.checkClaim({
+      claimId: claim.claimId, attemptId: job.attemptId, generation: job.generation,
+      evidenceIds: [evidence.evidenceId], state: 'verified', now: 452,
+    });
+    jobs.prepareToolCall({
+      toolCallId: 'unsafe_unknown_call', jobId: job.jobId, attemptId: job.attemptId,
+      generation: job.generation, fenceToken: job.fenceToken, toolName: 'external_send',
+      normalizedArgsDigest: 'digest', riskTier: 'dangerous', mutates: true,
+      effect: unsafeEffect, producer: 'test', now: 453,
+    });
+    jobs.startToolCall({
+      toolCallId: 'unsafe_unknown_call', attemptId: job.attemptId,
+      generation: job.generation, fenceToken: job.fenceToken, producer: 'test', now: 454,
+    });
+
+    expect(jobs.proof.finalize({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation,
+      fenceToken: job.fenceToken, now: 455,
+    }).verdict).toBe('partially_verified');
+  });
+
+  it('retains a crashed Attempt in proof history after a later Attempt verifies', () => {
+    const first = activeJob('attempt-history');
+    expect(jobs.recoverExpiredAttempts({
+      now: Date.now() + 31_000, instanceId: 'proof-test', producer: 'test', maxCrashes: 3,
+    })).toEqual([expect.objectContaining({ jobId: first.jobId, decision: 'retry' })]);
+    const attempts = jobs.listAttempts(first.jobId);
+    const second = attempts[1]!;
+    const lease = jobs.claimAttempt({ attemptId: second.id, ownerId: 'proof-owner-2', ttlMs: 30_000 });
+    const claim = jobs.proof.createClaim({
+      jobId: first.jobId, category: 'contract', statement: 'recovered artifact verified', required: true,
+    });
+    const evidence = jobs.proof.recordEvidence({
+      jobId: first.jobId, attemptId: second.id, generation: lease.generation!, fenceToken: lease.fenceToken!,
+      source: 'filesystem.readback', producer: 'test', observedAt: Date.now(), coverage: 'full',
+      verificationResult: 'verified', payload: { exact: true },
+    });
+    jobs.proof.checkClaim({
+      claimId: claim.claimId, attemptId: second.id, generation: lease.generation!,
+      evidenceIds: [evidence.evidenceId], state: 'verified',
+    });
+
+    expect(jobs.proof.finalize({
+      jobId: first.jobId, attemptId: second.id, generation: lease.generation!,
+      fenceToken: lease.fenceToken!,
+    }).verdict).toBe('verified');
+    expect(jobs.proof.exportJson(first.jobId)).toMatchObject({
+      attempts: [
+        expect.objectContaining({ attempt_id: first.attemptId, status: 'crashed' }),
+        expect.objectContaining({ attempt_id: second.id }),
+      ],
+    });
+  });
+
+  it('rejects evidence captured before its linked Effect began', () => {
+    const job = activeJob('pre-effect-evidence');
+    db.prepare(
+      `INSERT INTO side_effect_ledger
+         (key, task_id, step, tool, args_hash, status, attempted_at, job_id, attempt_id,
+          generation, effect_state)
+       VALUES ('effect_pre', ?, 0, 'file_write', 'digest', 'attempting', 500, ?, ?, ?, 'started')`,
+    ).run(job.jobId, job.jobId, job.attemptId, job.generation);
+
+    expect(() => jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation,
+      fenceToken: job.fenceToken, effectId: 'effect_pre', source: 'filesystem.readback',
+      producer: 'test', observedAt: 499, coverage: 'full', verificationResult: 'verified',
+      payload: { exists: true }, now: 501,
+    })).toThrow(/after the linked Effect began/);
   });
 });

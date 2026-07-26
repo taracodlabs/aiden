@@ -4,11 +4,15 @@
  */
 
 import { createHash } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import Database from 'better-sqlite3';
 
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  executeWithDurableToolCall,
   recordDurableToolVerification,
   runWithJobExecutionContext,
 } from '../../../core/v4/daemon/jobExecutionContext';
@@ -45,6 +49,118 @@ function resourceAuthorityMock() {
 }
 
 describe('ToolRegistry durable execution identity', () => {
+  it('captures fresh exact file readback and links proof to the current Effect', async () => {
+    const db = new Database(':memory:');
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-proof-readback-'));
+    try {
+      db.pragma('foreign_keys = ON');
+      runMigrations(db);
+      db.prepare(
+        `INSERT INTO daemon_instances (instance_id, pid, hostname, started_at, last_heartbeat, version)
+         VALUES ('instance-proof', 1, 'test', 1, 1, 'test')`,
+      ).run();
+      const engine = createJobEngine({ db });
+      const admission = engine.submitJob({
+        entryPoint: 'test', source: 'test', sessionId: 'session-proof', instanceId: 'instance-proof',
+        idempotencyNamespace: 'test', idempotencyKey: 'file-proof', goal: 'write exact artifact',
+      });
+      const lease = engine.claimAttempt({ attemptId: admission.attemptId, ownerId: 'test', ttlMs: 60_000 });
+      const target = path.join(dir, 'approval-once.txt');
+      const content = 'approval-once';
+
+      await runWithJobExecutionContext({
+        engine, jobId: admission.jobId, attemptId: admission.attemptId,
+        generation: lease.generation!, fenceToken: lease.fenceToken!, producer: 'test',
+      }, () => executeWithDurableToolCall({
+        toolCallId: 'write-exact', toolName: 'file_write', args: { path: target, content },
+        riskTier: 'caution', mutates: true,
+        effect: {
+          classification: 'reconcilable_mutation', kind: 'filesystem.write', target,
+          retrySafety: 'reconcile_before_retry', idempotencySupported: true,
+          reconciliationSupported: true, verificationSupported: true,
+          approvalRequirement: 'policy', sensitiveFields: ['content'],
+          redactionRules: ['omit_sensitive_values'], trusted: true,
+          reconciliationData: {
+            path: target,
+            expectedContentSha256: createHash('sha256').update(content).digest('hex'),
+            expectedSize: Buffer.byteLength(content),
+          },
+        },
+        execute: async () => {
+          await fs.writeFile(target, content);
+          return { success: true, path: target, bytes: Buffer.byteLength(content) };
+        },
+        isSuccessful: (result) => result.success,
+      }));
+
+      const claims = engine.proof.listClaims(admission.jobId);
+      const evidence = engine.proof.listEvidence(admission.jobId);
+      expect(claims).toHaveLength(1);
+      expect(claims[0]).toMatchObject({ required: true, state: 'verified' });
+      expect(evidence).toHaveLength(1);
+      expect(evidence[0]).toMatchObject({
+        attemptId: admission.attemptId, generation: lease.generation,
+        effectId: expect.any(String), source: 'filesystem.readback',
+        coverage: 'full', verificationResult: 'verified', late: false,
+        payload: expect.objectContaining({ path: target, exists: true, exact: true }),
+      });
+      const exported = engine.proof.exportJson(admission.jobId) as {
+        effects: Array<{ key: string }>; evidence: Array<{ effectId: string }>;
+      };
+      expect(exported.evidence[0].effectId).toBe(exported.effects[0].key);
+
+      const exerciseMismatch = async (
+        key: string,
+        proofTarget: string,
+        actual: string | null,
+      ) => {
+        const next = engine.submitJob({
+          entryPoint: 'test', source: 'test', sessionId: `session-${key}`, instanceId: 'instance-proof',
+          idempotencyNamespace: 'test', idempotencyKey: key, goal: key,
+        });
+        const nextLease = engine.claimAttempt({ attemptId: next.attemptId, ownerId: 'test', ttlMs: 60_000 });
+        await runWithJobExecutionContext({
+          engine, jobId: next.jobId, attemptId: next.attemptId,
+          generation: nextLease.generation!, fenceToken: nextLease.fenceToken!, producer: 'test',
+        }, () => executeWithDurableToolCall({
+          toolCallId: key, toolName: 'file_write', args: { path: proofTarget, content },
+          riskTier: 'caution', mutates: true,
+          effect: {
+            classification: 'reconcilable_mutation', kind: 'filesystem.write', target: proofTarget,
+            retrySafety: 'reconcile_before_retry', idempotencySupported: true,
+            reconciliationSupported: true, verificationSupported: true,
+            approvalRequirement: 'policy', sensitiveFields: ['content'], redactionRules: [], trusted: true,
+            reconciliationData: {
+              path: proofTarget,
+              expectedContentSha256: createHash('sha256').update(content).digest('hex'),
+              expectedSize: Buffer.byteLength(content),
+            },
+          },
+          execute: async () => {
+            if (actual !== null) await fs.writeFile(proofTarget, actual);
+            return { success: true };
+          },
+          isSuccessful: (result) => result.success,
+        }));
+        return { next, claims: engine.proof.listClaims(next.jobId), evidence: engine.proof.listEvidence(next.jobId) };
+      };
+
+      const wrong = await exerciseMismatch('wrong-file-content', path.join(dir, 'wrong.txt'), 'different');
+      expect(wrong.claims[0]?.state).toBe('failed');
+      expect(wrong.evidence[0]).toMatchObject({ coverage: 'full', verificationResult: 'failed' });
+
+      const unreadable = path.join(dir, 'capture-directory');
+      await fs.mkdir(unreadable);
+      const captureFailure = await exerciseMismatch('readback-capture-failure', unreadable, null);
+      expect(captureFailure.claims[0]?.state).toBe('unknown');
+      expect(captureFailure.evidence[0]).toMatchObject({ coverage: 'unknown', verificationResult: 'unknown' });
+      expect(captureFailure.evidence[0]?.payload).toMatchObject({ exists: null, exact: null });
+    } finally {
+      db.close();
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('persists and settles waits around approval and exclusive interaction', async () => {
     const db = new Database(':memory:');
     try {
@@ -416,6 +532,7 @@ describe('ToolRegistry durable execution identity', () => {
   });
 
   it('retains an unknown Effect when a mutating handler throws', async () => {
+    const updates: Array<{ phase: string; timing?: { terminalClassification?: string } }> = [];
     const engine = {
       ...resourceAuthorityMock(),
       prepareToolCall: vi.fn(() => ({ applied: true, effectId: 'effect_failure' })),
@@ -436,12 +553,19 @@ describe('ToolRegistry durable execution identity', () => {
     const result = await runWithJobExecutionContext({
       engine, jobId: 'job_1', attemptId: 'attempt_1', generation: 1,
       fenceToken: 'fence_1', producer: 'test',
-    }, () => execute({ id: 'tool_failure', name: 'failing_write', arguments: {} }));
+    }, () => execute(
+      { id: 'tool_failure', name: 'failing_write', arguments: {} },
+      undefined,
+      (update) => updates.push(update),
+    ));
 
     expect(result.error).toBe('fixture failure');
     expect(engine.completeToolCall).toHaveBeenCalledWith(expect.objectContaining({
       state: 'failed', sideEffectState: 'unknown',
     }));
+    expect(updates.at(-1)).toMatchObject({
+      phase: 'terminal', timing: { terminalClassification: 'unknown' },
+    });
   });
 
   it('recomputes policy and action identity immediately before execution', async () => {
