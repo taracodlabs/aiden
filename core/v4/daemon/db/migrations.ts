@@ -1493,6 +1493,19 @@ function getCurrentVersion(db: Database.Database): number {
   return verRow?.version ?? 0;
 }
 
+function tableExists(db: Database.Database, name: string): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+}
+
+function validateLatestSchema(db: Database.Database): void {
+  const required = ['tasks', 'runs', 'run_events', 'side_effect_ledger', 'durable_inputs'];
+  const missing = required.filter((table) => !tableExists(db, table));
+  if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
+  if (!tableExists(db, 'job_event_cursors')) {
+    db.transaction(() => applyV30(db)).immediate();
+  }
+}
+
 /**
  * Apply every pending migration. Idempotent: re-running a database
  * already at the latest version is a no-op.
@@ -1500,7 +1513,10 @@ function getCurrentVersion(db: Database.Database): number {
 export function runMigrations(db: Database.Database): { from: number; to: number } {
   const from = getCurrentVersion(db);
   const pending = MIGRATIONS.filter((m) => m.version > from);
-  if (pending.length === 0) return { from, to: from };
+  if (pending.length === 0) {
+    validateLatestSchema(db);
+    return { from, to: from };
+  }
   const apply = db.transaction((m: Migration): void => {
     if (m.apply) m.apply(db);
     else db.exec(m.sql ?? '');
@@ -1520,5 +1536,6 @@ export function runMigrations(db: Database.Database): { from: number; to: number
     }
     to = m.version;
   }
+  validateLatestSchema(db);
   return { from, to };
 }

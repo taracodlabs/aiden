@@ -28,7 +28,7 @@ import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { runMigrations } from './migrations';
+import { LATEST_SCHEMA_VERSION, runMigrations } from './migrations';
 
 export type Db = Database.Database;
 
@@ -44,6 +44,7 @@ const _open: Map<string, Db> = new Map();
 export function openDaemonDb(dbPath: string): Db {
   const cached = _open.get(dbPath);
   if (cached && cached.open) return cached;
+  const existedBeforeOpen = dbPath !== ':memory:' && fs.existsSync(dbPath) && fs.statSync(dbPath).size > 0;
   if (dbPath !== ':memory:') {
     try { fs.mkdirSync(path.dirname(dbPath), { recursive: true }); }
     catch { /* tolerate — open will surface a clearer error */ }
@@ -53,7 +54,29 @@ export function openDaemonDb(dbPath: string): Db {
   db.pragma('synchronous = NORMAL');
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 5000');
-  runMigrations(db);
+  const versionTable = db.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'",
+  ).get();
+  const fromVersion = versionTable
+    ? ((db.prepare('SELECT version FROM schema_version WHERE id = 1').get() as { version?: number } | undefined)?.version ?? 0)
+    : 0;
+  if (existedBeforeOpen && fromVersion < LATEST_SCHEMA_VERSION) {
+    const backupPath = `${dbPath}.pre-schema-v${fromVersion}.bak`;
+    if (!fs.existsSync(backupPath)) {
+      try {
+        db.prepare('VACUUM INTO ?').run(backupPath);
+      } catch (error) {
+        try { db.close(); } catch { /* preserve original migration error */ }
+        throw new Error(`Database backup before migration failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+  }
+  try {
+    runMigrations(db);
+  } catch (error) {
+    try { db.close(); } catch { /* preserve migration error */ }
+    throw error;
+  }
   _open.set(dbPath, db);
   // v4.5 Phase 3 — daemon.db stores webhook secrets (raw, required
   // for HMAC computation). Lock the file mode to user-only on POSIX
