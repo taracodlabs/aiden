@@ -94,6 +94,28 @@ export interface SubmitJobCommand {
   parentJobId?: string | null;
   rootJobId?: string | null;
   triggerEventId?: number | null;
+  childContract?: {
+    required?: boolean;
+    workerId: string;
+    capabilities: readonly string[];
+    allowedResources: Record<string, unknown>;
+    budget: Record<string, unknown>;
+  };
+}
+
+export interface ChildJobContractRecord {
+  childJobId: string;
+  parentJobId: string;
+  required: boolean;
+  workerId: string;
+  capabilities: string[];
+  allowedResources: Record<string, unknown>;
+  budget: Record<string, unknown>;
+  resultAttemptId: string | null;
+  resultGeneration: number | null;
+  resultStatus: string | null;
+  evidence: unknown;
+  evidenceHandles: unknown[];
 }
 
 export interface AdmissionResult {
@@ -159,6 +181,20 @@ export interface JobEngine {
   getAttempt(attemptId: string): AttemptRecord | null;
   listAttempts(jobId: string): AttemptRecord[];
   listEvents(jobId: string, afterSequence?: number): JobEventRecord[];
+  getChildContract(childJobId: string): ChildJobContractRecord | null;
+  listChildContracts(parentJobId: string): ChildJobContractRecord[];
+  recordChildResult(command: {
+    childJobId: string;
+    attemptId: string;
+    generation: number;
+    fenceToken: string;
+    status: string;
+    evidence: unknown;
+    evidenceHandles: unknown[];
+    producer: string;
+    idempotencyKey: string;
+    now?: number;
+  }): TransitionResult;
   appendJobEvent(command: {
     jobId: string;
     attemptId: string;
@@ -544,6 +580,18 @@ function parseArray(raw: string | null | undefined): unknown[] {
   }
 }
 
+function parseRecord(raw: string | null | undefined): Record<string, unknown> {
+  if (!raw) return {};
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   const { db } = opts;
   const graph = createExecutionGraphAuthority(db);
@@ -736,7 +784,105 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       idempotencyKey: `attempt-created:${attemptId}`,
       payload: { attemptNumber: 1, triggerReason: 'submission' },
     });
+    if (command.childContract) {
+      if (!command.parentJobId) throw new Error('Child Job contract requires a parent Job');
+      db.prepare(
+        `INSERT INTO child_job_contracts (
+           child_job_id, parent_job_id, required, worker_id,
+           capabilities_json, allowed_resources_json, budget_json,
+           created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        jobId,
+        command.parentJobId,
+        command.childContract.required === false ? 0 : 1,
+        command.childContract.workerId,
+        JSON.stringify([...command.childContract.capabilities]),
+        JSON.stringify(command.childContract.allowedResources),
+        JSON.stringify(command.childContract.budget),
+        now,
+        now,
+      );
+      appendEvent({
+        jobId, runId, attemptId, generation: 1,
+        type: 'worker.assigned', producer: command.source,
+        idempotencyKey: `worker-assigned:${jobId}`,
+        payload: { workerId: command.childContract.workerId, parentJobId: command.parentJobId },
+      });
+    }
     return { jobId, attemptId, runId, reused: false };
+  }).immediate;
+
+  type ChildContractRow = {
+    child_job_id: string;
+    parent_job_id: string;
+    required: number;
+    worker_id: string;
+    capabilities_json: string;
+    allowed_resources_json: string;
+    budget_json: string;
+    result_attempt_id: string | null;
+    result_generation: number | null;
+    result_status: string | null;
+    evidence_json: string | null;
+    evidence_handles_json: string | null;
+  };
+  const mapChildContract = (row: ChildContractRow): ChildJobContractRecord => ({
+    childJobId: row.child_job_id,
+    parentJobId: row.parent_job_id,
+    required: row.required === 1,
+    workerId: row.worker_id,
+    capabilities: parseArray(row.capabilities_json).filter((value): value is string => typeof value === 'string'),
+    allowedResources: parseRecord(row.allowed_resources_json),
+    budget: parseRecord(row.budget_json),
+    resultAttemptId: row.result_attempt_id,
+    resultGeneration: row.result_generation,
+    resultStatus: row.result_status,
+    evidence: row.evidence_json === null ? null : JSON.parse(row.evidence_json),
+    evidenceHandles: row.evidence_handles_json === null ? [] : parseArray(row.evidence_handles_json),
+  });
+
+  const recordChildResultTx = db.transaction((command: Parameters<JobEngine['recordChildResult']>[0]): TransitionResult => {
+    if (existingEvent(command.childJobId, command.idempotencyKey)) return { applied: false, duplicate: true };
+    const contract = db.prepare('SELECT * FROM child_job_contracts WHERE child_job_id = ?')
+      .get(command.childJobId) as ChildContractRow | undefined;
+    if (!contract) return { applied: false, conflict: 'not_found' };
+    const parent = getJobRow(contract.parent_job_id);
+    const child = getJobRow(command.childJobId);
+    const attempt = getAttemptRow(command.attemptId);
+    if (!parent || !child || !attempt || attempt.task_id !== child.id) return { applied: false, conflict: 'not_found' };
+    if (JOB_TERMINAL.has(parent.status)) return { applied: false, conflict: 'terminal_state' };
+    if (
+      child.active_attempt_id !== command.attemptId
+      || attempt.generation !== command.generation
+      || attempt.fence_token !== command.fenceToken
+    ) return { applied: false, conflict: 'stale_fence' };
+    const changed = db.prepare(
+      `UPDATE child_job_contracts
+          SET result_attempt_id = ?, result_generation = ?, result_status = ?,
+              evidence_json = ?, evidence_handles_json = ?, updated_at = ?
+        WHERE child_job_id = ? AND result_attempt_id IS NULL`,
+    ).run(
+      command.attemptId,
+      command.generation,
+      command.status,
+      JSON.stringify(command.evidence ?? null),
+      JSON.stringify(command.evidenceHandles),
+      command.now ?? Date.now(),
+      command.childJobId,
+    );
+    if (changed.changes !== 1) return { applied: false, conflict: 'stale_fence' };
+    appendEvent({
+      jobId: command.childJobId,
+      runId: attempt.id,
+      attemptId: command.attemptId,
+      generation: command.generation,
+      type: 'worker.result_recorded',
+      payload: { status: command.status, handleCount: command.evidenceHandles.length },
+      producer: command.producer,
+      idempotencyKey: command.idempotencyKey,
+    });
+    return { applied: true };
   }).immediate;
 
   const appendJobEventTx = db.transaction((command: {
@@ -932,6 +1078,14 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
     }
     if (command.status === 'completed') {
+      const unresolvedChild = db.prepare(
+        `SELECT 1 FROM child_job_contracts c
+          JOIN tasks child ON child.id = c.child_job_id
+         WHERE c.parent_job_id = ? AND c.required = 1
+           AND (c.result_attempt_id IS NULL OR child.status NOT IN ('completed','failed','cancelled','unknown','dead_letter'))
+         LIMIT 1`,
+      ).get(command.jobId);
+      if (unresolvedChild) return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
       const unresolved = db.prepare(
         `SELECT 1 FROM side_effect_ledger
           WHERE job_id = ? AND reconciliation_required = 1
@@ -2087,6 +2241,17 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       ).all(...params, limit) as JobSqlRow[];
       return rows.map(mapJob);
     },
+    getChildContract(childJobId) {
+      const row = db.prepare('SELECT * FROM child_job_contracts WHERE child_job_id = ?')
+        .get(childJobId) as ChildContractRow | undefined;
+      return row ? mapChildContract(row) : null;
+    },
+    listChildContracts(parentJobId) {
+      return (db.prepare(
+        'SELECT * FROM child_job_contracts WHERE parent_job_id = ? ORDER BY created_at, child_job_id',
+      ).all(parentJobId) as ChildContractRow[]).map(mapChildContract);
+    },
+    recordChildResult: recordChildResultTx,
     getAttempt(attemptId) {
       const row = getAttemptRow(attemptId);
       return row ? mapAttempt(row) : null;

@@ -255,6 +255,17 @@ export async function spawnSubAgent(
           title: spec.goal,
           parentJobId: parentJobContext.jobId,
           rootJobId: parentJob.rootJobId,
+          childContract: {
+            required: true,
+            workerId: `${deps.instanceId}:${childSessionId}`,
+            capabilities: spec.toolsets ?? deps.parentProfileToolsets ?? ['inherited'],
+            allowedResources: { cwd: deps.parentToolContext.cwd },
+            budget: {
+              maxIterations,
+              timeoutMs,
+              providerAttempts: spec.providerAttemptBudgets ?? null,
+            },
+          },
         },
         execute: async (handle) => {
           const projectedRunStore: RunStore = {
@@ -279,7 +290,21 @@ export async function spawnSubAgent(
           });
           return result;
         },
-        finalize: (result) => {
+        finalize: (result, handle) => {
+          const recorded = deps.jobEngine!.recordChildResult({
+            childJobId: handle.jobId,
+            attemptId: handle.attemptId,
+            generation: handle.generation,
+            fenceToken: handle.fenceToken,
+            status: result.status,
+            evidence: result.evidence ?? { status: result.status, exitReason: result.exitReason },
+            evidenceHandles: result.handles,
+            producer: 'subagent',
+            idempotencyKey: `worker-result:${handle.attemptId}:${handle.generation}`,
+          });
+          if (!recorded.applied && !recorded.duplicate) {
+            throw new Error(`Child result attribution rejected: ${recorded.conflict ?? 'unknown'}`);
+          }
           const completed = result.status === 'completed' && result.verdict !== 'verification_failed';
           const cancelled = result.status === 'interrupted';
           return {

@@ -820,3 +820,99 @@ describe('Job queries', () => {
     ]);
   });
 });
+
+describe('Durable child Job contracts', () => {
+  it('blocks parent completion until two required child results are durably attributed', () => {
+    const parent = submit();
+    const parentLease = claimJob(parent);
+    engine.transitionAttempt({
+      attemptId: parent.attemptId, expectedStateVersion: 1, generation: parentLease.generation,
+      fenceToken: parentLease.fenceToken, to: 'running', eventIdempotencyKey: 'parent-running-attempt', producer: 'test',
+    });
+    engine.transitionJob({
+      jobId: parent.jobId, attemptId: parent.attemptId, generation: parentLease.generation,
+      fenceToken: parentLease.fenceToken, expectedStateVersion: 0, to: 'running',
+      eventIdempotencyKey: 'parent-running-job', producer: 'test',
+    });
+    const children = ['one', 'two'].map((key) => submit({
+      idempotencyKey: `child-${key}`,
+      requestFingerprint: `child-${key}`,
+      sessionId: `child-session-${key}`,
+      parentJobId: parent.jobId,
+      rootJobId: parent.jobId,
+      goal: `child ${key}`,
+      childContract: {
+        workerId: `worker-${key}`,
+        capabilities: ['files'],
+        allowedResources: { cwd: 'workspace' },
+        budget: { maxIterations: 2 },
+      },
+    }));
+
+    expect(engine.listChildContracts(parent.jobId)).toHaveLength(2);
+    expect(engine.finalizeJob({
+      jobId: parent.jobId, attemptId: parent.attemptId, generation: parentLease.generation,
+      fenceToken: parentLease.fenceToken, expectedStateVersion: 1, status: 'completed',
+      outcome: 'verified', finishReason: 'done', evidence: {},
+      eventIdempotencyKey: 'parent-too-early', producer: 'test',
+    })).toMatchObject({ applied: false, conflict: 'illegal_transition' });
+
+    for (const child of children) {
+      const lease = claimJob(child, `owner-${child.jobId}`);
+      engine.transitionAttempt({
+        attemptId: child.attemptId, expectedStateVersion: 1, generation: lease.generation,
+        fenceToken: lease.fenceToken, to: 'running', eventIdempotencyKey: `child-attempt-running-${child.jobId}`, producer: 'test',
+      });
+      engine.transitionJob({
+        jobId: child.jobId, attemptId: child.attemptId, generation: lease.generation,
+        fenceToken: lease.fenceToken, expectedStateVersion: 0, to: 'running',
+        eventIdempotencyKey: `child-job-running-${child.jobId}`, producer: 'test',
+      });
+      expect(engine.recordChildResult({
+        childJobId: child.jobId, attemptId: child.attemptId, generation: lease.generation,
+        fenceToken: lease.fenceToken, status: 'completed', evidence: { observed: true },
+        evidenceHandles: [{ kind: 'path', value: child.jobId }], producer: 'test',
+        idempotencyKey: `child-result-${child.jobId}`,
+      }).applied).toBe(true);
+      engine.transitionAttempt({
+        attemptId: child.attemptId, expectedStateVersion: 2, generation: lease.generation,
+        fenceToken: lease.fenceToken, to: 'succeeded', eventIdempotencyKey: `child-attempt-done-${child.jobId}`, producer: 'test',
+      });
+      expect(engine.finalizeJob({
+        jobId: child.jobId, attemptId: child.attemptId, generation: lease.generation,
+        fenceToken: lease.fenceToken, expectedStateVersion: 1, status: 'completed',
+        outcome: 'verified', finishReason: 'done', evidence: {},
+        eventIdempotencyKey: `child-job-done-${child.jobId}`, producer: 'test',
+      }).applied).toBe(true);
+    }
+
+    const recorded = engine.listChildContracts(parent.jobId);
+    expect(recorded.map((child) => child.resultStatus)).toEqual(['completed', 'completed']);
+    expect(recorded.every((child) => child.evidenceHandles.length === 1)).toBe(true);
+    expect(engine.finalizeJob({
+      jobId: parent.jobId, attemptId: parent.attemptId, generation: parentLease.generation,
+      fenceToken: parentLease.fenceToken, expectedStateVersion: 1, status: 'completed',
+      outcome: 'verified', finishReason: 'done', evidence: { children: recorded.map((child) => child.childJobId) },
+      eventIdempotencyKey: 'parent-after-children', producer: 'test',
+    }).applied).toBe(true);
+  });
+
+  it('rejects a late child result after the parent is cancelled', () => {
+    const parent = submit();
+    const child = submit({
+      idempotencyKey: 'late-child', requestFingerprint: 'late-child', parentJobId: parent.jobId,
+      rootJobId: parent.jobId, childContract: {
+        workerId: 'worker-late', capabilities: [], allowedResources: {}, budget: {},
+      },
+    });
+    const lease = claimJob(child, 'child-owner');
+    expect(engine.cancelJob({
+      jobId: parent.jobId, reason: 'cancelled', producer: 'test', eventIdempotencyKey: 'cancel-parent',
+    }).applied).toBe(true);
+    expect(engine.recordChildResult({
+      childJobId: child.jobId, attemptId: child.attemptId, generation: lease.generation,
+      fenceToken: lease.fenceToken, status: 'completed', evidence: {}, evidenceHandles: [],
+      producer: 'test', idempotencyKey: 'late-result',
+    })).toMatchObject({ applied: false, conflict: 'terminal_state' });
+  });
+});

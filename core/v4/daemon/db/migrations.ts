@@ -1279,6 +1279,32 @@ function applyV26(db: Database.Database): void {
   ]);
 }
 
+/** Durable execution contract and attributed result for delegated child Jobs. */
+function applyV27(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS child_job_contracts (
+      child_job_id TEXT PRIMARY KEY,
+      parent_job_id TEXT NOT NULL,
+      required INTEGER NOT NULL DEFAULT 1,
+      worker_id TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      allowed_resources_json TEXT NOT NULL,
+      budget_json TEXT NOT NULL,
+      result_attempt_id TEXT,
+      result_generation INTEGER,
+      result_status TEXT,
+      evidence_json TEXT,
+      evidence_handles_json TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_child_job_contracts_parent
+      ON child_job_contracts(parent_job_id, required, child_job_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1306,6 +1332,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 24, name: 'durable execution graph', apply: applyV24 },
   { version: 25, name: 'durable waits and continuations', apply: applyV25 },
   { version: 26, name: 'exact approval fence binding', apply: applyV26 },
+  { version: 27, name: 'durable child Job contracts', apply: applyV27 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

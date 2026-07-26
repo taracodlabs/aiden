@@ -166,6 +166,12 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
     expect(children).toHaveLength(1);
     expect(children[0]).toMatchObject({ parentJobId: parent.jobId, rootJobId: parent.jobId, status: 'completed' });
     expect(jobEngine.listAttempts(children[0]!.id)[0]).toMatchObject({ status: 'succeeded' });
+    expect(jobEngine.getChildContract(children[0]!.id)).toMatchObject({
+      parentJobId: parent.jobId,
+      required: true,
+      resultStatus: 'completed',
+      budget: { maxIterations: 50, timeoutMs: 600_000, providerAttempts: null },
+    });
   });
 
   // ──────────────────────────────────────────────────────────────────────
