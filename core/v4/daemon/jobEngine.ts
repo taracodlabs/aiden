@@ -10,7 +10,13 @@ import type {
   EffectApprovalRequirement,
   EffectClassification,
   EffectRetrySafety,
+  EffectReconciliationData,
 } from '../effectContract';
+import type {
+  EffectReconciliationConfidence,
+  EffectReconciliationOutcome,
+  EffectRetryRecommendation,
+} from '../effectReconciliation';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -103,6 +109,33 @@ export interface TransitionResult {
   duplicate?: boolean;
   effectId?: string;
   existingToolCallId?: string;
+}
+
+export interface EffectReconciliationRecord {
+  reconciliationId: string;
+  effectId: string;
+  jobId: string;
+  attemptId: string;
+  generation: number;
+  outcome: EffectReconciliationOutcome;
+  confidence: EffectReconciliationConfidence;
+  evidence: Record<string, unknown>;
+  retryRecommendation: EffectRetryRecommendation;
+  humanResolutionRequired: boolean;
+  createdAt: number;
+}
+
+export interface EffectForReconciliation {
+  effectId: string;
+  jobId: string;
+  attemptId: string;
+  generation: number;
+  kind: string;
+  target: string | null;
+  retrySafety: EffectRetrySafety;
+  idempotencyKey: string | null;
+  reconciliationData: EffectReconciliationData | null;
+  effectState: string;
 }
 
 export interface LeaseResult extends TransitionResult {
@@ -250,6 +283,7 @@ export interface JobEngine {
       sensitiveFields: readonly string[];
       redactionRules: readonly string[];
       trusted: boolean;
+      reconciliationData?: EffectReconciliationData | null;
     };
     modelCallId?: string | null;
     producer: string;
@@ -295,6 +329,20 @@ export interface JobEngine {
     producer: string;
     now?: number;
   }): TransitionResult;
+  recordEffectReconciliation(command: {
+    effectId: string;
+    expectedJobStateVersion: number;
+    outcome: EffectReconciliationOutcome;
+    confidence: EffectReconciliationConfidence;
+    evidence: Record<string, unknown>;
+    retryRecommendation: EffectRetryRecommendation;
+    humanResolutionRequired: boolean;
+    producer: string;
+    idempotencyKey: string;
+    now?: number;
+  }): TransitionResult;
+  listEffectReconciliations(effectId: string): EffectReconciliationRecord[];
+  listEffectsRequiringReconciliation(jobId: string): EffectForReconciliation[];
   recoverExpiredAttempts(command: {
     now?: number;
     instanceId: string;
@@ -417,6 +465,26 @@ function fingerprintOf(command: SubmitJobCommand): string {
       parentJobId: command.parentJobId ?? null,
     }))
     .digest('hex');
+}
+
+const RECONCILIATION_EVIDENCE_KEYS = new Set([
+  'reason', 'effectKind', 'exists', 'size', 'mtimeMs', 'contentSha256',
+  'processId', 'running', 'finalUrl', 'externalId', 'receiptId', 'registry',
+  'packageName', 'version', 'integrity', 'status', 'before', 'after',
+]);
+
+function sanitizeReconciliationEvidence(value: unknown, depth = 0): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value) || depth >= 2) return undefined;
+  const sanitized: Record<string, unknown> = {};
+  for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+    if (!RECONCILIATION_EVIDENCE_KEYS.has(key)) continue;
+    const safe = sanitizeReconciliationEvidence(nested, depth + 1);
+    if (safe !== undefined) sanitized[key] = safe;
+  }
+  return sanitized;
 }
 
 function mapJob(row: JobSqlRow): JobRecord {
@@ -859,6 +927,14 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     }
     if (!isLegal(JOB_TRANSITIONS, job.status, command.status)) {
       return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
+    }
+    if (command.status === 'completed') {
+      const unresolved = db.prepare(
+        `SELECT 1 FROM side_effect_ledger
+          WHERE job_id = ? AND reconciliation_required = 1
+            AND effect_state IN ('unknown','partial','started','committed') LIMIT 1`,
+      ).get(command.jobId);
+      if (unresolved) return { applied: false, conflict: 'illegal_transition', stateVersion: job.state_version };
     }
     if (
       !ATTEMPT_TERMINAL.has(attempt.status)
@@ -1321,25 +1397,43 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     if (command.mutates && !command.effect) {
       return { applied: false, conflict: 'illegal_transition' };
     }
+    let retryEffectId: string | null = null;
     if (command.effect?.idempotencyKey) {
       const prior = db.prepare(
-        `SELECT key, tool_call_id FROM side_effect_ledger
+        `SELECT key, tool_call_id, args_hash, effect_kind, effect_classification,
+                effect_state, retry_safety, idempotency_supported,
+                reconciliation_outcome, reconciliation_required
+           FROM side_effect_ledger
           WHERE job_id = ? AND idempotency_key = ?`,
       ).get(command.jobId, command.effect.idempotencyKey) as {
-        key: string; tool_call_id: string;
+        key: string; tool_call_id: string; args_hash: string; effect_kind: string;
+        effect_classification: string; effect_state: string; retry_safety: string;
+        idempotency_supported: number; reconciliation_outcome: string | null;
+        reconciliation_required: number;
       } | undefined;
       if (prior) {
-        return {
-          applied: false,
-          duplicate: true,
-          effectId: prior.key,
-          existingToolCallId: prior.tool_call_id,
-        };
+        const retryable = prior.args_hash === command.normalizedArgsDigest
+          && prior.effect_kind === command.effect.kind
+          && prior.effect_classification === command.effect.classification
+          && prior.effect_state === 'not_occurred'
+          && prior.reconciliation_outcome === 'did_not_occur'
+          && prior.reconciliation_required === 0
+          && prior.idempotency_supported === 1
+          && ['same_idempotency_key', 'reconcile_before_retry'].includes(prior.retry_safety);
+        if (!retryable) {
+          return {
+            applied: false,
+            duplicate: true,
+            effectId: prior.key,
+            existingToolCallId: prior.tool_call_id,
+          };
+        }
+        retryEffectId = prior.key;
       }
     }
 
     const now = command.now ?? Date.now();
-    const sideEffectId = command.mutates ? `side_effect:${command.toolCallId}` : null;
+    const sideEffectId = command.mutates ? retryEffectId ?? `side_effect:${command.toolCallId}` : null;
     db.prepare(
       `INSERT INTO tool_calls (
          tool_call_id, job_id, attempt_id, generation, model_call_id,
@@ -1362,19 +1456,32 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     );
     if (sideEffectId) {
       const effect = command.effect!;
-      const ordinal = db.prepare(
-        'SELECT COUNT(*) + 1 AS ordinal FROM side_effect_ledger WHERE job_id = ?',
-      ).get(command.jobId) as { ordinal: number };
-      db.prepare(
+      if (retryEffectId) {
+        db.prepare(
+          `UPDATE side_effect_ledger
+              SET attempt_id = ?, generation = ?, tool_call_id = ?, effect_state = 'requested',
+                  status = 'requested', approval_state = ?, approval_id = NULL, action_digest = NULL,
+                  reconciliation_required = 0, reconciliation_data_json = ?, attempted_at = ?, updated_at = ?
+            WHERE key = ? AND effect_state = 'not_occurred' AND reconciliation_outcome = 'did_not_occur'`,
+        ).run(
+          command.attemptId, command.generation, command.toolCallId, effect.approvalState,
+          effect.reconciliationData ? JSON.stringify(effect.reconciliationData) : null,
+          now, now, retryEffectId,
+        );
+      } else {
+        const ordinal = db.prepare(
+          'SELECT COUNT(*) + 1 AS ordinal FROM side_effect_ledger WHERE job_id = ?',
+        ).get(command.jobId) as { ordinal: number };
+        db.prepare(
         `INSERT INTO side_effect_ledger (
            key, task_id, step, tool, args_hash, status, attempted_at,
            job_id, attempt_id, generation, tool_call_id, effect_state,
            effect_classification, effect_kind, target, retry_safety,
            idempotency_key, idempotency_supported, reconciliation_supported,
            verification_supported, approval_requirement, approval_state,
-           sensitive_fields_json, redaction_rules_json, updated_at
+           sensitive_fields_json, redaction_rules_json, reconciliation_data_json, updated_at
          ) VALUES (?, ?, ?, ?, ?, 'requested', ?, ?, ?, ?, ?, 'requested',
-                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
+                   ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)` ,
       ).run(
         sideEffectId,
         command.jobId,
@@ -1398,8 +1505,10 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         effect.approvalState,
         JSON.stringify(effect.sensitiveFields),
         JSON.stringify(effect.redactionRules),
+        effect.reconciliationData ? JSON.stringify(effect.reconciliationData) : null,
         now,
       );
+      }
     }
     appendEvent({
       jobId: command.jobId,
@@ -1424,7 +1533,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         runId: attempt.id,
         attemptId: command.attemptId,
         generation: command.generation,
-        type: 'effect.requested',
+        type: retryEffectId ? 'effect.retry_scheduled' : 'effect.requested',
         payload: {
           toolCallId: command.toolCallId,
           effectId: sideEffectId,
@@ -1432,7 +1541,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
           effectClassification: command.effect!.classification,
         },
         producer: command.producer,
-        idempotencyKey: `effect-requested:${command.toolCallId}`,
+        idempotencyKey: `${retryEffectId ? 'effect-retry' : 'effect-requested'}:${command.toolCallId}`,
       });
     }
     return { applied: true, effectId: sideEffectId ?? undefined };
@@ -1580,6 +1689,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       db.prepare(
         `UPDATE side_effect_ledger
             SET effect_state = ?, status = ?, result_ref = ?, updated_at = ?,
+                reconciliation_required = CASE WHEN ? = 'unknown' THEN 1 ELSE reconciliation_required END,
                 confirmed_at = CASE WHEN ? = 'committed' THEN ? ELSE confirmed_at END
           WHERE key = ? AND attempt_id = ? AND generation = ? AND effect_state = 'started'`,
       ).run(
@@ -1587,6 +1697,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         sideEffectState === 'committed' ? 'confirmed' : sideEffectState,
         command.resultRef ?? null,
         now,
+        sideEffectState,
         sideEffectState,
         now,
         toolCall.side_effect_id,
@@ -1674,6 +1785,80 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     return { applied: true };
   }).immediate;
 
+  const recordEffectReconciliationTx = db.transaction((
+    command: Parameters<JobEngine['recordEffectReconciliation']>[0],
+  ): TransitionResult => {
+    const effect = db.prepare(
+      `SELECT key, job_id, attempt_id, generation, effect_state
+         FROM side_effect_ledger WHERE key = ?`,
+    ).get(command.effectId) as {
+      key: string; job_id: string; attempt_id: string; generation: number; effect_state: string;
+    } | undefined;
+    if (!effect) return { applied: false, conflict: 'not_found' };
+    const job = getJobRow(effect.job_id);
+    if (!job) return { applied: false, conflict: 'not_found' };
+    const effectAttempt = getAttemptRow(effect.attempt_id);
+    if (!effectAttempt) return { applied: false, conflict: 'not_found' };
+    if (job.state_version !== command.expectedJobStateVersion) {
+      return { applied: false, conflict: 'state_version', stateVersion: job.state_version };
+    }
+    const duplicate = db.prepare(
+      'SELECT 1 FROM effect_reconciliations WHERE effect_id = ? AND idempotency_key = ?',
+    ).get(effect.key, command.idempotencyKey);
+    if (duplicate) return { applied: false, duplicate: true };
+
+    const evidence = sanitizeReconciliationEvidence(command.evidence) as Record<string, unknown>;
+    const now = command.now ?? Date.now();
+    const reconciliationId = `reconciliation_${createHash('sha256')
+      .update(`${effect.key}\0${command.idempotencyKey}`)
+      .digest('hex')}`;
+    db.prepare(
+      `INSERT INTO effect_reconciliations (
+         reconciliation_id, effect_id, job_id, attempt_id, generation,
+         outcome, confidence, evidence_json, retry_recommendation,
+         human_resolution_required, producer, idempotency_key, created_at
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      reconciliationId, effect.key, effect.job_id, effect.attempt_id, effect.generation,
+      command.outcome, command.confidence, JSON.stringify(evidence), command.retryRecommendation,
+      command.humanResolutionRequired ? 1 : 0, command.producer, command.idempotencyKey, now,
+    );
+    const effectState = command.outcome === 'occurred' ? 'committed'
+      : command.outcome === 'did_not_occur' ? 'not_occurred'
+        : command.outcome === 'partially_occurred' ? 'partial' : 'unknown';
+    db.prepare(
+      `UPDATE side_effect_ledger
+          SET effect_state = ?, status = ?, reconciliation_outcome = ?,
+              reconciliation_required = ?, last_reconciled_at = ?, updated_at = ?,
+              confirmed_at = CASE WHEN ? = 'committed' THEN ? ELSE confirmed_at END
+        WHERE key = ?`,
+    ).run(
+      effectState,
+      effectState === 'committed' ? 'confirmed' : effectState,
+      command.outcome,
+      command.humanResolutionRequired || command.outcome === 'unknown' || command.outcome === 'partially_occurred' ? 1 : 0,
+      now, now, effectState, now, effect.key,
+    );
+    appendEvent({
+      jobId: effect.job_id,
+      runId: effectAttempt.id,
+      attemptId: effect.attempt_id,
+      generation: effect.generation,
+      type: 'effect.reconciled',
+      payload: {
+        effectId: effect.key,
+        reconciliationId,
+        outcome: command.outcome,
+        confidence: command.confidence,
+        retryRecommendation: command.retryRecommendation,
+        humanResolutionRequired: command.humanResolutionRequired,
+      },
+      producer: command.producer,
+      idempotencyKey: `effect-reconciled:${effect.key}:${command.idempotencyKey}`,
+    });
+    return { applied: true, effectId: effect.key };
+  }).immediate;
+
   const recoverExpiredAttemptTx = db.transaction((command: {
     attemptId: string;
     now: number;
@@ -1733,6 +1918,39 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       command.now,
     );
     if (cleared.changes !== 1) return null;
+    if (ambiguous) {
+      const effects = db.prepare(
+        `SELECT key, tool_call_id, effect_state FROM side_effect_ledger
+          WHERE attempt_id = ? AND generation = ?
+            AND effect_state IN ('started','committed','partial','unknown')`,
+      ).all(attempt.attempt_id, attempt.generation) as Array<{
+        key: string; tool_call_id: string; effect_state: string;
+      }>;
+      db.prepare(
+        `UPDATE side_effect_ledger
+            SET effect_state = CASE WHEN effect_state = 'started' THEN 'unknown' ELSE effect_state END,
+                status = CASE WHEN effect_state = 'started' THEN 'unknown' ELSE status END,
+                reconciliation_required = 1, updated_at = ?
+          WHERE attempt_id = ? AND generation = ?
+            AND effect_state IN ('started','committed','partial','unknown')`,
+      ).run(command.now, attempt.attempt_id, attempt.generation);
+      db.prepare(
+        `UPDATE tool_calls SET state = 'unknown', ended_at = COALESCE(ended_at, ?), updated_at = ?
+          WHERE attempt_id = ? AND generation = ? AND state = 'started'`,
+      ).run(command.now, command.now, attempt.attempt_id, attempt.generation);
+      for (const effect of effects.filter((candidate) => candidate.effect_state === 'started')) {
+        appendEvent({
+          jobId: job.id,
+          runId: attempt.id,
+          attemptId: attempt.attempt_id,
+          generation: attempt.generation,
+          type: 'effect.unknown',
+          payload: { effectId: effect.key, toolCallId: effect.tool_call_id, reason: 'lease_expired_during_execution' },
+          producer: command.producer,
+          idempotencyKey: `effect-crash-unknown:${effect.key}:${attempt.generation}`,
+        });
+      }
+    }
     appendEvent({
       jobId: job.id,
       runId: attempt.id,
@@ -1928,6 +2146,61 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     startToolCall: startToolCallTx,
     completeToolCall: completeToolCallTx,
     attachToolVerification: attachToolVerificationTx,
+    recordEffectReconciliation: recordEffectReconciliationTx,
+    listEffectReconciliations(effectId) {
+      const rows = db.prepare(
+        `SELECT reconciliation_id, effect_id, job_id, attempt_id, generation,
+                outcome, confidence, evidence_json, retry_recommendation,
+                human_resolution_required, created_at
+           FROM effect_reconciliations WHERE effect_id = ?
+          ORDER BY created_at ASC, reconciliation_id ASC`,
+      ).all(effectId) as Array<{
+        reconciliation_id: string; effect_id: string; job_id: string; attempt_id: string;
+        generation: number; outcome: EffectReconciliationOutcome; confidence: EffectReconciliationConfidence;
+        evidence_json: string; retry_recommendation: EffectRetryRecommendation;
+        human_resolution_required: number; created_at: number;
+      }>;
+      return rows.map((row) => ({
+        reconciliationId: row.reconciliation_id,
+        effectId: row.effect_id,
+        jobId: row.job_id,
+        attemptId: row.attempt_id,
+        generation: row.generation,
+        outcome: row.outcome,
+        confidence: row.confidence,
+        evidence: JSON.parse(row.evidence_json) as Record<string, unknown>,
+        retryRecommendation: row.retry_recommendation,
+        humanResolutionRequired: row.human_resolution_required === 1,
+        createdAt: row.created_at,
+      }));
+    },
+    listEffectsRequiringReconciliation(jobId) {
+      const rows = db.prepare(
+        `SELECT key, job_id, attempt_id, generation, effect_kind, target,
+                retry_safety, idempotency_key, reconciliation_data_json, effect_state
+           FROM side_effect_ledger
+          WHERE job_id = ? AND reconciliation_required = 1
+          ORDER BY attempted_at ASC, key ASC`,
+      ).all(jobId) as Array<{
+        key: string; job_id: string; attempt_id: string; generation: number;
+        effect_kind: string; target: string | null; retry_safety: EffectRetrySafety;
+        idempotency_key: string | null; reconciliation_data_json: string | null; effect_state: string;
+      }>;
+      return rows.map((row) => {
+        let reconciliationData: EffectReconciliationData | null = null;
+        try {
+          reconciliationData = row.reconciliation_data_json
+            ? JSON.parse(row.reconciliation_data_json) as EffectReconciliationData
+            : null;
+        } catch { reconciliationData = null; }
+        return {
+          effectId: row.key, jobId: row.job_id, attemptId: row.attempt_id,
+          generation: row.generation, kind: row.effect_kind, target: row.target,
+          retrySafety: row.retry_safety, idempotencyKey: row.idempotency_key,
+          reconciliationData, effectState: row.effect_state,
+        };
+      });
+    },
     recoverExpiredAttempts(command) {
       const now = command.now ?? Date.now();
       const rows = db.prepare(

@@ -1103,6 +1103,40 @@ function applyV22(db: Database.Database): void {
   `);
 }
 
+/** Append-only reconciliation history for uncertain real-world Effects. */
+function applyV23(db: Database.Database): void {
+  addMissingColumns(db, 'side_effect_ledger', [
+    ['reconciliation_data_json', 'TEXT'],
+    ['reconciliation_outcome', 'TEXT'],
+    ['reconciliation_required', 'INTEGER NOT NULL DEFAULT 0'],
+    ['last_reconciled_at', 'INTEGER'],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS effect_reconciliations (
+      reconciliation_id TEXT PRIMARY KEY,
+      effect_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      outcome TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      retry_recommendation TEXT NOT NULL,
+      human_resolution_required INTEGER NOT NULL,
+      producer TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (effect_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_effect_reconciliations_effect
+      ON effect_reconciliations(effect_id, created_at, reconciliation_id);
+    CREATE INDEX IF NOT EXISTS idx_effect_reconciliation_required
+      ON side_effect_ledger(job_id, reconciliation_required, effect_state);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1126,6 +1160,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 20, name: 'v4.15.1 — durable Job and Attempt foundation',    apply: applyV20 },
   { version: 21, name: 'v4.15.1 - durable input and approval authority', apply: applyV21 },
   { version: 22, name: 'durable effect contracts', apply: applyV22 },
+  { version: 23, name: 'append-only effect reconciliation', apply: applyV23 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

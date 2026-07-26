@@ -64,4 +64,22 @@ describe('durable effect contract migration', () => {
     expect(names).not.toContain('effect_classification');
     expect(db.prepare('SELECT version FROM schema_version WHERE id = 1').get()).toEqual({ version: 21 });
   });
+
+  it('adds reconciliation history without replacing existing Effect rows', () => {
+    applyThrough(22);
+    db.prepare(
+      `INSERT INTO side_effect_ledger
+         (key, task_id, step, tool, args_hash, status, attempted_at, effect_state,
+          effect_classification, effect_kind, retry_safety, updated_at)
+       VALUES ('effect-before-v23', 'job-before-v23', 1, 'file_write', 'digest',
+               'unknown', 1, 'unknown', 'reconcilable_mutation', 'filesystem.write',
+               'reconcile_before_retry', 1)`,
+    ).run();
+
+    expect(runMigrations(db)).toEqual({ from: 22, to: LATEST_SCHEMA_VERSION });
+    expect(db.prepare('SELECT key, effect_state FROM side_effect_ledger WHERE key = ?')
+      .get('effect-before-v23')).toEqual({ key: 'effect-before-v23', effect_state: 'unknown' });
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='effect_reconciliations'").get())
+      .toEqual({ name: 'effect_reconciliations' });
+  });
 });

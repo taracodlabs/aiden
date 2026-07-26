@@ -3,6 +3,9 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  */
 
+import { createHash } from 'node:crypto';
+import { resolve } from 'node:path';
+
 import type { ToolEffectContract } from '../../core/v4/effectContract';
 import type { ToolHandler } from '../../core/v4/toolRegistry';
 
@@ -32,6 +35,16 @@ const FILE_WRITE = contract({
   reconciliationSupported: true, verificationSupported: true,
   approvalRequirement: 'policy', sensitiveFields: ['content', 'patch'],
   redactionRules: ['digest_arguments', 'omit_sensitive_values'], targetFields: ['path'],
+  reconciliationData(args, cwd) {
+    const path = typeof args.path === 'string' ? resolve(cwd, args.path) : null;
+    const content = typeof args.content === 'string' ? args.content : null;
+    if (!path || content === null) return null;
+    return {
+      path,
+      expectedContentSha256: createHash('sha256').update(content).digest('hex'),
+      expectedSize: Buffer.byteLength(content),
+    };
+  },
 });
 const FILE_MOVE = contract({
   classification: 'reconcilable_mutation', kind: 'filesystem.move',

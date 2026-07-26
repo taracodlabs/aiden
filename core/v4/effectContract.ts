@@ -17,6 +17,22 @@ export type EffectRetrySafety =
 
 export type EffectApprovalRequirement = 'none' | 'policy' | 'always';
 
+export interface EffectReconciliationData {
+  path?: string;
+  sourcePath?: string;
+  destinationPath?: string;
+  expectedContentSha256?: string;
+  expectedSize?: number;
+  before?: {
+    exists: boolean;
+    size?: number;
+    mtimeMs?: number;
+    contentSha256?: string;
+  };
+  sourceBefore?: { exists: boolean; size?: number; mtimeMs?: number; contentSha256?: string };
+  destinationBefore?: { exists: boolean; size?: number; mtimeMs?: number; contentSha256?: string };
+}
+
 export interface ToolEffectContract {
   classification: Exclude<EffectClassification, 'read_only'>;
   kind: string;
@@ -28,6 +44,7 @@ export interface ToolEffectContract {
   sensitiveFields: readonly string[];
   redactionRules: readonly string[];
   target(args: Readonly<Record<string, unknown>>): string | null;
+  reconciliationData?(args: Readonly<Record<string, unknown>>, cwd: string): EffectReconciliationData | null;
 }
 
 export interface DurableEffectDescriptor {
@@ -42,6 +59,7 @@ export interface DurableEffectDescriptor {
   sensitiveFields: readonly string[];
   redactionRules: readonly string[];
   trusted: boolean;
+  reconciliationData: EffectReconciliationData | null;
 }
 
 export const UNKNOWN_MUTATION_EFFECT_CONTRACT = Object.freeze({
@@ -82,6 +100,7 @@ function safeTarget(value: unknown): string | null {
 export function describeToolEffect(
   handler: EffectBearingHandler,
   args: Readonly<Record<string, unknown>>,
+  cwd = process.cwd(),
 ): DurableEffectDescriptor {
   if (handler.mutates === false) {
     return {
@@ -96,6 +115,7 @@ export function describeToolEffect(
       sensitiveFields: [],
       redactionRules: [],
       trusted: true,
+      reconciliationData: null,
     };
   }
   const contract = handler.effectContract;
@@ -104,10 +124,13 @@ export function describeToolEffect(
       ...UNKNOWN_MUTATION_EFFECT_CONTRACT,
       target: null,
       trusted: false,
+      reconciliationData: null,
     };
   }
   let target: string | null = null;
   try { target = safeTarget(contract.target(args)); } catch { target = null; }
+  let reconciliationData: EffectReconciliationData | null = null;
+  try { reconciliationData = contract.reconciliationData?.(args, cwd) ?? null; } catch { reconciliationData = null; }
   return {
     classification: contract.classification,
     kind: contract.kind,
@@ -120,5 +143,6 @@ export function describeToolEffect(
     sensitiveFields: [...contract.sensitiveFields],
     redactionRules: [...contract.redactionRules],
     trusted: true,
+    reconciliationData,
   };
 }

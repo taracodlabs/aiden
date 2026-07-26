@@ -118,8 +118,15 @@ describe('durable Job and Attempt migration', () => {
       'idempotency_supported', 'reconciliation_supported', 'verification_supported',
       'approval_requirement', 'approval_state', 'approval_id', 'action_digest',
       'sensitive_fields_json', 'redaction_rules_json', 'result_ref', 'updated_at',
+      'reconciliation_data_json', 'reconciliation_outcome',
+      'reconciliation_required', 'last_reconciled_at',
     ]));
     expect([...columns('approvals')]).toContain('effect_id');
+    expect([...columns('effect_reconciliations')]).toEqual(expect.arrayContaining([
+      'reconciliation_id', 'effect_id', 'job_id', 'attempt_id', 'generation',
+      'outcome', 'confidence', 'evidence_json', 'retry_recommendation',
+      'human_resolution_required', 'idempotency_key', 'created_at',
+    ]));
   });
 
   it('backfills stable Attempt identities and deterministic per-Job event order', () => {

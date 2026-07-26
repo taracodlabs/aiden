@@ -96,6 +96,8 @@ describe('durable Job recovery', () => {
     expect(engine.listAttempts(expired.jobId)).toHaveLength(1);
     expect(engine.getAttempt(expired.attemptId)?.status).toBe('unknown');
     expect(engine.getJob(expired.jobId)?.status).toBe('blocked');
+    expect(db.prepare('SELECT effect_state, status FROM side_effect_ledger WHERE tool_call_id = ?')
+      .get('tool_unknown')).toEqual({ effect_state: 'unknown', status: 'unknown' });
   });
 
   it('retries a read-only tool interrupted after start', () => {

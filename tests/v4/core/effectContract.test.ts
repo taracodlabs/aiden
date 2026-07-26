@@ -4,6 +4,8 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { createHash } from 'node:crypto';
+import { join } from 'node:path';
 
 import {
   UNKNOWN_MUTATION_EFFECT_CONTRACT,
@@ -65,5 +67,23 @@ describe('durable tool effect contracts', () => {
 
     expect(descriptor.target).toBe('https://example.test/path');
     expect(JSON.stringify(descriptor)).not.toMatch(/password|private|#secret/);
+  });
+
+  it('persists only a digest and resolved target for file-write reconciliation', () => {
+    const registry = new ToolRegistry();
+    registerAllTools(registry);
+    const content = 'private file body';
+    const descriptor = describeToolEffect(
+      registry.get('file_write')!,
+      { path: 'result.txt', content },
+      'C:\\workspace',
+    );
+
+    expect(descriptor.reconciliationData).toEqual({
+      path: join('C:\\workspace', 'result.txt'),
+      expectedContentSha256: createHash('sha256').update(content).digest('hex'),
+      expectedSize: Buffer.byteLength(content),
+    });
+    expect(JSON.stringify(descriptor.reconciliationData)).not.toContain(content);
   });
 });

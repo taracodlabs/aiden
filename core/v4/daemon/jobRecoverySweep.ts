@@ -5,6 +5,7 @@
 
 import type { JobEngine } from './jobEngine';
 import type { TriggerBus } from './triggerBus';
+import { reconcileFilesystemEffectSync } from '../effectReconciliation';
 
 export interface DurableRecoverySweepResult {
   expired: number;
@@ -12,6 +13,7 @@ export interface DurableRecoverySweepResult {
   needsUser: number;
   deadLettered: number;
   enqueued: number;
+  reconciled: number;
 }
 
 /**
@@ -40,7 +42,38 @@ export function sweepDurableJobRecovery(input: {
     needsUser: decisions.filter((item) => item.decision === 'ask_user').length,
     deadLettered: decisions.filter((item) => item.decision === 'dead_letter').length,
     enqueued: 0,
+    reconciled: 0,
   };
+
+  for (const decision of decisions.filter((item) => item.decision === 'ask_user')) {
+    const job = input.jobEngine.getJob(decision.jobId);
+    if (!job) continue;
+    const effects = input.jobEngine.listEffectsRequiringReconciliation(job.id);
+    for (const effect of effects) {
+      const reconciliation = reconcileFilesystemEffectSync(effect);
+      const recorded = input.jobEngine.recordEffectReconciliation({
+        effectId: effect.effectId,
+        expectedJobStateVersion: input.jobEngine.getJob(job.id)?.stateVersion ?? job.stateVersion,
+        ...reconciliation,
+        producer: input.producer,
+        idempotencyKey: `recovery:${effect.effectId}:${effect.generation}`,
+        now: input.now,
+      });
+      if (recorded.applied) result.reconciled += 1;
+    }
+    if (input.jobEngine.listEffectsRequiringReconciliation(job.id).length === 0) {
+      input.jobEngine.createRecoveryAttempt({
+        jobId: job.id,
+        recoveryOfAttemptId: decision.expiredAttemptId,
+        instanceId: input.instanceId,
+        triggerReason: 'effect_reconciled',
+        producer: input.producer,
+        eventIdempotencyKey: `effect-reconciled-resume:${job.id}:${job.stateVersion}`,
+      });
+      result.needsUser = Math.max(0, result.needsUser - 1);
+      result.retried += 1;
+    }
+  }
 
   for (const job of input.jobEngine.listJobs({ status: 'recovering' })) {
     const attempt = job.activeAttemptId

@@ -582,6 +582,7 @@ export class ToolRegistry {
       const preliminaryEffect = describeToolEffect(
         effectiveMutates ? handler : { ...handler, mutates: false },
         args,
+        context.cwd ?? process.cwd(),
       );
       const approvalGated = effectiveMutates && preliminaryEffect.approvalRequirement !== 'none' && (
         context.approvalEngine !== undefined || (context.actionAuthority !== undefined && durableJobContext !== undefined)

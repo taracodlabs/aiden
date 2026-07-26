@@ -5,6 +5,7 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 
 import type { JobEngine, TransitionResult } from './jobEngine';
 import type { DurableEffectDescriptor } from '../effectContract';
@@ -98,6 +99,26 @@ export function prepareDurableToolCall(command: {
   const toolCallId = durableToolCallId(context, command.toolCallId);
   const argsDigest = normalizedArgsDigest(command.args);
   const effect = command.mutates ? command.effect : undefined;
+  const reconciliationData = effect?.reconciliationData ? { ...effect.reconciliationData } : null;
+  if (reconciliationData?.path && effect?.kind.startsWith('filesystem.')) {
+    try {
+      if (!existsSync(reconciliationData.path)) {
+        reconciliationData.before = { exists: false };
+      } else {
+        const stat = statSync(reconciliationData.path);
+        reconciliationData.before = {
+          exists: true,
+          size: stat.size,
+          mtimeMs: stat.mtimeMs,
+          ...(stat.isFile() ? {
+            contentSha256: createHash('sha256').update(readFileSync(reconciliationData.path)).digest('hex'),
+          } : {}),
+        };
+      }
+    } catch {
+      reconciliationData.before = undefined;
+    }
+  }
   const result = context.engine.prepareToolCall({
     toolCallId,
     jobId: context.jobId,
@@ -125,6 +146,7 @@ export function prepareDurableToolCall(command: {
       sensitiveFields: effect.sensitiveFields,
       redactionRules: effect.redactionRules,
       trusted: effect.trusted,
+      reconciliationData,
     } : undefined,
     producer: context.producer,
   });

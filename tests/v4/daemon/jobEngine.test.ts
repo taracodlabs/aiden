@@ -686,6 +686,128 @@ describe('ToolCall and SideEffect identity', () => {
       now: base + 11,
     })).toMatchObject({ applied: false, conflict: 'lease_expired' });
   });
+
+  it('records append-only Effect reconciliation and rejects a stale Job version', () => {
+    const admitted = submit();
+    const lease = engine.claimAttempt({ attemptId: admitted.attemptId, ownerId: 'owner_a', ttlMs: 30_000 });
+    engine.prepareToolCall({
+      toolCallId: 'tool_reconcile', jobId: admitted.jobId, attemptId: admitted.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, toolName: 'file_write',
+      normalizedArgsDigest: 'digest_reconcile', riskTier: 'caution', mutates: true,
+      effect: { ...effect, idempotencyKey: 'effect-reconcile', approvalState: 'not_required' }, producer: 'test',
+    });
+    engine.startToolCall({
+      toolCallId: 'tool_reconcile', attemptId: admitted.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, producer: 'test',
+    });
+    engine.completeToolCall({
+      toolCallId: 'tool_reconcile', attemptId: admitted.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, state: 'unknown',
+      sideEffectState: 'unknown', producer: 'test',
+    });
+
+    const jobVersion = engine.getJob(admitted.jobId)!.stateVersion;
+    expect(engine.recordEffectReconciliation({
+      effectId: 'side_effect:tool_reconcile', expectedJobStateVersion: jobVersion + 1,
+      outcome: 'occurred', confidence: 'high', evidence: { exists: true, contentSha256: 'digest' },
+      retryRecommendation: 'do_not_retry', humanResolutionRequired: false,
+      producer: 'test', idempotencyKey: 'reconcile-stale',
+    })).toMatchObject({ applied: false, conflict: 'state_version' });
+
+    expect(engine.recordEffectReconciliation({
+      effectId: 'side_effect:tool_reconcile', expectedJobStateVersion: jobVersion,
+      outcome: 'unknown', confidence: 'low', evidence: { exists: true },
+      retryRecommendation: 'human_review', humanResolutionRequired: true,
+      producer: 'test', idempotencyKey: 'reconcile-1',
+    }).applied).toBe(true);
+    expect(engine.recordEffectReconciliation({
+      effectId: 'side_effect:tool_reconcile', expectedJobStateVersion: jobVersion,
+      outcome: 'occurred', confidence: 'high', evidence: { contentSha256: 'digest' },
+      retryRecommendation: 'do_not_retry', humanResolutionRequired: false,
+      producer: 'test', idempotencyKey: 'reconcile-2',
+    }).applied).toBe(true);
+
+    expect(engine.listEffectReconciliations('side_effect:tool_reconcile')).toMatchObject([
+      { outcome: 'unknown', humanResolutionRequired: true },
+      { outcome: 'occurred', humanResolutionRequired: false },
+    ]);
+    expect(db.prepare('SELECT effect_state, reconciliation_outcome FROM side_effect_ledger WHERE key = ?')
+      .get('side_effect:tool_reconcile')).toEqual({ effect_state: 'committed', reconciliation_outcome: 'occurred' });
+  });
+
+  it('reuses the trusted idempotency identity only after did-not-occur reconciliation', () => {
+    const admitted = submit();
+    const first = engine.claimAttempt({ attemptId: admitted.attemptId, ownerId: 'owner_a', ttlMs: 10, now: 100 });
+    const sharedEffect = { ...effect, idempotencyKey: 'effect-retry-same', approvalState: 'not_required' as const };
+    engine.prepareToolCall({
+      toolCallId: 'tool_retry_first', jobId: admitted.jobId, attemptId: admitted.attemptId,
+      generation: first.generation!, fenceToken: first.fenceToken!, toolName: 'file_write',
+      normalizedArgsDigest: 'same-digest', riskTier: 'caution', mutates: true,
+      effect: sharedEffect, producer: 'test', now: 101,
+    });
+    engine.startToolCall({
+      toolCallId: 'tool_retry_first', attemptId: admitted.attemptId,
+      generation: first.generation!, fenceToken: first.fenceToken!, producer: 'test', now: 102,
+    });
+    recoverExpired(111);
+    const version = engine.getJob(admitted.jobId)!.stateVersion;
+    engine.recordEffectReconciliation({
+      effectId: 'side_effect:tool_retry_first', expectedJobStateVersion: version,
+      outcome: 'did_not_occur', confidence: 'high', evidence: { exists: false },
+      retryRecommendation: 'retry_same_identity', humanResolutionRequired: false,
+      producer: 'test', idempotencyKey: 'did-not-occur', now: 112,
+    });
+    const recovered = engine.createRecoveryAttempt({
+      jobId: admitted.jobId, recoveryOfAttemptId: admitted.attemptId,
+      instanceId: 'instance_test', triggerReason: 'effect_reconciled',
+      producer: 'test', eventIdempotencyKey: 'resume-after-reconcile',
+    });
+    const second = engine.claimAttempt({ attemptId: recovered.attemptId, ownerId: 'owner_b', ttlMs: 30_000, now: 114 });
+
+    expect(engine.prepareToolCall({
+      toolCallId: 'tool_retry_second', jobId: admitted.jobId, attemptId: recovered.attemptId,
+      generation: second.generation!, fenceToken: second.fenceToken!, toolName: 'file_write',
+      normalizedArgsDigest: 'same-digest', riskTier: 'caution', mutates: true,
+      effect: sharedEffect, producer: 'test', now: 115,
+    })).toMatchObject({ applied: true, effectId: 'side_effect:tool_retry_first' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM side_effect_ledger WHERE job_id = ?')
+      .get(admitted.jobId)).toEqual({ count: 1 });
+  });
+
+  it('does not finalize a Job as completed while an Effect requires reconciliation', () => {
+    const admitted = submit();
+    const lease = engine.claimAttempt({ attemptId: admitted.attemptId, ownerId: 'owner_a', ttlMs: 30_000 });
+    engine.transitionJob({
+      jobId: admitted.jobId, attemptId: admitted.attemptId, generation: lease.generation!,
+      fenceToken: lease.fenceToken!, expectedStateVersion: 0, to: 'running',
+      eventIdempotencyKey: 'job-running-reconcile-cap', producer: 'test',
+    });
+    engine.prepareToolCall({
+      toolCallId: 'tool_unresolved_cap', jobId: admitted.jobId, attemptId: admitted.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, toolName: 'file_write',
+      normalizedArgsDigest: 'digest-cap', riskTier: 'caution', mutates: true,
+      effect: { ...effect, idempotencyKey: 'effect-cap', approvalState: 'not_required' }, producer: 'test',
+    });
+    engine.startToolCall({
+      toolCallId: 'tool_unresolved_cap', attemptId: admitted.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, producer: 'test',
+    });
+    engine.completeToolCall({
+      toolCallId: 'tool_unresolved_cap', attemptId: admitted.attemptId,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, state: 'unknown',
+      sideEffectState: 'unknown', producer: 'test',
+    });
+    db.prepare('UPDATE side_effect_ledger SET reconciliation_required = 1 WHERE tool_call_id = ?')
+      .run('tool_unresolved_cap');
+
+    expect(engine.finalizeJob({
+      jobId: admitted.jobId, attemptId: admitted.attemptId, generation: lease.generation!,
+      fenceToken: lease.fenceToken!, expectedStateVersion: 1, status: 'completed',
+      outcome: 'verified', finishReason: 'done', evidence: {},
+      eventIdempotencyKey: 'invalid-completion', producer: 'test',
+    })).toMatchObject({ applied: false, conflict: 'illegal_transition' });
+    expect(engine.getJob(admitted.jobId)?.status).toBe('running');
+  });
 });
 
 describe('Job queries', () => {
