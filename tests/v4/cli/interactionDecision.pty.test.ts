@@ -206,7 +206,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           state = 'clear-before-allow';
           commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-before-allow' && stripAnsi(output.slice(commandStart)).includes('History cleared.') && readyCount >= 4) {
+        } else if (state === 'clear-before-allow' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 4) {
           state = 'single-allow-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request approved command');
@@ -226,7 +226,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           state = 'clear-after-single';
           commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-single' && stripAnsi(output.slice(commandStart)).includes('History cleared.') && readyCount >= 6) {
+        } else if (state === 'clear-after-single' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 6) {
           state = 'batch-valid-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request partial batch');
@@ -246,7 +246,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           state = 'clear-after-retry';
           commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-retry' && stripAnsi(output.slice(commandStart)).includes('History cleared.') && readyCount >= 8) {
+        } else if (state === 'clear-after-retry' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 8) {
           state = 'batch-cancel-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request cancelled batch');
@@ -263,7 +263,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           state = 'clear-after-cancel';
           commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-cancel' && stripAnsi(output.slice(commandStart)).includes('History cleared.') && readyCount >= 10) {
+        } else if (state === 'clear-after-cancel' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 10) {
           state = 'batch-none-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request denied batch');

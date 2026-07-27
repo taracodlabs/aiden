@@ -19,13 +19,12 @@ export const clear: SlashCommand = {
     const id = ctx.session?.startNewSession?.() ?? null;
     if (id) {
       ctx.display.clearScreen();
-      ctx.display.success(`New chat started · ${id}`);
+      ctx.display.success('New chat started');
       ctx.display.dim('Previous Jobs and proof remain available through /jobs and /trace.');
-      ctx.display.dim('History cleared.');
-      return { clearHistory: true };
+      return { clearHistory: true, suppressSeparator: true };
     }
     if (ctx.session) ctx.session.clearHistory();
-    ctx.display.dim('History cleared. Persisted session switching is unavailable in this runtime.');
-    return { clearHistory: true };
+    ctx.display.dim('Conversation reset in this runtime. Durable Jobs and proof are unchanged.');
+    return { clearHistory: true, suppressSeparator: true };
   },
 };

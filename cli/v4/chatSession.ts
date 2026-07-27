@@ -1320,7 +1320,7 @@ export class ChatSession implements ChatSessionLike {
           // separator; acquiring another composer never adds one.
           if (typeof result.rerun === 'string' && result.rerun.length > 0) {
             await this.runAgentTurn(result.rerun);
-          } else {
+          } else if (!result.suppressSeparator) {
             this.opts.display.printTurnSeparator();
           }
           // Phase 23.6 — v3 doesn't print a status footer after slash
@@ -2898,6 +2898,7 @@ export class ChatSession implements ChatSessionLike {
           {
             finishReason:   result.finishReason,
             toolCallTrace:  result.toolCallTrace,
+            assistantContent: result.finalContent,
             declaredStatus,
           },
           {

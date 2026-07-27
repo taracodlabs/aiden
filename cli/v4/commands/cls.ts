@@ -14,6 +14,6 @@ export const cls: SlashCommand = {
   icon: '◇',
   handler: async (ctx) => {
     ctx.display.clearScreen();
-    return {};
+    return { suppressSeparator: true };
   },
 };

@@ -755,7 +755,7 @@ describe('/clear and /quit', () => {
     });
     const res = await clear.handler(ctx as any);
     expect(clearHistory).toHaveBeenCalled();
-    expect(res).toEqual({ clearHistory: true });
+    expect(res).toEqual({ clearHistory: true, suppressSeparator: true });
   });
 
   it('quit signals exit', async () => {

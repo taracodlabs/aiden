@@ -48,7 +48,62 @@ export interface LocalShellInvocation {
   detached: boolean;
 }
 
-const WINDOWS_SHELL_COMMAND = /^\s*(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\b/iu;
+const WINDOWS_SHELL_COMMAND = /^\s*(powershell(?:\.exe)?|pwsh(?:\.exe)?)\b\s*(.*)$/isu;
+const WINDOWS_CMD_HOSTED_POWERSHELL = /^\s*cmd(?:\.exe)?\s+(?:\/d\s+)?(?:\/s\s+)?\/c\s+([\s\S]+)$/iu;
+
+function splitWindowsArguments(value: string): string[] {
+  const args: string[] = [];
+  let current = '';
+  let quote: '"' | "'" | null = null;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index]!;
+    if (quote) {
+      if (char === quote) quote = null;
+      else current += char;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+    } else if (/\s/u.test(char)) {
+      if (current) {
+        args.push(current);
+        current = '';
+      }
+    } else {
+      current += char;
+    }
+  }
+  if (current) args.push(current);
+  return args;
+}
+
+function stripMatchingQuotes(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length >= 2) {
+    const first = trimmed[0];
+    if ((first === '"' || first === "'") && trimmed[trimmed.length - 1] === first) {
+      return trimmed.slice(1, -1);
+    }
+  }
+  return trimmed;
+}
+
+function buildExplicitPowerShellInvocation(match: RegExpMatchArray): LocalShellInvocation {
+  const executable = match[1]!;
+  const rest = match[2] ?? '';
+  const commandToken = /(?:^|\s)-(?:command|c)\b/iu.exec(rest);
+  if (commandToken) {
+    const prefix = rest.slice(0, commandToken.index).trim();
+    const script = stripMatchingQuotes(rest.slice(commandToken.index + commandToken[0].length));
+    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    return {
+      executable,
+      args: [...splitWindowsArguments(prefix), '-EncodedCommand', encoded],
+      detached: false,
+    };
+  }
+  return { executable, args: splitWindowsArguments(rest), detached: false };
+}
 
 /** Build a host-shell invocation without interpolating into another shell. */
 export function buildLocalShellInvocation(
@@ -58,11 +113,16 @@ export function buildLocalShellInvocation(
   if (platform !== 'win32') {
     return { executable: 'bash', args: ['-lc', command], detached: true };
   }
+  const cmdHosted = command.match(WINDOWS_CMD_HOSTED_POWERSHELL);
+  if (cmdHosted) {
+    const nested = stripMatchingQuotes(cmdHosted[1] ?? '');
+    const nestedPowerShell = nested.match(WINDOWS_SHELL_COMMAND);
+    if (nestedPowerShell) return buildExplicitPowerShellInvocation(nestedPowerShell);
+  }
   // An explicit nested PowerShell command must not pass through an outer
   // PowerShell parser, which would expand `$env:*` before the child sees it.
-  if (WINDOWS_SHELL_COMMAND.test(command)) {
-    return { executable: 'cmd.exe', args: ['/d', '/s', '/c', command], detached: false };
-  }
+  const explicitPowerShell = command.match(WINDOWS_SHELL_COMMAND);
+  if (explicitPowerShell) return buildExplicitPowerShellInvocation(explicitPowerShell);
   // EncodedCommand preserves quotes, Unicode, backticks, semicolons, and
   // literal dollar signs across the native process boundary.
   const encoded = Buffer.from(command, 'utf16le').toString('base64');

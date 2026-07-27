@@ -71,6 +71,18 @@ describe('decideTaskVerdict — policy', () => {
     expect(d.verdict).toBe('completed_unverified');
   });
 
+  it('does not treat a successful process exit and stdout as proof of the user goal', () => {
+    const d = decideTaskVerdict([
+      entry({
+        name: 'shell_exec',
+        result: { success: true, exitCode: 0, stdout: 'some output', durationMs: 2 },
+        handlerMutates: true,
+        verification: V_OK,
+      }),
+    ]);
+    expect(d.verdict).toBe('completed_unverified');
+  });
+
   it('mutation with NO verification verdict at all → completed_unverified (unverifiable is not verified)', () => {
     const d = decideTaskVerdict([
       entry({ name: 'custom_mutator', result: { success: true }, handlerMutates: true }),

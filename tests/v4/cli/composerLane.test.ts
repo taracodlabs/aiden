@@ -158,6 +158,21 @@ describe('ComposerLane — lifecycle', () => {
     expect(s.text().slice(beforeStatus)).not.toContain('one durable transcript row');
   });
 
+  it('clears only the viewport projection and never replays it after resize', () => {
+    const s = mockSink(24, 80);
+    const lane = new ComposerLane(s);
+    lane.activate('draft remains', 'provider · model');
+    lane.writeAbove('old conversation row\n');
+    lane.clearTranscript();
+    const afterClear = s.text().length;
+    s.setCols(44);
+    s.fireResize(24);
+    const resized = s.text().slice(afterClear);
+    expect(resized).not.toContain('old conversation row');
+    expect(resized).toContain('draft remains');
+    expect(resized).toContain('provider');
+  });
+
   it('resize re-reserves the region for the new height and repaints in place', () => {
     const s = mockSink(24);
     const lane = new ComposerLane(s);

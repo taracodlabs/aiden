@@ -15,9 +15,10 @@ describe('operator screen and conversation commands', () => {
   it('/cls clears only the visual screen', async () => {
     const clearScreen = vi.fn();
     const clearHistory = vi.fn();
-    await cls.handler({ display: { clearScreen }, session: { clearHistory } } as never);
+    const result = await cls.handler({ display: { clearScreen }, session: { clearHistory } } as never);
     expect(clearScreen).toHaveBeenCalledTimes(1);
     expect(clearHistory).not.toHaveBeenCalled();
+    expect(result).toEqual({ suppressSeparator: true });
   });
 
   it('/clear starts a new persisted conversation and preserves durable history', async () => {
@@ -29,9 +30,10 @@ describe('operator screen and conversation commands', () => {
       session: { startNewSession: () => 'session_new' },
     } as never);
     expect(clearScreen).toHaveBeenCalledTimes(1);
-    expect(success).toHaveBeenCalledWith('New chat started · session_new');
+    expect(success).toHaveBeenCalledWith('New chat started');
     expect(dim).toHaveBeenCalledWith('Previous Jobs and proof remain available through /jobs and /trace.');
-    expect(result).toEqual({ clearHistory: true });
+    expect(dim).not.toHaveBeenCalledWith('History cleared.');
+    expect(result).toEqual({ clearHistory: true, suppressSeparator: true });
   });
 
   it('/new is an exact alias for /clear', async () => {
@@ -42,8 +44,8 @@ describe('operator screen and conversation commands', () => {
       display: { clearScreen, success, dim },
       session: { startNewSession: () => 'session_new' },
     } as never);
-    expect(result).toEqual({ clearHistory: true });
-    expect(success).toHaveBeenCalledWith('New chat started · session_new');
+    expect(result).toEqual({ clearHistory: true, suppressSeparator: true });
+    expect(success).toHaveBeenCalledWith('New chat started');
   });
 
   it('retains bounded legacy behavior for injected sessions without persistence', async () => {
@@ -51,8 +53,9 @@ describe('operator screen and conversation commands', () => {
     const dim = vi.fn();
     const result = await clear.handler({ display: { dim }, session: { clearHistory } } as never);
     expect(clearHistory).toHaveBeenCalledTimes(1);
-    expect(dim).toHaveBeenCalledWith('History cleared. Persisted session switching is unavailable in this runtime.');
-    expect(result).toEqual({ clearHistory: true });
+    expect(dim).toHaveBeenCalledWith('Conversation reset in this runtime. Durable Jobs and proof are unchanged.');
+    expect(dim).not.toHaveBeenCalledWith(expect.stringMatching(/History cleared/));
+    expect(result).toEqual({ clearHistory: true, suppressSeparator: true });
   });
 
   it('/session delete requires an explicit confirmation', async () => {

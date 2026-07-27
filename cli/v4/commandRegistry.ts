@@ -163,6 +163,8 @@ export interface SlashCommandResult {
    * no rerun.
    */
   rerun?: string;
+  /** Command already owns the complete viewport transition. */
+  suppressSeparator?: boolean;
 }
 
 export type SlashCommandHandler = (
@@ -312,7 +314,7 @@ export class CommandRegistry {
   async execute(
     input: string,
     ctx: Omit<SlashCommandContext, 'args' | 'rawArgs' | 'registry'>,
-  ): Promise<{ handled: boolean; exit?: boolean; clearHistory?: boolean; rerun?: string }> {
+  ): Promise<{ handled: boolean; exit?: boolean; clearHistory?: boolean; rerun?: string; suppressSeparator?: boolean }> {
     const parsed = this.parse(input);
     if (!parsed) return { handled: false };
 
@@ -336,7 +338,13 @@ export class CommandRegistry {
     const raw = (await cmd.handler(fullCtx)) as SlashCommandResult | void;
     const result: SlashCommandResult = raw ? raw : {};
     this.recordRecent(cmd.name);
-    return { handled: true, exit: result.exit, clearHistory: result.clearHistory, rerun: result.rerun };
+    return {
+      handled: true,
+      exit: result.exit,
+      clearHistory: result.clearHistory,
+      rerun: result.rerun,
+      ...(result.suppressSeparator ? { suppressSeparator: true } : {}),
+    };
   }
 
   private closestVisibleCommand(input: string): string | null {
