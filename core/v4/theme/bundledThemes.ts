@@ -23,9 +23,11 @@
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 
-/** Bundled theme names, sorted to give `/theme list` a stable order. */
-export const BUNDLED_NAMES = ['default', 'monochrome', 'light', 'tokyo-night', 'dracula'] as const;
-export type BundledName = typeof BUNDLED_NAMES[number];
+/** Aiden-native bundled themes shown by `/theme list`. */
+export const BUNDLED_NAMES = ['aiden-ember', 'midnight', 'aurora', 'monochrome', 'high-contrast'] as const;
+/** Previously shipped identifiers remain resolvable for persisted configuration compatibility. */
+export const LEGACY_BUNDLED_NAMES = ['default', 'light', 'tokyo-night', 'dracula'] as const;
+export type BundledName = typeof BUNDLED_NAMES[number] | typeof LEGACY_BUNDLED_NAMES[number];
 
 /**
  * Walk up from `__dirname` looking for the repo root that holds the
@@ -86,6 +88,10 @@ export interface BundledSummary {
 }
 
 const DESCRIPTIONS: Record<BundledName, string> = {
+  'aiden-ember': "Aiden's warm orange identity on a restrained dark surface.",
+  midnight:      'Restrained blue and gray accents for low-light terminals.',
+  aurora:        'Cool luminous accents with clear semantic contrast.',
+  'high-contrast': 'Accessibility-focused contrast and bright state boundaries.',
   default:       "Aiden's signature brand-orange theme on a dark terminal.",
   monochrome:    'Pure greyscale. Semantic accents retained for error/success readability.',
   light:         'Light terminal. Dark text on light background. Brand orange accent.',
@@ -101,7 +107,7 @@ export function listBundled(): BundledSummary[] {
 }
 
 export function isBundled(name: string): name is BundledName {
-  return (BUNDLED_NAMES as readonly string[]).includes(name);
+  return ([...BUNDLED_NAMES, ...LEGACY_BUNDLED_NAMES] as readonly string[]).includes(name);
 }
 
 /** Test-only reset of the themes-dir cache. */

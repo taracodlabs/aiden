@@ -23,6 +23,14 @@ afterEach(async () => {
 });
 
 describe('SessionManager', () => {
+  it('deletes a stored conversation without affecting other sessions', () => {
+    const first = mgr.startSession({ providerId: 'test', modelId: 'first' });
+    const second = mgr.startSession({ providerId: 'test', modelId: 'second' });
+    expect(mgr.deleteSession(first.id)).toBe(true);
+    expect(mgr.resumeById(first.id)).toBeNull();
+    expect(mgr.resumeById(second.id)?.id).toBe(second.id);
+    expect(mgr.deleteSession(first.id)).toBe(false);
+  });
   it('1. startSession creates a new session when title is unique', () => {
     const s = mgr.startSession({
       title: 'first',

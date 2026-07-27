@@ -83,8 +83,9 @@ export const theme: SlashCommand = {
 
     if (sub === '' || sub === 'show') {
       const current = getCurrentName();
+      const displayCurrent = current === 'default' ? 'aiden-ember' : current;
       const active  = getActivePath();
-      ctx.display.info(`Active theme: ${current}`);
+      ctx.display.info(`Active theme: ${displayCurrent}`);
       if (active) {
         ctx.display.info(`Source: ${active}`);
       } else if (themePath) {
@@ -96,10 +97,11 @@ export const theme: SlashCommand = {
 
     if (sub === 'list') {
       const current  = getCurrentName();
+      const displayCurrent = current === 'default' ? 'aiden-ember' : current;
       const bundled  = listBundled();
       const userDir  = userThemesDir(ctx as { paths?: { root?: string } | null });
       const userList = listUserThemes(userDir);
-      ctx.display.info(`Active theme: ${current}`);
+      ctx.display.info(`Active theme: ${displayCurrent}`);
       ctx.display.info('Available themes:');
       const labelW = Math.max(
         ...bundled.map((b) => b.name.length),
@@ -107,7 +109,7 @@ export const theme: SlashCommand = {
         4,
       );
       for (const b of bundled) {
-        const marker = b.name === current ? '●' : '○';
+        const marker = b.name === displayCurrent ? '●' : '○';
         const padded = b.name.padEnd(labelW);
         ctx.display.info(`  ${marker} ${padded}  (bundled)  ${b.description}`);
       }
@@ -122,8 +124,9 @@ export const theme: SlashCommand = {
       return {};
     }
 
-    if (sub.startsWith('set ') || sub === 'set') {
-      const name = sub.replace(/^set\s*/, '').trim();
+    const directTheme = isBundled(sub) ? sub : null;
+    if (sub.startsWith('set ') || sub === 'set' || directTheme) {
+      const name = directTheme ?? sub.replace(/^set\s*/, '').trim();
       if (!name) {
         ctx.display.printError(
           'Usage: /theme set <name>',

@@ -82,6 +82,10 @@ import { greeter } from './greeter';
 import { mcp } from './mcpManage';
 // v4.12 /commands slice — /home working-directory show/change.
 import { home } from './home';
+import { approvals, attempts, effects, evidence, job, jobs, proof } from './operatorViews';
+import { cls } from './cls';
+import { newSession } from './newSession';
+import { session } from './session';
 
 export {
   help,
@@ -149,6 +153,16 @@ export {
   hooks,
   mcp,
   home,
+  jobs,
+  job,
+  attempts,
+  effects,
+  evidence,
+  proof,
+  approvals,
+  cls,
+  newSession,
+  session,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -223,6 +237,16 @@ export const allCommands: SlashCommand[] = [
   greeter,
   // v4.12 /commands slice — /home working-directory show/change.
   home,
+  jobs,
+  job,
+  attempts,
+  effects,
+  evidence,
+  proof,
+  approvals,
+  cls,
+  newSession,
+  session,
   clear,
   quit,
 ];

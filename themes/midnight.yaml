@@ -1,0 +1,25 @@
+name: "midnight"
+description: "Restrained blue and gray accents for low-light terminals."
+colors:
+  brand:
+    primary: "#7AA2F7"
+    muted: "#334A78"
+  content:
+    primary: "#D8DEE9"
+    secondary: "#A7B0C0"
+    tertiary: "#667085"
+  semantic:
+    success: "#7DC4A4"
+    warn: "#D7BA7D"
+    error: "#E07178"
+    info: "#82AAFF"
+  metrics:
+    model: "#9CB8FF"
+    tokens: "#D7BA7D"
+    turnCount: "#B8A5FF"
+    timer: "#7DC4A4"
+  surface:
+    bg: "#10131A"
+    elevated: "#171C27"
+    border: "#354052"
+    divider: "#465268"

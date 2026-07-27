@@ -42,6 +42,10 @@ export interface ChatSessionLike {
   history: Message[];
   setHistory(messages: Message[]): void;
   clearHistory(): void;
+  /** Start a new persisted conversation when the runtime supports it. */
+  startNewSession?(): string | null;
+  /** Delete one stored conversation after the command layer confirms intent. */
+  deleteStoredSession?(idOrTitle?: string): { deletedId: string; replacementId: string | null } | null;
   getCurrentProvider(): string;
   getCurrentModel(): string;
   setProvider(providerId: string, modelId: string): Promise<void>;
@@ -118,6 +122,8 @@ export interface SlashCommandContext {
    * lifecycle without spinning up a separate API server process.
    */
   channelManager?: ChannelManager;
+  /** Read-only durable Job projections used by local operator views. */
+  jobEngine?: import('../../core/v4/daemon/jobEngine').JobEngine;
   /**
    * Phase 17: prompt-the-user hook used by /plugins install for the
    * permission summary confirmation. Returns true to grant, false to
