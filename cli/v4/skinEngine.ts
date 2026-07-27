@@ -45,6 +45,11 @@ export function detectSkinColorDepth(
   if (!terminal.isTTY) return 'truecolor';
   if (/truecolor|24bit/iu.test(env.COLORTERM ?? '') || env.WT_SESSION || env.TERM_PROGRAM) return 'truecolor';
   if (/256color/iu.test(env.TERM ?? '')) return '256';
+  // Node enables virtual-terminal processing for interactive Windows streams.
+  // Modern Windows console hosts therefore accept 24-bit SGR even when they do
+  // not publish WT_SESSION or COLORTERM. Treating that ordinary PowerShell case
+  // as 16-color mapped the orange brand to bright red.
+  if (terminal.platform === 'win32') return 'truecolor';
   return '16';
 }
 
@@ -89,7 +94,9 @@ function ansiRgb(
   if (depth === '256') return `\x1b[38;5;${rgbTo256(r, g, b)}m${text}\x1b[39m`;
   if (depth === '16') {
     const semanticCode: Partial<Record<ColorKind, number>> = {
-      brand: 91, accent: 91, heading: 91, user: 91,
+      // ANSI 16 has no orange. Dark amber is the closest restrained fallback;
+      // it avoids turning the brand into bright red or painting the UI yellow.
+      brand: 33, accent: 33, heading: 33, user: 33,
       success: 92, warn: 93, degraded: 93, error: 31,
       tool: 96, session: 96, agent: 97, muted: 37,
       tertiary: 90, metric_turn: 95,

@@ -38,6 +38,18 @@ export function isFrameModeRequested(displayConfig?: { renderer?: string }): boo
 }
 
 /**
+ * The fixed bottom region is the authoritative interactive surface whenever it
+ * is available. The transient Ink composer remains a compatibility renderer
+ * for installations that explicitly disable the fixed surface.
+ */
+export function shouldUseFrameComposer(
+  displayConfig: { renderer?: string } | undefined,
+  fixedBottomRegion: boolean,
+): boolean {
+  return isFrameModeRequested(displayConfig) && !fixedBottomRegion;
+}
+
+/**
  * Read one line through the frame composer. Wraps the
  * pause-legacy-indicator dance so chatSession doesn't have to know
  * about it.

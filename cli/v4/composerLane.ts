@@ -574,7 +574,7 @@ export class BottomRegion {
     const surface = this.surface();
     const frame = surface.lines.join('\n');
     const geometry = this.establishGeometry(surface.laneRows);
-    if (!geometry && frame === this.lastFrame) {
+    if (!geometry && frame === this.lastFrame && !rebuildTranscript) {
       this.sink.write(`${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`);
       return;
     }
@@ -615,7 +615,7 @@ export class BottomRegion {
   deactivate(): void {
     if (!this.active) return;
     this.sink.write(
-      `${RESTORE_TRANSCRIPT}${ESC}[r${this.clearOwnedRows(this.laneRows)}`,
+      `${RESTORE_TRANSCRIPT}${SAVE}${ESC}[r${this.clearOwnedRows(this.laneRows)}${RESTORE}`,
     );
     this.unsubResize?.();
     this.unsubResize = null;

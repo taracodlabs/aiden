@@ -197,8 +197,16 @@ describe('SkinEngine terminal color capability', () => {
   it('detects truecolor, 256-color, 16-color, and monochrome terminals', () => {
     expect(detectSkinColorDepth({ COLORTERM: 'truecolor' }, { isTTY: true, platform: 'win32' })).toBe('truecolor');
     expect(detectSkinColorDepth({ TERM: 'xterm-256color' }, { isTTY: true, platform: 'linux' })).toBe('256');
-    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32' })).toBe('16');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32' })).toBe('truecolor');
     expect(detectSkinColorDepth({ NO_COLOR: '1' }, { isTTY: true, platform: 'win32' })).toBe('none');
+  });
+
+  it('uses a restrained amber brand fallback when 16-color mode is explicit', () => {
+    const engine = new SkinEngine({ colorDepth: '16' });
+    expect(engine.applyColors('Aiden', 'brand')).toContain('\x1b[33m');
+    expect(engine.applyColors('body', 'agent')).toContain('\x1b[97m');
+    expect(engine.applyColors('ok', 'success')).toContain('\x1b[92m');
+    expect(engine.applyColors('failed', 'error')).toContain('\x1b[31m');
   });
 
   it.each([

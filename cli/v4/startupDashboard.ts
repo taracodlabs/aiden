@@ -293,7 +293,8 @@ function renderProject(
   width: number,
 ): string[] {
   const identity = clean(data.identity) ?? 'Built solo';
-  const frameWidth = Math.max(4, Math.min(width, 72));
+  const indent = width >= 36 ? '  ' : '';
+  const frameWidth = Math.max(4, Math.min(width - startupVisibleWidth(indent), 72));
   const inside = Math.max(2, frameWidth - 2);
   const contentWidth = Math.max(1, inside - 2);
   const rows: string[] = [`♥  ${identity}`, ''];
@@ -310,14 +311,14 @@ function renderProject(
   addDetail('Web', clean(data.website));
   addDetail('Contact', clean(data.contact));
   return [
-    style.muted(`╭${'─'.repeat(inside)}╮`),
+    `${indent}${style.muted(`╭${'─'.repeat(inside)}╮`)}`,
     ...rows.map((row) => {
       const colored = row.startsWith('♥')
         ? `${style.brand('♥')}${style.text(row.slice(1))}`
         : style.text(row);
-      return `${style.muted('│')} ${pad(colored, contentWidth)} ${style.muted('│')}`;
+      return `${indent}${style.muted('│')} ${pad(colored, contentWidth)} ${style.muted('│')}`;
     }),
-    style.muted(`╰${'─'.repeat(inside)}╯`),
+    `${indent}${style.muted(`╰${'─'.repeat(inside)}╯`)}`,
   ];
 }
 

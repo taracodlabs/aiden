@@ -9,6 +9,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   isFrameModeRequested,
   pauseLegacyIndicator,
+  shouldUseFrameComposer,
 } from '../../../../cli/v4/frame';
 
 type Globals = typeof globalThis & { __aiden_legacy_indicator_paused?: boolean };
@@ -53,6 +54,18 @@ describe('isFrameModeRequested', () => {
   it('unknown env value falls back to config', () => {
     process.env.AIDEN_RENDERER = 'sparkle';
     expect(isFrameModeRequested({ renderer: 'frame' })).toBe(true);
+  });
+});
+
+describe('shouldUseFrameComposer', () => {
+  it('keeps the fixed bottom region as the sole interactive owner', () => {
+    process.env.AIDEN_RENDERER = 'frame';
+    expect(shouldUseFrameComposer(undefined, true)).toBe(false);
+  });
+
+  it('retains the transient frame composer behind the fixed-surface opt-out', () => {
+    process.env.AIDEN_RENDERER = 'frame';
+    expect(shouldUseFrameComposer(undefined, false)).toBe(true);
   });
 });
 

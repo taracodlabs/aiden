@@ -1144,7 +1144,8 @@ export class ChatSession implements ChatSessionLike {
     let frameModeOn = false;
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      frameModeOn = (require('./frame') as typeof import('./frame')).isFrameModeRequested();
+      const frame = require('./frame') as typeof import('./frame');
+      frameModeOn = frame.shouldUseFrameComposer(undefined, this.usesFixedBottomRegion());
     } catch { /* frame module unavailable → treat as legacy */ }
     const pasteBootAction = decidePasteBootAction({
       isTty:        !!stdout?.isTTY,
@@ -1890,8 +1891,8 @@ export class ChatSession implements ChatSessionLike {
     // block below regardless of how the turn ended.
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { isFrameModeRequested, pauseFrame } = require('./frame') as typeof import('./frame');
-      if (isFrameModeRequested()) await pauseFrame();
+      const { shouldUseFrameComposer, pauseFrame } = require('./frame') as typeof import('./frame');
+      if (shouldUseFrameComposer(undefined, this.usesFixedBottomRegion())) await pauseFrame();
     } catch { /* frame module is best-effort; never break a turn */ }
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -3465,8 +3466,8 @@ export class ChatSession implements ChatSessionLike {
       // turn ended (success, error, throw).
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { isFrameModeRequested, resumeFrame } = require('./frame') as typeof import('./frame');
-        if (isFrameModeRequested()) await resumeFrame();
+        const { shouldUseFrameComposer, resumeFrame } = require('./frame') as typeof import('./frame');
+        if (shouldUseFrameComposer(undefined, this.usesFixedBottomRegion())) await resumeFrame();
       } catch { /* never break a turn on frame cleanup */ }
       turnIdleDiagnostic('turn.finally.complete', {
         turnId,
@@ -4265,7 +4266,9 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
   // legacy aidenPrompt path is untouched and stays the default.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const frameMod = require('./frame') as typeof import('./frame');
-  const frameModeOn = frameMod.isFrameModeRequested();
+  const fixedBottomRegion = typeof opts.display?.fixedBottomRegionEnabled === 'function'
+    && opts.display.fixedBottomRegionEnabled();
+  const frameModeOn = frameMod.shouldUseFrameComposer(undefined, fixedBottomRegion);
 
   return {
     async readLine(prompt, readOpts) {
@@ -4296,8 +4299,6 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
           }
           return value ?? '';
         }
-        const fixedBottomRegion = typeof opts.display?.fixedBottomRegionEnabled === 'function'
-          && opts.display.fixedBottomRegionEnabled();
         const promptOutput = fixedBottomRegion
           ? new Writable({
               write(_chunk, _encoding, done) {

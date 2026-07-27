@@ -135,6 +135,18 @@ describe('responsive startup dashboard', () => {
   );
 
   it.each([160, 120, 100, 80, 60, 44])(
+    'keeps the Built solo card compact and indented at %i columns',
+    (columns) => {
+      const lines = render(columns);
+      const top = lines.find((line) => line.includes('╭')) ?? '';
+      const card = lines.filter((line) => /^[ ]{2}[╭│╰]/u.test(line));
+      expect(top.startsWith('  ╭')).toBe(true);
+      expect(card.length).toBeGreaterThanOrEqual(6);
+      expect(startupVisibleWidth(top)).toBeLessThanOrEqual(Math.min(columns, 74));
+    },
+  );
+
+  it.each([160, 120, 100, 80, 60, 44])(
     'keeps the complete logo on the Aiden orange accent at %i columns',
     (columns) => {
       const skin = new SkinEngine({ colorDepth: 'truecolor' });
