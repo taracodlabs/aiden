@@ -37,6 +37,7 @@ function value(row: Record<string, unknown>, ...keys: string[]): string {
 
 function renderJob(ctx: SlashCommandContext, job: JobRecord): void {
   const snapshot = ctx.jobEngine!.projection.rebuild(job.id);
+  const workers = ctx.jobEngine!.listChildContracts(job.id);
   ctx.display.write(`\n◆ Job ${job.id}\n`);
   ctx.display.write(`  goal        ${job.goal}\n`);
   ctx.display.write(`  state       ${job.status}${job.terminalOutcome ? ` · ${job.terminalOutcome}` : ''}\n`);
@@ -49,6 +50,16 @@ function renderJob(ctx: SlashCommandContext, job: JobRecord): void {
   for (const attempt of snapshot.attempts) {
     const lease = attempt.leaseOwner ? ` · owner ${attempt.leaseOwner}` : '';
     ctx.display.write(`  └─ ${attempt.id} · ${attempt.status} · gen ${attempt.generation}${lease}\n`);
+  }
+  if (workers.length > 0) {
+    ctx.display.write('  workers\n');
+    workers.forEach((contract, index) => {
+      const child = ctx.jobEngine!.getJob(contract.childJobId);
+      const branch = index === workers.length - 1 ? '└─' : '├─';
+      const status = child?.status ?? contract.resultStatus ?? 'waiting';
+      const goal = child?.goal ? ` · ${child.goal}` : '';
+      ctx.display.write(`  ${branch} ${contract.workerId} · ${status}${goal}\n`);
+    });
   }
 }
 

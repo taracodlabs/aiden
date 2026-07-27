@@ -44,6 +44,7 @@ function setup(args: string[] = []) {
   const engine = {
     getJob: (id: string) => id === job.id ? job : null,
     listJobs: () => [job],
+    listChildContracts: () => [],
     projection: { rebuild: () => snapshot },
   } as unknown as JobEngine;
   return {
@@ -92,6 +93,32 @@ describe('durable operator views', () => {
     await jobView.handler(h.context as never);
     expect(h.output()).toContain('◆ Job job_1');
     expect(h.output()).toContain('goal        read a file');
+  });
+
+  it('renders worker assignments from durable child contracts', async () => {
+    const h = setup(['job_1']);
+    const engine = h.context.jobEngine as unknown as {
+      getJob: (id: string) => JobRecord | null;
+      listChildContracts: () => Array<{
+        childJobId: string; workerId: string; resultStatus: string | null;
+      }>;
+    };
+    const child: JobRecord = {
+      id: 'job_child', status: 'running', stateVersion: 1, activeAttemptId: 'attempt_child',
+      rootJobId: 'job_1', parentJobId: 'job_1', sessionId: 'session_1',
+      goal: 'validate Windows', entryPoint: 'worker', source: 'parent', terminalAt: null,
+      terminalOutcome: null, finishReason: null, nextEventSequence: 1,
+    };
+    const originalGetJob = engine.getJob;
+    engine.getJob = (id) => id === child.id ? child : originalGetJob(id);
+    engine.listChildContracts = () => [{
+      childJobId: child.id, workerId: 'worker-windows', resultStatus: null,
+    }];
+
+    await jobView.handler(h.context as never);
+
+    expect(h.output()).toContain('workers');
+    expect(h.output()).toContain('worker-windows · running · validate Windows');
   });
 
   it('projects Attempts, Effects, and evidence from the same durable snapshot', async () => {
