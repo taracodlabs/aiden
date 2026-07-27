@@ -130,6 +130,34 @@ describe('ComposerLane — lifecycle', () => {
     expect(out).toMatch(/\x1b\[22;\d+H\x1b\[\?25h$/);
   });
 
+  it('rebuilds the semantic transcript when ownership resumes after a modal', () => {
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('Type your message');
+    lane.writeAbove('  ▲ You  run a slow safe tool\n');
+    lane.deactivate();
+    lane.writeAbove('Approval required\nDecision: Once\n');
+
+    const beforeResume = s.text().length;
+    lane.activate('Enter → queue', 'provider · model');
+    const resumedOutput = s.text().slice(beforeResume);
+
+    expect(resumedOutput).toContain('run a slow safe tool');
+    expect(resumedOutput).toContain('Approval required');
+  });
+
+  it('does not replay transcript bytes for a status-only refresh', () => {
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('Type your message', 'provider · 0ms');
+    lane.writeAbove('one durable transcript row\n');
+    const beforeStatus = s.text().length;
+
+    lane.paintStatus('provider · 1s');
+
+    expect(s.text().slice(beforeStatus)).not.toContain('one durable transcript row');
+  });
+
   it('resize re-reserves the region for the new height and repaints in place', () => {
     const s = mockSink(24);
     const lane = new ComposerLane(s);

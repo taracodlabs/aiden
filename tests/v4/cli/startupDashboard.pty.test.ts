@@ -129,7 +129,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     provider = await startMockProvider({ modelId: 'custom-default' });
 
     const wide = await launch(120, true);
-    const wideBeforeResize = wide.plain();
+    const wideBeforeResize = wide.rendered();
     expect(wideBeforeResize).toContain('Environment');
     expect(wideBeforeResize).toContain('Capabilities');
     expect(wideBeforeResize).toContain('Built solo');
@@ -148,18 +148,15 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     await new Promise((resolve) => setTimeout(resolve, 250));
     wide.child.resize(120, 50);
     await new Promise((resolve) => setTimeout(resolve, 250));
-    expect((wide.plain().match(/Autonomous AI Engine/g) ?? []).length).toBe(logoCount);
-    // ConPTY may replay visible bottom rows while reflowing its screen buffer;
-    // the typographic anchor is above that window and detects an actual second
-    // application startup render. The unit integration test separately proves
-    // the startup renderer owns no resize listener or repaint callback.
+    expect((wide.rendered().match(/Autonomous AI Engine/g) ?? []).length).toBe(logoCount);
 
     const medium = await launch(80);
-    expect(medium.plain()).toContain('Environment');
-    expect(medium.plain()).toContain('Capabilities');
-    expect(medium.plain()).toContain('github.com/taracodlabs/aiden');
-    expect(dashboardLines(medium.plain()).join('\n')).not.toContain('╭');
-    for (const line of dashboardLines(medium.plain())) {
+    const mediumRendered = medium.rendered();
+    expect(mediumRendered).toContain('Environment');
+    expect(mediumRendered).toContain('Capabilities');
+    expect(mediumRendered).toContain('github.com/taracodlabs/aiden');
+    expect(dashboardLines(mediumRendered).join('\n')).not.toContain('╭');
+    for (const line of dashboardLines(mediumRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(78);
     }
 
