@@ -79,6 +79,7 @@ export interface PromptApi {
   select(opts: {
     message: string;
     choices: { name: string; value: string }[];
+    default?: string;
   }, context?: { input?: ModalStdin }): Promise<string>;
   confirm(opts: { message: string; default?: boolean }, context?: { input?: ModalStdin }): Promise<boolean>;
   /** v4.11 — free-text line input (for the clarify tool's open answers). */
@@ -150,6 +151,12 @@ function decisionChoicesFor(req: ApprovalRequest): { name: string; value: Approv
   }
   choices.push({ name: 'Deny', value: 'deny' });
   return choices;
+}
+
+function defaultDecisionFor(req: ApprovalRequest): ApprovalDecision {
+  return req.riskTier === 'safe' && req.effects?.irreversible !== true
+    ? 'allow'
+    : 'deny';
 }
 
 const KNOWN_TIERS: ReadonlySet<RiskTier> = new Set(['safe', 'caution', 'dangerous']);
@@ -294,7 +301,10 @@ export class CliCallbacks {
     this.skillTeacher = opts.skillTeacher;
     this.resolveToolInteraction = opts.resolveToolInteraction;
     this.activities = new ActivityRegistry(
-      (name, args, read) => this.display.toolRow(name, args, read, { externalTicker: true }),
+      (name, args, read, id) => this.display.toolRow(name, args, read, {
+        externalTicker: true,
+        activityId: id,
+      }),
       Date.now,
       (verb) => this.display.liveActivityRow(verb),
     );
@@ -592,7 +602,15 @@ export class CliCallbacks {
       choice = await prompts.select({
         message: 'Decision',
         choices: decisionChoicesFor(req),
+        default: defaultDecisionFor(req),
       }, stdin ? { input: stdin } : undefined);
+
+      if (choice !== 'deny' && req.effects?.irreversible === true) {
+        const confirmation = await prompts.input({
+          message: 'Type ALLOW to confirm this irreversible action',
+        }, stdin ? { input: stdin } : undefined);
+        if (confirmation !== 'ALLOW') return 'deny';
+      }
     } catch {
       // The prompt was interrupted (Ctrl+C / the turn ended) before the user
       // answered. Fail closed — the tool does NOT run — but report it as an

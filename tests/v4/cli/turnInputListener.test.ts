@@ -106,6 +106,21 @@ describe('makeKeypressHandler — line buffer + key routing', () => {
     h(undefined, key('return'));
     expect(cb.onLine).toHaveBeenCalledWith('ab');
   });
+
+  it('routes transcript navigation without mutating the busy draft', () => {
+    const cb = { ...cbs(), onScroll: vi.fn(), onFollow: vi.fn(), onBufferChange: vi.fn() };
+    const h = makeKeypressHandler(cb);
+    h('a', key('a'));
+    cb.onBufferChange.mockClear();
+    h(undefined, key('pageup'));
+    h(undefined, key('pagedown'));
+    h(undefined, key('end', { ctrl: true }));
+    expect(cb.onScroll.mock.calls.map((call) => call[0])).toEqual([8, -8]);
+    expect(cb.onFollow).toHaveBeenCalledOnce();
+    expect(cb.onBufferChange).not.toHaveBeenCalled();
+    h(undefined, key('return'));
+    expect(cb.onLine).toHaveBeenCalledWith('a');
+  });
 });
 
 describe('makeKeypressHandler — onBufferChange fires per keystroke (Slice 2c)', () => {

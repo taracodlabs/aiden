@@ -312,7 +312,10 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         } else if (state === 'approval' && plain.includes('Decision')) {
           state = 'tool';
           frames.approval = screen.snapshot();
-          setTimeout(() => child!.write('\r'), 250);
+          setTimeout(() => {
+            child!.write('\x1b[A');
+            setTimeout(() => child!.write('\r'), 150);
+          }, 250);
         } else if (
           state === 'tool'
           && /running[\s\S]*Start-Sleep/i.test(plain)
@@ -370,7 +373,15 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     await completion;
 
     const plain = stripAnsi(output);
-    const ids = [...new Set(plain.match(/input_[a-zA-Z0-9_-]+/g) ?? [])];
+    const evidenceDir = process.env.AIDEN_ACCEPTANCE_EVIDENCE_DIR;
+    if (evidenceDir) {
+      await fs.mkdir(evidenceDir, { recursive: true });
+      await fs.writeFile(
+        path.join(evidenceDir, `busy-queue-${columns}-columns.txt`),
+        Object.entries(frames).map(([name, frame]) => `--- ${name} ---\n${frame}`).join('\n\n'),
+        'utf8',
+      );
+    }
     expect(firstComposer).toContain('▲ You · queue mode');
     expect(secondComposer).toContain('▲ You · queue mode');
     expect(firstStatus).toContain('custom_openai');
@@ -403,23 +414,17 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         expect(lines.slice(0, surface.top).filter((line) => line.includes('custom_openai'))).toHaveLength(0);
       }
     }
-    expect(ids).toHaveLength(2);
-    expect(ids[0]).not.toBe(ids[1]);
-    const queuedRuns = plain.match(/running queued: QUEUE (?:ONE|TWO)/g) ?? [];
+    const renderedIds = [...new Set(
+      frames.secondQueue.match(/input_[a-zA-Z0-9_-]+/g) ?? [],
+    )];
+    expect(renderedIds).toHaveLength(2);
+    expect(renderedIds[0]).not.toBe(renderedIds[1]);
+    const queuedRuns = frames.queueEmpty.match(/running queued: QUEUE (?:ONE|TWO)/g) ?? [];
     expect(queuedRuns).toEqual(['running queued: QUEUE ONE', 'running queued: QUEUE TWO']);
     expect(queuedRequestContents).toEqual(['QUEUE ONE', 'QUEUE TWO']);
     expect(providerCallsBeforeExit).toBe(4);
     expect(frames.queueEmpty).toMatch(/queue is empty/i);
 
-    const evidenceDir = process.env.AIDEN_ACCEPTANCE_EVIDENCE_DIR;
-    if (evidenceDir) {
-      await fs.mkdir(evidenceDir, { recursive: true });
-      await fs.writeFile(
-        path.join(evidenceDir, `busy-queue-${columns}-columns.txt`),
-        Object.entries(frames).map(([name, frame]) => `--- ${name} ---\n${frame}`).join('\n\n'),
-        'utf8',
-      );
-    }
   }, 75_000);
 
   it('preserves an exact multiline busy submission through resize and provider handoff', async () => {
@@ -665,7 +670,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
           modalStart = output.length;
           setTimeout(() => {
             modalEnd = output.length;
-            pressDownThenEnter(child!, 1);
+            child!.write('\r');
           }, 350);
         } else if (state === 'denying' && plain.includes('RESIZE APPROVAL COMPLETE') && readyCount >= 2) {
           state = 'normal';

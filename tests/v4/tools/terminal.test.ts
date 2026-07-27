@@ -76,6 +76,17 @@ describe('localBackend', () => {
     expect(nested.stdout.trim()).toBe(process.env.TEMP);
   });
 
+  it.runIf(isWin)('executes one approved PowerShell command exactly once', async () => {
+    const marker = path.join(tmp, 'one-effect.txt').replace(/'/g, "''");
+    const result = await localBackendExecute({
+      command: `Add-Content -LiteralPath '${marker}' -Value 'effect'; Get-Content -LiteralPath '${marker}'`,
+      cwd: tmp,
+    });
+    expect(result.exitCode).toBe(0);
+    expect((await fs.readFile(path.join(tmp, 'one-effect.txt'), 'utf8')).trim().split(/\r?\n/u)).toEqual(['effect']);
+    expect(result.stdout.trim().split(/\r?\n/u)).toEqual(['effect']);
+  });
+
   it('2. executes a simple command', async () => {
     const r = await localBackendExecute({ command: echoCmd('hello-shell') });
     expect(r.exitCode).toBe(0);
