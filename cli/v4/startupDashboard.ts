@@ -127,6 +127,42 @@ function fit(value: string, width: number): string {
   return fitStartupLine(value, Math.max(1, width));
 }
 
+/** Wrap plain startup copy without dropping words or splitting wide glyphs. */
+function wrapPlain(value: string, maxWidth: number): string[] {
+  const width = Math.max(1, Math.floor(maxWidth));
+  const words = value.trim().split(/\s+/u).filter(Boolean);
+  if (words.length === 0) return [''];
+  const lines: string[] = [];
+  let line = '';
+  const pushLongWord = (word: string): string => {
+    let rest = word;
+    while (startupVisibleWidth(rest) > width) {
+      let chunk = '';
+      for (const point of rest) {
+        if (startupVisibleWidth(chunk + point) > width) break;
+        chunk += point;
+      }
+      lines.push(chunk);
+      rest = rest.slice(chunk.length);
+    }
+    return rest;
+  };
+  for (const rawWord of words) {
+    const word = startupVisibleWidth(rawWord) > width ? pushLongWord(rawWord) : rawWord;
+    if (!word) continue;
+    if (!line) {
+      line = word;
+    } else if (startupVisibleWidth(`${line} ${word}`) <= width) {
+      line += ` ${word}`;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [''];
+}
+
 function pad(value: string, width: number): string {
   const fitted = fit(value, width);
   return fitted + ' '.repeat(Math.max(0, width - startupVisibleWidth(fitted)));
@@ -253,36 +289,36 @@ function renderMediumSections(
 function renderProject(
   data: StartupProjectData,
   style: StartupDashboardStyle,
-  tier: StartupDashboardTier,
+  _tier: StartupDashboardTier,
   width: number,
 ): string[] {
   const identity = clean(data.identity) ?? 'Built solo';
-  if (tier === 'wide') {
-    const frameWidth = Math.min(width, 72);
-    const inside = Math.max(1, frameWidth - 2);
-    const rows = [
-      `${style.brand('♥')}  ${style.text(identity)}`,
-      '',
-      clean(data.github) ? `${style.brand('GitHub:'.padEnd(10))}${style.text(data.github!)}` : undefined,
-      clean(data.website) ? `${style.brand('Web:'.padEnd(10))}${style.text(data.website!)}` : undefined,
-      clean(data.contact) ? `${style.brand('Contact:'.padEnd(10))}${style.text(data.contact!)}` : undefined,
-    ].filter((entry): entry is string => entry !== undefined);
-    return [
-      style.muted(`╭${'─'.repeat(inside)}╮`),
-      ...rows.map((row) => `${style.muted('│')}${pad(` ${row}`, inside)}${style.muted('│')}`),
-      style.muted(`╰${'─'.repeat(inside)}╯`),
-    ];
-  }
-  if (tier === 'medium') {
-    return [
-      `${style.brand('♥')} ${style.text(identity)}`,
-      ...[clean(data.github), clean(data.website), clean(data.contact)]
-        .filter((entry): entry is string => !!entry)
-        .map((entry) => fit(style.muted(entry), width)),
-    ];
-  }
-  const repo = clean(data.github)?.replace(/^github\.com\//, '') ?? clean(data.website) ?? '';
-  return [fit(`${style.brand('♥')} ${style.muted(`${identity.toLowerCase()}${repo ? ` · ${repo}` : ''}`)}`, width)];
+  const frameWidth = Math.max(4, Math.min(width, 72));
+  const inside = Math.max(2, frameWidth - 2);
+  const contentWidth = Math.max(1, inside - 2);
+  const rows: string[] = [`♥  ${identity}`, ''];
+  const addDetail = (label: string, value: string | undefined): void => {
+    if (!value) return;
+    const labelWidth = Math.min(9, contentWidth);
+    const firstPrefix = `${label}:`.padEnd(labelWidth);
+    const continuationPrefix = ' '.repeat(labelWidth);
+    const valueWidth = Math.max(1, contentWidth - labelWidth);
+    const wrapped = wrapPlain(value, valueWidth);
+    wrapped.forEach((line, index) => rows.push(`${index === 0 ? firstPrefix : continuationPrefix}${line}`));
+  };
+  addDetail('GitHub', clean(data.github));
+  addDetail('Web', clean(data.website));
+  addDetail('Contact', clean(data.contact));
+  return [
+    style.muted(`╭${'─'.repeat(inside)}╮`),
+    ...rows.map((row) => {
+      const colored = row.startsWith('♥')
+        ? `${style.brand('♥')}${style.text(row.slice(1))}`
+        : style.text(row);
+      return `${style.muted('│')} ${pad(colored, contentWidth)} ${style.muted('│')}`;
+    }),
+    style.muted(`╰${'─'.repeat(inside)}╯`),
+  ];
 }
 
 function normalizeBanner(banner: string | undefined, width: number): string[] {
@@ -298,15 +334,13 @@ export function renderStartupDashboard(options: RenderStartupDashboardOptions): 
   const tier = resolveStartupDashboardTier(options.columns);
   const data = options.data;
   const lines: string[] = [];
-  const bannerLines = tier === 'wide' || tier === 'medium'
-    ? normalizeBanner(options.banner, width)
-    : [];
+  const bannerLines = normalizeBanner(options.banner, width);
 
   if (bannerLines.length > 0) {
     lines.push(...bannerLines, style.muted('Autonomous AI Engine'), '');
   } else {
-    lines.push(style.brand('AIDEN'));
-    if (tier !== 'minimal') lines.push(style.muted('Autonomous AI Engine'));
+    lines.push(style.brand('Aiden'));
+    lines.push(style.muted('Autonomous AI Engine'));
   }
 
   lines.push(statusLine(data, style, tier, width));
@@ -321,8 +355,12 @@ export function renderStartupDashboard(options: RenderStartupDashboardOptions): 
   }
 
   lines.push(...renderProject(data.project, style, tier, width));
-  if (clean(data.greeting)) lines.push('', fit(style.text(data.greeting!), width));
-  if (clean(data.helper)) lines.push(fit(style.muted(data.helper!), width));
+  if (clean(data.greeting)) {
+    lines.push('', ...wrapPlain(data.greeting!, width).map((line) => style.text(line)));
+  }
+  if (clean(data.helper)) {
+    lines.push(...wrapPlain(data.helper!, width).map((line) => style.muted(line)));
+  }
 
   return {
     tier,

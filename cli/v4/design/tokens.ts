@@ -301,6 +301,16 @@ export const spacing = {
     groups:       1,
     /** Blank rows between top-level sections (boot card → REPL → events). */
     sections:     2,
+    /** Blank rows between transcript messages. */
+    messages:     1,
+    /** Blank rows around compact activity groups. */
+    activity:     0,
+    /** Blank rows around modal surfaces. */
+    modal:        1,
+    /** Blank rows between transcript tail and the fixed footer. */
+    transcriptToFooter: 0,
+    /** Narrow layouts compact major boundaries to this many rows. */
+    compact:      1,
   },
 } as const;
 

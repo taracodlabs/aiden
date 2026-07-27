@@ -155,15 +155,15 @@ describe('responsive startup status rows', () => {
 describe('responsive startup dashboard integration', () => {
   it.each([
     { columns: 120, tier: 'wide', sections: true, frame: true },
-    { columns: 80, tier: 'medium', sections: true, frame: false },
-    { columns: 48, tier: 'narrow', sections: false, frame: false },
-    { columns: 20, tier: 'minimal', sections: false, frame: false },
+    { columns: 80, tier: 'medium', sections: true, frame: true },
+    { columns: 48, tier: 'narrow', sections: false, frame: true },
+    { columns: 20, tier: 'minimal', sections: false, frame: true },
   ])('renders the $tier transcript once at $columns columns', async ({ columns, sections, frame }) => {
     const { session, chunks } = buildSession('Partner', columns);
     await session.renderStartupCard();
     const output = stripAnsi(chunks.join(''));
 
-    const logo = sections ? /Autonomous AI Engine/g : /AIDEN/g;
+    const logo = columns >= 44 ? /Autonomous AI Engine/g : /^Aiden$/gm;
     expect(output.match(logo)).toHaveLength(1);
     expect(output).toContain('Partner');
     expect(output).toContain('llama-3.3-70b-versatile'.slice(0, columns >= 48 ? 8 : 3));

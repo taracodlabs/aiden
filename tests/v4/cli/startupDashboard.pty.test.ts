@@ -103,7 +103,7 @@ async function launch(columns: number, paused = false): Promise<{
 
 function dashboardLines(output: string): string[] {
   const lines = output.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.includes('█████╗') || /^\s*AIDEN\s*$/.test(line));
+  const start = lines.findIndex((line) => line.includes('█████╗') || /^\s*Aiden\s*$/.test(line));
   const end = lines.findIndex((line, index) => index >= start && line.startsWith('╭─ ▲ You'));
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
@@ -155,19 +155,25 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     expect(mediumRendered).toContain('Environment');
     expect(mediumRendered).toContain('Capabilities');
     expect(mediumRendered).toContain('github.com/taracodlabs/aiden');
-    expect(dashboardLines(mediumRendered).join('\n')).not.toContain('╭');
+    expect(dashboardLines(mediumRendered).join('\n')).toContain('╭');
+    expect(mediumRendered).toContain('GitHub:');
+    expect(mediumRendered).toContain('Web:');
+    expect(mediumRendered).toContain('Contact:');
     for (const line of dashboardLines(mediumRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(78);
     }
 
     const narrow = await launch(48);
     const narrowRendered = narrow.rendered();
-    expect(narrowRendered).toMatch(/\bAIDEN\b/);
+    expect(narrowRendered).toContain('█████╗');
     expect(narrowRendered).toMatch(/Assistant\s+·\s+custom-default/i);
     expect(narrowRendered).toMatch(/built solo/i);
     expect(narrowRendered).not.toContain('Environment');
     expect(narrowRendered).not.toContain('Capabilities');
-    expect(dashboardLines(narrowRendered).join('\n')).not.toContain('╭');
+    expect(dashboardLines(narrowRendered).join('\n')).toContain('╭');
+    expect(narrowRendered).toContain('GitHub:');
+    expect(narrowRendered).toContain('Web:');
+    expect(narrowRendered).toContain('Contact:');
     for (const line of dashboardLines(narrowRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(46);
     }
