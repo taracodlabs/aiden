@@ -41,7 +41,6 @@ import {
 import { renderCapabilityCard } from './display/capabilityCard';
 import type { CapabilityCardData } from '../../providers/v4/types';
 import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
-import { recoveryActionsForOutcome } from './recoveryActions';
 import type { OperatorActivityState } from './operatorProjection';
 import { AIDEN_LOGO_LINES } from '../../core/v4/ui/identity';
 
@@ -440,7 +439,9 @@ export class Display {
     this.skin = opts.skin ?? getSkinEngine();
     this.out = opts.stdout ?? process.stdout;
     this.err = opts.stderr ?? process.stderr;
-    if (composerLaneEnabled() && this.out.isTTY) this.composerLane = new ComposerLane(this.laneSink());
+    if (composerLaneEnabled() && this.out.isTTY) {
+      this.composerLane = new ComposerLane(this.laneSink(), this.laneStyle());
+    }
     try {
       marked.setOptions({ renderer: new TerminalRenderer() as never });
     } catch {
@@ -2314,6 +2315,15 @@ export class Display {
     return composerLaneEnabled() && !!this.out.isTTY;
   }
 
+  /** Repaint the owned interactive surface after an effective theme change. */
+  refreshTheme(): void {
+    if (this.composerLane?.isActive()) {
+      this.paintComposerSurface();
+      return;
+    }
+    this.composerRepaint?.();
+  }
+
   /** Release all fixed bottom-region state for full-session teardown. */
   releaseBottomRegion(): void {
     this.composerSurfacePauseDepth = 0;
@@ -2366,7 +2376,9 @@ export class Display {
   private paintComposerSurface(): void {
     if (this.composerSurfacePauseDepth > 0) return;
     if (composerLaneEnabled() && this.out.isTTY) {
-      if (!this.composerLane) this.composerLane = new ComposerLane(this.laneSink());
+      if (!this.composerLane) {
+        this.composerLane = new ComposerLane(this.laneSink(), this.laneStyle());
+      }
       const content = this.composerContent();
       const hasStatus = typeof this.statusFooterSource === 'function'
         || this.statusFooterSource.length > 0;
@@ -2393,6 +2405,13 @@ export class Display {
     if (this.composerSurfacePauseDepth === 0) return;
     this.composerSurfacePauseDepth -= 1;
     if (this.composerSurfacePauseDepth === 0) this.paintComposerSurface();
+  }
+
+  private laneStyle(): { brand(value: string): string; muted(value: string): string } {
+    return {
+      brand: (value) => this.skin.applyColors(value, 'brand'),
+      muted: (value) => this.skin.applyColors(value, 'muted'),
+    };
   }
 
   /** Wire the lane to this display's real terminal stream + resize events. */
@@ -2489,13 +2508,26 @@ export class Display {
 
   /** Render the single structured outcome owned by turn finalization. */
   taskOutcome(outcome: TaskOutcomePresentation): void {
-    const details = outcome.taskId ? ` · Task: ${outcome.taskId}` : '';
-    const recovery = recoveryActionsForOutcome(outcome)[0];
-    const next = recovery?.command ? ` · Next: ${recovery.command}` : recovery?.instruction ? ` · ${recovery.instruction}` : '';
-    const text = `${outcome.label}${outcome.summary ? ` · ${outcome.summary}` : ''}${details}${next}`;
-    if (outcome.severity === 'success') this.success(text);
-    else if (outcome.severity === 'error' || outcome.severity === 'warning') this.warn(text);
-    else this.dim(text);
+    const taskId = outcome.taskId && terminalVisibleLength(outcome.taskId) > 13
+      ? `${outcome.taskId.slice(0, 8)}…${outcome.taskId.slice(-4)}`
+      : outcome.taskId;
+    const details = taskId ? ` · Task: ${taskId}` : '';
+    const projection = (() => {
+      switch (outcome.kind) {
+        case 'verified': return { glyph: '✓', label: outcome.label, role: 'success' as const };
+        case 'failed':
+        case 'timed_out': return { glyph: '×', label: outcome.label, role: 'error' as const };
+        case 'unverified_required': return { glyph: '?', label: 'Outcome unknown', role: 'warn' as const };
+        case 'cancelled': return { glyph: '■', label: outcome.label, role: 'muted' as const };
+        case 'completed_limited':
+        case 'partial':
+        case 'denied': return { glyph: '!', label: outcome.label, role: 'warn' as const };
+        case 'completed': return { glyph: '✓', label: outcome.label, role: 'success' as const };
+      }
+    })();
+    const summary = outcome.summary ? ` · ${outcome.summary}` : '';
+    const glyph = this.skin.applyColors(projection.glyph, projection.role);
+    this.writeOutput(`${glyph} ${projection.label}${summary}${details}\n`);
   }
 
   /**

@@ -78,6 +78,16 @@ export function fitLane(text: string, cols: number): string {
 
 type StatusSource = string | (() => string);
 
+export interface BottomRegionStyle {
+  brand(value: string): string;
+  muted(value: string): string;
+}
+
+const PLAIN_BOTTOM_STYLE: BottomRegionStyle = {
+  brand: (value) => value,
+  muted: (value) => value,
+};
+
 /** ANSI-aware front truncation used as the final no-wrap status guard. */
 function fitStatus(text: string, cols: number): string {
   const width = Math.max(4, cols);
@@ -236,6 +246,7 @@ export function renderBottomSurface(
   cols: number,
   composerSource: ComposerSource,
   status: string,
+  style: BottomRegionStyle = PLAIN_BOTTOM_STYLE,
 ): RenderedSurface {
   const composer = normalizeComposer(composerSource);
   // Leave the final physical cell unused so Windows ConPTY never enters its
@@ -255,9 +266,10 @@ export function renderBottomSurface(
   const titleRoom = Math.max(1, outerWidth - 5);
   const fittedTitle = terminalWidth(title) <= titleRoom ? title : fitStatus(title, titleRoom);
   const topPrefix = `╭─ ${fittedTitle} `;
-  const top = `${topPrefix}${'─'.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}╮`;
-  const body = content.map((line) => `│ ${padVisible(line, innerWidth)} │`);
-  const bottom = `╰${'─'.repeat(Math.max(0, outerWidth - 2))}╯`;
+  const topTail = `${'─'.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}╮`;
+  const top = `${style.muted('╭─ ')}${style.brand(fittedTitle)}${style.muted(` ${topTail}`)}`;
+  const body = content.map((line) => `${style.muted('│')} ${padVisible(line, innerWidth)} ${style.muted('│')}`);
+  const bottom = style.muted(`╰${'─'.repeat(Math.max(0, outerWidth - 2))}╯`);
   const fittedStatus = fitStatus(status, outerWidth);
   const topRow = rows - laneRows + 1;
   return {
@@ -291,7 +303,10 @@ export class BottomRegion {
   private rebuildTranscriptOnActivation = false;
   private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
 
-  constructor(private readonly sink: LaneSink) {}
+  constructor(
+    private readonly sink: LaneSink,
+    private readonly style: BottomRegionStyle = PLAIN_BOTTOM_STYLE,
+  ) {}
 
   isActive(): boolean {
     return this.active;
@@ -442,6 +457,7 @@ export class BottomRegion {
       this.sink.cols(),
       this.composerSource,
       rawStatus,
+      this.style,
     );
     const availableWidth = Math.max(1, this.sink.cols() - 1);
     const allLive = activeActivityRows(this.projection).flatMap((activity) => (

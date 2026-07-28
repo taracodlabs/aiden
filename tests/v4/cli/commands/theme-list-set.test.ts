@@ -17,10 +17,11 @@ interface CapturedDisplay {
   warn: string[];
   success: string[];
   errors: Array<{ msg: string; suggestion?: string }>;
+  refreshes: number;
 }
 
 function mkCtx(overrides: { paths?: { root: string } | null; rawArgs?: string }) {
-  const captured: CapturedDisplay = { info: [], warn: [], success: [], errors: [] };
+  const captured: CapturedDisplay = { info: [], warn: [], success: [], errors: [], refreshes: 0 };
   return {
     captured,
     ctx: {
@@ -30,6 +31,7 @@ function mkCtx(overrides: { paths?: { root: string } | null; rawArgs?: string })
         warn: (message: string) => captured.warn.push(message),
         success: (message: string) => captured.success.push(message),
         printError: (message: string, suggestion?: string) => captured.errors.push({ msg: message, suggestion }),
+        refreshTheme: () => { captured.refreshes += 1; },
       },
     } as unknown as Parameters<typeof theme.handler>[0],
   };
@@ -75,6 +77,7 @@ describe('Aiden-native bundled themes', () => {
     expect(readFileSync(themeFile, 'utf8')).toMatch(/name:\s*"midnight"/);
     expect(getCurrentName()).toBe('midnight');
     expect(captured.success.some((line) => /midnight.*bundled/.test(line))).toBe(true);
+    expect(captured.refreshes).toBe(1);
   });
 
   it('/theme <name> is a direct local selection alias', async () => {

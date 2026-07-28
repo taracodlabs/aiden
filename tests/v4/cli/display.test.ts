@@ -209,9 +209,59 @@ describe('Display Phase 14b helpers', () => {
       inspectable: true,
       prominent: true,
     });
-    expect(chunks.join('')).toContain('Could not verify required outcome · Task: 7');
-    expect(chunks.join('')).toContain('Next: /status');
-    expect(chunks.join('').match(/Could not verify required outcome/g)).toHaveLength(1);
+    expect(chunks.join('')).toContain('? Outcome unknown · Task: 7');
+    expect(chunks.join('')).not.toContain('Next:');
+    expect(chunks.join('').match(/Outcome unknown/g)).toHaveLength(1);
+  });
+
+  it.each([
+    ['verified', 'success', 'Verified', '✓ Verified'],
+    ['completed_limited', 'warning', 'Completed · limited evidence', '! Completed · limited evidence'],
+    ['failed', 'error', 'Failed', '× Failed'],
+    ['unverified_required', 'error', 'Could not verify required outcome', '? Outcome unknown'],
+    ['cancelled', 'info', 'Cancelled', '■ Cancelled'],
+  ] as const)('renders the compact %s verdict badge', (kind, severity, label, expected) => {
+    const { d, chunks } = captureDisplay();
+    d.taskOutcome({
+      kind,
+      severity,
+      label,
+      evidenceCount: 0,
+      hasRequiredEvidenceGap: kind === 'unverified_required',
+      executionStarted: true,
+      inspectable: false,
+      prominent: kind === 'failed' || kind === 'unverified_required',
+      requiredCompletedCount: 0,
+      requiredDeniedCount: 0,
+      requiredFailedCount: 0,
+      requiredSkippedCount: 0,
+      requiredUnresolvedCount: 0,
+      optionalDeniedCount: 0,
+    });
+    expect(chunks.join('')).toBe(`${expected}\n`);
+  });
+
+  it('abbreviates the task identity in the compact verdict row', () => {
+    const { d, chunks } = captureDisplay();
+    d.taskOutcome({
+      kind: 'verified',
+      severity: 'success',
+      label: 'Verified',
+      taskId: 'task_0123456789abcdef',
+      evidenceCount: 1,
+      hasRequiredEvidenceGap: false,
+      executionStarted: true,
+      inspectable: true,
+      prominent: false,
+      requiredCompletedCount: 1,
+      requiredDeniedCount: 0,
+      requiredFailedCount: 0,
+      requiredSkippedCount: 0,
+      requiredUnresolvedCount: 0,
+      optionalDeniedCount: 0,
+    });
+    expect(chunks.join('')).toContain('Task: task_012…cdef');
+    expect(chunks.join('')).not.toContain('task_0123456789abcdef');
   });
   function captureDisplay() {
     const chunks: string[] = [];

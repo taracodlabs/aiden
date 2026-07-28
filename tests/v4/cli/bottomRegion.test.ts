@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+import { renderBottomSurface } from '../../../cli/v4/composerLane';
 import { TerminalScreen } from '../harness/terminalScreen';
 
 class ScreenStream extends Writable {
@@ -39,6 +40,24 @@ class ScreenStream extends Writable {
 }
 
 const previousLaneSetting = process.env.AIDEN_COMPOSER_LANE;
+
+it('applies the active theme to the composer title and restrained frame without changing geometry', () => {
+  const renderStyled = renderBottomSurface as unknown as (...args: unknown[]) => ReturnType<typeof renderBottomSurface>;
+  const styled = renderStyled(
+    24,
+    80,
+    { draft: 'hello', mode: 'idle' },
+    '◆ provider · model',
+    {
+      brand: (value: string) => `\x1b[31m${value}\x1b[39m`,
+      muted: (value: string) => `\x1b[90m${value}\x1b[39m`,
+    },
+  );
+  const text = styled.lines.join('\n');
+  expect(text).toContain('\x1b[31m▲ You\x1b[39m');
+  expect(text).toContain('\x1b[90m╭─ \x1b[39m');
+  expect(styled.cursorCol).toBe(8);
+});
 
 afterEach(() => {
   if (previousLaneSetting === undefined) delete process.env.AIDEN_COMPOSER_LANE;
