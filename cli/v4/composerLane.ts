@@ -288,6 +288,7 @@ export class BottomRegion {
   private renderGeneration = 0;
   private projection: OperatorProjectionState = initialOperatorProjection();
   private projectionIdentity = 0;
+  private rebuildTranscriptOnActivation = false;
   private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
 
   constructor(private readonly sink: LaneSink) {}
@@ -300,12 +301,17 @@ export class BottomRegion {
   activate(composer: ComposerSource, status: StatusSource = this.statusSource): void {
     this.composerSource = composer;
     this.statusSource = status;
-    const resumingOwnership = !this.active;
     if (!this.active) {
       this.active = true;
       this.unsubResize = this.sink.onResize(() => this.onResize());
     }
-    this.paintAll(resumingOwnership && this.projection.transcript.length > 0);
+    // Transcript written before first activation already exists physically.
+    // A balanced modal release is different: the modal temporarily owns the
+    // same terminal rows, so restoring ownership must reconstruct the semantic
+    // transcript before repainting the footer.
+    const rebuildTranscript = this.rebuildTranscriptOnActivation;
+    this.rebuildTranscriptOnActivation = false;
+    this.paintAll(rebuildTranscript);
   }
 
   /** Backward-compatible composer update. */
@@ -623,6 +629,7 @@ export class BottomRegion {
     this.trailingResize = null;
     this.resizeBurstActive = false;
     this.active = false;
+    this.rebuildTranscriptOnActivation = true;
     this.laneRows = 0;
     this.geometry = null;
     this.lastFrame = '';

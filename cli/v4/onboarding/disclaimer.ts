@@ -23,7 +23,7 @@
 
 import * as readline from 'node:readline';
 
-import { renderBanner } from '../../../core/v4/ui/banner';
+import { renderTitleLine } from '../../../core/v4/ui/banner';
 import { c, separator, termWidth } from '../../../core/v4/ui/theme';
 import { VERSION } from '../../../core/version';
 
@@ -107,7 +107,9 @@ function renderDisclaimerBody(version: string): string {
   const w = termWidth();
   const innerW = Math.min(w - 4, 70);
   const body: string[] = [];
-  body.push(renderBanner({ version }));
+  // Fresh setup and the normal session run in the same process. Keep setup's
+  // identity compact so the canonical six-row startup wordmark has one owner.
+  body.push(`\n  ${renderTitleLine(version)}\n\n`);
 
   // Slice 10c framed-panel chrome. Orange bar at col 2; content + 2
   // inner spaces; muted `─` divider between sections.

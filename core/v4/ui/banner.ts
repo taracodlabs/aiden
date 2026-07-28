@@ -34,20 +34,12 @@
  */
 
 import { c, dim, termWidth, getColorDepth } from './theme';
+import { AIDEN_LOGO_LINES } from './identity';
 
 /**
- * The block-style AIDEN ASCII. Copied from cli/v4/display.ts so this
- * module has zero coupling to the skin-engine display surface. 6 rows,
- * widest row = 36 cells.
+ * The canonical block-style AIDEN ASCII. Six rows, widest row = 36 cells.
  */
-const AIDEN_ART = String.raw`
-█████╗  ██╗██████╗ ███████╗███╗   ██╗
-██╔══██╗██║██╔══██╗██╔════╝████╗  ██║
-███████║██║██║  ██║█████╗  ██╔██╗ ██║
-██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║
-██║  ██║██║██████╔╝███████╗██║ ╚████║
-╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝
-`.trim().split('\n');
+const AIDEN_ART = AIDEN_LOGO_LINES;
 
 const ART_WIDTH = 36;
 

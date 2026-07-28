@@ -43,6 +43,7 @@ import type { CapabilityCardData } from '../../providers/v4/types';
 import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
 import { recoveryActionsForOutcome } from './recoveryActions';
 import type { OperatorActivityState } from './operatorProjection';
+import { AIDEN_LOGO_LINES } from '../../core/v4/ui/identity';
 
 const DISPLAY_ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
 
@@ -382,15 +383,6 @@ export interface AgentTurnOptions {
   reasoning?: string;
 }
 
-const AIDEN_BANNER = String.raw`
-█████╗  ██╗██████╗ ███████╗███╗   ██╗
-██╔══██╗██║██╔══██╗██╔════╝████╗  ██║
-███████║██║██║  ██║█████╗  ██╔██╗ ██║
-██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║
-██║  ██║██║██████╔╝███████╗██║ ╚████║
-╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝
-`;
-
 /**
  * v4.9.0 pre-ship UI hotfix — pure context-bar helpers. Extracted
  * for testability + to fix the "always empty" symptom. Scale:
@@ -478,10 +470,8 @@ export class Display {
    */
   banner(_version = '4.0.0', _opts: { tip?: string } = {}): string {
     const sk = this.skin;
-    const lines = AIDEN_BANNER.split('\n').map((l) =>
-      l ? `  ${sk.applyColors(l, 'brand')}` : '',
-    );
-    return `${lines.join('\n')}\n`;
+    const lines = AIDEN_LOGO_LINES.map((line) => `  ${sk.applyColors(line, 'brand')}`);
+    return `\n${lines.join('\n')}\n\n`;
   }
 
   /** Print the banner. `opts.tip` accepted for backward compat; unused. */

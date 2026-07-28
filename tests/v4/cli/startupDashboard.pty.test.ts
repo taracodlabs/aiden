@@ -8,6 +8,15 @@ import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
 import { TerminalScreen } from '../harness/terminalScreen';
 
+const CANONICAL_LOGO = [
+  '█████╗  ██╗██████╗ ███████╗███╗   ██╗',
+  '██╔══██╗██║██╔══██╗██╔════╝████╗  ██║',
+  '███████║██║██║  ██║█████╗  ██╔██╗ ██║',
+  '██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║',
+  '██║  ██║██║██████╔╝███████╗██║ ╚████║',
+  '╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝',
+] as const;
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
 
@@ -125,6 +134,17 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dashboard', () => {
+  it('emits the canonical six-line logo exactly once before composer ownership begins', async () => {
+    provider = await startMockProvider({ modelId: 'custom-default' });
+    const startup = await launch(100);
+    const physical = startup.plain();
+
+    for (const row of CANONICAL_LOGO) {
+      expect(physical.split(row)).toHaveLength(2);
+    }
+    expect(physical).not.toMatch(/\x1b\[3[13]m/u);
+  }, 30_000);
+
   it('selects wide, medium, and narrow transcript tiers without resize duplication', async () => {
     provider = await startMockProvider({ modelId: 'custom-default' });
 
