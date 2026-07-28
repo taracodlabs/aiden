@@ -401,7 +401,14 @@ export function renderStartupNoticeLines(
     lines.push('Notices');
     for (const n of notices) {
       const action = n.command ? `: ${n.command}` : n.detail ? `: ${n.detail}` : '';
-      lines.push(fit(`! ${n.title}${action}`, width));
+      const combined = `! ${n.title}${action}`;
+      if (startupNoticeVisibleWidth(combined) <= width) {
+        lines.push(combined);
+      } else {
+        lines.push(fit(`! ${n.title}`, width));
+        if (n.command) lines.push(fit(`  Run: ${n.command}`, width));
+        else if (n.detail) lines.push(fit(`  ${n.detail}`, width));
+      }
     }
     return lines;
   }
@@ -409,7 +416,13 @@ export function renderStartupNoticeLines(
   if (tier === 'narrow') {
     for (const n of notices) {
       const action = n.command ? `: ${n.command}` : '';
-      lines.push(fit(`! ${compactTitle(n)}${action}`, width));
+      const combined = `! ${compactTitle(n)}${action}`;
+      if (startupNoticeVisibleWidth(combined) <= width) {
+        lines.push(combined);
+      } else {
+        lines.push(fit(`! ${compactTitle(n)}`, width));
+        if (n.command) lines.push(fit(`  Run: ${n.command}`, width));
+      }
     }
     return lines;
   }

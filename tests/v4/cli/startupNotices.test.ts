@@ -194,6 +194,9 @@ describe('startup notices', () => {
       for (const line of lines) {
         expect(startupNoticeVisibleWidth(line), line).toBeLessThanOrEqual(Math.max(1, columns - 2));
       }
+      if (columns === 48) {
+        expect(lines.some((line) => line.includes('/auth refresh provider-with-long-name'))).toBe(true);
+      }
     }
   });
 
