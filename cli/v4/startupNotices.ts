@@ -26,6 +26,11 @@ export interface StartupNotice {
 
 export interface StartupNoticeRenderOptions {
   columns: number;
+  style?: {
+    warning(value: string): string;
+    text(value: string): string;
+    command(value: string): string;
+  };
 }
 
 const SAFE_MARGIN = 2;
@@ -383,53 +388,26 @@ export function renderStartupNoticeLines(
   if (notices.length === 0) return [];
   const width = safeWidth(opts.columns);
   const tier = resolveStartupDashboardTier(opts.columns);
+  const style = opts.style ?? {
+    warning: (value: string) => value,
+    text: (value: string) => value,
+    command: (value: string) => value,
+  };
   const lines: string[] = [];
 
-  if (tier === 'wide') {
-    lines.push('Setup and notices', '');
+  if (tier !== 'minimal') {
     for (const n of notices) {
-      lines.push(fit(`! ${n.title}`, width));
-      if (n.detail) lines.push(fit(`  ${n.detail}`, width));
-      if (n.command) lines.push(fit(`  Run: ${n.command}`, width));
-      lines.push('');
-    }
-    if (lines[lines.length - 1] === '') lines.pop();
-    return lines;
-  }
-
-  if (tier === 'medium') {
-    lines.push('Notices');
-    for (const n of notices) {
-      const action = n.command ? `: ${n.command}` : n.detail ? `: ${n.detail}` : '';
-      const combined = `! ${n.title}${action}`;
-      if (startupNoticeVisibleWidth(combined) <= width) {
-        lines.push(combined);
-      } else {
-        lines.push(fit(`! ${n.title}`, width));
-        if (n.command) lines.push(fit(`  Run: ${n.command}`, width));
-        else if (n.detail) lines.push(fit(`  ${n.detail}`, width));
-      }
-    }
-    return lines;
-  }
-
-  if (tier === 'narrow') {
-    for (const n of notices) {
-      const action = n.command ? `: ${n.command}` : '';
-      const combined = `! ${compactTitle(n)}${action}`;
-      if (startupNoticeVisibleWidth(combined) <= width) {
-        lines.push(combined);
-      } else {
-        lines.push(fit(`! ${compactTitle(n)}`, width));
-        if (n.command) lines.push(fit(`  Run: ${n.command}`, width));
-      }
+      const title = tier === 'narrow' ? compactTitle(n) : n.title;
+      lines.push(fit(`${style.warning('!')} ${style.text(title)}`, width));
+      if (n.command) lines.push(fit(`  ${style.command(n.command)}`, width));
+      else if (n.detail) lines.push(fit(`  ${style.text(n.detail)}`, width));
     }
     return lines;
   }
 
   const first = notices.find((n) => n.blocking || n.severity !== 'info') ?? notices[0];
-  lines.push(fit('! Setup required', width));
-  lines.push(fit(`Run ${first.command ?? '/doctor'}`, width));
+  lines.push(fit(`${style.warning('!')} ${style.text('Setup required')}`, width));
+  lines.push(fit(style.command(first.command ?? '/doctor'), width));
   return lines;
 }
 

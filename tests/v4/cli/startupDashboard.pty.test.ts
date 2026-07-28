@@ -186,10 +186,10 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     const narrow = await launch(48);
     const narrowRendered = narrow.rendered();
     expect(narrowRendered).toContain('█████╗');
-    expect(narrowRendered).toMatch(/Assistant\s+·\s+custom-default/i);
+    expect(narrowRendered).toMatch(/◇\s+Assistant\s+·\s+◆\s+custom-default/i);
     expect(narrowRendered).toMatch(/built solo/i);
-    expect(narrowRendered).not.toContain('Environment');
-    expect(narrowRendered).not.toContain('Capabilities');
+    expect(narrowRendered).toContain('Environment');
+    expect(narrowRendered).toContain('Capabilities');
     expect(dashboardLines(narrowRendered).join('\n')).toContain('╭');
     expect(narrowRendered).toContain('GitHub:');
     expect(narrowRendered).toContain('Web:');

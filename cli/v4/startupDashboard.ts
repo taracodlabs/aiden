@@ -55,6 +55,7 @@ export interface StartupDashboardStyle {
   muted(value: string): string;
   text(value: string): string;
   success(value: string): string;
+  info?(value: string): string;
 }
 
 export interface RenderStartupDashboardOptions {
@@ -74,6 +75,7 @@ const PLAIN_STYLE: StartupDashboardStyle = {
   muted: (value) => value,
   text: (value) => value,
   success: (value) => value,
+  info: (value) => value,
 };
 
 export function startupVisibleWidth(value: string): number {
@@ -82,8 +84,8 @@ export function startupVisibleWidth(value: string): number {
 
 export function resolveStartupDashboardTier(columns: number): StartupDashboardTier {
   const width = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
-  if (width >= 100) return 'wide';
-  if (width >= 64) return 'medium';
+  if (width >= 80) return 'wide';
+  if (width >= 56) return 'medium';
   if (width >= 32) return 'narrow';
   return 'minimal';
 }
@@ -185,20 +187,23 @@ function statusLine(
   tier: StartupDashboardTier,
   width: number,
 ): string {
-  const dot = style.success('●');
+  const info = style.info ?? style.text;
+  const healthy = style.success('●');
+  const trustGlyph = info('◇');
+  const modelGlyph = info('◆');
   const model = data.providerReady ? clean(data.model) ?? 'not configured' : 'not configured';
-  const segments = tier === 'wide'
+  const segments = tier === 'wide' && width >= 98
     ? [
-        `${dot} ${style.muted('core')} ${style.text('online')}`,
-        `${dot} ${style.muted('trust')} ${style.text(clean(data.trust) ?? 'Assistant')}`,
-        `${dot} ${style.muted('model')} ${style.text(model)}`,
-        clean(data.memory) ? `${dot} ${style.muted('memory')} ${style.text(data.memory!)}` : undefined,
-        clean(data.version) ? `${dot} ${style.text(`v${data.version}`)}` : undefined,
+        `${healthy} ${style.muted('core')} ${style.success('online')}`,
+        `${trustGlyph} ${style.muted('trust')} ${info(clean(data.trust) ?? 'Assistant')}`,
+        `${modelGlyph} ${style.muted('model')} ${info(model)}`,
+        clean(data.memory) ? `${healthy} ${style.muted('memory')} ${style.success(data.memory!)}` : undefined,
+        clean(data.version) ? style.muted(`v${data.version}`) : undefined,
       ]
     : [
-        `${dot} ${style.text(clean(data.trust) ?? 'Assistant')}`,
-        `${style.text(model)}`,
-        clean(data.memory) ? style.muted(`memory ${data.memory}`) : undefined,
+        `${trustGlyph} ${info(clean(data.trust) ?? 'Assistant')}`,
+        `${modelGlyph} ${info(model)}`,
+        clean(data.memory) ? `${healthy} ${style.success(`memory ${data.memory}`)}` : undefined,
         clean(data.version) ? style.muted(`v${data.version}`) : undefined,
       ];
   return fit(segments.filter((entry): entry is string => !!entry).join(' · '), width);
@@ -232,9 +237,10 @@ function renderKeyValue(
   style: StartupDashboardStyle,
   width: number,
   keyWidth = 10,
+  valueStyle: (value: string) => string = style.text,
 ): string {
   const label = style.muted(key.padEnd(keyWidth));
-  return fit(label + style.text(value), width);
+  return fit(label + valueStyle(value), width);
 }
 
 function renderWideSections(
@@ -252,9 +258,16 @@ function renderWideSections(
     return [style.brand('Capabilities'), ...right.map(([key, value]) => renderKeyValue(key, value, style, width))];
   }
 
-  const separator = '    ';
+  const separator = style.muted(' │ ');
   const columnWidth = Math.max(1, Math.floor((width - startupVisibleWidth(separator)) / 2));
-  const leftLines = [style.brand('Environment'), ...left.map(([key, value]) => renderKeyValue(key, value, style, columnWidth))];
+  const leftLines = [style.brand('Environment'), ...left.map(([key, value]) => renderKeyValue(
+    key,
+    value,
+    style,
+    columnWidth,
+    10,
+    key === 'tools' || key === 'skills' ? style.success : style.text,
+  ))];
   const rightLines = [style.brand('Capabilities'), ...right.map(([key, value]) => renderKeyValue(key, value, style, columnWidth))];
   const count = Math.max(leftLines.length, rightLines.length);
   return Array.from({ length: count }, (_, index) =>
@@ -266,22 +279,24 @@ function renderMediumSections(
   style: StartupDashboardStyle,
   width: number,
 ): string[] {
-  const environment = data.environment;
   const lines: string[] = [];
-  const summary = [clean(environment?.os), clean(environment?.shell), clean(environment?.runtime)]
-    .filter((entry): entry is string => !!entry);
-  const counts = [countLabel(environment?.tools, 'tools'), countLabel(environment?.skills, 'skills')]
-    .filter((entry): entry is string => !!entry);
-  if (summary.length > 0 || counts.length > 0) {
+  const environment = environmentRows(data.environment);
+  if (environment.length > 0) {
     lines.push(style.brand('Environment'));
-    if (summary.length > 0) lines.push(fit(style.text(summary.join(' · ')), width));
-    if (counts.length > 0) lines.push(fit(style.muted(counts.join(' · ')), width));
+    lines.push(...environment.map(([key, value]) => renderKeyValue(
+      key,
+      value,
+      style,
+      width,
+      10,
+      key === 'tools' || key === 'skills' ? style.success : style.text,
+    )));
   }
-  const capabilities = capabilityRows(data.capabilities).map(([, value]) => value);
+  const capabilities = capabilityRows(data.capabilities);
   if (capabilities.length > 0) {
     if (lines.length > 0) lines.push('');
     lines.push(style.brand('Capabilities'));
-    lines.push(fit(style.text(Object.keys(data.capabilities ?? {}).join(' · ')), width));
+    lines.push(...capabilities.map(([key, value]) => renderKeyValue(key, value, style, width)));
   }
   return lines;
 }
@@ -347,7 +362,7 @@ export function renderStartupDashboard(options: RenderStartupDashboardOptions): 
   lines.push(statusLine(data, style, tier, width));
   if (clean(data.persistedModelNote)) lines.push(style.muted(fit(data.persistedModelNote!, width)));
 
-  if (tier === 'wide' || tier === 'medium') {
+  if (tier === 'wide' || tier === 'medium' || tier === 'narrow') {
     lines.push('', style.muted('─'.repeat(width)), '');
     lines.push(...(tier === 'wide'
       ? renderWideSections(data, style, width)

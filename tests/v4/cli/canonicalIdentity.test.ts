@@ -9,6 +9,7 @@ import path from 'node:path';
 import { Writable } from 'node:stream';
 
 import { AIDEN_LOGO_LINES, AIDEN_LOGO_TEXT } from '../../../core/v4/ui/identity';
+import { renderBanner } from '../../../core/v4/ui/banner';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 
@@ -44,5 +45,18 @@ describe('canonical Aiden identity', () => {
     expect(definitions.map((file) => path.relative(repoRoot, file))).toEqual([
       path.join('core', 'v4', 'ui', 'identity.ts'),
     ]);
+  });
+
+  it('does not force color when the terminal requests monochrome output', () => {
+    const previous = process.env.NO_COLOR;
+    process.env.NO_COLOR = '1';
+    try {
+      const rendered = renderBanner({ version: '4.16.1', width: 80 });
+      expect(rendered).not.toContain('\x1b[');
+      for (const line of AIDEN_LOGO_LINES) expect(rendered).toContain(line);
+    } finally {
+      if (previous === undefined) delete process.env.NO_COLOR;
+      else process.env.NO_COLOR = previous;
+    }
   });
 });

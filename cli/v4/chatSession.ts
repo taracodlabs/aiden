@@ -3514,7 +3514,7 @@ export class ChatSession implements ChatSessionLike {
     const tier = resolveStartupDashboardTier(columns);
     const version = AIDEN_VERSION;
     const startupTrust = this.opts.approvalEngine?.getAutonomyPolicy?.()?.level ?? 'Assistant';
-    const includeDetails = tier === 'wide' || tier === 'medium';
+    const includeDetails = tier !== 'minimal';
     const toolsCount = includeDetails ? this.opts.toolRegistry.list().length : undefined;
     let skillsLoaded: number | undefined;
     if (includeDetails) {
@@ -3533,6 +3533,7 @@ export class ChatSession implements ChatSessionLike {
         muted: (value) => display.muted(value),
         text: (value) => display.applyColors(value, 'agent'),
         success: (value) => display.success_(value),
+        info: (value) => display.applyColors(value, 'accent'),
       },
       data: {
         trust: startupTrust,
@@ -3564,7 +3565,14 @@ export class ChatSession implements ChatSessionLike {
       },
     });
     const notices = prepareStartupNotices(this.opts.startupNotices ?? [], this.opts.commandRegistry);
-    const noticeLines = renderStartupNoticeLines(notices, { columns });
+    const noticeLines = renderStartupNoticeLines(notices, {
+      columns,
+      style: {
+        warning: (value) => display.applyColors(value, 'warn'),
+        text: (value) => display.applyColors(value, 'agent'),
+        command: (value) => display.applyColors(value, 'accent'),
+      },
+    });
     if (noticeLines.length > 0) {
       display.write(`\n${noticeLines.join('\n')}\n`);
     }
@@ -3636,7 +3644,11 @@ export class ChatSession implements ChatSessionLike {
         // which fires the mutation listener → the name reaches the prompt.
         onboarded = await renderOnboardingIntro({
           paths:  this.opts.paths,
-          out:    process.stdout,
+          write:  (text) => { this.opts.display.write(text); },
+          style: {
+            accent: (text) => this.opts.display.applyColors(text, 'accent'),
+            muted: (text) => this.opts.display.applyColors(text, 'muted'),
+          },
           memory: this.opts.memoryManager,
         });
         if (!onboarded) {

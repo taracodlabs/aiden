@@ -22,4 +22,12 @@ describe('interactive writer ownership', () => {
     expect(source).not.toMatch(/process\.(?:stdout|stderr)\.write\s*\(/u);
     expect(source).not.toMatch(/console\.(?:log|warn|error)\s*\(/u);
   });
+
+  it('routes onboarding startup output through the session display owner', () => {
+    const source = readFileSync(path.resolve(__dirname, '../../..', 'cli/v4/chatSession.ts'), 'utf8');
+    const start = source.indexOf('async renderStartupCard()');
+    const end = source.indexOf('private async maybeShowBootUpdatePrompt()', start);
+    const startup = source.slice(start, end);
+    expect(startup).not.toMatch(/out:\s*process\.stdout/u);
+  });
 });

@@ -60,7 +60,8 @@ function assertBounded(lines: string[], columns: number): void {
 describe('responsive startup dashboard', () => {
   it.each([
     [120, 'wide'],
-    [80, 'medium'],
+    [80, 'wide'],
+    [60, 'medium'],
     [48, 'narrow'],
     [20, 'minimal'],
   ] as const)('selects the deterministic %s-column tier', (columns, tier) => {
@@ -79,19 +80,21 @@ describe('responsive startup dashboard', () => {
     expect(text).toContain('v4.14.9');
     expect(text).toContain('77 loaded');
     expect(text).toContain('76 loaded');
+    expect(text).toContain('│');
     expect(text).toContain('Built solo');
     expect(text).toContain('╭');
     expect(text).toContain('╯');
     assertBounded(lines, 120);
   });
 
-  it('renders a stacked medium dashboard while preserving the bordered project card', () => {
+  it('renders a side-by-side normal-width dashboard while preserving the bordered project card', () => {
     const lines = render(80);
     const text = lines.join('\n');
     expect(text).toContain('Environment');
     expect(text).toContain('Capabilities');
-    expect(text).toContain('77 tools');
-    expect(text).toContain('76 skills');
+    expect(text).toContain('77 loaded');
+    expect(text).toContain('76 loaded');
+    expect(text).toContain('│');
     expect(text).toContain('github.com/taracodlabs/aiden');
     expect(text).toContain('╭');
     expect(text).toContain('╯');
@@ -108,11 +111,49 @@ describe('responsive startup dashboard', () => {
     expect(text).toContain('github.com/taracodlabs/aiden');
     expect(text).toContain('aiden.taracod.com');
     expect(text).toContain('contact@taracod.com');
-    expect(text).not.toContain('Environment');
-    expect(text).not.toContain('Capabilities');
+    expect(text).toContain('Environment');
+    expect(text).toContain('Capabilities');
+    expect(text).toContain('Windows 11');
+    expect(text).toContain('PowerShell');
+    expect(text).toContain('web');
+    expect(text).toContain('browser');
     expect(text).toContain('╭');
     expect(text).toContain('╯');
     assertBounded(lines, 48);
+  });
+
+  it('uses distinct metadata glyphs and semantic colors for runtime state', () => {
+    const mark = (code: number) => (value: string): string => `\x1b[${code}m${value}\x1b[39m`;
+    const lines = renderStartupDashboard({
+      columns: 120,
+      data: base,
+      banner,
+      style: {
+        brand: mark(31),
+        muted: mark(90),
+        text: mark(37),
+        success: mark(32),
+        info: mark(36),
+      } as never,
+    }).lines;
+    const text = lines.join('\n');
+    expect(text).toContain('\x1b[32m●\x1b[39m');
+    expect(text).toContain('\x1b[36m◇\x1b[39m');
+    expect(text).toContain('\x1b[36m◆\x1b[39m');
+    expect(text).toContain('\x1b[32m77 loaded\x1b[39m');
+    expect(text).toContain('\x1b[32m76 loaded\x1b[39m');
+  });
+
+  it.each([60, 44])('retains labelled environment and capability rows at %i columns', (columns) => {
+    const lines = render(columns);
+    const text = lines.join('\n');
+    expect(text).toContain('Environment');
+    expect(text).toContain('Capabilities');
+    expect(text).toContain('OS');
+    expect(text).toContain('shell');
+    expect(text).toContain('web');
+    expect(text).toContain('files');
+    assertBounded(lines, columns);
   });
 
   it.each([160, 120, 100, 80, 60, 44])(

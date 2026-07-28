@@ -90,6 +90,24 @@ describe('shouldOnboard — trigger guard', () => {
 });
 
 describe('renderOnboardingIntro', () => {
+  it('uses the injected interactive theme authority for visible startup text', async () => {
+    const { out } = ttyOut(true);
+    const chunks: string[] = [];
+    await renderOnboardingIntro({
+      paths,
+      out,
+      write: (text) => { chunks.push(text); },
+      style: {
+        accent: (value) => `<accent>${value}</accent>`,
+        muted: (value) => `<muted>${value}</muted>`,
+      },
+      readAnswer: async () => null,
+    } as never);
+    const text = chunks.join('');
+    expect(text).toContain(`<accent>Hi — I'm Aiden.</accent>`);
+    expect(text).toContain('<muted>I run right here on your machine');
+  });
+
   it('brand-new + TTY: paints the calm intro, asks ONE thing (the name)', async () => {
     const { out, text } = ttyOut(true);
     const fired = await renderOnboardingIntro({ paths, out, readAnswer: async () => null });
