@@ -12,6 +12,7 @@
  * `/skin reload`       re-read the active skin from disk (live iteration)
  */
 import type { SlashCommand } from '../commandRegistry';
+import { theme } from './theme';
 
 export const skin: SlashCommand = {
   name: 'skin',
@@ -19,90 +20,23 @@ export const skin: SlashCommand = {
   category: 'system',
   icon: '🎨',
   handler: async (ctx) => {
-    // v4.9.0 Slice 1a — /skin is now an alias for the new /theme system.
-    // The legacy color skins (~/.aiden/skins/*.yaml, RGB-tuple format)
-    // continue to work alongside the new theme system; /skin still
-    // manages the SkinEngine palette. Theme tokens (panel chrome,
-    // status footer glyphs, shimmer) are controlled by /theme.
     ctx.display.warn(
-      '/skin is deprecated in v4.9 — use /theme for full visual customisation. ' +
-      '/skin continues to work for legacy colour skins.',
+      '/skin is deprecated — use /theme. Legacy names now select the matching effective theme.',
     );
-    const engine = ctx.skin;
-    if (!engine) {
-      ctx.display.warn('Skin engine not wired in this context.');
-      return {};
-    }
     const target = ctx.rawArgs.trim();
-
-    if (target === 'reload') {
-      try {
-        await engine.reload();
-        ctx.display.success(`Skin reloaded: ${engine.getActive().name}`);
-      } catch (err) {
-        ctx.display.printError(
-          `Skin reload failed: ${err instanceof Error ? err.message : String(err)}`,
-          'Check the yaml syntax in your skins directory.',
-        );
-      }
-      return {};
-    }
-
-    if (!target) {
-      // discover() is idempotent; safe to call on every list.
-      try {
-        await engine.discover();
-      } catch {
-        // non-fatal — built-in defaults remain
-      }
-      const summary = engine.list();
-      const current = engine.getActive().name;
-      ctx.display.info(`Active skin: ${current}`);
-      ctx.display.info('Available skins:');
-      for (const s of summary) {
-        const marker = s.name === current ? '*' : ' ';
-        const tag =
-          s.source === 'user'
-            ? ' (user)'
-            : s.source === 'bundled-yaml'
-              ? ' (yaml)'
-              : '';
-        const desc = s.description ? ` — ${s.description}` : '';
-        ctx.display.write(`  ${marker} ${s.name}${tag}${desc}\n`);
-      }
-      return {};
-    }
-
-    // Switch path. Try discovery first so user yaml is recognised.
-    try {
-      await engine.discover();
-    } catch {
-      // ignore
-    }
-    const before = engine.getActive().name;
-    const known = engine.listSkins().includes(target);
-    if (!known) {
-      // Try loading from disk (covers the case where discover missed a file).
-      const loaded = await engine.loadSkin(target);
-      if (loaded.name === before && before !== target) {
-        ctx.display.printError(
-          `Unknown skin '${target}'.`,
-          'Run /skin to see available names.',
-        );
-        return {};
-      }
-      ctx.display.success(`Skin: ${loaded.name}`);
-      return {};
-    }
-    const result = engine.setActive(target);
-    if (result.name !== target) {
+    const mapped = target === '' ? 'list'
+      : target === 'reload' ? 'reload'
+      : target === 'default' ? 'set aiden-ember'
+      : target === 'monochrome' ? 'set monochrome'
+      : target === 'light' ? 'set light'
+      : null;
+    if (!mapped) {
       ctx.display.printError(
-        `Unknown skin '${target}'.`,
-        'Run /skin to see available names.',
+        `Legacy skin '${target}' has no effective-theme mapping.`,
+        'Use /theme list and /theme set <name>.',
       );
       return {};
     }
-    ctx.display.success(`Skin: ${result.name}`);
-    return {};
+    return theme.handler({ ...ctx, rawArgs: mapped });
   },
 };

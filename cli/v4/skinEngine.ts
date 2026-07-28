@@ -28,21 +28,42 @@ import yaml from 'js-yaml';
 
 // v4.9.0 Slice 1a hotfix — read live theme overrides from tokens.ts.
 import { colors as liveColors } from './design/tokens';
-import { getActivePath as getActiveThemePath } from '../../core/v4/theme/themeRegistry';
+import {
+  getActivePath as getActiveThemePath,
+  getCurrentName as getCurrentThemeName,
+} from '../../core/v4/theme/themeRegistry';
 
 export type SkinColorDepth = 'truecolor' | '256' | '16' | 'none';
 
 export function detectSkinColorDepth(
   env: NodeJS.ProcessEnv = process.env,
-  terminal: { isTTY?: boolean; platform?: NodeJS.Platform } = {
+  terminal: {
+    isTTY?: boolean;
+    platform?: NodeJS.Platform;
+    getColorDepth?: () => number;
+  } = {
     isTTY: process.stdout.isTTY,
     platform: process.platform,
+    getColorDepth: typeof process.stdout.getColorDepth === 'function'
+      ? () => process.stdout.getColorDepth()
+      : undefined,
   },
 ): SkinColorDepth {
   const forced = env.AIDEN_FORCE_COLOR_DEPTH?.toLowerCase();
   if (forced === 'truecolor' || forced === '256' || forced === '16' || forced === 'none') return forced;
   if ((env.NO_COLOR != null && env.NO_COLOR !== '') || env.FORCE_COLOR === '0') return 'none';
+  if (env.FORCE_COLOR === '3') return 'truecolor';
+  if (env.FORCE_COLOR === '2') return '256';
+  if (env.FORCE_COLOR === '1') return '16';
   if (!terminal.isTTY) return 'truecolor';
+  let reportedDepth: number | undefined;
+  try { reportedDepth = terminal.getColorDepth?.(); } catch { /* use environment fallback */ }
+  if (reportedDepth !== undefined) {
+    if (reportedDepth >= 24) return 'truecolor';
+    if (reportedDepth >= 8) return '256';
+    if (reportedDepth >= 4) return '16';
+    return 'none';
+  }
   if (/truecolor|24bit/iu.test(env.COLORTERM ?? '') || env.WT_SESSION || env.TERM_PROGRAM) return 'truecolor';
   if (/256color/iu.test(env.TERM ?? '')) return '256';
   // Node enables virtual-terminal processing for interactive Windows streams.
@@ -132,6 +153,8 @@ const COLOR_KIND_TO_TOKEN_PATH: Partial<Record<string, string>> = {
   tertiary:    'content.tertiary',
   metric_turn: 'metrics.turnCount',
   degraded:    'semantic.warn',
+  agent:       'content.primary',
+  user:        'brand.primary',
 };
 
 function hexToRgb(hex: string): [number, number, number] | null {
@@ -452,10 +475,10 @@ export class SkinEngine {
     // ~/.aiden/theme.yaml override every paint surface that routes
     // through SkinEngine (Aiden reply chrome, panel bars, status
     // footer text, tool rows) without requiring users to also
-    // re-author a parallel ~/.aiden/skins/<name>.yaml. When no user
-    // theme is active, the legacy skin RGB path runs unchanged —
-    // preserves /skin custom-palette users from regression.
-    if (getActiveThemePath() !== null) {
+    // re-author a parallel ~/.aiden/skins/<name>.yaml. The bundled
+    // aiden-ember theme is also applied without a user-file path, so
+    // current theme identity participates in the authority check.
+    if (getActiveThemePath() !== null || getCurrentThemeName() !== 'default') {
       const dotted = COLOR_KIND_TO_TOKEN_PATH[kind];
       if (dotted) {
         const hex = readDottedPath(liveColors, dotted);

@@ -197,8 +197,12 @@ describe('SkinEngine terminal color capability', () => {
   it('detects truecolor, 256-color, 16-color, and monochrome terminals', () => {
     expect(detectSkinColorDepth({ COLORTERM: 'truecolor' }, { isTTY: true, platform: 'win32' })).toBe('truecolor');
     expect(detectSkinColorDepth({ TERM: 'xterm-256color' }, { isTTY: true, platform: 'linux' })).toBe('256');
-    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32' })).toBe('truecolor');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32', getColorDepth: () => 24 } as never)).toBe('truecolor');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32', getColorDepth: () => 8 } as never)).toBe('256');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32', getColorDepth: () => 4 } as never)).toBe('16');
     expect(detectSkinColorDepth({ NO_COLOR: '1' }, { isTTY: true, platform: 'win32' })).toBe('none');
+    expect(detectSkinColorDepth({ FORCE_COLOR: '2' }, { isTTY: true, platform: 'win32' })).toBe('256');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'linux', getColorDepth: () => { throw new Error('unsupported'); } })).toBe('16');
   });
 
   it('uses a restrained amber brand fallback when 16-color mode is explicit', () => {

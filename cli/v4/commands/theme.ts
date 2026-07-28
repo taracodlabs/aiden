@@ -183,8 +183,9 @@ export const theme: SlashCommand = {
       for (const w of warnings) ctx.display.warn(`theme: ${w}`);
       if (parsed) {
         applyTheme(parsed, themePath);
+        ctx.skin?.setActive('default');
         ctx.display.success(
-          `✓ Theme set to ${name} (${sourceLabel}). Run /theme reset to revert to default.`,
+          `Theme set to ${name} (${sourceLabel}). Run /theme reset to revert to default.`,
         );
       } else {
         ctx.display.printError(
@@ -208,6 +209,7 @@ export const theme: SlashCommand = {
       for (const w of warnings) ctx.display.warn(`theme: ${w}`);
       if (parsed) {
         applyTheme(parsed, themePath);
+        ctx.skin?.setActive('default');
         ctx.display.success(`Theme reloaded: ${parsed.name}`);
       } else {
         ctx.display.printError(
@@ -232,6 +234,7 @@ export const theme: SlashCommand = {
         }
       }
       resetToDefault();
+      ctx.skin?.setActive('default');
       ctx.display.success('Theme reset to bundled default.');
       return {};
     }

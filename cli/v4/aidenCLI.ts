@@ -35,6 +35,7 @@ import { ChatSession } from './chatSession';
 import { runTuiMode } from './aidenTUI';
 import { Display } from './display';
 import { SkinEngine } from './skinEngine';
+import { initializeEffectiveTheme } from './themeCompatibility';
 import { CommandRegistry } from './commandRegistry';
 import { CliCallbacks } from './callbacks';
 // Tier-3.1 (v4.1-tier3.1) — re-export the build fingerprint so the
@@ -1567,6 +1568,15 @@ export async function buildAgentRuntime(
   }
 
   const skin = new SkinEngine();
+  const effectiveTheme = initializeEffectiveTheme(
+    paths.root,
+    config.getValue<string>('display.skin', 'default'),
+    skin,
+  );
+  if (effectiveTheme.source === 'legacy-migration' && effectiveTheme.persisted) {
+    config.set('display.skin', 'default');
+    await config.save().catch(() => undefined);
+  }
   // Headless one-shot: route ALL display output to stderr so stdout carries
   // only the agent's answer (pipeable). Nothing streams to `display` during a
   // headless turn (runConversation is called bare), but any boot-time notice
