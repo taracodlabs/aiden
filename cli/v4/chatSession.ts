@@ -3137,25 +3137,6 @@ export class ChatSession implements ChatSessionLike {
         this.opts.display.taskOutcome(_taskOutcome);
       }
 
-      if (replRunId !== null) {
-        const turnUsage = currentProviderAttemptLedger()?.project({ runId: String(replRunId) });
-        if (turnUsage && turnUsage.physicalAttempts > 0) {
-          const reportedInput = turnUsage.providerInputTokens || turnUsage.estimatedInputTokens;
-          const reportedOutput = turnUsage.providerOutputTokens || turnUsage.estimatedOutputTokens;
-          const toolBytesSaved = Math.max(0, turnUsage.rawToolResultBytes - turnUsage.transmittedToolResultBytes);
-          const savings = [
-            toolBytesSaved > 0 ? `${toolBytesSaved.toLocaleString()} tool bytes externalized` : null,
-            turnUsage.deferredSchemaCount > 0 ? `${turnUsage.deferredSchemaCount} schemas deferred` : null,
-          ].filter((value): value is string => value !== null);
-          const cost = turnUsage.unknownCostAttempts > 0
-            ? 'cost unknown'
-            : `$${turnUsage.knownCostAmount.toFixed(4)} estimated`;
-          this.opts.display.dim(
-            `Usage: ${turnUsage.physicalAttempts} provider attempt${turnUsage.physicalAttempts === 1 ? '' : 's'} · ${reportedInput} in / ${reportedOutput} out · ${cost}${savings.length > 0 ? ` · ${savings.join(', ')}` : ''}`,
-          );
-        }
-      }
-
       // v4.1.6 Polish 2 — post-render skill-proposal handler.
       // The agent loop now SKIPS the inquirer prompt when a
       // prompt callback is wired, surfacing the SkillProposal
