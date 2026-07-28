@@ -2663,11 +2663,11 @@ export class Display {
 
   /** Clear the visual transcript while retaining composer and status state. */
   clearScreen(): void {
-    if (this.composerLane?.isActive()) {
-      this.composerLane.clearTranscript();
+    if (this.composerLane) {
+      this.composerLane.clearViewport();
       return;
     }
-    if (this.out.isTTY) this.out.write('\x1b[2J\x1b[H');
+    if (this.out.isTTY) this.out.write('\x1b[3J\x1b[2J\x1b[H');
   }
 
   private projectedStreamText(formatted: boolean): string {

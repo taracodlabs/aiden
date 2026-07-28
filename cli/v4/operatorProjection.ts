@@ -33,19 +33,28 @@ export interface ActivityProjection {
   detailsRef: string | null;
 }
 
+export interface ViewportProjectionState {
+  epoch: number;
+  hiddenBeforeSequence: number;
+  scrollOffset: number;
+  stickyTail: boolean;
+  selectedRow: string | null;
+  cachedWidth: number | null;
+  cachedHeight: number | null;
+  newEventsBelow: number;
+}
+
 export interface OperatorProjectionState {
   transcript: readonly TranscriptProjection[];
   activities: Readonly<Record<string, ActivityProjection>>;
   eventSequence: number;
-  followTail: boolean;
-  scrollOffset: number;
-  newEventsBelow: number;
+  viewport: ViewportProjectionState;
 }
 
 export type OperatorProjectionEvent =
   | { type: 'transcript.append'; id: string; kind: TranscriptKind; sourceText: string }
   | { type: 'transcript.replace'; id: string; sourceText: string }
-  | { type: 'transcript.clear' }
+  | { type: 'viewport.clear' }
   | { type: 'activity.upsert'; activity: ActivityProjection }
   | { type: 'activity.progress'; id: string; generation: number; summary: string }
   | { type: 'activity.terminal'; id: string; generation: number; state: Extract<OperatorActivityState,
@@ -53,7 +62,8 @@ export type OperatorProjectionEvent =
       summary: string; endedAt: number }
   | { type: 'activity.remove'; id: string }
   | { type: 'viewport.scroll'; delta: number }
-  | { type: 'viewport.follow' };
+  | { type: 'viewport.follow' }
+  | { type: 'viewport.measure'; width: number; height: number };
 
 const TERMINAL_ACTIVITY_STATES = new Set<OperatorActivityState>([
   'succeeded', 'failed', 'denied', 'interrupted', 'cancelled', 'timed_out', 'unknown', 'stale',
@@ -62,7 +72,16 @@ const TERMINAL_ACTIVITY_STATES = new Set<OperatorActivityState>([
 export function initialOperatorProjection(): OperatorProjectionState {
   return {
     transcript: [], activities: {}, eventSequence: 0,
-    followTail: true, scrollOffset: 0, newEventsBelow: 0,
+    viewport: {
+      epoch: 0,
+      hiddenBeforeSequence: 0,
+      scrollOffset: 0,
+      stickyTail: true,
+      selectedRow: null,
+      cachedWidth: null,
+      cachedHeight: null,
+      newEventsBelow: 0,
+    },
   };
 }
 
@@ -83,7 +102,10 @@ export function reduceOperatorProjection(
           sourceText: event.sourceText,
           sequence: nextSequence,
         }],
-        newEventsBelow: state.followTail ? 0 : state.newEventsBelow + 1,
+        viewport: {
+          ...state.viewport,
+          newEventsBelow: state.viewport.stickyTail ? 0 : state.viewport.newEventsBelow + 1,
+        },
       };
     }
     case 'transcript.replace': {
@@ -93,8 +115,21 @@ export function reduceOperatorProjection(
       transcript[index] = { ...transcript[index], sourceText: event.sourceText };
       return { ...state, eventSequence: nextSequence, transcript };
     }
-    case 'transcript.clear':
-      return { ...state, eventSequence: nextSequence, transcript: [], newEventsBelow: 0 };
+    case 'viewport.clear':
+      return {
+        ...state,
+        eventSequence: nextSequence,
+        viewport: {
+          epoch: state.viewport.epoch + 1,
+          hiddenBeforeSequence: nextSequence,
+          scrollOffset: 0,
+          stickyTail: true,
+          selectedRow: null,
+          cachedWidth: null,
+          cachedHeight: null,
+          newEventsBelow: 0,
+        },
+      };
     case 'activity.upsert': {
       const current = state.activities[event.activity.id];
       if (current && (
@@ -140,16 +175,28 @@ export function reduceOperatorProjection(
       return { ...state, eventSequence: nextSequence, activities };
     }
     case 'viewport.scroll': {
-      const scrollOffset = Math.max(0, state.scrollOffset + event.delta);
+      const scrollOffset = Math.max(0, state.viewport.scrollOffset + event.delta);
       return {
         ...state,
-        followTail: scrollOffset === 0,
-        scrollOffset,
-        newEventsBelow: scrollOffset === 0 ? 0 : state.newEventsBelow,
+        viewport: {
+          ...state.viewport,
+          stickyTail: scrollOffset === 0,
+          scrollOffset,
+          newEventsBelow: scrollOffset === 0 ? 0 : state.viewport.newEventsBelow,
+        },
       };
     }
     case 'viewport.follow':
-      return { ...state, followTail: true, scrollOffset: 0, newEventsBelow: 0 };
+      return {
+        ...state,
+        viewport: { ...state.viewport, stickyTail: true, scrollOffset: 0, newEventsBelow: 0 },
+      };
+    case 'viewport.measure':
+      if (state.viewport.cachedWidth === event.width && state.viewport.cachedHeight === event.height) return state;
+      return {
+        ...state,
+        viewport: { ...state.viewport, cachedWidth: event.width, cachedHeight: event.height },
+      };
   }
 }
 
@@ -161,4 +208,11 @@ export function activeActivityRows(state: OperatorProjectionState): ActivityProj
 
 export function transcriptSource(state: OperatorProjectionState): string {
   return state.transcript.map((item) => item.sourceText).join('');
+}
+
+export function visibleTranscriptSource(state: OperatorProjectionState): string {
+  return state.transcript
+    .filter((item) => item.sequence > state.viewport.hiddenBeforeSequence)
+    .map((item) => item.sourceText)
+    .join('');
 }

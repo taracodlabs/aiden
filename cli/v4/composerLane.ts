@@ -21,6 +21,7 @@ import {
   initialOperatorProjection,
   reduceOperatorProjection,
   transcriptSource,
+  visibleTranscriptSource,
   type OperatorActivityState,
   type OperatorProjectionState,
 } from './operatorProjection';
@@ -30,6 +31,7 @@ const SAVE = `${ESC}7`;
 const RESTORE = `${ESC}8`;
 const SAVE_TRANSCRIPT = `${ESC}[s`;
 const RESTORE_TRANSCRIPT = `${ESC}[u`;
+const CLEAR_PHYSICAL_VIEWPORT = `${ESC}[?25l${ESC}[r${ESC}[3J${ESC}[2J${ESC}[H`;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
 const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
@@ -301,6 +303,7 @@ export class BottomRegion {
   private projection: OperatorProjectionState = initialOperatorProjection();
   private projectionIdentity = 0;
   private rebuildTranscriptOnActivation = false;
+  private viewportClearPending = false;
   private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
 
   constructor(
@@ -326,6 +329,10 @@ export class BottomRegion {
     // transcript before repainting the footer.
     const rebuildTranscript = this.rebuildTranscriptOnActivation;
     this.rebuildTranscriptOnActivation = false;
+    if (this.viewportClearPending) {
+      this.paintClearedViewport();
+      return;
+    }
     this.paintAll(rebuildTranscript);
   }
 
@@ -410,13 +417,54 @@ export class BottomRegion {
   }
 
   newEventsBelow(): number {
-    return this.projection.newEventsBelow;
+    return this.projection.viewport.newEventsBelow;
   }
 
-  /** Clear only the visual transcript; durable/session state is untouched. */
+  /** Start a new physical viewport while retaining semantic transcript state. */
+  clearViewport(): void {
+    this.renderGeneration += 1;
+    if (this.trailingResize) clearImmediate(this.trailingResize);
+    this.trailingResize = null;
+    this.resizeBurstActive = false;
+    this.projection = reduceOperatorProjection(this.projection, { type: 'viewport.clear' });
+    this.lastFrame = '';
+    this.geometry = null;
+    this.laneRows = 0;
+    this.rebuildTranscriptOnActivation = false;
+    this.viewportClearPending = true;
+    if (this.active) this.paintClearedViewport();
+  }
+
+  /** Existing importer compatibility. */
   clearTranscript(): void {
-    this.projection = reduceOperatorProjection(this.projection, { type: 'transcript.clear' });
-    if (this.active) this.paintAll(true);
+    this.clearViewport();
+  }
+
+  viewportSnapshot(): {
+    epoch: number;
+    hiddenBeforeSequence: number;
+    scrollOffset: number;
+    stickyTail: boolean;
+    selectedRow: string | null;
+    cachedWidth: number | null;
+    cachedHeight: number | null;
+    retainedTranscriptRows: number;
+    visibleTranscriptRows: number;
+  } {
+    const width = Math.max(1, (this.projection.viewport.cachedWidth ?? this.sink.cols()) - 1);
+    const retainedSource = transcriptSource(this.projection);
+    const visibleSource = visibleTranscriptSource(this.projection);
+    return {
+      epoch: this.projection.viewport.epoch,
+      hiddenBeforeSequence: this.projection.viewport.hiddenBeforeSequence,
+      scrollOffset: this.projection.viewport.scrollOffset,
+      stickyTail: this.projection.viewport.stickyTail,
+      selectedRow: this.projection.viewport.selectedRow,
+      cachedWidth: this.projection.viewport.cachedWidth,
+      cachedHeight: this.projection.viewport.cachedHeight,
+      retainedTranscriptRows: retainedSource ? wrapTranscriptText(retainedSource, width).length : 0,
+      visibleTranscriptRows: visibleSource ? wrapTranscriptText(visibleSource, width).length : 0,
+    };
   }
 
   /**
@@ -485,18 +533,18 @@ export class BottomRegion {
       kind: 'system',
       sourceText: text,
     });
-    let transcript = transcriptSource(this.projection);
-    if (transcript.length > BottomRegion.MAX_TRANSCRIPT_CHARS) {
-      transcript = transcript.slice(-BottomRegion.MAX_TRANSCRIPT_CHARS);
-      this.projection = {
-        ...this.projection,
-        transcript: [{
-          id: `transcript:${++this.projectionIdentity}`,
-          kind: 'system',
-          sourceText: transcript,
-          sequence: this.projection.eventSequence,
-        }],
-      };
+    if (transcriptSource(this.projection).length > BottomRegion.MAX_TRANSCRIPT_CHARS) {
+      let remaining = BottomRegion.MAX_TRANSCRIPT_CHARS;
+      const retained: Array<OperatorProjectionState['transcript'][number]> = [];
+      for (let index = this.projection.transcript.length - 1; index >= 0 && remaining > 0; index -= 1) {
+        const item = this.projection.transcript[index];
+        const sourceText = item.sourceText.length <= remaining
+          ? item.sourceText
+          : item.sourceText.slice(-remaining);
+        retained.unshift(sourceText === item.sourceText ? item : { ...item, sourceText });
+        remaining -= sourceText.length;
+      }
+      this.projection = { ...this.projection, transcript: retained };
     }
   }
 
@@ -504,12 +552,12 @@ export class BottomRegion {
     const bottom = Math.max(0, this.sink.rows() - surface.laneRows);
     if (bottom === 0) return '';
     const width = Math.max(1, this.sink.cols() - 1);
-    const rows = wrapTranscriptText(transcriptSource(this.projection), width);
-    const end = Math.max(0, rows.length - this.projection.scrollOffset);
+    const rows = wrapTranscriptText(visibleTranscriptSource(this.projection), width);
+    const end = Math.max(0, rows.length - this.projection.viewport.scrollOffset);
     const visible = rows.slice(Math.max(0, end - bottom), end);
-    if (!this.projection.followTail && bottom > 0) {
-      const indicator = this.projection.newEventsBelow > 0
-        ? `↓ ${this.projection.newEventsBelow} new events below · End to follow`
+    if (!this.projection.viewport.stickyTail && bottom > 0) {
+      const indicator = this.projection.viewport.newEventsBelow > 0
+        ? `↓ ${this.projection.viewport.newEventsBelow} new events below · End to follow`
         : '↓ End to follow live output';
       if (visible.length === bottom) visible[visible.length - 1] = indicator;
       else visible.push(indicator);
@@ -593,11 +641,17 @@ export class BottomRegion {
 
   private paintAll(rebuildTranscript = false): void {
     if (!this.active) return;
+    const epoch = this.projection.viewport.epoch;
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
+    });
     const surface = this.surface();
     const frame = surface.lines.join('\n');
     const geometry = this.establishGeometry(surface.laneRows);
     if (!geometry && frame === this.lastFrame && !rebuildTranscript) {
-      this.sink.write(`${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`);
+      if (epoch === this.projection.viewport.epoch) {
+        this.sink.write(`${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`);
+      }
       return;
     }
     this.lastFrame = frame;
@@ -608,7 +662,32 @@ export class BottomRegion {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });
     sequence += `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`;
-    this.sink.write(sequence);
+    if (epoch === this.projection.viewport.epoch) this.sink.write(sequence);
+  }
+
+  private paintClearedViewport(): void {
+    if (!this.active) return;
+    const epoch = this.projection.viewport.epoch;
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
+    });
+    const surface = this.surface();
+    this.laneRows = surface.laneRows;
+    this.geometry = {
+      rows: this.sink.rows(),
+      cols: this.sink.cols(),
+      laneRows: surface.laneRows,
+      topRow: Math.max(1, this.sink.rows() - surface.laneRows + 1),
+    };
+    this.lastFrame = surface.lines.join('\n');
+    this.viewportClearPending = false;
+    const topRow = this.sink.rows() - surface.laneRows + 1;
+    let sequence = `${CLEAR_PHYSICAL_VIEWPORT}${reserveSeq(this.sink.rows(), surface.laneRows)}${SAVE_TRANSCRIPT}`;
+    surface.lines.forEach((line, index) => {
+      sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
+    });
+    sequence += `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`;
+    if (epoch === this.projection.viewport.epoch) this.sink.write(sequence);
   }
 
   private reanchor(): void {
@@ -621,6 +700,7 @@ export class BottomRegion {
 
   private onResize(): void {
     if (!this.active) return;
+    const epoch = this.projection.viewport.epoch;
     if (!this.resizeBurstActive) {
       this.resizeBurstActive = true;
       this.reanchor();
@@ -628,6 +708,7 @@ export class BottomRegion {
     if (this.trailingResize) clearImmediate(this.trailingResize);
     this.trailingResize = setImmediate(() => {
       this.trailingResize = null;
+      if (!this.active || epoch !== this.projection.viewport.epoch) return;
       this.resizeBurstActive = false;
       this.reanchor();
     });

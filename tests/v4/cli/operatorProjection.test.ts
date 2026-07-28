@@ -11,6 +11,7 @@ import {
   initialOperatorProjection,
   reduceOperatorProjection,
   transcriptSource,
+  visibleTranscriptSource,
   type ActivityProjection,
   type OperatorProjectionState,
 } from '../../../cli/v4/operatorProjection';
@@ -125,8 +126,8 @@ describe('operator projection', () => {
     state = reduceOperatorProjection(state, {
       type: 'transcript.append', id: 'n1', kind: 'notice', sourceText: 'later\n',
     });
-    expect(state.followTail).toBe(false);
-    expect(state.newEventsBelow).toBe(1);
+    expect(state.viewport.stickyTail).toBe(false);
+    expect(state.viewport.newEventsBelow).toBe(1);
   });
 
   it('End-style follow returns to the live tail and clears the counter', () => {
@@ -137,6 +138,45 @@ describe('operator projection', () => {
       type: 'transcript.append', id: 'n1', kind: 'notice', sourceText: 'later\n',
     });
     state = reduceOperatorProjection(state, { type: 'viewport.follow' });
-    expect(state).toMatchObject({ followTail: true, scrollOffset: 0, newEventsBelow: 0 });
+    expect(state.viewport).toMatchObject({ stickyTail: true, scrollOffset: 0, newEventsBelow: 0 });
+  });
+
+  it('starts a new viewport epoch without deleting durable transcript projection', () => {
+    let state = initialOperatorProjection();
+    state = reduceOperatorProjection(state, {
+      type: 'transcript.append', id: 'startup', kind: 'notice', sourceText: 'canonical startup\n',
+    });
+    state = reduceOperatorProjection(state, {
+      type: 'transcript.append', id: 'turn', kind: 'assistant', sourceText: 'prior answer\n',
+    });
+    state = reduceOperatorProjection(state, { type: 'viewport.scroll', delta: 20 });
+
+    const priorEpoch = state.viewport.epoch;
+    const cleared = reduceOperatorProjection(state, { type: 'viewport.clear' });
+
+    expect(cleared.transcript).toEqual(state.transcript);
+    expect(transcriptSource(cleared)).toBe('canonical startup\nprior answer\n');
+    expect(visibleTranscriptSource(cleared)).toBe('');
+    expect(cleared.viewport).toMatchObject({
+      epoch: priorEpoch + 1,
+      scrollOffset: 0,
+      stickyTail: true,
+      selectedRow: null,
+      cachedWidth: null,
+      cachedHeight: null,
+    });
+  });
+
+  it('shows only transcript committed after the current viewport boundary', () => {
+    let state = reduceOperatorProjection(initialOperatorProjection(), {
+      type: 'transcript.append', id: 'old', kind: 'system', sourceText: 'old row\n',
+    });
+    state = reduceOperatorProjection(state, { type: 'viewport.clear' });
+    state = reduceOperatorProjection(state, {
+      type: 'transcript.append', id: 'new', kind: 'user', sourceText: 'new prompt\n',
+    });
+
+    expect(transcriptSource(state)).toBe('old row\nnew prompt\n');
+    expect(visibleTranscriptSource(state)).toBe('new prompt\n');
   });
 });
