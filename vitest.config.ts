@@ -12,7 +12,7 @@ import { defineConfig } from 'vitest/config';
 // Windows pseudo-terminal helpers also share console infrastructure outside the
 // worker process. Capping file workers prevents unrelated suites from starving
 // input delivery without serializing the entire repository.
-const windowsWorkerLimit = process.platform === 'win32' ? 4 : undefined;
+const windowsWorkerLimit = process.platform === 'win32' ? 2 : undefined;
 
 export default defineConfig({
   test: {
