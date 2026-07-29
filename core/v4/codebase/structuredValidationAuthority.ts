@@ -572,16 +572,13 @@ export function createStructuredValidationAuthority(deps: Deps): StructuredValid
         )))].sort();
       }
 
-      let parseState: StructuredValidationRun['parseState'] = 'unparsed';
-      let semanticallyVerified = false;
-      if (current.kind === 'test') {
-        parseState = parsedTest!.parsed ? 'parsed' : 'unparsed';
-        semanticallyVerified = state === 'succeeded' && parsedTest!.parsed
-          && (parsedTest!.failed ?? 0) === 0 && sourceMutations.length === 0;
-      } else {
-        parseState = outputArtifacts.length > 0 ? 'parsed' : 'unparsed';
-        semanticallyVerified = state === 'succeeded' && outputArtifacts.length > 0 && sourceMutations.length === 0;
-      }
+      const parseState: StructuredValidationRun['parseState'] = current.kind === 'test'
+        ? parsedTest!.parsed ? 'parsed' : 'unparsed'
+        : outputArtifacts.length > 0 ? 'parsed' : 'unparsed';
+      const semanticallyVerified = current.kind === 'test'
+        ? state === 'succeeded' && parsedTest!.parsed
+          && (parsedTest!.failed ?? 0) === 0 && sourceMutations.length === 0
+        : state === 'succeeded' && outputArtifacts.length > 0 && sourceMutations.length === 0;
 
       const evidence = deps.proof.recordEvidence({
         jobId: current.jobId, attemptId: current.attemptId, generation: current.generation,
