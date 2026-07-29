@@ -28,10 +28,102 @@ import yaml from 'js-yaml';
 
 // v4.9.0 Slice 1a hotfix — read live theme overrides from tokens.ts.
 import { colors as liveColors } from './design/tokens';
-import { getActivePath as getActiveThemePath } from '../../core/v4/theme/themeRegistry';
+import {
+  getActivePath as getActiveThemePath,
+  getCurrentName as getCurrentThemeName,
+} from '../../core/v4/theme/themeRegistry';
 
-/** Wrap text with a 24-bit ANSI foreground colour. */
-function ansiRgb(text: string, r: number, g: number, b: number): string {
+export type SkinColorDepth = 'truecolor' | '256' | '16' | 'none';
+
+export function detectSkinColorDepth(
+  env: NodeJS.ProcessEnv = process.env,
+  terminal: {
+    isTTY?: boolean;
+    platform?: NodeJS.Platform;
+    getColorDepth?: () => number;
+  } = {
+    isTTY: process.stdout.isTTY,
+    platform: process.platform,
+    getColorDepth: typeof process.stdout.getColorDepth === 'function'
+      ? () => process.stdout.getColorDepth()
+      : undefined,
+  },
+): SkinColorDepth {
+  const forced = env.AIDEN_FORCE_COLOR_DEPTH?.toLowerCase();
+  if (forced === 'truecolor' || forced === '256' || forced === '16' || forced === 'none') return forced;
+  if ((env.NO_COLOR != null && env.NO_COLOR !== '') || env.FORCE_COLOR === '0') return 'none';
+  if (env.FORCE_COLOR === '3') return 'truecolor';
+  if (env.FORCE_COLOR === '2') return '256';
+  if (env.FORCE_COLOR === '1') return '16';
+  if (!terminal.isTTY) return 'truecolor';
+  let reportedDepth: number | undefined;
+  try { reportedDepth = terminal.getColorDepth?.(); } catch { /* use environment fallback */ }
+  if (reportedDepth !== undefined) {
+    if (reportedDepth >= 24) return 'truecolor';
+    if (reportedDepth >= 8) return '256';
+    if (reportedDepth >= 4) return '16';
+    return 'none';
+  }
+  if (/truecolor|24bit/iu.test(env.COLORTERM ?? '') || env.WT_SESSION || env.TERM_PROGRAM) return 'truecolor';
+  if (/256color/iu.test(env.TERM ?? '')) return '256';
+  // Node enables virtual-terminal processing for interactive Windows streams.
+  // Modern Windows console hosts therefore accept 24-bit SGR even when they do
+  // not publish WT_SESSION or COLORTERM. Treating that ordinary PowerShell case
+  // as 16-color mapped the orange brand to bright red.
+  if (terminal.platform === 'win32') return 'truecolor';
+  return '16';
+}
+
+function rgbTo256(r: number, g: number, b: number): number {
+  if (r === g && g === b) {
+    if (r < 8) return 16;
+    if (r > 248) return 231;
+    return Math.round(((r - 8) / 247) * 24) + 232;
+  }
+  return 16 + 36 * Math.round(r / 51) + 6 * Math.round(g / 51) + Math.round(b / 51);
+}
+
+const ANSI16: ReadonlyArray<readonly [number, number, number, number]> = [
+  [0, 0, 0, 30], [128, 0, 0, 31], [0, 128, 0, 32], [128, 128, 0, 33],
+  [0, 0, 128, 34], [128, 0, 128, 35], [0, 128, 128, 36], [192, 192, 192, 37],
+  [128, 128, 128, 90], [255, 0, 0, 91], [0, 255, 0, 92], [255, 255, 0, 93],
+  [0, 0, 255, 94], [255, 0, 255, 95], [0, 255, 255, 96], [255, 255, 255, 97],
+];
+
+function rgbTo16(r: number, g: number, b: number): number {
+  let selected = ANSI16[0]!;
+  let distance = Number.POSITIVE_INFINITY;
+  for (const candidate of ANSI16) {
+    const next = (r - candidate[0]) ** 2 + (g - candidate[1]) ** 2 + (b - candidate[2]) ** 2;
+    if (next < distance) {
+      selected = candidate;
+      distance = next;
+    }
+  }
+  return selected[3];
+}
+
+function ansiRgb(
+  text: string,
+  r: number,
+  g: number,
+  b: number,
+  depth: SkinColorDepth,
+  kind?: ColorKind,
+): string {
+  if (depth === 'none') return text;
+  if (depth === '256') return `\x1b[38;5;${rgbTo256(r, g, b)}m${text}\x1b[39m`;
+  if (depth === '16') {
+    const semanticCode: Partial<Record<ColorKind, number>> = {
+      // ANSI 16 has no orange. Dark amber is the closest restrained fallback;
+      // it avoids turning the brand into bright red or painting the UI yellow.
+      brand: 33, accent: 33, heading: 33, user: 33,
+      success: 92, warn: 93, degraded: 93, error: 31,
+      tool: 96, session: 96, agent: 97, muted: 37,
+      tertiary: 90, metric_turn: 95,
+    };
+    return `\x1b[${semanticCode[kind!] ?? rgbTo16(r, g, b)}m${text}\x1b[39m`;
+  }
   return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
 }
 
@@ -61,6 +153,8 @@ const COLOR_KIND_TO_TOKEN_PATH: Partial<Record<string, string>> = {
   tertiary:    'content.tertiary',
   metric_turn: 'metrics.turnCount',
   degraded:    'semantic.warn',
+  agent:       'content.primary',
+  user:        'brand.primary',
 };
 
 function hexToRgb(hex: string): [number, number, number] | null {
@@ -123,7 +217,7 @@ const DEFAULT_SKIN: SkinDefinition = {
   colors: {
     brand: BRAND_ORANGE,
     accent: BRAND_ORANGE,
-    user: [0x4e, 0xc9, 0xb0], // teal — user input
+    user: BRAND_ORANGE, // user input shares the Aiden brand accent
     agent: [0xe0, 0xe0, 0xe0], // off-white — agent reply
     tool: [0x9c, 0xdc, 0xfe], // cyan — tool calls
     error: [0xf4, 0x47, 0x47],
@@ -172,7 +266,7 @@ const LIGHT_SKIN: SkinDefinition = {
   colors: {
     brand: [0xc4, 0x42, 0x10],
     accent: [0xc4, 0x42, 0x10],
-    user: [0x00, 0x66, 0x55],
+    user: [0xc4, 0x42, 0x10],
     agent: [0x20, 0x20, 0x20],
     tool: [0x00, 0x55, 0x88],
     error: [0xb0, 0x10, 0x10],
@@ -243,6 +337,8 @@ export interface SkinEngineOptions {
    * for tests and `NO_COLOR`-aware deployments.
    */
   forceMono?: boolean;
+  /** Override terminal capability detection for deterministic rendering. */
+  colorDepth?: SkinColorDepth;
 }
 
 export type SkinSource = 'bundled-builtin' | 'bundled-yaml' | 'user';
@@ -277,6 +373,7 @@ export class SkinEngine {
   private readonly bundledDir: string;
   private readonly onError?: (msg: string) => void;
   private readonly forceMono: boolean;
+  private readonly colorDepth: SkinColorDepth;
   private readonly cache = new Map<string, SkinDefinition>();
   private readonly sourceMap = new Map<string, SkinSource>();
   private readonly fileMap = new Map<string, string>();
@@ -289,6 +386,7 @@ export class SkinEngine {
     this.forceMono =
       opts.forceMono ??
       (process.env.NO_COLOR != null && process.env.NO_COLOR !== '');
+    this.colorDepth = opts.colorDepth ?? detectSkinColorDepth();
     for (const name of Object.keys(BUNDLED)) {
       this.cache.set(name, BUNDLED[name]);
       this.sourceMap.set(name, 'bundled-builtin');
@@ -377,22 +475,22 @@ export class SkinEngine {
     // ~/.aiden/theme.yaml override every paint surface that routes
     // through SkinEngine (Aiden reply chrome, panel bars, status
     // footer text, tool rows) without requiring users to also
-    // re-author a parallel ~/.aiden/skins/<name>.yaml. When no user
-    // theme is active, the legacy skin RGB path runs unchanged —
-    // preserves /skin custom-palette users from regression.
-    if (getActiveThemePath() !== null) {
+    // re-author a parallel ~/.aiden/skins/<name>.yaml. The bundled
+    // aiden-ember theme is also applied without a user-file path, so
+    // current theme identity participates in the authority check.
+    if (getActiveThemePath() !== null || getCurrentThemeName() !== 'default') {
       const dotted = COLOR_KIND_TO_TOKEN_PATH[kind];
       if (dotted) {
         const hex = readDottedPath(liveColors, dotted);
         if (typeof hex === 'string') {
           const rgb = hexToRgb(hex);
-          if (rgb) return ansiRgb(text, rgb[0], rgb[1], rgb[2]);
+          if (rgb) return ansiRgb(text, rgb[0], rgb[1], rgb[2], this.colorDepth, kind);
         }
       }
     }
     const rgb = this.current.colors[kind];
     if (!rgb) return text;
-    return ansiRgb(text, rgb[0], rgb[1], rgb[2]);
+    return ansiRgb(text, rgb[0], rgb[1], rgb[2], this.colorDepth, kind);
   }
 
   /** List all skin names currently cached (bundled + previously loaded). */

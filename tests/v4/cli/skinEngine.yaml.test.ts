@@ -3,7 +3,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
-import { SkinEngine } from '../../../cli/v4/skinEngine';
+import { SkinEngine, detectSkinColorDepth } from '../../../cli/v4/skinEngine';
 
 async function makeTmp(prefix: string): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -190,5 +190,47 @@ describe('SkinEngine muted color (v4.1.4 reply-quality polish)', () => {
     const engine = new SkinEngine({ forceMono: true });
     const out = engine.applyColors('dim row', 'muted');
     expect(out).toBe('dim row');
+  });
+});
+
+describe('SkinEngine terminal color capability', () => {
+  it('detects truecolor, 256-color, 16-color, and monochrome terminals', () => {
+    expect(detectSkinColorDepth({ COLORTERM: 'truecolor' }, { isTTY: true, platform: 'win32' })).toBe('truecolor');
+    expect(detectSkinColorDepth({ TERM: 'xterm-256color' }, { isTTY: true, platform: 'linux' })).toBe('256');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32', getColorDepth: () => 24 } as never)).toBe('truecolor');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32', getColorDepth: () => 8 } as never)).toBe('256');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'win32', getColorDepth: () => 4 } as never)).toBe('16');
+    expect(detectSkinColorDepth({ NO_COLOR: '1' }, { isTTY: true, platform: 'win32' })).toBe('none');
+    expect(detectSkinColorDepth({ FORCE_COLOR: '2' }, { isTTY: true, platform: 'win32' })).toBe('256');
+    expect(detectSkinColorDepth({}, { isTTY: true, platform: 'linux', getColorDepth: () => { throw new Error('unsupported'); } })).toBe('16');
+  });
+
+  it('uses a restrained amber brand fallback when 16-color mode is explicit', () => {
+    const engine = new SkinEngine({ colorDepth: '16' });
+    expect(engine.applyColors('Aiden', 'brand')).toContain('\x1b[33m');
+    expect(engine.applyColors('body', 'agent')).toContain('\x1b[97m');
+    expect(engine.applyColors('ok', 'success')).toContain('\x1b[92m');
+    expect(engine.applyColors('failed', 'error')).toContain('\x1b[31m');
+  });
+
+  it.each([
+    ['truecolor', '\\x1b[38;2;'],
+    ['256', '\\x1b[38;5;'],
+    ['16', '\\x1b['],
+  ] as const)('renders semantic colors through the %s fallback', (depth, prefix) => {
+    const engine = new SkinEngine({ colorDepth: depth });
+    const brand = engine.applyColors('brand', 'brand');
+    const success = engine.applyColors('success', 'success');
+    const warning = engine.applyColors('warning', 'warn');
+    const failure = engine.applyColors('failure', 'error');
+    expect(brand).toContain(prefix.replace('\\x1b', '\x1b'));
+    const codes = [brand, success, warning, failure]
+      .map((value) => value.match(/^\x1b\[[^m]+m/u)?.[0]);
+    expect(new Set(codes).size).toBe(4);
+  });
+
+  it('keeps the user label on the Aiden brand accent', () => {
+    const engine = new SkinEngine({ colorDepth: 'truecolor' });
+    expect(engine.applyColors('You', 'user')).toContain('\x1b[38;2;255;107;53m');
   });
 });

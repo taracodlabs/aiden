@@ -1,0 +1,25 @@
+name: "aiden-ember"
+description: "Aiden's warm orange identity on a restrained dark surface."
+colors:
+  brand:
+    primary: "#FF6B35"
+    muted: "#7A3119"
+  content:
+    primary: "#E8EBF0"
+    secondary: "#B8A89A"
+    tertiary: "#6A6A6A"
+  semantic:
+    success: "#7FC28B"
+    warn: "#E0A040"
+    error: "#E05A5A"
+    info: "#7DA7C7"
+  metrics:
+    model: "#9CDCFE"
+    tokens: "#E0A040"
+    turnCount: "#A48BE0"
+    timer: "#7FC28B"
+  surface:
+    bg: "#0D0E10"
+    elevated: "#16181B"
+    border: "#2A2A2A"
+    divider: "#3A3A3A"

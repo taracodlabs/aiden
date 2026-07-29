@@ -223,6 +223,14 @@ export class SessionManager {
     return this.store.listSessions(opts);
   }
 
+  /** Delete one stored conversation and its messages. Durable Job data is
+   * owned by the Job Engine and is intentionally outside this operation. */
+  deleteSession(id: string): boolean {
+    if (!this.store.getSession(id)) return false;
+    this.store.deleteSession(id);
+    return true;
+  }
+
   // ── Internals ────────────────────────────────────────────────────────
 
   private findByExactTitle(title: string): SessionRecord | null {

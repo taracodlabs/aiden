@@ -194,7 +194,34 @@ describe('startup notices', () => {
       for (const line of lines) {
         expect(startupNoticeVisibleWidth(line), line).toBeLessThanOrEqual(Math.max(1, columns - 2));
       }
+      if (columns === 48) {
+        expect(lines.some((line) => line.includes('/auth refresh provider-with-long-name'))).toBe(true);
+      }
     }
+  });
+
+  it('renders one actionable notice in at most two semantically styled lines', () => {
+    const notices = prepareStartupNotices([
+      notice({
+        id: 'browser-permission',
+        source: 'plugin',
+        title: 'Browser control needs permission',
+        detail: 'Grant the installed browser capability before using it.',
+        command: '/plugins grant aiden-plugin-cdp-browser',
+      }),
+    ], registry());
+    const lines = renderStartupNoticeLines(notices, {
+      columns: 120,
+      style: {
+        warning: (value: string) => `\x1b[33m${value}\x1b[39m`,
+        text: (value: string) => `\x1b[37m${value}\x1b[39m`,
+        command: (value: string) => `\x1b[36m${value}\x1b[39m`,
+      },
+    } as never);
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toContain('\x1b[33m!\x1b[39m');
+    expect(lines[0]).toContain('\x1b[37mBrowser control needs permission\x1b[39m');
+    expect(lines[1]).toContain('\x1b[36m/plugins grant aiden-plugin-cdp-browser\x1b[39m');
   });
 
   it('rejects displayed commands that are not registered or verified', () => {

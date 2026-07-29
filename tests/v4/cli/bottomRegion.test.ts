@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+import { renderBottomSurface } from '../../../cli/v4/composerLane';
 import { TerminalScreen } from '../harness/terminalScreen';
 
 class ScreenStream extends Writable {
@@ -39,6 +40,24 @@ class ScreenStream extends Writable {
 }
 
 const previousLaneSetting = process.env.AIDEN_COMPOSER_LANE;
+
+it('applies the active theme to the composer title and restrained frame without changing geometry', () => {
+  const renderStyled = renderBottomSurface as unknown as (...args: unknown[]) => ReturnType<typeof renderBottomSurface>;
+  const styled = renderStyled(
+    24,
+    80,
+    { draft: 'hello', mode: 'idle' },
+    '◆ provider · model',
+    {
+      brand: (value: string) => `\x1b[31m${value}\x1b[39m`,
+      muted: (value: string) => `\x1b[90m${value}\x1b[39m`,
+    },
+  );
+  const text = styled.lines.join('\n');
+  expect(text).toContain('\x1b[31m▲ You\x1b[39m');
+  expect(text).toContain('\x1b[90m╭─ \x1b[39m');
+  expect(styled.cursorCol).toBe(8);
+});
 
 afterEach(() => {
   if (previousLaneSetting === undefined) delete process.env.AIDEN_COMPOSER_LANE;
@@ -212,5 +231,135 @@ describe('boxed fixed bottom region resize', () => {
     surface = expectExclusiveSurface(screen, 'provider');
     expect(surface.content.join(' ')).toContain('Unicode draft 世界');
     expect(screen.cursorPosition().row).toBe(surface.bottom - 1);
+  });
+});
+
+function semanticGap(lines: string[], before: string, after: string): number {
+  const beforeRow = lines.findLastIndex((line) => line.includes(before));
+  const afterRow = lines.findLastIndex((line) => line.includes(after));
+  expect(beforeRow, `missing semantic row: ${before}`).toBeGreaterThanOrEqual(0);
+  expect(afterRow, `missing semantic row: ${after}`).toBeGreaterThan(beforeRow);
+  return afterRow - beforeRow - 1;
+}
+
+describe('compact hybrid transcript geometry', () => {
+  it.each([16, 24, 35, 45, 60])(
+    'keeps provider activity adjacent to a short prompt at %i rows',
+    (rows) => {
+      delete process.env.AIDEN_COMPOSER_LANE;
+      const { display, screen } = createDisplay(100, rows);
+      display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+      display.setIdleComposer('', 'Type your message · /help');
+      display.submitIdleComposer('compact provider request', 'Type your message · /help');
+      display.setBusyHint('Enter → queue · Ctrl+C stop');
+      const provider = display.liveActivityRow('calling provider');
+
+      expect(semanticGap(screen.lines(), 'compact provider request', 'calling provider')).toBeLessThanOrEqual(1);
+      provider.stop();
+    },
+  );
+
+  it('keeps provider activity adjacent to the final wrapped prompt row', () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(44, 45);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.submitIdleComposer(
+      'wrapped request keeps every semantic neighbor close FINAL-PROMPT-LINE',
+      'Type your message · /help',
+    );
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    const provider = display.liveActivityRow('calling provider');
+
+    expect(semanticGap(screen.lines(), 'FINAL-PROMPT-LINE', 'calling provider')).toBeLessThanOrEqual(1);
+    provider.stop();
+  });
+
+  it('keeps compact spacing while terminal height changes during provider activity', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 24);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.submitIdleComposer('resize provider request', 'Type your message · /help');
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    const provider = display.liveActivityRow('calling provider');
+
+    for (const rows of [60, 16, 35]) {
+      stream.resize(100, rows);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(semanticGap(screen.lines(), 'resize provider request', 'calling provider')).toBeLessThanOrEqual(1);
+    }
+    provider.stop();
+  });
+
+  it('keeps provider and tool activity in semantic order without filler rows', () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(100, 45);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.submitIdleComposer('inspect the package manifest', 'Type your message · /help');
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    const provider = display.liveActivityRow('calling provider');
+    const tool = display.toolRow('file_read', { path: 'package.json' }, undefined, {
+      activityId: 'activity_package_read',
+    });
+
+    const lines = screen.lines();
+    expect(semanticGap(lines, 'inspect the package manifest', 'calling provider')).toBeLessThanOrEqual(1);
+    expect(semanticGap(lines, 'calling provider', 'package.json')).toBe(0);
+    tool.ok(20);
+    provider.stop();
+  });
+
+  it('places the final response immediately after the active provider phase', () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(100, 35);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.submitIdleComposer('return one concise answer', 'Type your message · /help');
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    const provider = display.liveActivityRow('calling provider');
+    expect(semanticGap(screen.lines(), 'return one concise answer', 'calling provider')).toBeLessThanOrEqual(1);
+
+    provider.stop();
+    display.write(display.agentHeader());
+    display.write('FINAL COMPACT RESPONSE\n');
+    expect(semanticGap(screen.lines(), 'return one concise answer', 'Aiden')).toBeLessThanOrEqual(1);
+    expect(semanticGap(screen.lines(), 'Aiden', 'FINAL COMPACT RESPONSE')).toBeLessThanOrEqual(1);
+  });
+
+  it('opens approval at the active semantic boundary and restores the footer', () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(100, 35);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.submitIdleComposer('request a guarded action', 'Type your message · /help');
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    const provider = display.liveActivityRow('calling provider');
+    expect(semanticGap(screen.lines(), 'request a guarded action', 'calling provider')).toBeLessThanOrEqual(1);
+
+    provider.stop();
+    display.pauseComposerSurface();
+    display.write('Approval required\n');
+    expect(semanticGap(screen.lines(), 'request a guarded action', 'Approval required')).toBeLessThanOrEqual(1);
+    display.resumeComposerSurface();
+    expect(screen.lines().at(-1)).toContain('provider');
+  });
+
+  it.each(['clear', 'cls'])('starts a compact provider block after /%s projection reset', (command) => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(100, 35);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.submitIdleComposer('OLD VISIBLE REQUEST', 'Type your message · /help');
+    display.clearScreen();
+    if (command === 'clear') display.success('New chat started');
+    display.submitIdleComposer(`request after ${command}`, 'Type your message · /help');
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    const provider = display.liveActivityRow('calling provider');
+
+    expect(screen.snapshot()).not.toContain('OLD VISIBLE REQUEST');
+    expect(semanticGap(screen.lines(), `request after ${command}`, 'calling provider')).toBeLessThanOrEqual(1);
+    provider.stop();
   });
 });

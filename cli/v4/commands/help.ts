@@ -42,6 +42,9 @@ export type Subsection = (typeof SUBSECTION_ORDER)[number];
 export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   // ── Session ── conversation lifecycle
   clear: 'Session',
+  new: 'Session',
+  cls: 'Session',
+  session: 'Session',
   compress: 'Session',
   save: 'Session',
   title: 'Session',
@@ -126,6 +129,13 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   // v4.12 /commands slice — /home (working dir) + /activity (inline roll-up).
   home: 'System',
   activity: 'System',
+  jobs: 'System',
+  job: 'System',
+  attempts: 'System',
+  effects: 'System',
+  evidence: 'System',
+  proof: 'System',
+  approvals: 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

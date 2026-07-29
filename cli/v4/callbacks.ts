@@ -79,6 +79,7 @@ export interface PromptApi {
   select(opts: {
     message: string;
     choices: { name: string; value: string }[];
+    default?: string;
   }, context?: { input?: ModalStdin }): Promise<string>;
   confirm(opts: { message: string; default?: boolean }, context?: { input?: ModalStdin }): Promise<boolean>;
   /** v4.11 — free-text line input (for the clarify tool's open answers). */
@@ -150,6 +151,12 @@ function decisionChoicesFor(req: ApprovalRequest): { name: string; value: Approv
   }
   choices.push({ name: 'Deny', value: 'deny' });
   return choices;
+}
+
+function defaultDecisionFor(req: ApprovalRequest): ApprovalDecision {
+  return req.riskTier === 'safe' && req.effects?.irreversible !== true
+    ? 'allow'
+    : 'deny';
 }
 
 const KNOWN_TIERS: ReadonlySet<RiskTier> = new Set(['safe', 'caution', 'dangerous']);
@@ -294,7 +301,10 @@ export class CliCallbacks {
     this.skillTeacher = opts.skillTeacher;
     this.resolveToolInteraction = opts.resolveToolInteraction;
     this.activities = new ActivityRegistry(
-      (name, args, read) => this.display.toolRow(name, args, read, { externalTicker: true }),
+      (name, args, read, id) => this.display.toolRow(name, args, read, {
+        externalTicker: true,
+        activityId: id,
+      }),
       Date.now,
       (verb) => this.display.liveActivityRow(verb),
     );
@@ -592,7 +602,15 @@ export class CliCallbacks {
       choice = await prompts.select({
         message: 'Decision',
         choices: decisionChoicesFor(req),
+        default: defaultDecisionFor(req),
       }, stdin ? { input: stdin } : undefined);
+
+      if (choice !== 'deny' && req.effects?.irreversible === true) {
+        const confirmation = await prompts.input({
+          message: 'Type ALLOW to confirm this irreversible action',
+        }, stdin ? { input: stdin } : undefined);
+        if (confirmation !== 'ALLOW') return 'deny';
+      }
     } catch {
       // The prompt was interrupted (Ctrl+C / the turn ended) before the user
       // answered. Fail closed — the tool does NOT run — but report it as an
@@ -919,19 +937,13 @@ function badgeForTier(tier?: RiskTier): string {
 
 // ─── Phase 22 Task 5B — boxed approval prompt ─────────────────────────
 
-// Args limit kept under the visible content width (BOX_WIDTH minus the
-// 1-char gutter on each side and the ` Args: ` label) so the explicit
-// ellipsis we append surfaces inside the box. Setting this above the
-// visible budget would let `boxLine`'s hard truncation eat the ellipsis
-// and the user wouldn't see they were viewing a partial value.
-
 /**
  * Render an approval request with the Aiden-native framed-panel chrome
  * (Slice 6) — orange left bar, no closing corners, footer hint always
  * present. Token-sourced from cli/v4/design/tokens.ts. Returns the
- * multi-line string; caller writes it. Args are truncated to
- * APPROVAL_ARGS_LIMIT chars for display only; the full args stay with
- * the tool call. Colour discipline: brand (bar + title + key glyphs),
+ * multi-line string; caller writes it. The default view shows bounded,
+ * redacted decision facts while the full arguments stay with the tool
+ * call. Colour discipline: brand (bar + title + key glyphs),
  * tier-semantic (badge), muted (everything else) — ≤3 distinct colours.
  */
 export function renderApprovalBox(req: ApprovalRequest, display: Display): string {
@@ -953,24 +965,23 @@ export function renderApprovalBox(req: ApprovalRequest, display: Display): strin
   const line = (content: string): string => `${prefix}${truncateVisible(content, contentWidth)}`;
   const divider = display.muted(glyphs.chrome.hLine.repeat(contentWidth));
 
-  let argsPreview = '';
-  try { argsPreview = JSON.stringify(req.args); }
-  catch { argsPreview = String(req.args); }
-  const argsValueWidth = Math.max(1, contentWidth - (columns >= 48 ? 12 : 5));
-  if (argsPreview.length > argsValueWidth) {
-    argsPreview = truncateApproval(argsPreview, argsValueWidth);
-  }
-
   // Key-value rows. Key column padded to 12 cells for vertical alignment.
   const KEY_W = columns >= 48 ? 12 : 5;
   const kv = (k: string, v: string): string =>
     `${display.muted(k.padEnd(KEY_W))}${v}`;
 
   const lines: string[] = [
-    line(kv('tool', req.toolName)),
+    line(kv('action', req.toolName)),
   ];
+  const target = [req.args.path, req.args.file, req.args.target, req.args.url]
+    .find((value): value is string => typeof value === 'string' && value.trim().length > 0);
+  const cwd = typeof req.args.cwd === 'string' && req.args.cwd.trim() ? req.args.cwd : null;
+  if (target) lines.push(line(kv('target', truncateApproval(redactApprovalTarget(target), Math.max(1, contentWidth - KEY_W)))));
+  if (cwd) lines.push(line(kv('cwd', truncateApproval(cwd, Math.max(1, contentWidth - KEY_W)))));
+  lines.push(line(kv('risk', req.riskTier ?? 'unclassified')));
+  lines.push(line(kv('reversible', req.effects?.irreversible === true ? 'no' : req.effects ? 'yes' : 'unknown')));
+  lines.push(line(kv('network', req.effects?.network ? 'external' : req.effects ? 'none declared' : 'unknown')));
   if (req.reason) lines.push(line(kv('reason', req.reason)));
-  lines.push(line(kv('args', argsPreview)));
   // v4.10 Slice 10.6 — surface fine-grained effects when the tool
   // declared them. Renders as a comma-separated list of flag names
   // (only the truthy ones). Tools without effects keep the pre-10.6
@@ -984,7 +995,7 @@ export function renderApprovalBox(req: ApprovalRequest, display: Display): strin
     if (e.externalSpend) flags.push('external-spend');
     if (e.irreversible)  flags.push('irreversible');
     if (flags.length > 0) {
-      lines.push(line(kv('effects', flags.join(', '))));
+      lines.push(line(kv('effect', flags.join(', '))));
     }
   }
   lines.push(line(divider));
@@ -996,6 +1007,22 @@ export function renderApprovalBox(req: ApprovalRequest, display: Display): strin
   // newline, so producing '\n<panel>\n' yields one blank above + one
   // blank below once the caller's own '\n' lands.
   return '\n' + lines.join('\n') + '\n';
+}
+
+function redactApprovalTarget(value: string): string {
+  if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(value)) {
+    try {
+      const parsed = new URL(value);
+      parsed.username = '';
+      parsed.password = '';
+      parsed.search = '';
+      parsed.hash = '';
+      return parsed.toString();
+    } catch { /* fall through to plain-value redaction */ }
+  }
+  return value
+    .replace(/(?:bearer\s+)[^\s]+/giu, 'Bearer [redacted]')
+    .replace(/\b(?:gsk_|sk-)[A-Za-z0-9_-]+\b/gu, '[redacted]');
 }
 
 function truncateApproval(value: string, width: number): string {

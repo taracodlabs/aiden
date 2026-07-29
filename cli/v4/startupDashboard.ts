@@ -55,6 +55,7 @@ export interface StartupDashboardStyle {
   muted(value: string): string;
   text(value: string): string;
   success(value: string): string;
+  info?(value: string): string;
 }
 
 export interface RenderStartupDashboardOptions {
@@ -74,6 +75,7 @@ const PLAIN_STYLE: StartupDashboardStyle = {
   muted: (value) => value,
   text: (value) => value,
   success: (value) => value,
+  info: (value) => value,
 };
 
 export function startupVisibleWidth(value: string): number {
@@ -82,8 +84,8 @@ export function startupVisibleWidth(value: string): number {
 
 export function resolveStartupDashboardTier(columns: number): StartupDashboardTier {
   const width = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
-  if (width >= 100) return 'wide';
-  if (width >= 64) return 'medium';
+  if (width >= 80) return 'wide';
+  if (width >= 56) return 'medium';
   if (width >= 32) return 'narrow';
   return 'minimal';
 }
@@ -127,6 +129,42 @@ function fit(value: string, width: number): string {
   return fitStartupLine(value, Math.max(1, width));
 }
 
+/** Wrap plain startup copy without dropping words or splitting wide glyphs. */
+function wrapPlain(value: string, maxWidth: number): string[] {
+  const width = Math.max(1, Math.floor(maxWidth));
+  const words = value.trim().split(/\s+/u).filter(Boolean);
+  if (words.length === 0) return [''];
+  const lines: string[] = [];
+  let line = '';
+  const pushLongWord = (word: string): string => {
+    let rest = word;
+    while (startupVisibleWidth(rest) > width) {
+      let chunk = '';
+      for (const point of rest) {
+        if (startupVisibleWidth(chunk + point) > width) break;
+        chunk += point;
+      }
+      lines.push(chunk);
+      rest = rest.slice(chunk.length);
+    }
+    return rest;
+  };
+  for (const rawWord of words) {
+    const word = startupVisibleWidth(rawWord) > width ? pushLongWord(rawWord) : rawWord;
+    if (!word) continue;
+    if (!line) {
+      line = word;
+    } else if (startupVisibleWidth(`${line} ${word}`) <= width) {
+      line += ` ${word}`;
+    } else {
+      lines.push(line);
+      line = word;
+    }
+  }
+  if (line) lines.push(line);
+  return lines.length > 0 ? lines : [''];
+}
+
 function pad(value: string, width: number): string {
   const fitted = fit(value, width);
   return fitted + ' '.repeat(Math.max(0, width - startupVisibleWidth(fitted)));
@@ -149,20 +187,23 @@ function statusLine(
   tier: StartupDashboardTier,
   width: number,
 ): string {
-  const dot = style.success('●');
+  const info = style.info ?? style.text;
+  const healthy = style.success('●');
+  const trustGlyph = info('◇');
+  const modelGlyph = info('◆');
   const model = data.providerReady ? clean(data.model) ?? 'not configured' : 'not configured';
-  const segments = tier === 'wide'
+  const segments = tier === 'wide' && width >= 98
     ? [
-        `${dot} ${style.muted('core')} ${style.text('online')}`,
-        `${dot} ${style.muted('trust')} ${style.text(clean(data.trust) ?? 'Assistant')}`,
-        `${dot} ${style.muted('model')} ${style.text(model)}`,
-        clean(data.memory) ? `${dot} ${style.muted('memory')} ${style.text(data.memory!)}` : undefined,
-        clean(data.version) ? `${dot} ${style.text(`v${data.version}`)}` : undefined,
+        `${healthy} ${style.muted('core')} ${style.success('online')}`,
+        `${trustGlyph} ${style.muted('trust')} ${info(clean(data.trust) ?? 'Assistant')}`,
+        `${modelGlyph} ${style.muted('model')} ${info(model)}`,
+        clean(data.memory) ? `${healthy} ${style.muted('memory')} ${style.success(data.memory!)}` : undefined,
+        clean(data.version) ? style.muted(`v${data.version}`) : undefined,
       ]
     : [
-        `${dot} ${style.text(clean(data.trust) ?? 'Assistant')}`,
-        `${style.text(model)}`,
-        clean(data.memory) ? style.muted(`memory ${data.memory}`) : undefined,
+        `${trustGlyph} ${info(clean(data.trust) ?? 'Assistant')}`,
+        `${modelGlyph} ${info(model)}`,
+        clean(data.memory) ? `${healthy} ${style.success(`memory ${data.memory}`)}` : undefined,
         clean(data.version) ? style.muted(`v${data.version}`) : undefined,
       ];
   return fit(segments.filter((entry): entry is string => !!entry).join(' · '), width);
@@ -196,9 +237,10 @@ function renderKeyValue(
   style: StartupDashboardStyle,
   width: number,
   keyWidth = 10,
+  valueStyle: (value: string) => string = style.text,
 ): string {
   const label = style.muted(key.padEnd(keyWidth));
-  return fit(label + style.text(value), width);
+  return fit(label + valueStyle(value), width);
 }
 
 function renderWideSections(
@@ -216,9 +258,16 @@ function renderWideSections(
     return [style.brand('Capabilities'), ...right.map(([key, value]) => renderKeyValue(key, value, style, width))];
   }
 
-  const separator = '    ';
+  const separator = style.muted(' │ ');
   const columnWidth = Math.max(1, Math.floor((width - startupVisibleWidth(separator)) / 2));
-  const leftLines = [style.brand('Environment'), ...left.map(([key, value]) => renderKeyValue(key, value, style, columnWidth))];
+  const leftLines = [style.brand('Environment'), ...left.map(([key, value]) => renderKeyValue(
+    key,
+    value,
+    style,
+    columnWidth,
+    10,
+    key === 'tools' || key === 'skills' ? style.success : style.text,
+  ))];
   const rightLines = [style.brand('Capabilities'), ...right.map(([key, value]) => renderKeyValue(key, value, style, columnWidth))];
   const count = Math.max(leftLines.length, rightLines.length);
   return Array.from({ length: count }, (_, index) =>
@@ -230,22 +279,24 @@ function renderMediumSections(
   style: StartupDashboardStyle,
   width: number,
 ): string[] {
-  const environment = data.environment;
   const lines: string[] = [];
-  const summary = [clean(environment?.os), clean(environment?.shell), clean(environment?.runtime)]
-    .filter((entry): entry is string => !!entry);
-  const counts = [countLabel(environment?.tools, 'tools'), countLabel(environment?.skills, 'skills')]
-    .filter((entry): entry is string => !!entry);
-  if (summary.length > 0 || counts.length > 0) {
+  const environment = environmentRows(data.environment);
+  if (environment.length > 0) {
     lines.push(style.brand('Environment'));
-    if (summary.length > 0) lines.push(fit(style.text(summary.join(' · ')), width));
-    if (counts.length > 0) lines.push(fit(style.muted(counts.join(' · ')), width));
+    lines.push(...environment.map(([key, value]) => renderKeyValue(
+      key,
+      value,
+      style,
+      width,
+      10,
+      key === 'tools' || key === 'skills' ? style.success : style.text,
+    )));
   }
-  const capabilities = capabilityRows(data.capabilities).map(([, value]) => value);
+  const capabilities = capabilityRows(data.capabilities);
   if (capabilities.length > 0) {
     if (lines.length > 0) lines.push('');
     lines.push(style.brand('Capabilities'));
-    lines.push(fit(style.text(Object.keys(data.capabilities ?? {}).join(' · ')), width));
+    lines.push(...capabilities.map(([key, value]) => renderKeyValue(key, value, style, width)));
   }
   return lines;
 }
@@ -253,36 +304,37 @@ function renderMediumSections(
 function renderProject(
   data: StartupProjectData,
   style: StartupDashboardStyle,
-  tier: StartupDashboardTier,
+  _tier: StartupDashboardTier,
   width: number,
 ): string[] {
   const identity = clean(data.identity) ?? 'Built solo';
-  if (tier === 'wide') {
-    const frameWidth = Math.min(width, 72);
-    const inside = Math.max(1, frameWidth - 2);
-    const rows = [
-      `${style.brand('♥')}  ${style.text(identity)}`,
-      '',
-      clean(data.github) ? `${style.brand('GitHub:'.padEnd(10))}${style.text(data.github!)}` : undefined,
-      clean(data.website) ? `${style.brand('Web:'.padEnd(10))}${style.text(data.website!)}` : undefined,
-      clean(data.contact) ? `${style.brand('Contact:'.padEnd(10))}${style.text(data.contact!)}` : undefined,
-    ].filter((entry): entry is string => entry !== undefined);
-    return [
-      style.muted(`╭${'─'.repeat(inside)}╮`),
-      ...rows.map((row) => `${style.muted('│')}${pad(` ${row}`, inside)}${style.muted('│')}`),
-      style.muted(`╰${'─'.repeat(inside)}╯`),
-    ];
-  }
-  if (tier === 'medium') {
-    return [
-      `${style.brand('♥')} ${style.text(identity)}`,
-      ...[clean(data.github), clean(data.website), clean(data.contact)]
-        .filter((entry): entry is string => !!entry)
-        .map((entry) => fit(style.muted(entry), width)),
-    ];
-  }
-  const repo = clean(data.github)?.replace(/^github\.com\//, '') ?? clean(data.website) ?? '';
-  return [fit(`${style.brand('♥')} ${style.muted(`${identity.toLowerCase()}${repo ? ` · ${repo}` : ''}`)}`, width)];
+  const indent = width >= 36 ? '  ' : '';
+  const frameWidth = Math.max(4, Math.min(width - startupVisibleWidth(indent), 72));
+  const inside = Math.max(2, frameWidth - 2);
+  const contentWidth = Math.max(1, inside - 2);
+  const rows: string[] = [`♥  ${identity}`, ''];
+  const addDetail = (label: string, value: string | undefined): void => {
+    if (!value) return;
+    const labelWidth = Math.min(9, contentWidth);
+    const firstPrefix = `${label}:`.padEnd(labelWidth);
+    const continuationPrefix = ' '.repeat(labelWidth);
+    const valueWidth = Math.max(1, contentWidth - labelWidth);
+    const wrapped = wrapPlain(value, valueWidth);
+    wrapped.forEach((line, index) => rows.push(`${index === 0 ? firstPrefix : continuationPrefix}${line}`));
+  };
+  addDetail('GitHub', clean(data.github));
+  addDetail('Web', clean(data.website));
+  addDetail('Contact', clean(data.contact));
+  return [
+    `${indent}${style.muted(`╭${'─'.repeat(inside)}╮`)}`,
+    ...rows.map((row) => {
+      const colored = row.startsWith('♥')
+        ? `${style.brand('♥')}${style.text(row.slice(1))}`
+        : style.text(row);
+      return `${indent}${style.muted('│')} ${pad(colored, contentWidth)} ${style.muted('│')}`;
+    }),
+    `${indent}${style.muted(`╰${'─'.repeat(inside)}╯`)}`,
+  ];
 }
 
 function normalizeBanner(banner: string | undefined, width: number): string[] {
@@ -298,21 +350,19 @@ export function renderStartupDashboard(options: RenderStartupDashboardOptions): 
   const tier = resolveStartupDashboardTier(options.columns);
   const data = options.data;
   const lines: string[] = [];
-  const bannerLines = tier === 'wide' || tier === 'medium'
-    ? normalizeBanner(options.banner, width)
-    : [];
+  const bannerLines = normalizeBanner(options.banner, width);
 
   if (bannerLines.length > 0) {
     lines.push(...bannerLines, style.muted('Autonomous AI Engine'), '');
   } else {
-    lines.push(style.brand('AIDEN'));
-    if (tier !== 'minimal') lines.push(style.muted('Autonomous AI Engine'));
+    lines.push(style.brand('Aiden'));
+    lines.push(style.muted('Autonomous AI Engine'));
   }
 
   lines.push(statusLine(data, style, tier, width));
   if (clean(data.persistedModelNote)) lines.push(style.muted(fit(data.persistedModelNote!, width)));
 
-  if (tier === 'wide' || tier === 'medium') {
+  if (tier === 'wide' || tier === 'medium' || tier === 'narrow') {
     lines.push('', style.muted('─'.repeat(width)), '');
     lines.push(...(tier === 'wide'
       ? renderWideSections(data, style, width)
@@ -321,8 +371,12 @@ export function renderStartupDashboard(options: RenderStartupDashboardOptions): 
   }
 
   lines.push(...renderProject(data.project, style, tier, width));
-  if (clean(data.greeting)) lines.push('', fit(style.text(data.greeting!), width));
-  if (clean(data.helper)) lines.push(fit(style.muted(data.helper!), width));
+  if (clean(data.greeting)) {
+    lines.push('', ...wrapPlain(data.greeting!, width).map((line) => style.text(line)));
+  }
+  if (clean(data.helper)) {
+    lines.push(...wrapPlain(data.helper!, width).map((line) => style.muted(line)));
+  }
 
   return {
     tier,

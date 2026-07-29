@@ -574,6 +574,17 @@ export function bootSourceLabel(
 }
 
 export class ChatSession implements ChatSessionLike {
+  private readonly projectedWarnings = new Set<string>();
+
+  private reportRuntimeWarning(component: string, error: unknown): void {
+    turnIdleDiagnostic('runtime.warning', {
+      component,
+      errorType: error instanceof Error ? error.name : typeof error,
+    });
+    if (this.projectedWarnings.has(component)) return;
+    this.projectedWarnings.add(component);
+    this.opts.display.warn(`Runtime persistence warning · ${component}. Durable details remain available through /trace.`);
+  }
   private updateExitRequested = false;
   history: Message[] = [];
   private sessionId: string | null = null;
@@ -790,6 +801,45 @@ export class ChatSession implements ChatSessionLike {
     // resurrecting pre-clear turns via /undo would be surprising.
     this.undoStack = [];
   }
+  startNewSession(): string | null {
+    this.clearHistory();
+    try {
+      const session = this.opts.sessionManager.startSession({
+        providerId: this.currentProviderId,
+        modelId: this.currentModelId,
+      });
+      this.sessionId = session.id;
+      this.totalUsage = { inputTokens: 0, outputTokens: 0 };
+      this.compressionCount = 0;
+      if (this.opts.replParentRunRef) {
+        this.opts.replParentRunRef.sessionId = null;
+        this.opts.replParentRunRef.chatSessionId = session.id;
+      }
+      this.opts.sessionManager.persistActiveState(session.id, {
+        messages: [],
+        compressionCount: 0,
+        cumulativeUsage: { inputTokens: 0, outputTokens: 0 },
+        budgetState: this.budgetState,
+      });
+      return session.id;
+    } catch {
+      return null;
+    }
+  }
+  deleteStoredSession(idOrTitle?: string): { deletedId: string; replacementId: string | null } | null {
+    const target = idOrTitle
+      ? this.opts.sessionManager.resumeById(idOrTitle)
+      : this.sessionId ? this.opts.sessionManager.resumeById(this.sessionId) : null;
+    if (!target) return null;
+
+    let replacementId: string | null = null;
+    if (target.id === this.sessionId) {
+      replacementId = this.startNewSession();
+      if (!replacementId) return null;
+    }
+    if (!this.opts.sessionManager.deleteSession(target.id)) return null;
+    return { deletedId: target.id, replacementId };
+  }
   /**
    * v4.11 Slice B — restore the history captured before the most recent
    * turn (in-memory only). Returns false when there's nothing to undo.
@@ -896,6 +946,15 @@ export class ChatSession implements ChatSessionLike {
         if (record.kind !== 'message' || record.content === null) continue;
         this.duringTurnInput.enqueue(record.content);
         this.durableQueueInputIds.push(record.inputId);
+      }
+    }
+    if (this.opts.jobEngine && typeof this.opts.jobEngine.listJobs === 'function') {
+      const activeStates = new Set(['queued', 'running', 'waiting', 'paused', 'cancelling', 'unknown', 'crashed', 'recovering']);
+      for (const job of this.opts.jobEngine.listJobs({ sessionId: this.sessionId, limit: 100 })) {
+        if (!activeStates.has(job.status)) continue;
+        const attempt = job.activeAttemptId ? this.opts.jobEngine.getAttempt(job.activeAttemptId) : null;
+        const identity = attempt ? ` · ${attempt.id} · gen ${attempt.generation}` : '';
+        this.opts.display.restoreDurableActivity(job.id, `◆ ${job.goal} · ${job.status}${identity}`);
       }
     }
 
@@ -1085,7 +1144,8 @@ export class ChatSession implements ChatSessionLike {
     let frameModeOn = false;
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      frameModeOn = (require('./frame') as typeof import('./frame')).isFrameModeRequested();
+      const frame = require('./frame') as typeof import('./frame');
+      frameModeOn = frame.shouldUseFrameComposer(undefined, this.usesFixedBottomRegion());
     } catch { /* frame module unavailable → treat as legacy */ }
     const pasteBootAction = decidePasteBootAction({
       isTty:        !!stdout?.isTTY,
@@ -1134,7 +1194,7 @@ export class ChatSession implements ChatSessionLike {
     // counter so a mid-stream resize doesn't try to erase rows that
     // the hard-clear already removed. See `resetStreamFrameForResize`
     // in display.ts for the rationale.
-    const restoreResizeGuard = this.opts.promptApi
+    const restoreResizeGuard = this.opts.promptApi || this.usesFixedBottomRegion()
       ? (): void => { /* test prompt API: skip */ }
       : installResizeGuard({
           onCleared: () => {
@@ -1202,6 +1262,7 @@ export class ChatSession implements ChatSessionLike {
             agent: this.opts.agent,
             pluginLoader: this.opts.pluginLoader,
             channelManager: this.opts.channelManager,
+            jobEngine: this.opts.jobEngine,
             // v4.12 /commands slice — /home working-directory change seam.
             setWorkingDir: this.opts.setWorkingDir,
             // v4.9.2 Slice 3 — UX-rebuilt confirmation primitive.
@@ -1260,7 +1321,7 @@ export class ChatSession implements ChatSessionLike {
           // separator; acquiring another composer never adds one.
           if (typeof result.rerun === 'string' && result.rerun.length > 0) {
             await this.runAgentTurn(result.rerun);
-          } else {
+          } else if (!result.suppressSeparator) {
             this.opts.display.printTurnSeparator();
           }
           // Phase 23.6 — v3 doesn't print a status footer after slash
@@ -1830,8 +1891,8 @@ export class ChatSession implements ChatSessionLike {
     // block below regardless of how the turn ended.
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const { isFrameModeRequested, pauseFrame } = require('./frame') as typeof import('./frame');
-      if (isFrameModeRequested()) await pauseFrame();
+      const { shouldUseFrameComposer, pauseFrame } = require('./frame') as typeof import('./frame');
+      if (shouldUseFrameComposer(undefined, this.usesFixedBottomRegion())) await pauseFrame();
     } catch { /* frame module is best-effort; never break a turn */ }
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -1973,6 +2034,38 @@ export class ChatSession implements ChatSessionLike {
             } catch { /* defensive */ }
             return;
           }
+          if (word === '/status') {
+            const target = this.activeDurableTarget;
+            const identity = target
+              ? `${target.jobId} · ${target.attemptId} · gen ${target.generation}`
+              : 'no active durable identity';
+            this.opts.display.info(`Active turn · ${identity} · ${this.duringTurnInput.busyHint()}`);
+            return;
+          }
+          if (word === '/queue') {
+            const entries = this.listQueueEntries();
+            if (entries.length === 0) this.opts.display.dim('Queue empty.');
+            else for (const [index, entry] of entries.entries()) {
+              this.opts.display.dim(`${index + 1}. ${entry.inputId ?? 'pending'} · ${entry.message}`);
+            }
+            return;
+          }
+          if (word === '/cancel' || word === '/interrupt') {
+            const target = this.activeDurableTarget;
+            if (target && this.opts.jobControlAuthority) {
+              this.opts.jobControlAuthority.commands.request({
+                ...target,
+                kind: word === '/cancel' ? 'cancel' : 'interrupt',
+                source: 'tui',
+                reason: `user requested ${word.slice(1)}`,
+                idempotencyNamespace: `tui-control:${this.sessionId}`,
+                idempotencyKey: `${word.slice(1)}:${target.attemptId}:${++this.durableInputOrdinal}`,
+              });
+            }
+            this.opts.display.dim(word === '/cancel' ? 'Cancellation requested.' : 'Interruption requested.');
+            requestTurnCancel(this.currentAbortController);
+            return;
+          }
           const target = this.activeDurableTarget;
           let durableInputId: string | null = null;
           if (target && this.opts.jobControlAuthority) {
@@ -2061,6 +2154,8 @@ export class ChatSession implements ChatSessionLike {
           requestTurnCancel(this.currentAbortController);
         },
         onCtrlC:  () => { try { (process as NodeJS.Process).emit('SIGINT'); } catch { /* defensive */ } },
+        onScroll: (deltaRows) => { this.opts.display.scrollTranscript(deltaRows); },
+        onFollow: () => { this.opts.display.followTranscript(); },
         // Slice 2c — paint the live during-turn buffer so the user sees their
         // keystrokes (not blind), labelled with what Enter will do. Empty
         // buffer (initial, or the reset after submit/cancel) clears the row.
@@ -2150,6 +2245,7 @@ export class ChatSession implements ChatSessionLike {
         attemptId: lifecycleContext.handle.attemptId,
         generation: lifecycleContext.handle.generation,
       };
+      this.opts.display.removeDurableActivity(lifecycleContext.handle.jobId);
     } else if (replRunStore && replInstanceId && this.sessionId) {
       try {
         replRunId = replRunStore.create({
@@ -2163,10 +2259,7 @@ export class ChatSession implements ChatSessionLike {
           replParentRunRef.sessionId = this.sessionId;
         }
       } catch (err) {
-        // Logged once per turn; the user's chat is not interrupted.
-        // eslint-disable-next-line no-console
-        console.warn('[runs] failed to write REPL parent-run row:',
-          err instanceof Error ? err.message : String(err));
+        this.reportRuntimeWarning('run admission', err);
         replRunId = null;
       }
     }
@@ -2227,9 +2320,7 @@ export class ChatSession implements ChatSessionLike {
           status:    'active',
         });
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn('[tasks] failed to write REPL task row:',
-          err instanceof Error ? err.message : String(err));
+        this.reportRuntimeWarning('Job admission', err);
         replTaskId = null;
       }
     }
@@ -2775,9 +2866,7 @@ export class ChatSession implements ChatSessionLike {
             completedAt:  Date.now(),
           });
         } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn('[runs] failed to finalize REPL parent-run row:',
-            err instanceof Error ? err.message : String(err));
+          this.reportRuntimeWarning('run finalization', err);
         }
       }
       // v4.13 Gap 1 — verify-before-done gate. The model narrates; the
@@ -2810,6 +2899,7 @@ export class ChatSession implements ChatSessionLike {
           {
             finishReason:   result.finishReason,
             toolCallTrace:  result.toolCallTrace,
+            assistantContent: result.finalContent,
             declaredStatus,
           },
           {
@@ -2875,9 +2965,7 @@ export class ChatSession implements ChatSessionLike {
         }
         result.taskOutcome = _taskOutcome;
       } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn('[tasks] failed to compute finalization:',
-          err instanceof Error ? err.message : String(err));
+        this.reportRuntimeWarning('verification finalization', err);
       }
 
       if (lifecycleContext && _fin) {
@@ -2926,9 +3014,7 @@ export class ChatSession implements ChatSessionLike {
           }
           replTaskStore.finalizeVerification(replTaskId, fin.status, fin.evidence, fin.jobCard);
         } catch (err) {
-          // eslint-disable-next-line no-console
-          console.warn('[tasks] failed to finalize REPL task row:',
-            err instanceof Error ? err.message : String(err));
+          this.reportRuntimeWarning('Job finalization', err);
         }
       }
 
@@ -2999,9 +3085,7 @@ export class ChatSession implements ChatSessionLike {
               this.opts.replTaskStore.appendArtifactId(replTaskId, artifactId);
             }
           } catch (err) {
-            // eslint-disable-next-line no-console
-            console.warn('[artifacts] capture failed:',
-              err instanceof Error ? err.message : String(err));
+            this.reportRuntimeWarning('artifact capture', err);
           }
         }
       }
@@ -3051,25 +3135,6 @@ export class ChatSession implements ChatSessionLike {
       // concise post-reply outcome; activity rows remain execution-only.
       if (_taskOutcome && (result.toolCallTrace?.length ?? 0) > 0) {
         this.opts.display.taskOutcome(_taskOutcome);
-      }
-
-      if (replRunId !== null) {
-        const turnUsage = currentProviderAttemptLedger()?.project({ runId: String(replRunId) });
-        if (turnUsage && turnUsage.physicalAttempts > 0) {
-          const reportedInput = turnUsage.providerInputTokens || turnUsage.estimatedInputTokens;
-          const reportedOutput = turnUsage.providerOutputTokens || turnUsage.estimatedOutputTokens;
-          const toolBytesSaved = Math.max(0, turnUsage.rawToolResultBytes - turnUsage.transmittedToolResultBytes);
-          const savings = [
-            toolBytesSaved > 0 ? `${toolBytesSaved.toLocaleString()} tool bytes externalized` : null,
-            turnUsage.deferredSchemaCount > 0 ? `${turnUsage.deferredSchemaCount} schemas deferred` : null,
-          ].filter((value): value is string => value !== null);
-          const cost = turnUsage.unknownCostAttempts > 0
-            ? 'cost unknown'
-            : `$${turnUsage.knownCostAmount.toFixed(4)} estimated`;
-          this.opts.display.dim(
-            `Usage: ${turnUsage.physicalAttempts} provider attempt${turnUsage.physicalAttempts === 1 ? '' : 's'} · ${reportedInput} in / ${reportedOutput} out · ${cost}${savings.length > 0 ? ` · ${savings.join(', ')}` : ''}`,
-          );
-        }
       }
 
       // v4.1.6 Polish 2 — post-render skill-proposal handler.
@@ -3241,9 +3306,7 @@ export class ChatSession implements ChatSessionLike {
             completedAt:  Date.now(),
           });
         } catch (e2) {
-          // eslint-disable-next-line no-console
-          console.warn('[runs] failed to mark REPL parent-run failed:',
-            e2 instanceof Error ? e2.message : String(e2));
+          this.reportRuntimeWarning('run failure transition', e2);
         }
       }
       // v4.10 Slice 10.8 — symmetric task-lite failure transition.
@@ -3254,9 +3317,7 @@ export class ChatSession implements ChatSessionLike {
         try {
           replTaskStore.setStatus(replTaskId, 'failed');
         } catch (e3) {
-          // eslint-disable-next-line no-console
-          console.warn('[tasks] failed to mark REPL task failed:',
-            e3 instanceof Error ? e3.message : String(e3));
+          this.reportRuntimeWarning('Job failure transition', e3);
         }
       }
       if (replParentRunRef) {
@@ -3335,7 +3396,10 @@ export class ChatSession implements ChatSessionLike {
         modalPauseDepth: this.opts.callbacks.activityModalPauseDepth?.() ?? 0,
       });
       lifecycleContext?.handle.signal.removeEventListener('abort', abortFromLifecycle);
-      if (this.activeDurableTarget?.attemptId === jobAttemptId) this.activeDurableTarget = null;
+      if (this.activeDurableTarget?.attemptId === jobAttemptId) {
+        this.opts.display.removeDurableActivity(this.activeDurableTarget.jobId);
+        this.activeDurableTarget = null;
+      }
       // v4.11 Slice 3 — release the per-turn cancel handles. ORDER
       // MATTERS:
       //   1. Drop activeTurnId FIRST so any late callbacks already
@@ -3383,8 +3447,8 @@ export class ChatSession implements ChatSessionLike {
       // turn ended (success, error, throw).
       try {
         // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const { isFrameModeRequested, resumeFrame } = require('./frame') as typeof import('./frame');
-        if (isFrameModeRequested()) await resumeFrame();
+        const { shouldUseFrameComposer, resumeFrame } = require('./frame') as typeof import('./frame');
+        if (shouldUseFrameComposer(undefined, this.usesFixedBottomRegion())) await resumeFrame();
       } catch { /* never break a turn on frame cleanup */ }
       turnIdleDiagnostic('turn.finally.complete', {
         turnId,
@@ -3450,7 +3514,7 @@ export class ChatSession implements ChatSessionLike {
     const tier = resolveStartupDashboardTier(columns);
     const version = AIDEN_VERSION;
     const startupTrust = this.opts.approvalEngine?.getAutonomyPolicy?.()?.level ?? 'Assistant';
-    const includeDetails = tier === 'wide' || tier === 'medium';
+    const includeDetails = tier !== 'minimal';
     const toolsCount = includeDetails ? this.opts.toolRegistry.list().length : undefined;
     let skillsLoaded: number | undefined;
     if (includeDetails) {
@@ -3469,6 +3533,7 @@ export class ChatSession implements ChatSessionLike {
         muted: (value) => display.muted(value),
         text: (value) => display.applyColors(value, 'agent'),
         success: (value) => display.success_(value),
+        info: (value) => display.applyColors(value, 'accent'),
       },
       data: {
         trust: startupTrust,
@@ -3500,7 +3565,14 @@ export class ChatSession implements ChatSessionLike {
       },
     });
     const notices = prepareStartupNotices(this.opts.startupNotices ?? [], this.opts.commandRegistry);
-    const noticeLines = renderStartupNoticeLines(notices, { columns });
+    const noticeLines = renderStartupNoticeLines(notices, {
+      columns,
+      style: {
+        warning: (value) => display.applyColors(value, 'warn'),
+        text: (value) => display.applyColors(value, 'agent'),
+        command: (value) => display.applyColors(value, 'accent'),
+      },
+    });
     if (noticeLines.length > 0) {
       display.write(`\n${noticeLines.join('\n')}\n`);
     }
@@ -3572,13 +3644,22 @@ export class ChatSession implements ChatSessionLike {
         // which fires the mutation listener → the name reaches the prompt.
         onboarded = await renderOnboardingIntro({
           paths:  this.opts.paths,
-          out:    process.stdout,
+          write:  (text) => { this.opts.display.write(text); },
+          style: {
+            accent: (text) => this.opts.display.applyColors(text, 'accent'),
+            muted: (text) => this.opts.display.applyColors(text, 'muted'),
+          },
           memory: this.opts.memoryManager,
         });
         if (!onboarded) {
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const { renderFirstRunHint } = require('./repl/firstRunHint') as typeof import('./repl/firstRunHint');
-          await renderFirstRunHint({ paths: this.opts.paths, out: process.stdout });
+          const firstRunOut = {
+            isTTY: process.stdout.isTTY,
+            columns: process.stdout.columns,
+            write: (text: string) => { this.opts.display.write(text); return true; },
+          } as unknown as NodeJS.WriteStream;
+          await renderFirstRunHint({ paths: this.opts.paths, out: firstRunOut });
         }
       }
     } catch { /* never let a missing marker crash boot */ }
@@ -4178,7 +4259,9 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
   // legacy aidenPrompt path is untouched and stays the default.
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const frameMod = require('./frame') as typeof import('./frame');
-  const frameModeOn = frameMod.isFrameModeRequested();
+  const fixedBottomRegion = typeof opts.display?.fixedBottomRegionEnabled === 'function'
+    && opts.display.fixedBottomRegionEnabled();
+  const frameModeOn = frameMod.shouldUseFrameComposer(undefined, fixedBottomRegion);
 
   return {
     async readLine(prompt, readOpts) {
@@ -4209,8 +4292,6 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
           }
           return value ?? '';
         }
-        const fixedBottomRegion = typeof opts.display?.fixedBottomRegionEnabled === 'function'
-          && opts.display.fixedBottomRegionEnabled();
         const promptOutput = fixedBottomRegion
           ? new Writable({
               write(_chunk, _encoding, done) {
@@ -4235,6 +4316,8 @@ function createDefaultPromptApi(opts: DefaultPromptOpts = {}): ChatPromptApi {
                 ready: () => {
                   emitComposerReadyForTests((marker) => opts.display?.writeAfterComposerCursor(marker));
                 },
+                scroll: (deltaRows) => opts.display?.scrollTranscript(deltaRows),
+                follow: () => opts.display?.followTranscript(),
               }
             : undefined,
         }, { output: promptOutput });

@@ -111,6 +111,7 @@ async function spawnFrameAiden(busyTickMs = 300): Promise<AidenTerm> {
     env: {
       GROQ_API_KEY:               'aiden-frame-pty-fake-key',
       AIDEN_RENDERER:             'frame',
+      AIDEN_COMPOSER_LANE:        '0',
       AIDEN_FRAME_BUSY_TICK_MS:   String(busyTickMs),
     },
   });

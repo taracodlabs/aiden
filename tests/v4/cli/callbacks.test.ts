@@ -52,6 +52,69 @@ function mockPrompts(answers: { kind: 'select' | 'confirm' | 'input'; value: any
 }
 
 describe('CliCallbacks.promptApproval', () => {
+  it.each([
+    ['safe reversible actions', 'safe', false, 'allow'],
+    ['caution actions', 'caution', false, 'deny'],
+    ['dangerous actions', 'dangerous', false, 'deny'],
+    ['unclassified actions', undefined, false, 'deny'],
+    ['irreversible safe actions', 'safe', true, 'deny'],
+  ] as const)('uses a safe default for %s', async (_label, riskTier, irreversible, expected) => {
+    const { display } = makeDisplay();
+    let capturedDefault: string | undefined;
+    const prompts: PromptApi = {
+      async select(opts) {
+        capturedDefault = opts.default;
+        return 'deny';
+      },
+      async confirm() { return false; },
+      async input() { return ''; },
+    };
+    const cb = new CliCallbacks({ display, promptModule: prompts });
+
+    await cb.promptApproval({
+      toolName: 'test_tool',
+      category: 'execute',
+      args: {},
+      riskTier,
+      effects: irreversible ? { irreversible: true } : undefined,
+    });
+
+    expect(capturedDefault).toBe(expected);
+  });
+
+  it('requires deliberate typed confirmation for an irreversible action', async () => {
+    const { display } = makeDisplay();
+    const denied = new CliCallbacks({
+      display,
+      promptModule: mockPrompts([
+        { kind: 'select', value: 'allow' },
+        { kind: 'input', value: 'allow' },
+      ]),
+    });
+    await expect(denied.promptApproval({
+      toolName: 'publish',
+      category: 'network',
+      args: {},
+      riskTier: 'dangerous',
+      effects: { irreversible: true },
+    })).resolves.toBe('deny');
+
+    const allowed = new CliCallbacks({
+      display,
+      promptModule: mockPrompts([
+        { kind: 'select', value: 'allow' },
+        { kind: 'input', value: 'ALLOW' },
+      ]),
+    });
+    await expect(allowed.promptApproval({
+      toolName: 'publish',
+      category: 'network',
+      args: {},
+      riskTier: 'dangerous',
+      effects: { irreversible: true },
+    })).resolves.toBe('allow');
+  });
+
   it('renders the approval card with risk tier and reason', async () => {
     const { display, output } = makeDisplay();
     const cb = new CliCallbacks({
@@ -64,6 +127,7 @@ describe('CliCallbacks.promptApproval', () => {
       args: { command: 'rm -rf /' },
       riskTier: 'dangerous',
       reason: 'destructive command',
+      effects: {},
     });
     expect(decision).toBe('allow');
     const out = output();
@@ -72,8 +136,12 @@ describe('CliCallbacks.promptApproval', () => {
     // no "Approval needed" title (Phase 2.5 event row owns the headline).
     // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
     expect(out).toMatch(/│/);
-    expect(out).toMatch(/tool\s+shell_exec/);
+    expect(out).toMatch(/action\s+shell_exec/);
     expect(out).toMatch(/reason\s+destructive command/);
+    expect(out).toMatch(/risk\s+dangerous/);
+    expect(out).toMatch(/reversible\s+yes/i);
+    expect(out).not.toMatch(/args\s+\{/);
+    expect(out).not.toContain('rm -rf /');
     expect(out).not.toMatch(/┌── Approval required /);
   });
 
@@ -89,6 +157,22 @@ describe('CliCallbacks.promptApproval', () => {
       args: { path: '/tmp/x' },
     });
     expect(d).toBe('allow_session');
+  });
+
+  it('redacts credentials and query data from approval targets', async () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({
+      display,
+      promptModule: mockPrompts([{ kind: 'select', value: 'deny' }]),
+    });
+    await cb.promptApproval({
+      toolName: 'network_send', category: 'network',
+      args: { url: 'https://user:secret@example.test/action?token=provider_secret_value#fragment' },
+      riskTier: 'dangerous', effects: { network: true },
+    });
+    const rendered = output();
+    expect(rendered).toContain('https://example.test/action');
+    expect(rendered).not.toMatch(/secret|provider_secret_value|token=|fragment/u);
   });
 
   it('reports an interrupt (Ctrl+C) as "interrupted", not a fabricated Deny', async () => {

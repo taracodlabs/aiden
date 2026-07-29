@@ -41,7 +41,8 @@ import {
 import { renderCapabilityCard } from './display/capabilityCard';
 import type { CapabilityCardData } from '../../providers/v4/types';
 import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
-import { recoveryActionsForOutcome } from './recoveryActions';
+import type { OperatorActivityState } from './operatorProjection';
+import { AIDEN_LOGO_LINES } from '../../core/v4/ui/identity';
 
 const DISPLAY_ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
 
@@ -381,15 +382,6 @@ export interface AgentTurnOptions {
   reasoning?: string;
 }
 
-const AIDEN_BANNER = String.raw`
-█████╗  ██╗██████╗ ███████╗███╗   ██╗
-██╔══██╗██║██╔══██╗██╔════╝████╗  ██║
-███████║██║██║  ██║█████╗  ██╔██╗ ██║
-██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║
-██║  ██║██║██████╔╝███████╗██║ ╚████║
-╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝
-`;
-
 /**
  * v4.9.0 pre-ship UI hotfix — pure context-bar helpers. Extracted
  * for testability + to fix the "always empty" symptom. Scale:
@@ -441,11 +433,15 @@ export class Display {
   // Modal prompts need the full terminal surface while they own stdin. This
   // depth pauses only composer painting and retains the exact draft/hint.
   private composerSurfacePauseDepth = 0;
+  private nextLiveRowIdentity = 0;
 
   constructor(opts: { skin?: SkinEngine; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}) {
     this.skin = opts.skin ?? getSkinEngine();
     this.out = opts.stdout ?? process.stdout;
     this.err = opts.stderr ?? process.stderr;
+    if (composerLaneEnabled() && this.out.isTTY) {
+      this.composerLane = new ComposerLane(this.laneSink(), this.laneStyle());
+    }
     try {
       marked.setOptions({ renderer: new TerminalRenderer() as never });
     } catch {
@@ -475,10 +471,8 @@ export class Display {
    */
   banner(_version = '4.0.0', _opts: { tip?: string } = {}): string {
     const sk = this.skin;
-    const lines = AIDEN_BANNER.split('\n').map((l) =>
-      l ? `  ${sk.applyColors(l, 'brand')}` : '',
-    );
-    return `${lines.join('\n')}\n`;
+    const lines = AIDEN_LOGO_LINES.map((line) => `  ${sk.applyColors(line, 'brand')}`);
+    return `\n${lines.join('\n')}\n\n`;
   }
 
   /** Print the banner. `opts.tip` accepted for backward compat; unused. */
@@ -1112,6 +1106,26 @@ export class Display {
    * apart from emitting `text\n` once.
    */
   startSpinner(text: string): SpinnerHandle {
+    const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
+    if (screenOwner) {
+      const rowId = `command:${++this.nextLiveRowIdentity}`;
+      let current = text;
+      let stopped = false;
+      screenOwner.setLiveRow(rowId, `⚙ ${current}`);
+      return {
+        setText: (next: string): void => {
+          if (stopped) return;
+          current = next;
+          screenOwner.setLiveRow(rowId, `⚙ ${current}`);
+        },
+        stop: (finalText?: string): void => {
+          if (stopped) return;
+          stopped = true;
+          if (finalText) screenOwner.settleLiveRow(rowId, finalText);
+          else screenOwner.removeLiveRow(rowId);
+        },
+      };
+    }
     const skin = this.skin;
     const frames = skin.getActive().glyphs?.spinner ?? ['|', '/', '-', '\\'];
     const isTty = !!this.out.isTTY;
@@ -1201,6 +1215,40 @@ export class Display {
     initialVerb: string = 'thinking',
     opts: { waveBar?: boolean } = {},
   ): ActivityIndicatorHandle {
+    const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
+    if (screenOwner) {
+      const rowId = `command-activity:${++this.nextLiveRowIdentity}`;
+      let verb = initialVerb;
+      let paused = false;
+      let stopped = false;
+      const paint = (): void => screenOwner.setLiveRow(rowId, `⚙ ${verb}`);
+      paint();
+      return {
+        pause: (): void => {
+          if (stopped || paused) return;
+          paused = true;
+          screenOwner.removeLiveRow(rowId);
+        },
+        resume: (next?: string): void => {
+          if (stopped) return;
+          if (next) verb = next;
+          paused = false;
+          paint();
+        },
+        setVerb: (next: string): void => {
+          if (stopped) return;
+          verb = next;
+          if (!paused) paint();
+        },
+        stop: (): void => {
+          if (stopped) return;
+          stopped = true;
+          screenOwner.removeLiveRow(rowId);
+        },
+        isPaused: (): boolean => paused,
+        isStopped: (): boolean => stopped,
+      };
+    }
     const sk     = this.skin;
     const out    = this.out;
     const isTty  = !!out.isTTY;
@@ -1498,6 +1546,8 @@ export class Display {
     let invalidated = false;
     let lastBody = '';
     let frameIndex = 0;
+    const rowId = `provider:${++this.nextLiveRowIdentity}`;
+    const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
 
     const animation = (width: number): string => {
       if (width >= 60) {
@@ -1525,6 +1575,12 @@ export class Display {
     };
     const erase = (): void => {
       if (!printed || !isTty) return;
+      if (screenOwner) {
+        screenOwner.removeLiveRow(rowId);
+        printed = false;
+        lastBody = '';
+        return;
+      }
       this.writeOutput('\x1b[1A\x1b[2K\r');
       printed = false;
       lastBody = '';
@@ -1535,9 +1591,10 @@ export class Display {
       if (typeof frame === 'number') frameIndex = frame;
       const next = body();
       if (printed && !invalidated && next === lastBody) return;
-      this.writeOutput(printed
-        ? `\x1b[1A\x1b[2K\r${next}\x1b[1B\r`
-        : `${next}\n`);
+      if (screenOwner) screenOwner.setLiveRow(rowId, next);
+      else this.writeOutput(printed
+          ? `\x1b[1A\x1b[2K\r${next}\x1b[1B\r`
+          : `${next}\n`);
       printed = true;
       invalidated = false;
       lastBody = next;
@@ -1594,7 +1651,7 @@ export class Display {
     name: string,
     args: unknown,
     readActivity?: () => ActivitySnapshot,
-    opts: { externalTicker?: boolean } = {},
+    opts: { externalTicker?: boolean; activityId?: string } = {},
   ): ToolRowHandle {
     // v4.1.5 Phase 1d (Q-Q2-a) — TRAIL_HIDE_TOOLS suppression.
     //
@@ -1709,6 +1766,8 @@ export class Display {
     const out = this.out;
     const writeOutput = (text: string): void => this.writeOutput(text);
     const isTty = !!out.isTTY;
+    const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
+    const rowId = opts.activityId ?? `tool:${++this.nextLiveRowIdentity}`;
     // Keep a two-cell safety margin. Windows ConPTY can report the cursor
     // width one cell beyond the last safe printable column; filling that cell
     // sets the terminal's pending-wrap flag and makes the next repaint walk
@@ -1750,9 +1809,18 @@ export class Display {
       return `${truncateVisible(body, width)}\n`;
     };
 
-    const replaceLast = (row: string, settle = false): void => {
+    const replaceLast = (
+      row: string,
+      settle = false,
+      terminalState: Extract<OperatorActivityState,
+        'succeeded' | 'failed' | 'denied' | 'interrupted' | 'cancelled' | 'timed_out' | 'unknown' | 'stale'> = 'succeeded',
+    ): void => {
       const fitted = fitTerminalRow(row);
-      if (isTty && printed) {
+      if (screenOwner) {
+        const body = fitted.endsWith('\n') ? fitted.slice(0, -1) : fitted;
+        if (settle) screenOwner.settleLiveRow(rowId, body, terminalState);
+        else screenOwner.setLiveRow(rowId, body);
+      } else if (isTty && printed) {
         const body = fitted.endsWith('\n') ? fitted.slice(0, -1) : fitted;
         this.writeOutput(settle
           ? `\x1b[1A\x1b[2K\r${body}\n`
@@ -1764,6 +1832,11 @@ export class Display {
 
     // Erase the last printed line (TTY only).
     const eraseLast = (): void => {
+      if (screenOwner) {
+        screenOwner.removeLiveRow(rowId);
+        printed = false;
+        return;
+      }
       if (isTty && printed) {
         this.writeOutput('\x1b[1A\x1b[2K\r');
         printed = false;
@@ -1773,7 +1846,13 @@ export class Display {
     const writeFinal = (suffix: string, kind: ColorKindForBracket): void => {
       stopTick();
       turnIdleDiagnostic('activity.row.final', { name });
-      replaceLast(outcomeRow(suffix, kind), true);
+      const terminalState = /^denied\b/u.test(suffix) ? 'denied'
+        : /^cancelled\b/u.test(suffix) ? 'cancelled'
+        : /^timed out\b/u.test(suffix) ? 'timed_out'
+        : /^unknown\b/u.test(suffix) ? 'unknown'
+        : /^(?:fail|failed|blocked|partial|empty (?:fail|retry))\b/u.test(suffix) ? 'failed'
+        : 'succeeded';
+      replaceLast(outcomeRow(suffix, kind), true, terminalState);
     };
 
     const startRunningTick = (): void => {
@@ -1796,7 +1875,12 @@ export class Display {
       // its own newline-fencing + in-place rerender of the just-streamed
       // chunk so this row lands cleanly on its own line below.
       this.commitStreamChunk();
-      this.writeOutput(fitTerminalRow(runningRow()));
+      if (screenOwner) {
+        const initial = fitTerminalRow(runningRow());
+        screenOwner.setLiveRow(rowId, initial.endsWith('\n') ? initial.slice(0, -1) : initial);
+      } else {
+        this.writeOutput(fitTerminalRow(runningRow()));
+      }
       printed = true;
       // v4.1.3-essentials: start the live-elapsed ticker. Fires every
       // 1s; first tick at +1s, when `runningRow()` starts emitting the
@@ -1969,7 +2053,9 @@ export class Display {
         if (settled || !pausedRow) return;
         pausedRow = false;
         if (!isTty) return;
-        writeOutput(fitTerminalRow(runningRow()));
+        const resumed = fitTerminalRow(runningRow());
+        if (screenOwner) screenOwner.setLiveRow(rowId, resumed.endsWith('\n') ? resumed.slice(0, -1) : resumed);
+        else writeOutput(resumed);
         printed = true;
         startRunningTick();
       },
@@ -2140,7 +2226,7 @@ export class Display {
 
   /** Route flowing output through the fixed-region owner while it is active. */
   private writeOutput(text: string): void {
-    if (this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()) {
+    if (this.composerLane) {
       this.composerLane.writeAbove(text);
       return;
     }
@@ -2229,6 +2315,15 @@ export class Display {
     return composerLaneEnabled() && !!this.out.isTTY;
   }
 
+  /** Repaint the owned interactive surface after an effective theme change. */
+  refreshTheme(): void {
+    if (this.composerLane?.isActive()) {
+      this.paintComposerSurface();
+      return;
+    }
+    this.composerRepaint?.();
+  }
+
   /** Release all fixed bottom-region state for full-session teardown. */
   releaseBottomRegion(): void {
     this.composerSurfacePauseDepth = 0;
@@ -2281,7 +2376,9 @@ export class Display {
   private paintComposerSurface(): void {
     if (this.composerSurfacePauseDepth > 0) return;
     if (composerLaneEnabled() && this.out.isTTY) {
-      if (!this.composerLane) this.composerLane = new ComposerLane(this.laneSink());
+      if (!this.composerLane) {
+        this.composerLane = new ComposerLane(this.laneSink(), this.laneStyle());
+      }
       const content = this.composerContent();
       const hasStatus = typeof this.statusFooterSource === 'function'
         || this.statusFooterSource.length > 0;
@@ -2308,6 +2405,13 @@ export class Display {
     if (this.composerSurfacePauseDepth === 0) return;
     this.composerSurfacePauseDepth -= 1;
     if (this.composerSurfacePauseDepth === 0) this.paintComposerSurface();
+  }
+
+  private laneStyle(): { brand(value: string): string; muted(value: string): string } {
+    return {
+      brand: (value) => this.skin.applyColors(value, 'brand'),
+      muted: (value) => this.skin.applyColors(value, 'muted'),
+    };
   }
 
   /** Wire the lane to this display's real terminal stream + resize events. */
@@ -2404,13 +2508,26 @@ export class Display {
 
   /** Render the single structured outcome owned by turn finalization. */
   taskOutcome(outcome: TaskOutcomePresentation): void {
-    const details = outcome.taskId ? ` · Task: ${outcome.taskId}` : '';
-    const recovery = recoveryActionsForOutcome(outcome)[0];
-    const next = recovery?.command ? ` · Next: ${recovery.command}` : recovery?.instruction ? ` · ${recovery.instruction}` : '';
-    const text = `${outcome.label}${outcome.summary ? ` · ${outcome.summary}` : ''}${details}${next}`;
-    if (outcome.severity === 'success') this.success(text);
-    else if (outcome.severity === 'error' || outcome.severity === 'warning') this.warn(text);
-    else this.dim(text);
+    const taskId = outcome.taskId && terminalVisibleLength(outcome.taskId) > 13
+      ? `${outcome.taskId.slice(0, 8)}…${outcome.taskId.slice(-4)}`
+      : outcome.taskId;
+    const details = taskId ? ` · Task: ${taskId}` : '';
+    const projection = (() => {
+      switch (outcome.kind) {
+        case 'verified': return { glyph: '✓', label: outcome.label, role: 'success' as const };
+        case 'failed':
+        case 'timed_out': return { glyph: '×', label: outcome.label, role: 'error' as const };
+        case 'unverified_required': return { glyph: '?', label: 'Outcome unknown', role: 'warn' as const };
+        case 'cancelled': return { glyph: '■', label: outcome.label, role: 'muted' as const };
+        case 'completed_limited':
+        case 'partial':
+        case 'denied': return { glyph: '!', label: outcome.label, role: 'warn' as const };
+        case 'completed': return { glyph: '✓', label: outcome.label, role: 'success' as const };
+      }
+    })();
+    const summary = outcome.summary ? ` · ${outcome.summary}` : '';
+    const glyph = this.skin.applyColors(projection.glyph, projection.role);
+    this.writeOutput(`${glyph} ${projection.label}${summary}${details}\n`);
   }
 
   /**
@@ -2515,6 +2632,67 @@ export class Display {
   // reprints the formatted output.
   private streamBuffer = '';
   private streamLineCount = 0;
+  private streamProjectionSequence = 0;
+  private streamProjectionId = '';
+  private streamProjectionHeaderPending = false;
+
+  private projectedStreamOwner(): ComposerLane | null {
+    return this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()
+      ? this.composerLane
+      : null;
+  }
+
+  /** Scroll only the transcript viewport; composer and live rows remain fixed. */
+  scrollTranscript(deltaRows: number): void {
+    this.composerLane?.scrollTranscript(deltaRows);
+  }
+
+  /** Restore sticky-tail transcript following. */
+  followTranscript(): void {
+    this.composerLane?.followTranscript();
+  }
+
+  /** Rebuild one live row from durable state before the interactive surface mounts. */
+  restoreDurableActivity(id: string, summary: string): void {
+    this.composerLane?.setLiveRow(`durable:${id}`, summary);
+  }
+
+  removeDurableActivity(id: string): void {
+    this.composerLane?.removeLiveRow(`durable:${id}`);
+  }
+
+  /** Clear the visual transcript while retaining composer and status state. */
+  clearScreen(): void {
+    if (this.composerLane) {
+      this.composerLane.clearViewport();
+      return;
+    }
+    if (this.out.isTTY) this.out.write('\x1b[3J\x1b[2J\x1b[H');
+  }
+
+  private projectedStreamText(formatted: boolean): string {
+    let body = this.streamBuffer;
+    if (formatted && body) {
+      try {
+        body = this.applyFrameToRendered(this.markdown(body).trimEnd());
+      } catch { /* raw streamed text remains the honest fallback */ }
+    } else {
+      body = body.split('\n').map((line) => `  ${line}`).join('\n');
+    }
+    return `${this.streamProjectionHeaderPending ? this.agentHeader().trimEnd() + '\n' : ''}${body}`;
+  }
+
+  private settleProjectedStream(owner: ComposerLane): void {
+    if (this.streamBuffer) {
+      owner.settleLiveRow(this.streamProjectionId, this.projectedStreamText(true));
+      this.streamProjectionHeaderPending = false;
+    } else {
+      owner.removeLiveRow(this.streamProjectionId);
+    }
+    this.streamBuffer = '';
+    this.streamLineCount = 0;
+    this.streamProjectionId = `assistant-stream:${++this.streamProjectionSequence}`;
+  }
 
   /**
    * v4.1.4 reply-quality polish (Q-ResizeReflow Option B): zero the
@@ -2535,6 +2713,7 @@ export class Display {
    */
   resetStreamFrameForResize(): void {
     if (!this.streamHeaderShown) return;
+    if (this.projectedStreamOwner()) return;
     this.streamLineCount = 0;
     this.streamBuffer = '';
     // Header was wiped by the hard-clear too — let the next
@@ -2554,17 +2733,26 @@ export class Display {
    */
   streamPartial(text: string): void {
     if (!text) return;
+    const projectedOwner = this.projectedStreamOwner();
     if (!this.streamHeaderShown) {
       // Phase 26.2.3 — share the `▎ Aiden` header with non-streaming
       // agentTurn so streamed + non-streamed responses open identically.
-      this.writeOutput(this.agentHeader());
+      if (!projectedOwner) this.writeOutput(this.agentHeader());
       this.streamHeaderShown = true;
       this.streamBuffer = '';
       this.streamLineCount = 0;
+      this.streamProjectionId = `assistant-stream:${++this.streamProjectionSequence}`;
+      this.streamProjectionHeaderPending = true;
       this.uiEventsFiredThisTurn = false;
       // agentHeader emits trailing `\n\n`; cursor is at col 0 of a fresh
       // line, so the very next chunk needs the leading indent.
       this.streamLastEndedNewline = true;
+    }
+    if (projectedOwner) {
+      this.streamBuffer += text;
+      this.streamLastEndedNewline = text.endsWith('\n');
+      projectedOwner.setLiveRow(this.streamProjectionId, this.projectedStreamText(false));
+      return;
     }
     // v4.8.0 Slice 7 hotfix #3 — inject a 2-cell indent at every line
     // start so streamed content aligns with the ▎ bar in agentHeader.
@@ -2761,6 +2949,12 @@ export class Display {
    */
   private commitStreamChunk(): void {
     if (!this.streamHeaderShown) return;
+    const projectedOwner = this.projectedStreamOwner();
+    if (projectedOwner) {
+      this.settleProjectedStream(projectedOwner);
+      this.streamLastEndedNewline = true;
+      return;
+    }
     // Ensure the streamed chunk ends with a newline so the interrupt
     // row doesn't stick to mid-token text from the prior delta.
     if (!this.streamLastEndedNewline) {
@@ -2838,6 +3032,15 @@ export class Display {
    */
   streamComplete(): void {
     if (!this.streamHeaderShown) return;
+    const projectedOwner = this.projectedStreamOwner();
+    if (projectedOwner) {
+      this.settleProjectedStream(projectedOwner);
+      this.streamHeaderShown = false;
+      this.streamLastEndedNewline = false;
+      this.streamProjectionHeaderPending = false;
+      this.uiEventsFiredThisTurn = false;
+      return;
+    }
     if (!this.streamLastEndedNewline) {
       this.writeOutput('\n');
       this.streamLineCount += 1;

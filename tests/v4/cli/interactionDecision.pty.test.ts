@@ -34,6 +34,12 @@ function stripAnsi(value: string): string {
     .replace(/\r/g, '');
 }
 
+function currentTurn(output: string, prompt: string): string {
+  const marker = `▲ You  ${prompt}`;
+  const start = output.lastIndexOf(marker);
+  return start >= 0 ? output.slice(start) : output;
+}
+
 afterEach(async () => {
   if (child) {
     try { child.kill(); } catch { /* already exited */ }
@@ -162,6 +168,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
     let output = '';
     let state = 'boot';
     let turnStart = 0;
+    let commandStart = 0;
     const settled: Record<string, string> = {};
 
     await new Promise<void>((resolve, reject) => {
@@ -182,42 +189,44 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           state = 'single-settle';
           setTimeout(() => child!.write('\x03'), 250);
         } else if (state === 'single-settle' && plain.slice(turnStart).includes('Cancelled') && readyCount >= 2) {
-          settled.single = plain.slice(turnStart);
+          settled.single = currentTurn(plain, 'request interrupted write');
           state = 'single-denial-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request explicitly denied command');
         } else if (state === 'single-denial-prompt' && plain.slice(turnStart).includes('Decision')) {
           state = 'single-denial-settle';
-          setTimeout(() => {
-            child!.write('\x1b[B');
-            setTimeout(() => child!.write('\r'), 150);
-          }, 250);
+          setTimeout(() => child!.write('\r'), 250);
         } else if (
           state === 'single-denial-settle'
           && provider!.callCount() >= 3
           && plain.slice(turnStart).includes('Denied · Task:')
           && readyCount >= 3
         ) {
-          settled.denial = plain.slice(turnStart);
+          settled.denial = currentTurn(plain, 'request explicitly denied command');
           state = 'clear-before-allow';
+          commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-before-allow' && plain.match(/History cleared\./g)?.length === 1 && readyCount >= 4) {
+        } else if (state === 'clear-before-allow' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 4) {
           state = 'single-allow-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request approved command');
         } else if (state === 'single-allow-prompt' && plain.slice(turnStart).includes('Decision')) {
           state = 'single-allow-settle';
-          setTimeout(() => child!.write('\r'), 250);
+          setTimeout(() => {
+            child!.write('\x1b[A');
+            setTimeout(() => child!.write('\r'), 150);
+          }, 250);
         } else if (
           state === 'single-allow-settle'
           && provider!.callCount() >= 5
           && plain.slice(turnStart).includes('Completed · Task:')
           && readyCount >= 5
         ) {
-          settled.allow = plain.slice(turnStart);
+          settled.allow = currentTurn(plain, 'request approved command');
           state = 'clear-after-single';
+          commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-single' && plain.match(/History cleared\./g)?.length === 2 && readyCount >= 6) {
+        } else if (state === 'clear-after-single' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 6) {
           state = 'batch-valid-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request partial batch');
@@ -233,10 +242,11 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           && /(?:Partially completed|Verified) · Task:/.test(plain.slice(turnStart))
           && readyCount >= 7
         ) {
-          settled.retry = plain.slice(turnStart);
+          settled.retry = currentTurn(plain, 'request partial batch');
           state = 'clear-after-retry';
+          commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-retry' && plain.match(/History cleared\./g)?.length === 3 && readyCount >= 8) {
+        } else if (state === 'clear-after-retry' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 8) {
           state = 'batch-cancel-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request cancelled batch');
@@ -249,10 +259,11 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           && plain.slice(turnStart).includes('Cancelled · Task:')
           && readyCount >= 9
         ) {
-          settled.cancel = plain.slice(turnStart);
+          settled.cancel = currentTurn(plain, 'request cancelled batch');
           state = 'clear-after-cancel';
+          commandStart = output.length;
           typeLine(child!, '/clear');
-        } else if (state === 'clear-after-cancel' && plain.match(/History cleared\./g)?.length === 4 && readyCount >= 10) {
+        } else if (state === 'clear-after-cancel' && stripAnsi(output.slice(commandStart)).includes('New chat started') && readyCount >= 10) {
           state = 'batch-none-prompt';
           turnStart = plain.length;
           typeLine(child!, 'request denied batch');
@@ -265,7 +276,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
           && plain.slice(turnStart).includes('Denied · Task:')
           && readyCount >= 11
         ) {
-          settled.none = plain.slice(turnStart);
+          settled.none = currentTurn(plain, 'request denied batch');
           state = 'queue';
           typeLine(child!, '/queue');
         } else if (state === 'queue' && /queue is empty/i.test(plain)) {

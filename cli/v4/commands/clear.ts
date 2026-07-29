@@ -12,12 +12,19 @@ import type { SlashCommand } from '../commandRegistry';
 
 export const clear: SlashCommand = {
   name: 'clear',
-  description: 'Clear conversation history.',
+  description: 'Start a clean conversation; durable Jobs and proof remain available.',
   category: 'system',
   icon: '*',
   handler: async (ctx) => {
+    const id = ctx.session?.startNewSession?.() ?? null;
+    if (id) {
+      ctx.display.clearScreen();
+      ctx.display.success('New chat started');
+      ctx.display.dim('Previous Jobs and proof remain available through /jobs and /trace.');
+      return { clearHistory: true, suppressSeparator: true };
+    }
     if (ctx.session) ctx.session.clearHistory();
-    ctx.display.dim('History cleared.');
-    return { clearHistory: true };
+    ctx.display.dim('Conversation reset in this runtime. Durable Jobs and proof are unchanged.');
+    return { clearHistory: true, suppressSeparator: true };
   },
 };

@@ -1,5 +1,8 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { Writable } from 'node:stream';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import { CommandRegistry } from '../../../cli/v4/commandRegistry';
@@ -28,6 +31,7 @@ import {
   quit,
 } from '../../../cli/v4/commands';
 import { ApprovalEngine } from '../../../moat/approvalEngine';
+import { getCurrentName, resetToDefault } from '../../../core/v4/theme/themeRegistry';
 
 function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex
@@ -62,7 +66,7 @@ function makeCtx(over: Record<string, unknown> = {}) {
 }
 
 describe('barrel exports', () => {
-  it('allCommands has 58 entries with unique names', () => {
+  it('allCommands has 68 entries with unique names', () => {
     // Phase 16b.3 added /identity (17 → 18).
     // Phase 16b.4 added /debug-prompt (18 → 19).
     // Phase 16c added /streaming (19 → 20).
@@ -99,9 +103,10 @@ describe('barrel exports', () => {
     // v4.12.1 Pillar 4 Slice 2b added /redirect (55 → 56).
     // v4.14 added /auto (one-command Partner opt-in) (56 → 57).
     // v4.14 added /mode (friendly trust-level viewer/switcher) (57 → 58).
-    expect(allCommands.length).toBe(59);
+    // Operator views and conversation/screen controls add eleven commands.
+    expect(allCommands.length).toBe(69);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(59);
+    expect(names.size).toBe(69);
   });
 
   it('every command exposes name, description, category', () => {
@@ -572,37 +577,56 @@ describe('/skin', () => {
     const skinEngine = new SkinEngine({ forceMono: true });
     const { ctx, output } = makeCtx({ skin: skinEngine });
     await skin.handler(ctx as any);
-    expect(output()).toMatch(/default/);
+    expect(output()).toMatch(/aiden-ember/);
     expect(output()).toMatch(/monochrome/);
   });
 
-  it('switches to a known skin', async () => {
+  it('maps a known legacy skin into effective theme authority', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'aiden-skin-command-'));
     const skinEngine = new SkinEngine({ forceMono: true });
     const { ctx, output } = makeCtx({
       skin: skinEngine,
+      paths: { root },
       rawArgs: 'monochrome',
     });
-    await skin.handler(ctx as any);
-    expect(skinEngine.getActive().name).toBe('monochrome');
-    expect(output()).toMatch(/Skin: monochrome/);
+    try {
+      await skin.handler(ctx as any);
+      expect(skinEngine.getActive().name).toBe('default');
+      expect(getCurrentName()).toBe('monochrome');
+      expect(output()).toMatch(/Theme set to monochrome/);
+    } finally {
+      resetToDefault();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
-  it('reload re-reads the active skin from disk', async () => {
+  it('reload re-reads the effective theme from disk', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'aiden-skin-reload-'));
+    writeFileSync(path.join(root, 'theme.yaml'), 'name: reloaded\ncolors:\n  brand:\n    primary: "#123456"\n');
     const skinEngine = new SkinEngine({ forceMono: true });
-    const reloadSpy = vi.spyOn(skinEngine, 'reload');
-    const { ctx, output } = makeCtx({ skin: skinEngine, rawArgs: 'reload' });
-    await skin.handler(ctx as any);
-    expect(reloadSpy).toHaveBeenCalled();
-    expect(output()).toMatch(/Skin reloaded/);
+    const { ctx, output } = makeCtx({ skin: skinEngine, paths: { root }, rawArgs: 'reload' });
+    try {
+      await skin.handler(ctx as any);
+      expect(getCurrentName()).toBe('reloaded');
+      expect(output()).toMatch(/Theme reloaded/);
+    } finally {
+      resetToDefault();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('reports an actionable error when reload fails', async () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'aiden-skin-reload-error-'));
+    writeFileSync(path.join(root, 'theme.yaml'), 'name: : invalid');
     const skinEngine = new SkinEngine({ forceMono: true });
-    vi.spyOn(skinEngine, 'reload').mockRejectedValueOnce(new Error('bad yaml'));
-    const { ctx, output } = makeCtx({ skin: skinEngine, rawArgs: 'reload' });
-    await skin.handler(ctx as any);
-    expect(output()).toMatch(/reload failed/i);
-    expect(output()).toMatch(/yaml/);
+    const { ctx, output } = makeCtx({ skin: skinEngine, paths: { root }, rawArgs: 'reload' });
+    try {
+      await skin.handler(ctx as any);
+      expect(output()).toMatch(/parse failed/i);
+    } finally {
+      resetToDefault();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('rejects an unknown skin name with an actionable error', async () => {
@@ -611,7 +635,7 @@ describe('/skin', () => {
     const { ctx, output } = makeCtx({ skin: skinEngine, rawArgs: 'totally-fake' });
     await skin.handler(ctx as any);
     expect(skinEngine.getActive().name).toBe(before);
-    expect(output()).toMatch(/Unknown skin/);
+    expect(output()).toMatch(/has no effective-theme mapping/);
   });
 });
 
@@ -754,7 +778,7 @@ describe('/clear and /quit', () => {
     });
     const res = await clear.handler(ctx as any);
     expect(clearHistory).toHaveBeenCalled();
-    expect(res).toEqual({ clearHistory: true });
+    expect(res).toEqual({ clearHistory: true, suppressSeparator: true });
   });
 
   it('quit signals exit', async () => {

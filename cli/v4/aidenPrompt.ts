@@ -77,6 +77,8 @@ export interface AidenPromptConfig {
   fixedComposer?: {
     update: (value: string, hint: string, cursorIndex: number) => void;
     ready?: () => void;
+    scroll?: (deltaRows: number) => void;
+    follow?: () => void;
   };
 }
 
@@ -228,6 +230,10 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
       sequenceLength: (key as typeof key & { sequence?: string }).sequence?.length ?? 0,
       lineLength: rl.line.length,
     });
+
+    if (key.name === 'pageup') { config.fixedComposer?.scroll?.(8); return; }
+    if (key.name === 'pagedown') { config.fixedComposer?.scroll?.(-8); return; }
+    if (key.ctrl && key.name === 'end') { config.fixedComposer?.follow?.(); return; }
 
     // ── Submit ──
     if (isEnterKey(key)) {

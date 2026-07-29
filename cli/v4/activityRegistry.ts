@@ -67,6 +67,7 @@ export class ActivityRegistry {
       name: string,
       args: unknown,
       read: () => ActivitySnapshot,
+      id: string,
     ) => ToolRowHandle,
     private readonly now: () => number = Date.now,
     private readonly createTurnRow?: (verb: string) => LiveActivityRowHandle,
@@ -117,7 +118,7 @@ export class ActivityRegistry {
       handle: undefined as unknown as ToolRowHandle,
     };
     this.entries.set(id, entry);
-    entry.handle = this.createRow(name, args, () => this.snapshot(id));
+    entry.handle = this.createRow(name, args, () => this.snapshot(id), id);
     entry.state = 'running';
     if (this.modalDepth > 0) entry.handle.pause();
     this.ensureTicker();

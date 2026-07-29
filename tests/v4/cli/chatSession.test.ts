@@ -20,6 +20,8 @@ import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 import { createJobControlAuthority } from '../../../core/v4/daemon/jobControlAuthority';
 import { currentJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
+import { ProviderAttemptLedger } from '../../../core/v4/usageLedger';
+import { setProviderAttemptLedger } from '../../../providers/v4/providerAttemptAccounting';
 
 function mkDisplay() {
   const chunks: string[] = [];
@@ -654,6 +656,46 @@ describe('ChatSession — v4.6 Phase 2Q-B REPL parent-run row', () => {
     // Ref cleared after the turn so cross-turn spawns get NULL parent.
     expect(ref.runId).toBeNull();
     expect(ref.sessionId).toBeNull();
+  });
+
+  it('keeps expanded provider accounting out of the ordinary transcript', async () => {
+    const ledger = new ProviderAttemptLedger(':memory:');
+    const { display, out } = mkDisplay();
+    const { agent } = mkAgent({ finalContent: 'ordinary response' });
+    const { store } = mkFakeRunStore();
+    const ref: { runId: number | null; sessionId: string | null } = { runId: null, sessionId: null };
+    ledger.append({
+      callId: 'call_visible_usage', parentCallId: null, sessionId: 'sess-abc-123', taskId: null,
+      runId: '100', jobId: null, attemptId: null, attemptGeneration: null,
+      entryPoint: 'cli', purpose: 'primary', providerConfigured: 'groq', providerActual: 'groq',
+      modelConfigured: 'model', modelActual: 'model', apiMode: 'chat_completions', transport: 'https',
+      attemptIndex: 0, fallbackIndex: 0, credentialLabelRedacted: null, status: 'success', errorClass: null,
+      startedAt: 1, completedAt: 2, estimatedInputTokens: 12, estimatedOutputTokens: 4,
+      estimatedSchemaTokens: 0, estimatedImageTokens: 0, providerInputTokens: 12,
+      providerOutputTokens: 4, providerCacheReadTokens: 0, providerCacheWriteTokens: 0,
+      providerReasoningTokens: 0, requestBytes: 10, responseBytes: 10, usageSource: 'provider_reported',
+      costAmount: null, costCurrency: null, costStatus: 'unknown', costSource: null,
+      contextSnapshotId: null, toolSchemaSnapshotId: null, coreSchemaCount: 0, mcpSchemaCount: 0,
+      pluginSchemaCount: 0, deferredSchemaCount: 0, serializedSchemaBytes: 0, selectedProfile: null,
+      selectedMode: 'balanced', rawToolResultBytes: 0, transmittedToolResultBytes: 0,
+      memoryTokens: 0, userProfileTokens: 0, projectMemoryTokens: 0, skillIndexTokens: 0,
+      loadedSkillTokens: 0,
+    });
+    setProviderAttemptLedger(ledger);
+    try {
+      const session = new ChatSession(buildOpts({
+        display, agent: agent as never,
+        promptApi: mkPromptApi({ inputs: ['hello', '/quit'] }),
+        replRunStore: store, replInstanceId: 'inst-test', replParentRunRef: ref,
+      }));
+      await session.run();
+      const transcript = out.join('');
+      expect(transcript).toContain('ordinary response');
+      expect(transcript).not.toMatch(/^Usage: .*provider attempt/mu);
+    } finally {
+      setProviderAttemptLedger(null);
+      ledger.close();
+    }
   });
 
   it('writes failed status on agent throw and clears the ref', async () => {

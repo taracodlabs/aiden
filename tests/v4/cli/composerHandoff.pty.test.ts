@@ -84,20 +84,6 @@ function typeLikeKeyboard(terminal: RunningPty, text: string, submitDelayMs = 10
   writeNext();
 }
 
-function pressDownThenEnter(terminal: RunningPty, count: number): void {
-  let remaining = count;
-  const next = (): void => {
-    if (remaining > 0) {
-      remaining -= 1;
-      terminal.write('\x1b[B');
-      setTimeout(next, 80);
-    } else {
-      terminal.write('\r');
-    }
-  };
-  next();
-}
-
 function stripAnsi(value: string): string {
   return value
     // eslint-disable-next-line no-control-regex
@@ -344,7 +330,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI turn-to-composer handof
         }
         if (!denied && plain.includes('Decision')) {
           denied = true;
-          setTimeout(() => pressDownThenEnter(child!, 3), 200);
+          setTimeout(() => child!.write('\r'), 200);
         }
         if (!nextSent && readyCount >= 2 && plain.includes('DENIAL COMPLETE')) {
           nextSent = true;

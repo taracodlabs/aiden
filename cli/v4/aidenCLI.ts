@@ -35,6 +35,7 @@ import { ChatSession } from './chatSession';
 import { runTuiMode } from './aidenTUI';
 import { Display } from './display';
 import { SkinEngine } from './skinEngine';
+import { initializeEffectiveTheme } from './themeCompatibility';
 import { CommandRegistry } from './commandRegistry';
 import { CliCallbacks } from './callbacks';
 // Tier-3.1 (v4.1-tier3.1) — re-export the build fingerprint so the
@@ -1567,6 +1568,15 @@ export async function buildAgentRuntime(
   }
 
   const skin = new SkinEngine();
+  const effectiveTheme = initializeEffectiveTheme(
+    paths.root,
+    config.getValue<string>('display.skin', 'default'),
+    skin,
+  );
+  if (effectiveTheme.source === 'legacy-migration' && effectiveTheme.persisted) {
+    config.set('display.skin', 'default');
+    await config.save().catch(() => undefined);
+  }
   // Headless one-shot: route ALL display output to stderr so stdout carries
   // only the agent's answer (pipeable). Nothing streams to `display` during a
   // headless turn (runConversation is called bare), but any boot-time notice
@@ -4091,6 +4101,8 @@ export async function runQuery(
   });
 }
 
+let interactiveSessionCompleted = false;
+
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
   const runtime = await buildAgentRuntime(cliOpts, opts);
   const resumedActiveState = runtime.resumeSessionId
@@ -4201,15 +4213,22 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     replArtifactStore: runtime.replArtifactStore,
   };
 
-  if (cliOpts.tui) {
-    await runTuiMode({
-      sessionOpts: sessionOpts as any,
-      skinName:
-        runtime.config.getValue<string>('display.skin', 'default') ?? 'default',
-    });
-  } else {
-    const session = new ChatSession(sessionOpts as any);
-    await session.run();
+  try {
+    if (cliOpts.tui) {
+      await runTuiMode({
+        sessionOpts: sessionOpts as any,
+        skinName:
+          runtime.config.getValue<string>('display.skin', 'default') ?? 'default',
+      });
+    } else {
+      const session = new ChatSession(sessionOpts as any);
+      await session.run();
+    }
+  } finally {
+    // Terminal ownership ends with the interactive session, before service
+    // teardown. This prevents a referenced Windows console reader from keeping
+    // the process alive while a resource-free cleanup promise is still pending.
+    releaseInteractiveStdin();
   }
   if (runtime.mcpClient) {
     await runtime.mcpClient.closeAll().catch(() => undefined);
@@ -4222,6 +4241,31 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
   // and never throws.
   await runtime.channelManager.stopAll().catch(() => undefined);
   runtime.store.close?.();
+  releaseInteractiveOutput();
+  interactiveSessionCompleted = true;
+}
+
+/**
+ * The interactive session is finished and no later owner may consume terminal
+ * input. Pausing restores cooked input state; unreferencing the TTY reader lets
+ * the host shell resume even when Windows keeps the console reader allocated.
+ */
+export function releaseInteractiveStdin(
+  stdin: NodeJS.ReadStream = process.stdin,
+): void {
+  try { stdin.pause(); } catch { /* shutdown is already committed */ }
+  try { stdin.unref(); } catch { /* not every injected stream owns a native handle */ }
+}
+
+/** Release Windows TTY output references after every cleanup and final write. */
+export function releaseInteractiveOutput(
+  stdout: NodeJS.WriteStream = process.stdout,
+  stderr: NodeJS.WriteStream = process.stderr,
+): void {
+  try { stdout.unref(); } catch { /* redirected streams may not own a TTY handle */ }
+  if (stderr !== stdout) {
+    try { stderr.unref(); } catch { /* redirected streams may not own a TTY handle */ }
+  }
 }
 
 // ─── setup ─────────────────────────────────────────────────────────────
@@ -4442,6 +4486,10 @@ async function runSkillsSubcommand(
 if (require.main === module) {
   // eslint-disable-next-line @typescript-eslint/no-floating-promises
   main(process.argv).then((code) => {
+    // Interactive shutdown has already released terminal ownership and awaited
+    // every service/store cleanup. Exit explicitly because Node 20 can retain a
+    // completed ConPTY process even after all TTY handles are unreferenced.
+    if (interactiveSessionCompleted) process.exit(code);
     process.exitCode = code;
   });
 }

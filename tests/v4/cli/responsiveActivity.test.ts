@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ActivityRegistry } from '../../../cli/v4/activityRegistry';
 import { Display, type LiveActivityRowHandle, type ToolRowHandle } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 function stripAnsi(value: string): string {
   return value
@@ -104,7 +105,16 @@ describe('responsive registry-owned turn activity', () => {
   });
 
   it('clamps the complete provider row at 120, 44, and 100 columns', () => {
-    const { out, chunks } = makeOutput(120);
+    const screen = new TerminalScreen(120, 30);
+    const out = new Writable({
+      write(chunk, _encoding, callback) {
+        screen.write(chunk);
+        callback();
+      },
+    }) as Writable & { isTTY?: boolean; columns?: number; rows?: number };
+    out.isTTY = true;
+    out.columns = 120;
+    out.rows = 30;
     const display = new Display({
       stdout: out as unknown as NodeJS.WriteStream,
       skin: new SkinEngine({ forceMono: true }),
@@ -112,16 +122,17 @@ describe('responsive registry-owned turn activity', () => {
     display.setBusyHint('Enter → queue · /busy to change · Ctrl+C stop');
     const row = display.liveActivityRow('calling provider');
     const assertLatestFrameFits = (width: number): void => {
-      const frames = chunks.flatMap((chunk) => stripAnsi(chunk).split('\n'))
-        .filter((line) => line.includes('provider'));
-      expect(frames.length).toBeGreaterThan(0);
-      expect(frames.at(-1)!.length).toBeLessThanOrEqual(width - 2);
+      const frames = screen.lines().filter((line) => line.includes('provider'));
+      expect(frames).toHaveLength(1);
+      expect(frames[0].length).toBeLessThanOrEqual(width - 1);
     };
     assertLatestFrameFits(120);
     out.columns = 44;
+    screen.resize(44, 30);
     row.refresh();
     assertLatestFrameFits(44);
     out.columns = 100;
+    screen.resize(100, 30);
     row.refresh();
     assertLatestFrameFits(100);
     row.stop();

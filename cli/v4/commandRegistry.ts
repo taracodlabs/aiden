@@ -42,6 +42,10 @@ export interface ChatSessionLike {
   history: Message[];
   setHistory(messages: Message[]): void;
   clearHistory(): void;
+  /** Start a new persisted conversation when the runtime supports it. */
+  startNewSession?(): string | null;
+  /** Delete one stored conversation after the command layer confirms intent. */
+  deleteStoredSession?(idOrTitle?: string): { deletedId: string; replacementId: string | null } | null;
   getCurrentProvider(): string;
   getCurrentModel(): string;
   setProvider(providerId: string, modelId: string): Promise<void>;
@@ -118,6 +122,8 @@ export interface SlashCommandContext {
    * lifecycle without spinning up a separate API server process.
    */
   channelManager?: ChannelManager;
+  /** Read-only durable Job projections used by local operator views. */
+  jobEngine?: import('../../core/v4/daemon/jobEngine').JobEngine;
   /**
    * Phase 17: prompt-the-user hook used by /plugins install for the
    * permission summary confirmation. Returns true to grant, false to
@@ -157,6 +163,8 @@ export interface SlashCommandResult {
    * no rerun.
    */
   rerun?: string;
+  /** Command already owns the complete viewport transition. */
+  suppressSeparator?: boolean;
 }
 
 export type SlashCommandHandler = (
@@ -306,7 +314,7 @@ export class CommandRegistry {
   async execute(
     input: string,
     ctx: Omit<SlashCommandContext, 'args' | 'rawArgs' | 'registry'>,
-  ): Promise<{ handled: boolean; exit?: boolean; clearHistory?: boolean; rerun?: string }> {
+  ): Promise<{ handled: boolean; exit?: boolean; clearHistory?: boolean; rerun?: string; suppressSeparator?: boolean }> {
     const parsed = this.parse(input);
     if (!parsed) return { handled: false };
 
@@ -330,7 +338,13 @@ export class CommandRegistry {
     const raw = (await cmd.handler(fullCtx)) as SlashCommandResult | void;
     const result: SlashCommandResult = raw ? raw : {};
     this.recordRecent(cmd.name);
-    return { handled: true, exit: result.exit, clearHistory: result.clearHistory, rerun: result.rerun };
+    return {
+      handled: true,
+      exit: result.exit,
+      clearHistory: result.clearHistory,
+      rerun: result.rerun,
+      ...(result.suppressSeparator ? { suppressSeparator: true } : {}),
+    };
   }
 
   private closestVisibleCommand(input: string): string | null {

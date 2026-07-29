@@ -46,6 +46,10 @@ export interface TurnInputCallbacks {
    * current buffer, so the live composer can repaint what the user typed.
    */
   onBufferChange?: (buffer: string) => void;
+  /** Scroll the transcript without transferring composer ownership. */
+  onScroll?: (deltaRows: number) => void;
+  /** Return the transcript to sticky-tail mode. */
+  onFollow?: () => void;
 }
 
 /** Non-text keys that must never land in the line buffer. */
@@ -82,6 +86,9 @@ export function makeKeypressHandler(cb: TurnInputCallbacks): (str: string | unde
     if (seq === PASTE_END   || k.name === 'paste-end')   { pasting = false; return; }
 
     if (k.ctrl && k.name === 'c') { buffer = ''; pasting = false; cb.onCtrlC(); notify(prev); return; }
+    if (k.name === 'pageup') { cb.onScroll?.(8); return; }
+    if (k.name === 'pagedown') { cb.onScroll?.(-8); return; }
+    if (k.ctrl && k.name === 'end') { cb.onFollow?.(); return; }
     // Only a BARE ESC cancels — a CSI sequence (paste marker, arrow) does not.
     if (k.name === 'escape' && (seq === '\x1b' || seq === '')) { buffer = ''; pasting = false; cb.onEscape(); notify(prev); return; }
     if (k.name === 'return' || k.name === 'enter') {

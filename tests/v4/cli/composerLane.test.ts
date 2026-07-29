@@ -130,6 +130,94 @@ describe('ComposerLane — lifecycle', () => {
     expect(out).toMatch(/\x1b\[22;\d+H\x1b\[\?25h$/);
   });
 
+  it('rebuilds the semantic transcript when ownership resumes after a modal', () => {
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('Type your message');
+    lane.writeAbove('  ▲ You  run a slow safe tool\n');
+    lane.deactivate();
+    lane.writeAbove('Approval required\nDecision: Once\n');
+
+    const beforeResume = s.text().length;
+    lane.activate('Enter → queue', 'provider · model');
+    const resumedOutput = s.text().slice(beforeResume);
+
+    expect(resumedOutput).toContain('run a slow safe tool');
+    expect(resumedOutput).toContain('Approval required');
+  });
+
+  it('does not replay transcript bytes for a status-only refresh', () => {
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('Type your message', 'provider · 0ms');
+    lane.writeAbove('one durable transcript row\n');
+    const beforeStatus = s.text().length;
+
+    lane.paintStatus('provider · 1s');
+
+    expect(s.text().slice(beforeStatus)).not.toContain('one durable transcript row');
+  });
+
+  it('clears only the viewport projection and never replays it after resize', () => {
+    const s = mockSink(24, 80);
+    const lane = new ComposerLane(s);
+    lane.activate('draft remains', 'provider · model');
+    lane.writeAbove('old conversation row\n');
+    lane.clearTranscript();
+    const afterClear = s.text().length;
+    s.setCols(44);
+    s.fireResize(24);
+    const resized = s.text().slice(afterClear);
+    expect(resized).not.toContain('old conversation row');
+    expect(resized).toContain('draft remains');
+    expect(resized).toContain('provider');
+  });
+
+  it('physically resets the viewport once and preserves transcript behind an epoch boundary', () => {
+    const s = mockSink(24, 80);
+    const lane = new ComposerLane(s);
+    lane.activate({ draft: '', mode: 'idle' }, 'provider · model · ready');
+    lane.writeAbove('startup row\nprior user row\nprior assistant row\n');
+    lane.scrollTranscript(12);
+    const before = s.text().length;
+
+    lane.clearTranscript();
+
+    const clearOutput = s.text().slice(before);
+    expect(clearOutput).toContain(`${ESC}[3J${ESC}[2J${ESC}[H`);
+    expect(clearOutput).not.toContain('startup row');
+    expect(clearOutput).not.toContain('prior assistant row');
+    expect(clearOutput.match(/╭─ ▲ You/gu)).toHaveLength(1);
+    expect(clearOutput.match(/provider/gu)).toHaveLength(1);
+    expect(lane.viewportSnapshot()).toMatchObject({
+      epoch: 1,
+      scrollOffset: 0,
+      stickyTail: true,
+      selectedRow: null,
+      cachedWidth: 80,
+      cachedHeight: 24,
+      retainedTranscriptRows: 3,
+      visibleTranscriptRows: 0,
+    });
+  });
+
+  it('discards a trailing resize repaint captured before the viewport epoch changed', async () => {
+    const s = mockSink(24, 80);
+    const lane = new ComposerLane(s);
+    lane.activate({ draft: '', mode: 'idle' }, 'provider · model · ready');
+    lane.writeAbove('must stay hidden\n');
+    s.setCols(44);
+    s.fireResize(24);
+    lane.clearTranscript();
+    const afterClear = s.text().length;
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const lateOutput = s.text().slice(afterClear);
+    expect(lateOutput).not.toContain('must stay hidden');
+    expect(lane.viewportSnapshot()).toMatchObject({ epoch: 1, cachedWidth: 44, cachedHeight: 24 });
+  });
+
   it('resize re-reserves the region for the new height and repaints in place', () => {
     const s = mockSink(24);
     const lane = new ComposerLane(s);

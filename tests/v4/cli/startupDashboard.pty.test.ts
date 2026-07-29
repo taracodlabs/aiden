@@ -8,6 +8,15 @@ import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
 import { TerminalScreen } from '../harness/terminalScreen';
 
+const CANONICAL_LOGO = [
+  '█████╗  ██╗██████╗ ███████╗███╗   ██╗',
+  '██╔══██╗██║██╔══██╗██╔════╝████╗  ██║',
+  '███████║██║██║  ██║█████╗  ██╔██╗ ██║',
+  '██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║',
+  '██║  ██║██║██████╔╝███████╗██║ ╚████║',
+  '╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝',
+] as const;
+
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
 
@@ -93,6 +102,14 @@ async function launch(columns: number, paused = false): Promise<{
     () => output.includes(COMPOSER_READY_TOKEN),
     () => stripAnsi(output),
   );
+  await waitFor(
+    () => {
+      const lines = screen.snapshot().split('\n');
+      return (lines.at(-4)?.includes('You') ?? false)
+        && (lines.at(-1)?.includes('custom-default') ?? false);
+    },
+    () => screen.snapshot(),
+  );
   return {
     child,
     raw: () => output,
@@ -103,7 +120,7 @@ async function launch(columns: number, paused = false): Promise<{
 
 function dashboardLines(output: string): string[] {
   const lines = output.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.includes('█████╗') || /^\s*AIDEN\s*$/.test(line));
+  const start = lines.findIndex((line) => line.includes('█████╗') || /^\s*Aiden\s*$/.test(line));
   const end = lines.findIndex((line, index) => index >= start && line.startsWith('╭─ ▲ You'));
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
@@ -125,11 +142,22 @@ afterEach(async () => {
 });
 
 describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dashboard', () => {
+  it('emits the canonical six-line logo exactly once before composer ownership begins', async () => {
+    provider = await startMockProvider({ modelId: 'custom-default' });
+    const startup = await launch(100);
+    const physical = startup.plain();
+
+    for (const row of CANONICAL_LOGO) {
+      expect(physical.split(row)).toHaveLength(2);
+    }
+    expect(physical).not.toMatch(/\x1b\[3[13]m/u);
+  }, 30_000);
+
   it('selects wide, medium, and narrow transcript tiers without resize duplication', async () => {
     provider = await startMockProvider({ modelId: 'custom-default' });
 
     const wide = await launch(120, true);
-    const wideBeforeResize = wide.plain();
+    const wideBeforeResize = wide.rendered();
     expect(wideBeforeResize).toContain('Environment');
     expect(wideBeforeResize).toContain('Capabilities');
     expect(wideBeforeResize).toContain('Built solo');
@@ -148,29 +176,32 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     await new Promise((resolve) => setTimeout(resolve, 250));
     wide.child.resize(120, 50);
     await new Promise((resolve) => setTimeout(resolve, 250));
-    expect((wide.plain().match(/Autonomous AI Engine/g) ?? []).length).toBe(logoCount);
-    // ConPTY may replay visible bottom rows while reflowing its screen buffer;
-    // the typographic anchor is above that window and detects an actual second
-    // application startup render. The unit integration test separately proves
-    // the startup renderer owns no resize listener or repaint callback.
+    expect((wide.rendered().match(/Autonomous AI Engine/g) ?? []).length).toBe(logoCount);
 
     const medium = await launch(80);
-    expect(medium.plain()).toContain('Environment');
-    expect(medium.plain()).toContain('Capabilities');
-    expect(medium.plain()).toContain('github.com/taracodlabs/aiden');
-    expect(dashboardLines(medium.plain()).join('\n')).not.toContain('╭');
-    for (const line of dashboardLines(medium.plain())) {
+    const mediumRendered = medium.rendered();
+    expect(mediumRendered).toContain('Environment');
+    expect(mediumRendered).toContain('Capabilities');
+    expect(mediumRendered).toContain('github.com/taracodlabs/aiden');
+    expect(dashboardLines(mediumRendered).join('\n')).toContain('╭');
+    expect(mediumRendered).toContain('GitHub:');
+    expect(mediumRendered).toContain('Web:');
+    expect(mediumRendered).toContain('Contact:');
+    for (const line of dashboardLines(mediumRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(78);
     }
 
     const narrow = await launch(48);
     const narrowRendered = narrow.rendered();
-    expect(narrowRendered).toMatch(/\bAIDEN\b/);
-    expect(narrowRendered).toMatch(/Assistant\s+·\s+custom-default/i);
+    expect(narrowRendered).toContain('█████╗');
+    expect(narrowRendered).toMatch(/◇\s+Assistant\s+·\s+◆\s+custom-default/i);
     expect(narrowRendered).toMatch(/built solo/i);
-    expect(narrowRendered).not.toContain('Environment');
-    expect(narrowRendered).not.toContain('Capabilities');
-    expect(dashboardLines(narrowRendered).join('\n')).not.toContain('╭');
+    expect(narrowRendered).toContain('Environment');
+    expect(narrowRendered).toContain('Capabilities');
+    expect(dashboardLines(narrowRendered).join('\n')).toContain('╭');
+    expect(narrowRendered).toContain('GitHub:');
+    expect(narrowRendered).toContain('Web:');
+    expect(narrowRendered).toContain('Contact:');
     for (const line of dashboardLines(narrowRendered)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(46);
     }

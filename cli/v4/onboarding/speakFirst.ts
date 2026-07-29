@@ -54,6 +54,13 @@ export interface OnboardingMemory {
 export interface OnboardingOptions {
   paths:  AidenPaths;
   out?:   NodeJS.WriteStream;
+  /** Route visible text through the active presentation owner. */
+  write?: (text: string) => void;
+  /** Effective interactive theme supplied by the owning display. */
+  style?: {
+    accent(value: string): string;
+    muted(value: string): string;
+  };
   /** Injectable fs for tests. */
   fsImpl?: typeof fs;
   /** Injectable stdin for tests. Default: process.stdin. */
@@ -187,6 +194,8 @@ function defaultReadAnswer(
  */
 export async function renderOnboardingIntro(opts: OnboardingOptions): Promise<boolean> {
   const out    = opts.out    ?? process.stdout;
+  const write  = opts.write  ?? ((text: string) => { out.write(text); });
+  const style  = opts.style  ?? { accent: c.accent, muted: c.muted };
   const fsImpl = opts.fsImpl ?? fs;
   const input  = opts.input  ?? process.stdin;
   if (!out.isTTY) return false;
@@ -196,10 +205,10 @@ export async function renderOnboardingIntro(opts: OnboardingOptions): Promise<bo
   // One question only — just the name. Light, optional. The question is
   // written HERE (not by the reader) so it's always on screen, whichever
   // reader captures the line.
-  out.write(
+  write(
     '\n' +
-    `  ${c.accent("Hi — I'm Aiden.")} ` +
-    `${c.muted("I run right here on your machine, and I'll remember what matters as we work.")}\n\n` +
+    `  ${style.accent("Hi — I'm Aiden.")} ` +
+    `${style.muted("I run right here on your machine, and I'll remember what matters as we work.")}\n\n` +
     '  What should I call you? ',
   );
 
@@ -210,7 +219,7 @@ export async function renderOnboardingIntro(opts: OnboardingOptions): Promise<bo
   } catch {
     name = null;   // reader fault → graceful no-name
   }
-  out.write('\n');   // close the question line before the acknowledgement
+  write('\n');   // close the question line before the acknowledgement
 
   // Mark shown BEFORE the store so a store failure can never trigger a re-ask.
   await markOnboardingShown(opts.paths, fsImpl);
@@ -223,14 +232,14 @@ export async function renderOnboardingIntro(opts: OnboardingOptions): Promise<bo
     } catch {
       stored = false;   // store best-effort; never crash boot
     }
-    out.write(
+    write(
       stored
-        ? `  ${c.muted(`Good to meet you, ${name}. I'll remember that.`)}\n\n`
-        : `  ${c.muted(`Good to meet you, ${name}.`)}\n\n`,
+        ? `  ${style.muted(`Good to meet you, ${name}. I'll remember that.`)}\n\n`
+        : `  ${style.muted(`Good to meet you, ${name}.`)}\n\n`,
     );
   } else {
     // Skipped / empty / non-interactive → graceful, no store, never re-asks.
-    out.write(`  ${c.muted("No problem — just say the word when you're ready.")}\n\n`);
+    write(`  ${style.muted("No problem — just say the word when you're ready.")}\n\n`);
   }
   return true;
 }

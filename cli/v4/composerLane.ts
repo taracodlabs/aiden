@@ -16,14 +16,26 @@
  * never emits terminal-control sequences.
  */
 
+import {
+  activeActivityRows,
+  initialOperatorProjection,
+  reduceOperatorProjection,
+  transcriptSource,
+  visibleTranscriptSource,
+  type OperatorActivityState,
+  type OperatorProjectionState,
+} from './operatorProjection';
+
 const ESC = '\x1b';
 const SAVE = `${ESC}7`;
 const RESTORE = `${ESC}8`;
 const SAVE_TRANSCRIPT = `${ESC}[s`;
 const RESTORE_TRANSCRIPT = `${ESC}[u`;
+const CLEAR_PHYSICAL_VIEWPORT = `${ESC}[?25l${ESC}[r${ESC}[3J${ESC}[2J${ESC}[H`;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
 const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+const TERMINAL_CONTROL_PATTERN = /\x1b(?:\][^\x07]*(?:\x07|\x1b\\)|\[[?0-9;]*[A-Za-z]|[78])/gu;
 
 function terminalWidth(text: string): number {
   return stringWidth(text.replace(ANSI_PATTERN, ''));
@@ -68,6 +80,16 @@ export function fitLane(text: string, cols: number): string {
 
 type StatusSource = string | (() => string);
 
+export interface BottomRegionStyle {
+  brand(value: string): string;
+  muted(value: string): string;
+}
+
+const PLAIN_BOTTOM_STYLE: BottomRegionStyle = {
+  brand: (value) => value,
+  muted: (value) => value,
+};
+
 /** ANSI-aware front truncation used as the final no-wrap status guard. */
 function fitStatus(text: string, cols: number): string {
   const width = Math.max(4, cols);
@@ -98,6 +120,25 @@ function fitStatus(text: string, cols: number): string {
 
 function padVisible(text: string, width: number): string {
   return `${text}${' '.repeat(Math.max(0, width - terminalWidth(text)))}`;
+}
+
+function wrapTranscriptText(text: string, width: number): string[] {
+  const plain = text.replace(TERMINAL_CONTROL_PATTERN, '').replace(/\r/g, '');
+  const rows: string[] = [];
+  for (const logical of plain.split('\n')) {
+    let row = '';
+    for (const character of Array.from(logical)) {
+      if (row && terminalWidth(row + character) > width) {
+        rows.push(row);
+        row = character;
+      } else {
+        row += character;
+      }
+    }
+    rows.push(row);
+  }
+  if (plain.endsWith('\n')) rows.pop();
+  return rows;
 }
 
 interface WrappedDraft {
@@ -182,6 +223,13 @@ interface RenderedSurface {
   cursorCol: number;
 }
 
+interface SurfaceGeometry {
+  rows: number;
+  cols: number;
+  laneRows: number;
+  topRow: number;
+}
+
 function normalizeComposer(source: ComposerSource): BottomComposerSurface {
   return typeof source === 'string'
     ? { draft: source, mode: 'idle' }
@@ -200,6 +248,7 @@ export function renderBottomSurface(
   cols: number,
   composerSource: ComposerSource,
   status: string,
+  style: BottomRegionStyle = PLAIN_BOTTOM_STYLE,
 ): RenderedSurface {
   const composer = normalizeComposer(composerSource);
   // Leave the final physical cell unused so Windows ConPTY never enters its
@@ -219,9 +268,10 @@ export function renderBottomSurface(
   const titleRoom = Math.max(1, outerWidth - 5);
   const fittedTitle = terminalWidth(title) <= titleRoom ? title : fitStatus(title, titleRoom);
   const topPrefix = `╭─ ${fittedTitle} `;
-  const top = `${topPrefix}${'─'.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}╮`;
-  const body = content.map((line) => `│ ${padVisible(line, innerWidth)} │`);
-  const bottom = `╰${'─'.repeat(Math.max(0, outerWidth - 2))}╯`;
+  const topTail = `${'─'.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}╮`;
+  const top = `${style.muted('╭─ ')}${style.brand(fittedTitle)}${style.muted(` ${topTail}`)}`;
+  const body = content.map((line) => `${style.muted('│')} ${padVisible(line, innerWidth)} ${style.muted('│')}`);
+  const bottom = style.muted(`╰${'─'.repeat(Math.max(0, outerWidth - 2))}╯`);
   const fittedStatus = fitStatus(status, outerWidth);
   const topRow = rows - laneRows + 1;
   return {
@@ -246,8 +296,20 @@ export class BottomRegion {
   private laneRows = 0;
   private lastFrame = '';
   private unsubResize: (() => void) | null = null;
+  private geometry: SurfaceGeometry | null = null;
+  private resizeBurstActive = false;
+  private trailingResize: ReturnType<typeof setImmediate> | null = null;
+  private renderGeneration = 0;
+  private projection: OperatorProjectionState = initialOperatorProjection();
+  private projectionIdentity = 0;
+  private rebuildTranscriptOnActivation = false;
+  private viewportClearPending = false;
+  private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
 
-  constructor(private readonly sink: LaneSink) {}
+  constructor(
+    private readonly sink: LaneSink,
+    private readonly style: BottomRegionStyle = PLAIN_BOTTOM_STYLE,
+  ) {}
 
   isActive(): boolean {
     return this.active;
@@ -259,9 +321,19 @@ export class BottomRegion {
     this.statusSource = status;
     if (!this.active) {
       this.active = true;
-      this.unsubResize = this.sink.onResize(() => this.reanchor());
+      this.unsubResize = this.sink.onResize(() => this.onResize());
     }
-    this.paintAll();
+    // Transcript written before first activation already exists physically.
+    // A balanced modal release is different: the modal temporarily owns the
+    // same terminal rows, so restoring ownership must reconstruct the semantic
+    // transcript before repainting the footer.
+    const rebuildTranscript = this.rebuildTranscriptOnActivation;
+    this.rebuildTranscriptOnActivation = false;
+    if (this.viewportClearPending) {
+      this.paintClearedViewport();
+      return;
+    }
+    this.paintAll(rebuildTranscript);
   }
 
   /** Backward-compatible composer update. */
@@ -277,11 +349,130 @@ export class BottomRegion {
     this.paintAll();
   }
 
+  /** Project one identity-backed live row above the composer. */
+  setLiveRow(id: string, text: string): void {
+    const normalized = text.replace(/\r?\n$/u, '');
+    const current = this.projection.activities[id];
+    const next = reduceOperatorProjection(this.projection, current
+      ? { type: 'activity.progress', id, generation: current.generation, summary: normalized }
+      : {
+          type: 'activity.upsert',
+          activity: {
+            id, parentId: null, jobId: null, attemptId: null, generation: 0,
+            startedSequence: this.projection.eventSequence + 1,
+            state: 'running', startedAt: Date.now(), endedAt: null,
+            summary: normalized, detailsRef: null,
+          },
+        });
+    if (next === this.projection) return;
+    this.projection = next;
+    if (this.active) this.paintAll();
+  }
+
+  /** Hide a live row without adding it to transcript history. */
+  removeLiveRow(id: string): void {
+    const next = reduceOperatorProjection(this.projection, { type: 'activity.remove', id });
+    if (next === this.projection) return;
+    this.projection = next;
+    if (this.active) this.paintAll();
+  }
+
+  /** Replace a live row with its final transcript row exactly once. */
+  settleLiveRow(
+    id: string,
+    text: string,
+    state: Extract<OperatorActivityState,
+      'succeeded' | 'failed' | 'denied' | 'interrupted' | 'cancelled' | 'timed_out' | 'unknown' | 'stale'> = 'succeeded',
+  ): void {
+    const current = this.projection.activities[id];
+    if (current) {
+      this.projection = reduceOperatorProjection(this.projection, {
+        type: 'activity.terminal', id, generation: current.generation,
+        state, summary: text, endedAt: Date.now(),
+      });
+      this.projection = reduceOperatorProjection(this.projection, { type: 'activity.remove', id });
+    }
+    const terminal = text.endsWith('\n') ? text : `${text}\n`;
+    this.recordTranscript(terminal);
+    if (!this.active) {
+      this.sink.write(terminal);
+      return;
+    }
+    this.sink.write(`${RESTORE_TRANSCRIPT}${terminal}${SAVE_TRANSCRIPT}`);
+    this.paintAll();
+  }
+
+  /** Move the transcript viewport away from or toward the live tail. */
+  scrollTranscript(deltaRows: number): void {
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.scroll', delta: deltaRows,
+    });
+    if (this.active) this.paintAll(true);
+  }
+
+  /** Return transcript projection to sticky-tail mode. */
+  followTranscript(): void {
+    this.projection = reduceOperatorProjection(this.projection, { type: 'viewport.follow' });
+    if (this.active) this.paintAll(true);
+  }
+
+  newEventsBelow(): number {
+    return this.projection.viewport.newEventsBelow;
+  }
+
+  /** Start a new physical viewport while retaining semantic transcript state. */
+  clearViewport(): void {
+    this.renderGeneration += 1;
+    if (this.trailingResize) clearImmediate(this.trailingResize);
+    this.trailingResize = null;
+    this.resizeBurstActive = false;
+    this.projection = reduceOperatorProjection(this.projection, { type: 'viewport.clear' });
+    this.lastFrame = '';
+    this.geometry = null;
+    this.laneRows = 0;
+    this.rebuildTranscriptOnActivation = false;
+    this.viewportClearPending = true;
+    if (this.active) this.paintClearedViewport();
+  }
+
+  /** Existing importer compatibility. */
+  clearTranscript(): void {
+    this.clearViewport();
+  }
+
+  viewportSnapshot(): {
+    epoch: number;
+    hiddenBeforeSequence: number;
+    scrollOffset: number;
+    stickyTail: boolean;
+    selectedRow: string | null;
+    cachedWidth: number | null;
+    cachedHeight: number | null;
+    retainedTranscriptRows: number;
+    visibleTranscriptRows: number;
+  } {
+    const width = Math.max(1, (this.projection.viewport.cachedWidth ?? this.sink.cols()) - 1);
+    const retainedSource = transcriptSource(this.projection);
+    const visibleSource = visibleTranscriptSource(this.projection);
+    return {
+      epoch: this.projection.viewport.epoch,
+      hiddenBeforeSequence: this.projection.viewport.hiddenBeforeSequence,
+      scrollOffset: this.projection.viewport.scrollOffset,
+      stickyTail: this.projection.viewport.stickyTail,
+      selectedRow: this.projection.viewport.selectedRow,
+      cachedWidth: this.projection.viewport.cachedWidth,
+      cachedHeight: this.projection.viewport.cachedHeight,
+      retainedTranscriptRows: retainedSource ? wrapTranscriptText(retainedSource, width).length : 0,
+      visibleTranscriptRows: visibleSource ? wrapTranscriptText(visibleSource, width).length : 0,
+    };
+  }
+
   /**
    * Write flowing output in the scrollable transcript, then return the hardware
    * cursor to the draft insertion point without repainting or mutating draft.
    */
   writeAbove(text: string): void {
+    this.recordTranscript(text);
     if (!this.active) {
       this.sink.write(text);
       return;
@@ -309,12 +500,77 @@ export class BottomRegion {
     const rawStatus = typeof this.statusSource === 'function'
       ? this.statusSource()
       : this.statusSource;
-    return renderBottomSurface(
+    const composer = renderBottomSurface(
       this.sink.rows(),
       this.sink.cols(),
       this.composerSource,
       rawStatus,
+      this.style,
     );
+    const availableWidth = Math.max(1, this.sink.cols() - 1);
+    const allLive = activeActivityRows(this.projection).flatMap((activity) => (
+      activity.summary.split('\n').map((line) => fitStatus(line, availableWidth))
+    ));
+    const maxLiveRows = Math.max(0, this.sink.rows() - composer.laneRows);
+    const hiddenLiveRows = Math.max(0, allLive.length - maxLiveRows);
+    const live = hiddenLiveRows > 0 && maxLiveRows > 0
+      ? [fitStatus(`… ${hiddenLiveRows + 1} more active`, availableWidth), ...allLive.slice(-(maxLiveRows - 1))]
+      : maxLiveRows === 0 ? [] : allLive.slice(-maxLiveRows);
+    return {
+      lines: [...live, ...composer.lines],
+      laneRows: composer.laneRows + live.length,
+      cursorRow: composer.cursorRow,
+      cursorCol: composer.cursorCol,
+    };
+  }
+
+  private recordTranscript(text: string): void {
+    const semantic = text.replace(TERMINAL_CONTROL_PATTERN, '');
+    if (!/[^\s]/u.test(semantic)) return;
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'transcript.append',
+      id: `transcript:${++this.projectionIdentity}`,
+      kind: 'system',
+      sourceText: text,
+    });
+    if (transcriptSource(this.projection).length > BottomRegion.MAX_TRANSCRIPT_CHARS) {
+      let remaining = BottomRegion.MAX_TRANSCRIPT_CHARS;
+      const retained: Array<OperatorProjectionState['transcript'][number]> = [];
+      for (let index = this.projection.transcript.length - 1; index >= 0 && remaining > 0; index -= 1) {
+        const item = this.projection.transcript[index];
+        const sourceText = item.sourceText.length <= remaining
+          ? item.sourceText
+          : item.sourceText.slice(-remaining);
+        retained.unshift(sourceText === item.sourceText ? item : { ...item, sourceText });
+        remaining -= sourceText.length;
+      }
+      this.projection = { ...this.projection, transcript: retained };
+    }
+  }
+
+  private transcriptFrame(surface: RenderedSurface): string {
+    const bottom = Math.max(0, this.sink.rows() - surface.laneRows);
+    if (bottom === 0) return '';
+    const width = Math.max(1, this.sink.cols() - 1);
+    const rows = wrapTranscriptText(visibleTranscriptSource(this.projection), width);
+    const end = Math.max(0, rows.length - this.projection.viewport.scrollOffset);
+    const visible = rows.slice(Math.max(0, end - bottom), end);
+    if (!this.projection.viewport.stickyTail && bottom > 0) {
+      const indicator = this.projection.viewport.newEventsBelow > 0
+        ? `↓ ${this.projection.viewport.newEventsBelow} new events below · End to follow`
+        : '↓ End to follow live output';
+      if (visible.length === bottom) visible[visible.length - 1] = indicator;
+      else visible.push(indicator);
+    }
+    const start = bottom - visible.length + 1;
+    let sequence = '';
+    for (let row = 1; row <= bottom; row += 1) {
+      sequence += `${ESC}[${row};1H${ESC}[2K`;
+    }
+    visible.forEach((line, index) => {
+      sequence += `${ESC}[${start + index};1H${fitStatus(line, width)}`;
+    });
+    return sequence;
   }
 
   private clearOwnedRows(count: number): string {
@@ -325,10 +581,40 @@ export class BottomRegion {
     return sequence;
   }
 
+  private clearDamagedUnion(previous: SurfaceGeometry | null, next: SurfaceGeometry): string {
+    const physicalRows = this.sink.rows();
+    const rows = new Set<number>();
+    const add = (geometry: SurfaceGeometry | null): void => {
+      if (!geometry) return;
+      for (let row = geometry.topRow; row <= geometry.rows; row += 1) {
+        if (row >= 1 && row <= physicalRows) rows.add(row);
+      }
+    };
+    add(previous);
+    add(next);
+    return [...rows]
+      .sort((a, b) => a - b)
+      .map((row) => `${ESC}[${row};1H${ESC}[2K`)
+      .join('');
+  }
+
   private establishGeometry(nextRows: number): string {
-    if (this.laneRows === nextRows && this.laneRows > 0) return '';
+    const physicalRows = this.sink.rows();
+    const physicalCols = this.sink.cols();
+    const nextGeometry: SurfaceGeometry = {
+      rows: physicalRows,
+      cols: physicalCols,
+      laneRows: nextRows,
+      topRow: Math.max(1, physicalRows - nextRows + 1),
+    };
+    const previousGeometry = this.geometry;
+    const dimensionsChanged = previousGeometry !== null && (
+      previousGeometry.rows !== physicalRows || previousGeometry.cols !== physicalCols
+    );
+    if (this.laneRows === nextRows && this.laneRows > 0 && !dimensionsChanged) return '';
     const previousRows = this.laneRows;
     this.laneRows = nextRows;
+    this.geometry = nextGeometry;
     if (previousRows === 0) {
       // Make physical room before reserving the footer. Painting directly over
       // the last rows would destroy startup/transcript content already there.
@@ -345,49 +631,104 @@ export class BottomRegion {
     const makeRoom = growth > 0
       ? `${ESC}[${previousTranscriptBottom};1H${'\n'.repeat(growth)}`
       : '';
+    const clear = dimensionsChanged
+      ? this.clearDamagedUnion(previousGeometry, nextGeometry)
+      : this.clearOwnedRows(Math.max(previousRows, nextRows));
     return `${RESTORE_TRANSCRIPT}${makeRoom}${ESC}[r` +
-      `${this.clearOwnedRows(Math.max(previousRows, nextRows))}` +
+      `${clear}` +
       `${reserveSeq(this.sink.rows(), nextRows)}${SAVE_TRANSCRIPT}`;
   }
 
-  private paintAll(): void {
+  private paintAll(rebuildTranscript = false): void {
     if (!this.active) return;
+    const epoch = this.projection.viewport.epoch;
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
+    });
     const surface = this.surface();
     const frame = surface.lines.join('\n');
     const geometry = this.establishGeometry(surface.laneRows);
-    if (!geometry && frame === this.lastFrame) {
-      this.sink.write(`${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`);
+    if (!geometry && frame === this.lastFrame && !rebuildTranscript) {
+      if (epoch === this.projection.viewport.epoch) {
+        this.sink.write(`${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`);
+      }
       return;
     }
     this.lastFrame = frame;
     const topRow = this.sink.rows() - surface.laneRows + 1;
     let sequence = geometry;
+    if (rebuildTranscript) sequence += this.transcriptFrame(surface);
     surface.lines.forEach((line, index) => {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });
     sequence += `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`;
-    this.sink.write(sequence);
+    if (epoch === this.projection.viewport.epoch) this.sink.write(sequence);
+  }
+
+  private paintClearedViewport(): void {
+    if (!this.active) return;
+    const epoch = this.projection.viewport.epoch;
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
+    });
+    const surface = this.surface();
+    this.laneRows = surface.laneRows;
+    this.geometry = {
+      rows: this.sink.rows(),
+      cols: this.sink.cols(),
+      laneRows: surface.laneRows,
+      topRow: Math.max(1, this.sink.rows() - surface.laneRows + 1),
+    };
+    this.lastFrame = surface.lines.join('\n');
+    this.viewportClearPending = false;
+    const topRow = this.sink.rows() - surface.laneRows + 1;
+    let sequence = `${CLEAR_PHYSICAL_VIEWPORT}${reserveSeq(this.sink.rows(), surface.laneRows)}${SAVE_TRANSCRIPT}`;
+    surface.lines.forEach((line, index) => {
+      sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
+    });
+    sequence += `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`;
+    if (epoch === this.projection.viewport.epoch) this.sink.write(sequence);
   }
 
   private reanchor(): void {
     if (!this.active) return;
-    const previousRows = this.laneRows;
+    const generation = ++this.renderGeneration;
     this.lastFrame = '';
-    this.laneRows = 0;
-    this.sink.write(`${RESTORE_TRANSCRIPT}${ESC}[r${this.clearOwnedRows(previousRows)}`);
-    this.paintAll();
+    this.paintAll(true);
+    if (generation !== this.renderGeneration) return;
+  }
+
+  private onResize(): void {
+    if (!this.active) return;
+    const epoch = this.projection.viewport.epoch;
+    if (!this.resizeBurstActive) {
+      this.resizeBurstActive = true;
+      this.reanchor();
+    }
+    if (this.trailingResize) clearImmediate(this.trailingResize);
+    this.trailingResize = setImmediate(() => {
+      this.trailingResize = null;
+      if (!this.active || epoch !== this.projection.viewport.epoch) return;
+      this.resizeBurstActive = false;
+      this.reanchor();
+    });
   }
 
   /** Release and clear the complete surface exactly once. */
   deactivate(): void {
     if (!this.active) return;
     this.sink.write(
-      `${RESTORE_TRANSCRIPT}${ESC}[r${this.clearOwnedRows(this.laneRows)}`,
+      `${RESTORE_TRANSCRIPT}${SAVE}${ESC}[r${this.clearOwnedRows(this.laneRows)}${RESTORE}`,
     );
     this.unsubResize?.();
     this.unsubResize = null;
+    if (this.trailingResize) clearImmediate(this.trailingResize);
+    this.trailingResize = null;
+    this.resizeBurstActive = false;
     this.active = false;
+    this.rebuildTranscriptOnActivation = true;
     this.laneRows = 0;
+    this.geometry = null;
     this.lastFrame = '';
   }
 }

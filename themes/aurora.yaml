@@ -1,0 +1,25 @@
+name: "aurora"
+description: "Cool luminous accents with clear semantic contrast."
+colors:
+  brand:
+    primary: "#5EEAD4"
+    muted: "#245E5B"
+  content:
+    primary: "#ECFEFF"
+    secondary: "#B8D7DA"
+    tertiary: "#668A8F"
+  semantic:
+    success: "#86EFAC"
+    warn: "#FDE68A"
+    error: "#FDA4AF"
+    info: "#93C5FD"
+  metrics:
+    model: "#67E8F9"
+    tokens: "#FDE68A"
+    turnCount: "#C4B5FD"
+    timer: "#86EFAC"
+  surface:
+    bg: "#071416"
+    elevated: "#0D2023"
+    border: "#245258"
+    divider: "#36727A"

@@ -16,8 +16,9 @@
  *     needs-confirmation (or verify), ambiguous ordinal → needs-confirmation;
  *   • the crash-then-resume simulation for both branches.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { promises as fs } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
@@ -35,6 +36,15 @@ let tmp: string;
 let dbFile: string;
 let db: Database.Database;
 
+// Run the real migration chain once, then copy the closed database for each
+// isolated case. Re-running every migration in every test made synchronous
+// SQLite setup vulnerable to Windows filesystem contention under full load.
+const suiteTmp = mkdtempSync(path.join(os.tmpdir(), 'aiden-sel-suite-'));
+const templateFile = path.join(suiteTmp, 'template.db');
+const templateDb = new Database(templateFile);
+runMigrations(templateDb);
+templateDb.close();
+
 function openLedger(): SideEffectLedger {
   db = new Database(dbFile);
   runMigrations(db);
@@ -42,13 +52,18 @@ function openLedger(): SideEffectLedger {
 }
 
 beforeEach(async () => {
-  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-sel-'));
+  tmp = await fs.mkdtemp(path.join(suiteTmp, 'case-'));
   dbFile = path.join(tmp, 'daemon.db');
+  await fs.copyFile(templateFile, dbFile);
 });
 
 afterEach(async () => {
   try { db?.close(); } catch { /* already closed */ }
   await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+});
+
+afterAll(() => {
+  rmSync(suiteTmp, { recursive: true, force: true });
 });
 
 // ── Key derivation ──────────────────────────────────────────────────────────

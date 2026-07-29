@@ -326,6 +326,18 @@ export function decideTaskVerdict(
     // complete on its own terms. (Read evidence still recorded above.)
     return { verdict: 'completed', handles, failures };
   }
+  // A clean process exit proves that the process ran; it does not prove the
+  // user's requested real-world outcome. Goal proof must come from an
+  // independent readback or a durable required claim, never stdout alone.
+  const hasProcessOnlyEvidence = mutating.some((entry) => {
+    if (entry.name !== 'shell_exec' && entry.name !== 'execute_code') return false;
+    if (!isOk(entry)) return false;
+    return !extractEvidenceHandles(entry).some((handle) =>
+      handle.verified && handle.kind !== 'exit_code' && handle.kind !== 'note');
+  });
+  if (hasProcessOnlyEvidence) {
+    return { verdict: 'completed_unverified', handles, failures };
+  }
   // No unresolved failures left. Completed iff every mutating entry is
   // verified-ok OR a superseded failure; a low_signal/unknown mutation is an
   // honest downgrade (never silently upgraded).
@@ -432,6 +444,8 @@ export function computeTaskFinalization(
   turn: {
     finishReason:   string;
     toolCallTrace?: HonestyTraceEntry[];
+    /** Final assistant response, consulted only for an explicit failure admission. */
+    assistantContent?: string | null;
     /** Model-declared ui_task_done status ('success'/'failure'/…), when seen. */
     declaredStatus?: string | null;
   },
@@ -513,6 +527,21 @@ export function computeTaskFinalization(
       status:   'failed',
       outcome:  deriveVerificationOutcome('failed', decision.handles, decision.failures, turn.finishReason),
       evidence: { ...buildEvidenceEnvelope(decision, { now: opts?.now }), verdict: 'failed', ...declinedExtra },
+      jobCard,
+    };
+  }
+  const assistantReportedFailure = typeof turn.assistantContent === 'string'
+    && /\b(?:I\s+(?:could\s+not|couldn't|was\s+unable\s+to|failed\s+to)\s+(?:complete|finish|perform|execute|create|write|update|delete|run|satisfy|verify)|the\s+(?:task|operation)\s+failed)\b/iu
+      .test(turn.assistantContent);
+  if (assistantReportedFailure) {
+    return {
+      status:   'failed',
+      outcome:  deriveVerificationOutcome('failed', decision.handles, decision.failures, 'assistant_reported_failure'),
+      evidence: {
+        ...buildEvidenceEnvelope(decision, { reportedFailure: 'assistant_reported_failure', now: opts?.now }),
+        verdict: 'failed',
+        ...declinedExtra,
+      },
       jobCard,
     };
   }

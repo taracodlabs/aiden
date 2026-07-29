@@ -217,19 +217,20 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
   it('Slice 6 hotfix: key column is consistently aligned across all rows', () => {
     const display = makeDisplay({ mono: true });
     const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
-    // Pull the col-index where each key starts. tool/reason/args must
+    // Pull the col-index where each key starts. Structured decision facts must
     // share the same x position.
-    const keyCols = ['tool', 'reason', 'args']
+    const keyCols = ['action', 'risk', 'reason']
       .map(k => out.split('\n').find(l => l.includes(k))?.indexOf(k) ?? -1);
     expect(new Set(keyCols).size).toBe(1);
   });
 
-  it('renders key/value rows for tool, reason, and args', () => {
+  it('renders structured decision facts without exposing raw arguments', () => {
     const display = makeDisplay({ mono: true });
     const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
-    expect(out).toMatch(/tool\s+file_delete/);
+    expect(out).toMatch(/action\s+file_delete/);
+    expect(out).toMatch(/target\s+C:\\Users\\shiva\\backups\\old\.zip/);
     expect(out).toMatch(/reason\s+destructive operation/);
-    expect(out).toMatch(/args\s+\{"path":"C:\\\\Users\\\\shiva\\\\backups\\\\old\.zip"\}/);
+    expect(out).not.toMatch(/args\s+\{/);
   });
 
   it('omits the reason row when no reason is supplied', () => {
@@ -237,14 +238,15 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     const noReason = { ...SAMPLE_REQ, reason: undefined };
     const out = stripAnsi(renderApprovalBox(noReason as any, display));
     expect(out).not.toMatch(/^.*reason\s+/m);
-    expect(out).toMatch(/tool\s+file_delete/);
+    expect(out).toMatch(/action\s+file_delete/);
   });
 
-  it('truncates oversized args with an ellipsis', () => {
+  it('does not render oversized raw arguments', () => {
     const display = makeDisplay({ mono: true });
     const big = { ...SAMPLE_REQ, args: { blob: 'x'.repeat(500) } };
     const out = stripAnsi(renderApprovalBox(big as any, display));
-    expect(out).toMatch(/args\s+\{"blob":"x+…/);
+    expect(out).not.toContain('x'.repeat(20));
+    expect(out).not.toMatch(/args\s+/);
   });
 
   it('Slice 6 hotfix: footer hint matches the inquirer mechanic (arrow nav)', () => {
@@ -274,7 +276,7 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     const lines = out.split('\n').filter(Boolean);
     expect(lines.length).toBeGreaterThan(0);
     expect(Math.max(...lines.map((line) => line.length))).toBeLessThanOrEqual(columns - 1);
-    expect(out).toContain('tool');
+    expect(out).toContain('action');
     expect(out).toContain('file_delete');
   });
 });

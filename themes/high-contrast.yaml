@@ -1,0 +1,25 @@
+name: "high-contrast"
+description: "Accessibility-focused contrast and bright state boundaries."
+colors:
+  brand:
+    primary: "#FFB000"
+    muted: "#A66F00"
+  content:
+    primary: "#FFFFFF"
+    secondary: "#F2F2F2"
+    tertiary: "#C8C8C8"
+  semantic:
+    success: "#57FF57"
+    warn: "#FFFF00"
+    error: "#FF5C5C"
+    info: "#65C7FF"
+  metrics:
+    model: "#65C7FF"
+    tokens: "#FFFF00"
+    turnCount: "#FFB000"
+    timer: "#57FF57"
+  surface:
+    bg: "#000000"
+    elevated: "#111111"
+    border: "#FFFFFF"
+    divider: "#D9D9D9"

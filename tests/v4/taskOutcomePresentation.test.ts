@@ -76,6 +76,39 @@ describe('task outcome presentation mapper', () => {
     expect(mapTaskOutcomePresentation(input()).kind).toBe('completed');
   });
 
+  it('projects a zero-exit shell action as limited evidence rather than Verified', () => {
+    const trace = [{
+      name: 'shell_exec',
+      result: { success: true, exitCode: 0, stdout: 'ACTIVITY-DONE', durationMs: 5 },
+      handlerMutates: true,
+      verification: { ok: true, confidence: 1, code: 'ok' },
+    }];
+    const finalization = computeTaskFinalization({ finishReason: 'stop', toolCallTrace: trace as never });
+    const mapped = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
+      finalization,
+      trace: trace as never,
+      finishReason: 'stop',
+    }));
+    expect(finalization.status).toBe('completed_unverified');
+    expect(mapped.kind).toBe('completed_limited');
+    expect(mapped.label).not.toBe('Verified');
+  });
+
+  it('never verifies a turn whose final response explicitly admits task failure', () => {
+    const trace = [{
+      name: 'shell_exec',
+      result: { success: true, exitCode: 0, stdout: 'unexpected', durationMs: 3 },
+      handlerMutates: true,
+      verification: { ok: true, confidence: 1, code: 'ok' },
+    }];
+    const finalization = computeTaskFinalization({
+      finishReason: 'stop',
+      assistantContent: 'I could not create the requested marker, and the task failed.',
+      toolCallTrace: trace as never,
+    });
+    expect(finalization.status).toBe('failed');
+  });
+
   it('treats successful completion-only empty output as Completed', () => {
     expect(mapTaskOutcomePresentation(input({
       status: 'completed_unverified',

@@ -52,11 +52,38 @@ describe('localBackend', () => {
     for (const executable of ['powershell', 'powershell.exe', 'pwsh', 'pwsh.exe']) {
       const command = `${executable} -NoProfile -Command \"$env:TEMP; $env:LOCALAPPDATA\"`;
       expect(buildLocalShellInvocation(command, 'win32')).toEqual({
-        executable: 'cmd.exe',
-        args: ['/d', '/s', '/c', command],
+        executable,
+        args: ['-NoProfile', '-EncodedCommand', expect.any(String)],
         detached: false,
       });
+      const invocation = buildLocalShellInvocation(command, 'win32');
+      expect(Buffer.from(invocation.args.at(-1)!, 'base64').toString('utf16le'))
+        .toBe('$env:TEMP; $env:LOCALAPPDATA');
     }
+  });
+
+  it('preserves existing encoded commands and direct PowerShell argv', () => {
+    const encoded = Buffer.from("Write-Output 'encoded 世界'", 'utf16le').toString('base64');
+    expect(buildLocalShellInvocation(`powershell.exe -NoProfile -EncodedCommand ${encoded}`, 'win32')).toEqual({
+      executable: 'powershell.exe',
+      args: ['-NoProfile', '-EncodedCommand', encoded],
+      detached: false,
+    });
+    expect(buildLocalShellInvocation('pwsh.exe -NoProfile -File "C:\\space path\\script.ps1"', 'win32')).toEqual({
+      executable: 'pwsh.exe',
+      args: ['-NoProfile', '-File', 'C:\\space path\\script.ps1'],
+      detached: false,
+    });
+  });
+
+  it('removes a cmd host when its sole payload is PowerShell', () => {
+    const invocation = buildLocalShellInvocation(
+      'cmd.exe /d /s /c powershell.exe -NoProfile -Command "$marker = 1; Write-Output $marker"',
+      'win32',
+    );
+    expect(invocation.executable).toBe('powershell.exe');
+    expect(Buffer.from(invocation.args[invocation.args.length - 1]!, 'base64').toString('utf16le'))
+      .toBe('$marker = 1; Write-Output $marker');
   });
 
   it.runIf(isWin)('executes direct environment lookups and special characters on Windows', async () => {
@@ -74,6 +101,36 @@ describe('localBackend', () => {
     const nested = await localBackendExecute({ command: 'powershell -NoProfile -Command "$env:TEMP"' });
     expect(nested.exitCode).toBe(0);
     expect(nested.stdout.trim()).toBe(process.env.TEMP);
+  });
+
+  it.runIf(isWin)('executes cmd-hosted PowerShell without stripping local variables', async () => {
+    const nested = await localBackendExecute({
+      command: 'cmd.exe /d /s /c powershell.exe -NoProfile -Command "$marker = $env:TEMP; Write-Output $marker"',
+    });
+    expect(nested.exitCode).toBe(0);
+    expect(nested.stdout.trim()).toBe(process.env.TEMP);
+  });
+
+  it.runIf(isWin)('runs the exact delayed marker contract once with variables intact', async () => {
+    const marker = path.join(tmp, "activity marker '世界'.txt").replace(/'/g, "''");
+    const command = `powershell.exe -NoProfile -Command "$marker = '${marker}'; Start-Sleep -Milliseconds 250; $count = if (Test-Path -LiteralPath $marker) { [int](Get-Content -LiteralPath $marker) } else { 0 }; Set-Content -LiteralPath $marker -Value ($count + 1); Write-Output 'ACTIVITY-DONE'"`;
+    const started = Date.now();
+    const result = await localBackendExecute({ command, cwd: tmp });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(200);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe('ACTIVITY-DONE');
+    expect((await fs.readFile(path.join(tmp, "activity marker '世界'.txt"), 'utf8')).trim()).toBe('1');
+  });
+
+  it.runIf(isWin)('executes one approved PowerShell command exactly once', async () => {
+    const marker = path.join(tmp, 'one-effect.txt').replace(/'/g, "''");
+    const result = await localBackendExecute({
+      command: `Add-Content -LiteralPath '${marker}' -Value 'effect'; Get-Content -LiteralPath '${marker}'`,
+      cwd: tmp,
+    });
+    expect(result.exitCode).toBe(0);
+    expect((await fs.readFile(path.join(tmp, 'one-effect.txt'), 'utf8')).trim().split(/\r?\n/u)).toEqual(['effect']);
+    expect(result.stdout.trim().split(/\r?\n/u)).toEqual(['effect']);
   });
 
   it('2. executes a simple command', async () => {
