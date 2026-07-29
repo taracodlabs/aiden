@@ -46,6 +46,15 @@ describe('runMigrations', () => {
     expect(names).toContain('crash_reports');
     expect(names).toContain('restart_failure_counts');
     expect(names).toContain('triggers');
+    expect(names).toContain('child_job_contracts');
+    expect(names).toContain('job_budgets');
+    expect(names).toContain('job_budget_debits');
+    expect(names).toContain('job_capability_sets');
+    expect(names).toContain('job_claims');
+    expect(names).toContain('job_evidence');
+    expect(names).toContain('job_verdicts');
+    expect(names).toContain('proof_reviews');
+    expect(names).toContain('job_event_cursors');
   });
 
   it('enforces trigger_events UNIQUE(source, idempotency_key) when key present', () => {

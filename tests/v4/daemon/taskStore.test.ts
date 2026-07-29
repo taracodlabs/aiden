@@ -258,7 +258,7 @@ describe('TaskStore — defensive JSON parses', () => {
 // ─── V14 migration smoke ─────────────────────────────────────────────
 
 describe('v14 migration — Slice 10.8 tasks table', () => {
-  it('creates the tasks table + two indexes; idempotent on re-run', () => {
+  it('creates the tasks table and current indexes; idempotent on re-run', () => {
     // Fresh DB already migrated by the beforeEach above. Just assert
     // the post-state.
     const cols = db.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>;
@@ -272,7 +272,7 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'failure_state', 'files_touched', 'finish_reason',
       'goal', 'id', 'idempotency_key', 'idempotency_namespace',
-      'next_event_sequence', 'next_input_sequence', 'parent_task_id',
+      'next_event_sequence', 'next_input_sequence', 'next_wait_sequence', 'parent_task_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'permissions', 'policy_snapshot_id', 'principal_id', 'recovery_state',
       'request_fingerprint',
@@ -288,7 +288,9 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
       'idx_tasks_idempotency',
       'idx_tasks_root_job',
       'idx_tasks_session_created',
+      'idx_tasks_session_created_id',
       'idx_tasks_status',
+      'idx_tasks_status_created_id',
     ]);
     // Re-run is idempotent (CREATE TABLE IF NOT EXISTS + version bump
     // already applied so this is effectively a no-op).

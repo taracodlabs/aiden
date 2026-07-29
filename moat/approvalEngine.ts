@@ -312,6 +312,7 @@ export class ApprovalEngine {
    * so it never reflects a previous request.
    */
   private lastPromptDecision: ApprovalDecision | null = null;
+  private lastApprovalScope: 'once' | 'session' | 'permanent' = 'once';
   /**
    * v4.12.1 Pillar 2 — the installed autonomy policy. When set, the
    * mutating-path decision routes through `decideAutonomy`. Opt-in: when
@@ -588,6 +589,7 @@ export class ApprovalEngine {
     // never reaches a prompt (hard-block / autonomy / no-prompter), it stays
     // null and explainDenial reports from the deterministic gates instead.
     this.lastPromptDecision = null;
+    this.lastApprovalScope = 'once';
 
     // ★ v4.12.1 Pillar 2 — HARD-BLOCK FLOOR. Catastrophic, no-recovery ops
     // (wipe root/home, mkfs, dd-to-device, fork bomb, shutdown, kill-all,
@@ -626,6 +628,7 @@ export class ApprovalEngine {
     const sig = argSignature(req.toolName, req.args);
     const key = `${req.toolName}::${sig}`;
     if (this.sessionAllow.has(key)) {
+      this.lastApprovalScope = this.permanentAllow.has(key) ? 'permanent' : 'session';
       // v4.10 Slice 10.6 — refresh the audit timestamp for any
       // PERMANENT-tier match (session-only matches stay in memory
       // and are gone on /quit, so no disk refresh is meaningful).
@@ -754,11 +757,17 @@ export class ApprovalEngine {
     // (callbacks.decisionChoicesFor) already withholds these options for
     // floor-gated calls; this is the engine-level backstop.
     if (decision === 'allow_session') {
-      if (!isNeverBlanketAllow(req)) this.allowForSession(req.toolName, sig);
+      if (!isNeverBlanketAllow(req)) {
+        this.allowForSession(req.toolName, sig);
+        this.lastApprovalScope = 'session';
+      }
       return true;
     }
     if (decision === 'allow_always') {
-      if (!isNeverBlanketAllow(req)) this.allowAlways(req.toolName, sig);
+      if (!isNeverBlanketAllow(req)) {
+        this.allowAlways(req.toolName, sig);
+        this.lastApprovalScope = 'permanent';
+      }
       return true;
     }
     return false;
@@ -767,7 +776,7 @@ export class ApprovalEngine {
   /** Detailed companion to the stable boolean approval seam. */
   async checkApprovalDetailed(req: ApprovalRequest): Promise<ApprovalCheckResult> {
     const approved = await this.checkApproval(req);
-    if (approved) return { state: 'approved', approved: true };
+    if (approved) return { state: 'approved', approved: true, scope: this.lastApprovalScope };
 
     const promptDecision = this.lastPromptDecision;
     if (promptDecision === 'interrupted') {

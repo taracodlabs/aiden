@@ -22,6 +22,7 @@
 
 import type { ToolHandler, ToolRegistry } from '../../core/v4/toolRegistry';
 import { withDryRun } from '../../core/v4/dryRun';
+import { withBuiltInEffectContract } from './effectContracts';
 
 import { webSearchTool } from './web/webSearch';
 import { webFetchTool } from './web/webFetch';
@@ -131,7 +132,6 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   register(deepResearchTool);
   // Phase 16f: open_url uses shell launch (start chrome / open / xdg-open)
   // for "open X in browser" requests — bypasses Playwright detection.
-  register(openUrlTool);
   // Phase 23.4a: youtube_search returns real /watch?v= URLs scraped
   // from youtube.com/results. media-search uses it before open_url so
   // the URL provenance gate has a candidate set to validate against —
@@ -142,7 +142,6 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   register(fileReadTool);
   register(fileListTool);
 
-  register(browserScreenshotTool);
   register(browserSnapshotTool);
   register(browserSeeTool);
   register(browserExtractTool);
@@ -166,7 +165,6 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   register(toolResultArtifactReadTool);
 
   // Phase v4.1.2-followup-3 — computer-control read-only tools.
-  register(screenshotTool);
   register(osProcessListTool);
   register(clipboardReadTool);
   // v4.1.4-media — GSMTC session enumeration (read). Pair with
@@ -257,7 +255,7 @@ export function registerWriteTools(registry: ToolRegistry): void {
   // Write tools are where the preview path is actually hot — when
   // AIDEN_DRYRUN=1, each handler's `buildPreview` is called instead
   // of `execute`.
-  const register = (h: ToolHandler): void => registry.register(withDryRun(h));
+  const register = (h: ToolHandler): void => registry.register(withDryRun(withBuiltInEffectContract(h)));
   register(fileWriteTool);
   register(filePatchTool);
   register(fileDeleteTool);
@@ -266,6 +264,9 @@ export function registerWriteTools(registry: ToolRegistry): void {
   register(planApprovalTool);
   register(fileMoveTool);
   register(fileCopyTool);
+  register(browserScreenshotTool);
+  register(screenshotTool);
+  register(openUrlTool);
 
   register(shellExecTool);
 

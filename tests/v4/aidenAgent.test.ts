@@ -45,6 +45,7 @@ describe('AidenAgent.runConversation', () => {
     expect(result.finishReason).toBe('stop');
     expect(result.messages).toHaveLength(2); // user, assistant
     expect(result.messages[1]).toEqual({ role: 'assistant', content: 'hello world' });
+    expect(provider.capturedInputs).toHaveLength(1);
   });
 
   it('2. one tool call, then response — message history shape is correct', async () => {
@@ -82,6 +83,7 @@ describe('AidenAgent.runConversation', () => {
 
     expect(result.toolCallCount).toBe(2);
     expect(result.turnCount).toBe(3);
+    expect(provider.capturedInputs).toHaveLength(3);
     expect(provider.capturedInputs[1].messages.filter((m) => m.role === 'tool')).toHaveLength(1);
     expect(provider.capturedInputs[2].messages.filter((m) => m.role === 'tool')).toHaveLength(2);
     expect(result.finalContent).toBe('finished');

@@ -137,17 +137,31 @@ describe('final action and durable Approval authority', () => {
       riskTier: 'caution',
       policy,
     });
+    const prepared = jobs.prepareToolCall({
+      toolCallId: 'tool-call-1', jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, fenceToken, toolName: 'file_write', normalizedArgsDigest: 'fixture-digest',
+      riskTier: 'caution', mutates: true, producer: 'test',
+      effect: {
+        classification: 'reconcilable_mutation', kind: 'filesystem.write', target: 'result.txt',
+        retrySafety: 'reconcile_before_retry', idempotencySupported: false, idempotencyKey: null,
+        reconciliationSupported: true, verificationSupported: true, approvalRequirement: 'policy',
+        approvalState: 'pending', sensitiveFields: ['content'], redactionRules: ['digest_arguments'], trusted: true,
+      },
+    });
     const approval = actions.request({
       jobId: admission.jobId,
       attemptId: admission.attemptId,
       generation: 1,
+      fenceToken,
       toolCallId: 'tool-call-1',
+      effectId: prepared.effectId,
       toolName: 'file_write',
       riskTier: 'caution',
       riskReasons: ['filesystem write'],
       normalized,
       expiresAt: Date.now() + 60_000,
     });
+    expect(approval.effectId).toBe('side_effect:tool-call-1');
     expect(actions.listPending(admission.jobId)).toHaveLength(1);
     expect(actions.decide({
       approvalId: approval.approvalId,
@@ -167,6 +181,7 @@ describe('final action and durable Approval authority', () => {
       generation: 1,
       fenceToken,
       toolCallId: 'tool-call-1',
+      effectId: approval.effectId,
       actionDigest: normalized.actionDigest,
       policySnapshotId: approval.policySnapshotId,
     }).authorized).toBe(true);
@@ -177,6 +192,7 @@ describe('final action and durable Approval authority', () => {
       generation: 1,
       fenceToken,
       toolCallId: 'tool-call-1',
+      effectId: approval.effectId,
       actionDigest: normalized.actionDigest,
       policySnapshotId: approval.policySnapshotId,
     })).toMatchObject({ authorized: false, duplicate: true });
@@ -195,6 +211,7 @@ describe('final action and durable Approval authority', () => {
       jobId: admission.jobId,
       attemptId: admission.attemptId,
       generation: 1,
+      fenceToken,
       toolCallId: 'tool-call-events',
       toolName: 'file_write',
       riskTier: 'caution',
@@ -220,6 +237,7 @@ describe('final action and durable Approval authority', () => {
       generation: 1,
       fenceToken,
       toolCallId: 'tool-call-events',
+      effectId: approval.effectId,
       actionDigest: normalized.actionDigest,
       policySnapshotId: approval.policySnapshotId,
     });
@@ -252,6 +270,7 @@ describe('final action and durable Approval authority', () => {
       jobId: admission.jobId,
       attemptId: admission.attemptId,
       generation: 1,
+      fenceToken,
       toolCallId: 'tool-call-change',
       toolName: 'shell_exec',
       riskTier: 'dangerous',
@@ -284,6 +303,7 @@ describe('final action and durable Approval authority', () => {
       generation: 1,
       fenceToken,
       toolCallId: 'tool-call-change',
+      effectId: approval.effectId,
       actionDigest: changed.actionDigest,
       policySnapshotId: changed.policySnapshot.policySnapshotId,
     })).toMatchObject({ authorized: false, reason: expect.stringMatching(/changed|mismatch|invalid/i) });
@@ -302,6 +322,7 @@ describe('final action and durable Approval authority', () => {
       jobId: admission.jobId,
       attemptId: admission.attemptId,
       generation: 1,
+      fenceToken,
       toolCallId: 'tool-call-2',
       toolName: 'file_write',
       riskTier: 'caution',
@@ -329,7 +350,7 @@ describe('final action and durable Approval authority', () => {
       mutates: true, riskTier: 'caution', policy,
     });
     const approval = actions.request({
-      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1,
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
       toolCallId: 'tool-call-stale-fence', toolName: 'file_write', riskTier: 'caution',
       riskReasons: [], normalized,
     });
@@ -343,10 +364,59 @@ describe('final action and durable Approval authority', () => {
     expect(actions.authorizeExecution({
       approvalId: approval.approvalId, jobId: admission.jobId,
       attemptId: admission.attemptId, generation: 1, fenceToken: 'stale-fence',
-      toolCallId: 'tool-call-stale-fence', actionDigest: normalized.actionDigest,
+      toolCallId: 'tool-call-stale-fence', effectId: approval.effectId, actionDigest: normalized.actionDigest,
       policySnapshotId: approval.policySnapshotId,
     })).toMatchObject({ authorized: false, reason: expect.stringMatching(/fence/i) });
     expect(actions.get(approval.approvalId)?.state).toBe('invalidated');
+  });
+
+  it('rejects changed Effect identity and a replacement fence after approval', () => {
+    const normalized = normalizeExecutionPlan({
+      toolName: 'file_write', args: { path: 'bound.txt' }, cwd: 'C:/workspace',
+      mutates: true, riskTier: 'caution', policy,
+    });
+    const approve = (toolCallId: string) => {
+      const prepared = jobs.prepareToolCall({
+        toolCallId, jobId: admission.jobId, attemptId: admission.attemptId,
+        generation: 1, fenceToken, toolName: 'file_write', normalizedArgsDigest: normalized.actionDigest,
+        riskTier: 'caution', mutates: true, producer: 'test',
+        effect: {
+          classification: 'reconcilable_mutation', kind: 'filesystem.write', target: 'bound.txt',
+          retrySafety: 'reconcile_before_retry', idempotencySupported: false, idempotencyKey: null,
+          reconciliationSupported: true, verificationSupported: true, approvalRequirement: 'policy',
+          approvalState: 'pending', sensitiveFields: [], redactionRules: [], trusted: true,
+        },
+      });
+      const record = actions.request({
+        jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
+        toolCallId, effectId: prepared.effectId, toolName: 'file_write', riskTier: 'caution',
+        riskReasons: [], normalized,
+      });
+      actions.decide({
+        approvalId: record.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+        generation: 1, actionDigest: normalized.actionDigest, policySnapshotId: record.policySnapshotId,
+        decision: 'approved', decidedBy: 'user', decisionChannel: 'tui',
+      });
+      return record;
+    };
+
+    const changedEffect = approve('tool-effect-binding');
+    expect(actions.authorizeExecution({
+      approvalId: changedEffect.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, fenceToken, toolCallId: changedEffect.toolCallId, effectId: null,
+      actionDigest: normalized.actionDigest, policySnapshotId: changedEffect.policySnapshotId,
+    })).toMatchObject({ authorized: false, reason: expect.stringMatching(/binding|changed/i) });
+
+    const changedFence = approve('tool-fence-binding');
+    const replacementFence = 'replacement-fence';
+    db.prepare('UPDATE runs SET fence_token = ?, lease_expires_at = ? WHERE attempt_id = ?')
+      .run(replacementFence, Date.now() + 60_000, admission.attemptId);
+    expect(actions.authorizeExecution({
+      approvalId: changedFence.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, fenceToken: replacementFence, toolCallId: changedFence.toolCallId,
+      effectId: changedFence.effectId, actionDigest: normalized.actionDigest,
+      policySnapshotId: changedFence.policySnapshotId,
+    })).toMatchObject({ authorized: false, reason: expect.stringMatching(/binding|changed/i) });
   });
 
   it('restores pending approvals by exact ID after authority restart', () => {
@@ -355,7 +425,7 @@ describe('final action and durable Approval authority', () => {
       mutates: true, riskTier: 'caution', policy,
     });
     const created = actions.request({
-      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1,
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
       toolCallId: 'tool-restart', toolName: 'file_write', riskTier: 'caution',
       riskReasons: ['filesystem write'], normalized, expiresAt: 10_000, now: 1_000,
     });
@@ -372,13 +442,49 @@ describe('final action and durable Approval authority', () => {
     ]);
   });
 
+  it('preserves denial and exact approved identity across authority restart', () => {
+    const normalized = normalizeExecutionPlan({
+      toolName: 'file_write', args: { path: 'restart-decision.txt' }, cwd: 'C:/workspace',
+      mutates: true, riskTier: 'caution', policy,
+    });
+    const request = (toolCallId: string) => actions.request({
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
+      toolCallId, toolName: 'file_write', riskTier: 'caution', riskReasons: [], normalized,
+    });
+    const denied = request('tool-restart-denied');
+    actions.decide({
+      approvalId: denied.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, actionDigest: normalized.actionDigest, policySnapshotId: denied.policySnapshotId,
+      decision: 'denied', decidedBy: 'user', decisionChannel: 'tui',
+    });
+    const approved = request('tool-restart-approved');
+    actions.decide({
+      approvalId: approved.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, actionDigest: normalized.actionDigest, policySnapshotId: approved.policySnapshotId,
+      decision: 'approved', decidedBy: 'user', decisionChannel: 'tui',
+    });
+
+    const restarted = createActionAuthority({ db, jobEngine: createJobEngine({ db }) });
+    expect(restarted.get(denied.approvalId)?.state).toBe('denied');
+    expect(restarted.authorizeExecution({
+      approvalId: denied.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, fenceToken, toolCallId: denied.toolCallId, effectId: denied.effectId,
+      actionDigest: normalized.actionDigest, policySnapshotId: denied.policySnapshotId,
+    })).toMatchObject({ authorized: false, reason: 'approval is denied' });
+    expect(restarted.authorizeExecution({
+      approvalId: approved.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, fenceToken, toolCallId: approved.toolCallId, effectId: approved.effectId,
+      actionDigest: normalized.actionDigest, policySnapshotId: approved.policySnapshotId,
+    }).authorized).toBe(true);
+  });
+
   it('makes duplicate decisions idempotent but rejects a conflicting decision', () => {
     const normalized = normalizeExecutionPlan({
       toolName: 'file_write', args: { path: 'once.txt' }, cwd: 'C:/workspace',
       mutates: true, riskTier: 'caution', policy,
     });
     const approval = actions.request({
-      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1,
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
       toolCallId: 'tool-decision', toolName: 'file_write', riskTier: 'caution',
       riskReasons: [], normalized,
     });
@@ -390,10 +496,12 @@ describe('final action and durable Approval authority', () => {
       actionDigest: normalized.actionDigest,
       policySnapshotId: approval.policySnapshotId,
       decision: 'approved' as const,
+      decisionScope: 'session' as const,
       decidedBy: 'user',
       decisionChannel: 'tui',
     };
     expect(actions.decide(decision).state).toBe('approved');
+    expect(actions.get(approval.approvalId)?.decisionScope).toBe('session');
     expect(actions.decide(decision).state).toBe('approved');
     expect(() => actions.decide({ ...decision, decision: 'denied' })).toThrow(/conflicting decision/i);
   });
@@ -404,7 +512,7 @@ describe('final action and durable Approval authority', () => {
       mutates: true, riskTier: 'caution', policy,
     });
     const expired = actions.request({
-      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1,
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
       toolCallId: 'tool-expired', toolName: 'file_write', riskTier: 'caution',
       riskReasons: [], normalized, expiresAt: 2, now: 1,
     });
@@ -417,7 +525,7 @@ describe('final action and durable Approval authority', () => {
     expect(actions.get(expired.approvalId)?.state).toBe('expired');
 
     const pending = actions.request({
-      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1,
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
       toolCallId: 'tool-terminal', toolName: 'file_write', riskTier: 'caution',
       riskReasons: [], normalized,
     });
@@ -435,6 +543,7 @@ describe('final action and durable Approval authority', () => {
       jobId: admission.jobId,
       attemptId: admission.attemptId,
       generation: 1,
+      fenceToken,
       toolCallId,
       toolName: 'file_write',
       riskTier: 'caution',

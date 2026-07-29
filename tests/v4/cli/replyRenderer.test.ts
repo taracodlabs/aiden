@@ -344,4 +344,22 @@ describe('replyRenderer — Bug 2 (inline-code colon token decode)', () => {
     expect(out).toContain('C:\\x');
     expect(out).not.toContain('*#COLON|*');
   });
+
+  it('does not inject spaces around inline Windows paths or punctuation', () => {
+    const out = stripAnsi(getReplyRenderer().render(
+      'Created `C:\\Users\\sample\\AppData\\Local\\Temp\\aiden.txt` containing `approval-once`.',
+    ));
+    expect(out).toContain(
+      'Created C:\\Users\\sample\\AppData\\Local\\Temp\\aiden.txt containing approval-once.',
+    );
+    expect(out).not.toContain('Created  C:');
+    expect(out).not.toContain('approval-once .');
+  });
+
+  it('preserves intentional prose and code-block whitespace', () => {
+    const prose = stripAnsi(getReplyRenderer().render('Keep  intentional spacing outside `code`.'));
+    expect(prose).toContain('Keep  intentional spacing outside code.');
+    const block = stripAnsi(getReplyRenderer().render('```text\n  indented  value\n```'));
+    expect(block).toContain('  indented  value');
+  });
 });

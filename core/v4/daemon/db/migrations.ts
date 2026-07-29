@@ -1062,6 +1062,396 @@ function applyV21(db: Database.Database): void {
   `);
 }
 
+/** Extend the existing SideEffect ledger with explicit execution contracts. */
+function applyV22(db: Database.Database): void {
+  addMissingColumns(db, 'side_effect_ledger', [
+    ['effect_classification',      "TEXT NOT NULL DEFAULT 'unknown_mutation'"],
+    ['effect_kind',                "TEXT NOT NULL DEFAULT 'unknown'"],
+    ['retry_safety',               "TEXT NOT NULL DEFAULT 'never_automatic'"],
+    ['idempotency_key',            'TEXT'],
+    ['idempotency_supported',      'INTEGER NOT NULL DEFAULT 0'],
+    ['reconciliation_supported',   'INTEGER NOT NULL DEFAULT 0'],
+    ['verification_supported',     'INTEGER NOT NULL DEFAULT 0'],
+    ['approval_requirement',       "TEXT NOT NULL DEFAULT 'always'"],
+    ['approval_state',             "TEXT NOT NULL DEFAULT 'not_required'"],
+    ['approval_id',                'TEXT'],
+    ['action_digest',              'TEXT'],
+    ['sensitive_fields_json',      "TEXT NOT NULL DEFAULT '[]'"],
+    ['redaction_rules_json',       "TEXT NOT NULL DEFAULT '[]'"],
+    ['result_ref',                 'TEXT'],
+    ['updated_at',                 'INTEGER'],
+  ]);
+  addMissingColumns(db, 'approvals', [
+    ['effect_id', 'TEXT'],
+  ]);
+  db.exec(`
+    UPDATE side_effect_ledger
+       SET updated_at = COALESCE(updated_at, confirmed_at, attempted_at),
+           effect_classification = CASE
+             WHEN effect_classification = 'unknown_mutation' AND effect_state IN ('committed','started')
+               THEN 'unsafe_mutation'
+             ELSE effect_classification
+           END;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_side_effect_job_idempotency
+      ON side_effect_ledger(job_id, idempotency_key)
+      WHERE job_id IS NOT NULL AND idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_side_effect_recovery
+      ON side_effect_ledger(effect_state, retry_safety, updated_at);
+    CREATE INDEX IF NOT EXISTS idx_approvals_effect
+      ON approvals(effect_id, state)
+      WHERE effect_id IS NOT NULL;
+  `);
+}
+
+/** Append-only reconciliation history for uncertain real-world Effects. */
+function applyV23(db: Database.Database): void {
+  addMissingColumns(db, 'side_effect_ledger', [
+    ['reconciliation_data_json', 'TEXT'],
+    ['reconciliation_outcome', 'TEXT'],
+    ['reconciliation_required', 'INTEGER NOT NULL DEFAULT 0'],
+    ['last_reconciled_at', 'INTEGER'],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS effect_reconciliations (
+      reconciliation_id TEXT PRIMARY KEY,
+      effect_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      outcome TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      retry_recommendation TEXT NOT NULL,
+      human_resolution_required INTEGER NOT NULL,
+      producer TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (effect_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_effect_reconciliations_effect
+      ON effect_reconciliations(effect_id, created_at, reconciliation_id);
+    CREATE INDEX IF NOT EXISTS idx_effect_reconciliation_required
+      ON side_effect_ledger(job_id, reconciliation_required, effect_state);
+  `);
+}
+
+/** Durable dependency graph and append-only node execution history. */
+function applyV24(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS execution_graphs (
+      graph_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL UNIQUE,
+      plan_digest TEXT NOT NULL,
+      state TEXT NOT NULL,
+      version INTEGER NOT NULL,
+      next_event_sequence INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS execution_graph_nodes (
+      node_id TEXT PRIMARY KEY,
+      node_key TEXT NOT NULL,
+      graph_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      state TEXT NOT NULL,
+      label TEXT,
+      input_ref TEXT,
+      output_ref TEXT,
+      verification_ref TEXT,
+      requires_verification INTEGER NOT NULL DEFAULT 0,
+      ordinal INTEGER NOT NULL,
+      state_version INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (graph_id, node_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_graph_nodes_state
+      ON execution_graph_nodes(graph_id, state, ordinal);
+    CREATE TABLE IF NOT EXISTS execution_graph_edges (
+      graph_id TEXT NOT NULL,
+      from_node_id TEXT NOT NULL,
+      to_node_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (graph_id, from_node_id, to_node_id),
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (from_node_id) REFERENCES execution_graph_nodes(node_id) ON DELETE CASCADE,
+      FOREIGN KEY (to_node_id) REFERENCES execution_graph_nodes(node_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_graph_edges_target
+      ON execution_graph_edges(graph_id, to_node_id);
+    CREATE TABLE IF NOT EXISTS execution_node_attempts (
+      node_execution_id TEXT PRIMARY KEY,
+      graph_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      state TEXT NOT NULL,
+      output_ref TEXT,
+      verification_ref TEXT,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (node_id) REFERENCES execution_graph_nodes(node_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (node_id, attempt_id, generation)
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_node_attempts_active
+      ON execution_node_attempts(job_id, state, started_at);
+    CREATE TABLE IF NOT EXISTS execution_graph_events (
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      graph_id TEXT NOT NULL,
+      graph_sequence INTEGER NOT NULL,
+      job_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      producer TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (graph_id, graph_sequence),
+      UNIQUE (graph_id, idempotency_key)
+    );
+  `);
+}
+
+/** Durable waits and their append-only resolution history. */
+function applyV25(db: Database.Database): void {
+  addMissingColumns(db, 'tasks', [
+    ['next_wait_sequence', 'INTEGER NOT NULL DEFAULT 1'],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_waits (
+      wait_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      sequence INTEGER NOT NULL,
+      graph_node_key TEXT,
+      kind TEXT NOT NULL,
+      state TEXT NOT NULL,
+      deadline_at INTEGER,
+      external_key TEXT,
+      payload_ref TEXT,
+      resolved_by_input_id TEXT,
+      resolution_ref TEXT,
+      idempotency_namespace TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (resolved_by_input_id) REFERENCES durable_inputs(input_id) ON DELETE SET NULL,
+      UNIQUE (idempotency_namespace, idempotency_key),
+      UNIQUE (job_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_waits_pending
+      ON job_waits(job_id, state, deadline_at, sequence);
+    CREATE INDEX IF NOT EXISTS idx_job_waits_external
+      ON job_waits(job_id, external_key, state) WHERE external_key IS NOT NULL;
+    CREATE TABLE IF NOT EXISTS job_wait_events (
+      wait_event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      wait_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      producer TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (wait_id) REFERENCES job_waits(wait_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (wait_id, idempotency_key)
+    );
+  `);
+}
+
+/** Bind each durable Approval to the exact lease fence that requested it. */
+function applyV26(db: Database.Database): void {
+  addMissingColumns(db, 'approvals', [
+    ['fence_token_digest', 'TEXT'],
+  ]);
+}
+
+/** Durable execution contract and attributed result for delegated child Jobs. */
+function applyV27(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS child_job_contracts (
+      child_job_id TEXT PRIMARY KEY,
+      parent_job_id TEXT NOT NULL,
+      required INTEGER NOT NULL DEFAULT 1,
+      worker_id TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      allowed_resources_json TEXT NOT NULL,
+      budget_json TEXT NOT NULL,
+      result_attempt_id TEXT,
+      result_generation INTEGER,
+      result_status TEXT,
+      evidence_json TEXT,
+      evidence_handles_json TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (parent_job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_child_job_contracts_parent
+      ON child_job_contracts(parent_job_id, required, child_job_id);
+  `);
+}
+
+/** Durable budget balances, debits, and least-privilege capability snapshots. */
+function applyV28(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_budgets (
+      job_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      limit_value REAL,
+      used_value REAL NOT NULL DEFAULT 0,
+      has_unknown_usage INTEGER NOT NULL DEFAULT 0,
+      state_version INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (job_id, kind),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS job_budget_debits (
+      debit_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      amount REAL,
+      certainty TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (job_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_budget_debits_attempt
+      ON job_budget_debits(attempt_id, generation, created_at);
+    CREATE TABLE IF NOT EXISTS job_capability_sets (
+      job_id TEXT PRIMARY KEY,
+      allowed_tools_json TEXT NOT NULL,
+      allowed_paths_json TEXT NOT NULL,
+      allowed_hosts_json TEXT NOT NULL,
+      allowed_applications_json TEXT NOT NULL,
+      allowed_connections_json TEXT NOT NULL,
+      allowed_accounts_json TEXT NOT NULL,
+      allowed_workers_json TEXT NOT NULL,
+      allowed_effect_kinds_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+  `);
+}
+
+/** Attempt-attributed claims, evidence, immutable verdicts, and late-review history. */
+function applyV29(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_claims (
+      claim_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT,
+      generation INTEGER,
+      category TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      required INTEGER NOT NULL DEFAULT 0,
+      state TEXT NOT NULL DEFAULT 'unverified',
+      created_at INTEGER NOT NULL,
+      checked_at INTEGER,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_claims_job
+      ON job_claims(job_id, category, required, created_at);
+    CREATE TABLE IF NOT EXISTS job_evidence (
+      evidence_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      effect_id TEXT,
+      source TEXT NOT NULL,
+      producer TEXT NOT NULL,
+      captured_at INTEGER NOT NULL,
+      observed_at INTEGER NOT NULL,
+      fresh_until INTEGER,
+      integrity_sha256 TEXT NOT NULL,
+      coverage TEXT NOT NULL,
+      verification_result TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      late INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_evidence_attempt
+      ON job_evidence(job_id, attempt_id, generation, captured_at);
+    CREATE TABLE IF NOT EXISTS claim_evidence (
+      claim_id TEXT NOT NULL,
+      evidence_id TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (claim_id, evidence_id),
+      FOREIGN KEY (claim_id) REFERENCES job_claims(claim_id) ON DELETE CASCADE,
+      FOREIGN KEY (evidence_id) REFERENCES job_evidence(evidence_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS job_verdicts (
+      job_id TEXT PRIMARY KEY,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      verdict TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      finalized_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS proof_reviews (
+      review_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id TEXT NOT NULL,
+      evidence_id TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (evidence_id) REFERENCES job_evidence(evidence_id) ON DELETE CASCADE
+    );
+  `);
+}
+
+/** Durable cursors for replayable Job-event consumers. */
+function applyV30(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS job_event_cursors (
+      consumer_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      last_sequence INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (consumer_id, job_id),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_event_cursors_job
+      ON job_event_cursors(job_id, last_sequence);
+  `);
+}
+
+/** Cover the ordered kernel projection and active-Job query paths. */
+function applyV31(db: Database.Database): void {
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_tasks_status_created_id
+      ON tasks(status, created_at, id);
+    CREATE INDEX IF NOT EXISTS idx_tasks_session_created_id
+      ON tasks(session_id, created_at, id);
+    CREATE INDEX IF NOT EXISTS idx_side_effect_job_created
+      ON side_effect_ledger(job_id, attempted_at, key);
+    CREATE INDEX IF NOT EXISTS idx_child_job_contracts_parent_created
+      ON child_job_contracts(parent_job_id, created_at, child_job_id);
+    CREATE INDEX IF NOT EXISTS idx_job_claims_job_created
+      ON job_claims(job_id, created_at, claim_id);
+    CREATE INDEX IF NOT EXISTS idx_job_evidence_job_created
+      ON job_evidence(job_id, captured_at, evidence_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1084,6 +1474,16 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 19, name: 'v4.12.1 — side-effect idempotency ledger',        sql: V19_SQL },
   { version: 20, name: 'v4.15.1 — durable Job and Attempt foundation',    apply: applyV20 },
   { version: 21, name: 'v4.15.1 - durable input and approval authority', apply: applyV21 },
+  { version: 22, name: 'durable effect contracts', apply: applyV22 },
+  { version: 23, name: 'append-only effect reconciliation', apply: applyV23 },
+  { version: 24, name: 'durable execution graph', apply: applyV24 },
+  { version: 25, name: 'durable waits and continuations', apply: applyV25 },
+  { version: 26, name: 'exact approval fence binding', apply: applyV26 },
+  { version: 27, name: 'durable child Job contracts', apply: applyV27 },
+  { version: 28, name: 'durable budgets and capabilities', apply: applyV28 },
+  { version: 29, name: 'durable claims evidence and verdicts', apply: applyV29 },
+  { version: 30, name: 'durable Job event cursors', apply: applyV30 },
+  { version: 31, name: 'kernel projection query indexes', apply: applyV31 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -1112,6 +1512,19 @@ function getCurrentVersion(db: Database.Database): number {
   return verRow?.version ?? 0;
 }
 
+function tableExists(db: Database.Database, name: string): boolean {
+  return db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name) !== undefined;
+}
+
+function validateLatestSchema(db: Database.Database): void {
+  const required = ['tasks', 'runs', 'run_events', 'side_effect_ledger', 'durable_inputs'];
+  const missing = required.filter((table) => !tableExists(db, table));
+  if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
+  if (!tableExists(db, 'job_event_cursors')) {
+    db.transaction(() => applyV30(db)).immediate();
+  }
+}
+
 /**
  * Apply every pending migration. Idempotent: re-running a database
  * already at the latest version is a no-op.
@@ -1119,7 +1532,10 @@ function getCurrentVersion(db: Database.Database): number {
 export function runMigrations(db: Database.Database): { from: number; to: number } {
   const from = getCurrentVersion(db);
   const pending = MIGRATIONS.filter((m) => m.version > from);
-  if (pending.length === 0) return { from, to: from };
+  if (pending.length === 0) {
+    validateLatestSchema(db);
+    return { from, to: from };
+  }
   const apply = db.transaction((m: Migration): void => {
     if (m.apply) m.apply(db);
     else db.exec(m.sql ?? '');
@@ -1139,5 +1555,6 @@ export function runMigrations(db: Database.Database): { from: number; to: number
     }
     to = m.version;
   }
+  validateLatestSchema(db);
   return { from, to };
 }

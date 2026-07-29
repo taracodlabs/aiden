@@ -1684,7 +1684,16 @@ export class Display {
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
       const failed = kind === 'error' || kind === 'warn' || /^(?:cancelled|denied|blocked|timed out|fail)/u.test(suffix);
       const outcomeGlyph = failed ? '!' : '✓';
-      const prefix = `${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(verb)} `;
+      const terminalVerb = /^denied\b/u.test(suffix) ? 'denied'
+        : /^cancelled\b/u.test(suffix) ? 'cancelled'
+        : /^timed out\b/u.test(suffix) ? 'timed out'
+        : /^unknown\b/u.test(suffix) ? 'unknown'
+        : /^blocked\b/u.test(suffix) ? 'blocked'
+        : /^fail(?:ed)?\b/u.test(suffix) ? 'failed'
+        : /^partial\b/u.test(suffix) ? 'partial'
+        : /^empty (?:fail|retry)\b/u.test(suffix) ? 'failed'
+        : 'completed';
+      const prefix = `${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(terminalVerb)} `;
       const suffixText = suffix ? `  ${suffix}` : '';
       const width = terminalRowWidth();
       const availableDetail = width === null
@@ -1853,6 +1862,9 @@ export class Display {
             break;
           case 'degraded':
             writeFinal(`partial ${execution}${waited}`, 'degraded');
+            break;
+          case 'unknown':
+            writeFinal(snapshot.executionDurationMs > 0 ? `unknown after ${execution}` : 'unknown', 'warn');
             break;
           default:
             writeFinal(`done ${execution}${attempts}${waited}${backoff}`, 'muted');

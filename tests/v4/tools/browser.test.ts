@@ -44,12 +44,11 @@ afterEach(() => {
 });
 
 describe('browser tools', () => {
-  it('1. all three are categorised as browser, mutates=false, toolset=browser', () => {
-    for (const tool of [
-      browserScreenshotTool,
-      browserExtractTool,
-      browserGetUrlTool,
-    ]) {
+  it('1. persists screenshot artifacts while extract and URL inspection remain read-only', () => {
+    expect(browserScreenshotTool.category).toBe('browser');
+    expect(browserScreenshotTool.mutates).toBe(true);
+    expect(browserScreenshotTool.toolset).toBe('browser');
+    for (const tool of [browserExtractTool, browserGetUrlTool]) {
       expect(tool.category).toBe('browser');
       expect(tool.mutates).toBe(false);
       expect(tool.toolset).toBe('browser');

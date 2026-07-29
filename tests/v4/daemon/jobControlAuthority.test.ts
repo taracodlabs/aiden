@@ -280,6 +280,96 @@ describe('durable Job input and control authority', () => {
     }).applied).toBe(true);
   });
 
+  it('retargets a pending input to a continuation Job and rejects the stale Attempt', () => {
+    const received = controls.inputs.receive({
+      jobId: admission.jobId,
+      targetAttemptId: admission.attemptId,
+      sessionId: 'session-1',
+      source: 'tui',
+      kind: 'message',
+      content: 'continue as a new Job',
+      idempotencyNamespace: 'tui:continuation',
+      idempotencyKey: 'continuation-input',
+    });
+    expect(controls.inputs.claimNext({
+      jobId: admission.jobId,
+      attemptId: admission.attemptId,
+      generation: 1,
+      inputId: received.record.inputId,
+    })?.state).toBe('claimed');
+    const continuation = jobs.submitJob({
+      entryPoint: 'interactive', source: 'repl', sessionId: 'session-1',
+      instanceId: 'instance-1', idempotencyNamespace: 'continuation',
+      idempotencyKey: 'continuation-job', goal: 'continue as a new Job',
+    });
+
+    const moved = controls.inputs.retarget({
+      inputId: received.record.inputId,
+      jobId: continuation.jobId,
+      attemptId: continuation.attemptId,
+      source: 'repl',
+    });
+    expect(moved).toMatchObject({
+      applied: true,
+      record: {
+        inputId: received.record.inputId,
+        jobId: continuation.jobId,
+        targetAttemptId: continuation.attemptId,
+        targetGeneration: null,
+        state: 'queued',
+        claimedByAttemptId: null,
+      },
+    });
+    expect(controls.inputs.consume({
+      inputId: received.record.inputId,
+      attemptId: admission.attemptId,
+      generation: 1,
+    })).toMatchObject({ applied: false, conflict: 'stale_generation' });
+
+    const lease = jobs.claimAttempt({
+      attemptId: continuation.attemptId,
+      ownerId: 'instance-1',
+      ttlMs: 30_000,
+    });
+    expect(lease).toMatchObject({ acquired: true, generation: 1 });
+    expect(controls.inputs.claimNext({
+      jobId: continuation.jobId,
+      attemptId: continuation.attemptId,
+      generation: 1,
+      inputId: received.record.inputId,
+    })?.inputId).toBe(received.record.inputId);
+    expect(controls.inputs.consume({
+      inputId: received.record.inputId,
+      attemptId: continuation.attemptId,
+      generation: 1,
+    }).applied).toBe(true);
+    expect(jobs.listEvents(continuation.jobId).map((event) => event.type)).toContain('input.retargeted');
+  });
+
+  it('requeues an untargeted claimed input for the new recovery generation exactly once', () => {
+    const received = controls.inputs.receive({
+      jobId: admission.jobId, sessionId: 'session-1', source: 'tui', kind: 'follow_up',
+      content: 'continue after crash', idempotencyNamespace: 'tui:recovery', idempotencyKey: 'follow-up',
+    });
+    expect(controls.inputs.claimNext({
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1,
+    })?.inputId).toBe(received.record.inputId);
+    db.prepare('UPDATE runs SET lease_expires_at = 1 WHERE attempt_id = ?').run(admission.attemptId);
+    jobs.claimAttempt({ attemptId: admission.attemptId, ownerId: 'expired', ttlMs: 1, now: 0 });
+    const recovery = jobs.recoverExpiredAttempts({ now: 2, instanceId: 'instance-2', producer: 'test', maxCrashes: 3 })[0]!;
+    const attempt = jobs.getAttempt(recovery.recoveryAttemptId!)!;
+    const restored = createJobControlAuthority({ db, jobEngine: createJobEngine({ db }) });
+    expect(restored.inputs.claimNext({
+      jobId: admission.jobId, attemptId: attempt.id, generation: attempt.generation,
+    })?.inputId).toBe(received.record.inputId);
+    expect(restored.inputs.consume({
+      inputId: received.record.inputId, attemptId: attempt.id, generation: attempt.generation,
+    }).applied).toBe(true);
+    expect(restored.inputs.consume({
+      inputId: received.record.inputId, attemptId: attempt.id, generation: attempt.generation,
+    })).toMatchObject({ applied: false, duplicate: true });
+  });
+
   it('projects input lifecycle by reference without copying content into Job events', () => {
     const secretLikeContent = 'ordinary input with private material';
     const received = controls.inputs.receive({

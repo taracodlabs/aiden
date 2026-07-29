@@ -5,6 +5,7 @@ import {
   buildAuthenticationNotice,
   buildLocalRuntimeNotice,
   buildNoProviderNotice,
+  buildPluginGrantNotice,
   buildProviderFallbackNotice,
   buildProviderResolutionNotice,
   buildSavedModelNotice,
@@ -157,6 +158,24 @@ describe('startup notices', () => {
       notice({ id: 'block', severity: 'blocking', blocking: true, source: 'provider', command: '/model', dedupeKey: 'block' }),
     ], registry());
     expect(prepared.map((n) => n.id)).toEqual(['block', 'auth', 'model', 'mcp', 'plugin', 'info']);
+  });
+
+  it('suppresses a stale plugin notice when the active provider route already works', () => {
+    expect(buildPluginGrantNotice('hosted-route-plugin', {
+      activeProvider: 'hosted-route',
+      providedProviders: ['hosted-route'],
+    })).toBeNull();
+  });
+
+  it('describes an ungranted plugin as an optional capability, not a provider outage', () => {
+    const n = buildPluginGrantNotice('browser-plugin', {
+      activeProvider: 'hosted-route',
+      providedProviders: [],
+      capabilities: ['browser_read'],
+    });
+    expect(n?.title).toContain('capability');
+    expect(n?.detail).toContain('browser_read');
+    expect(`${n?.title} ${n?.detail}`).not.toMatch(/provider.*unavailable|provider.*required/i);
   });
 
   it('bounds wide, medium, narrow, and minimal rendering', () => {

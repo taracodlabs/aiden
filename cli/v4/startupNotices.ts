@@ -299,12 +299,25 @@ export function buildMcpAuthNotice(serverName: string): StartupNotice {
   });
 }
 
-export function buildPluginGrantNotice(pluginName: string): StartupNotice {
+export function buildPluginGrantNotice(
+  pluginName: string,
+  options: { activeProvider?: string; providedProviders?: readonly string[]; capabilities?: readonly string[] } = {},
+): StartupNotice | null {
   const plugin = clean(pluginName) ?? 'plugin';
+  if (
+    options.activeProvider
+    && options.providedProviders?.includes(options.activeProvider)
+  ) {
+    return null;
+  }
+  const capabilities = options.capabilities?.filter((value) => clean(value)) ?? [];
   return notice({
     id: `plugin:grant:${plugin}`,
     severity: 'action',
-    title: `${plugin} plugin grant required`,
+    title: `${plugin} plugin capability requires a grant`,
+    detail: capabilities.length > 0
+      ? `Grant only to enable: ${capabilities.join(', ')}.`
+      : 'Grant only if you want to enable this optional plugin capability.',
     command: `/plugins grant ${plugin}`,
     source: 'plugin',
     blocking: false,

@@ -20,6 +20,14 @@ import {
  *     (covers same-length replace-section writes that bump mtime only)
  */
 describe('shouldAutoSummarize', () => {
+  it('honors an explicit distillation opt-out before other gates', () => {
+    expect(shouldAutoSummarize({
+      userTurns: 8,
+      unconfigured: false,
+      memoryPath: '/tmp/m.md',
+      disabled: true,
+    })).toEqual({ fire: false, reason: 'disabled' });
+  });
   it('exposes the threshold constant as 3', () => {
     expect(SESSION_SUMMARY_MIN_TURNS).toBe(3);
   });

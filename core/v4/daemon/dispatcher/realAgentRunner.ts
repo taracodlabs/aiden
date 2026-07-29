@@ -80,8 +80,8 @@ import { mapTaskOutcomePresentation, taskOutcomeInputFromFinalization } from '..
 import { emitArtifactVerified, emitCostUpdated, type PillarEventSink } from '../../pillarEvents';
 import type { TaskStore } from '../taskStore';
 import type { JobEngine } from '../jobEngine';
-import { createJobControlAuthority } from '../jobControlAuthority';
-import { runWithJobExecutionContext } from '../jobExecutionContext';
+import { createJobControlAuthority, type JobControlAuthority } from '../jobControlAuthority';
+import { executeDurableJob, type DurableJobHandle } from '../jobLifecycle';
 import {
   resolveDaemonModel,
 } from './resolveModel';
@@ -160,6 +160,10 @@ export interface CreateRealAgentRunnerOptions {
   dailyBudget?:      number | null;
   /** Test-only override clock. */
   now?:              () => number;
+  /** Existing authority used by a canonical lifecycle projection adapter. */
+  jobControlAuthority?: JobControlAuthority;
+  /** Canonical Attempt cancellation signal supplied to the execution adapter. */
+  executionSignal?: AbortSignal;
 }
 
 // ── Implementation ─────────────────────────────────────────────────────────
@@ -181,185 +185,25 @@ export function createRealAgentRunner(
         entryPoint: 'daemon',
       })
     : createDailyBudgetTracker({ db: opts.db, budget: configuredBudget });
-  const jobControls = opts.jobEngine
+  const jobControls = opts.jobControlAuthority ?? (opts.jobEngine
     ? createJobControlAuthority({ db: opts.db, jobEngine: opts.jobEngine })
-    : null;
+    : null);
+
+  if (opts.jobEngine && jobControls) {
+    const durableOptions = { ...opts, jobEngine: opts.jobEngine };
+    return {
+      invoke: (input) => invokeDurableDaemon(input, durableOptions, jobControls),
+    };
+  }
 
   return {
     async invoke(input: DaemonAgentInput): Promise<DaemonAgentResult> {
       const dailyBudget = opts.dailyBudget ?? readDailyBudgetFromEnv();
-      let durableJobId: string | null = null;
-      let durableAttemptId: string | null = null;
-      let durableRunId: number | null = null;
-      let durableGeneration: number | null = null;
-      let durableFenceToken: string | null = null;
-      let durableJobVersion = 0;
-      let durableAttemptVersion = 0;
-      let durableLeaseHeartbeat: ReturnType<typeof setInterval> | null = null;
-      let durableControlWatcher: ReturnType<typeof setInterval> | null = null;
-      const durableAbort = new AbortController();
+      let durableJobId: string | null = input.admission?.jobId ?? null;
+      let durableAttemptId: string | null = input.admission?.attemptId ?? null;
+      let durableRunId: number | null = input.admission?.runId ?? null;
+      let durableGeneration: number | null = input.admission?.generation ?? null;
       let pausedAtBoundary = false;
-      const stopDurableHeartbeat = (): void => {
-        if (durableLeaseHeartbeat !== null) {
-          clearInterval(durableLeaseHeartbeat);
-          durableLeaseHeartbeat = null;
-        }
-        if (durableControlWatcher !== null) {
-          clearInterval(durableControlWatcher);
-          durableControlWatcher = null;
-        }
-      };
-      const finishDurable = (input2: {
-        status: 'completed' | 'failed' | 'cancelled';
-        attemptStatus: 'succeeded' | 'failed' | 'cancelled' | 'timed_out' | 'unknown';
-        outcome: string;
-        finishReason: string;
-        evidence: unknown;
-        jobCard?: Parameters<JobEngine['finalizeJob']>[0]['jobCard'];
-      }): void => {
-        if (!opts.jobEngine || !durableJobId || !durableAttemptId || durableGeneration === null || !durableFenceToken) return;
-        stopDurableHeartbeat();
-        const attempt = opts.jobEngine.transitionAttempt({
-          attemptId: durableAttemptId,
-          expectedStateVersion: durableAttemptVersion,
-          generation: durableGeneration,
-          fenceToken: durableFenceToken,
-          to: input2.attemptStatus,
-          eventIdempotencyKey: `attempt-${input2.attemptStatus}:${durableAttemptId}:${durableGeneration}`,
-          producer: 'daemon',
-          finishReason: input2.finishReason,
-          now: now(),
-        });
-        if (!attempt.applied) throw new Error(`Durable daemon Attempt finalization rejected: ${attempt.conflict ?? 'unknown'}`);
-        const job = opts.jobEngine.finalizeJob({
-          jobId: durableJobId,
-          attemptId: durableAttemptId,
-          generation: durableGeneration,
-          fenceToken: durableFenceToken,
-          expectedStateVersion: durableJobVersion,
-          status: input2.status,
-          outcome: input2.outcome,
-          finishReason: input2.finishReason,
-          evidence: input2.evidence,
-          jobCard: input2.jobCard,
-          eventIdempotencyKey: `job-finalized:${durableJobId}:${durableGeneration}`,
-          producer: 'daemon',
-        });
-        if (!job.applied) throw new Error(`Durable daemon Job finalization rejected: ${job.conflict ?? 'unknown'}`);
-      };
-
-      if (opts.jobEngine) {
-        let admitted: { jobId: string; attemptId: string; runId: number };
-        if (input.admission) {
-          const admittedJob = opts.jobEngine.getJob(input.admission.jobId);
-          const admittedAttempt = opts.jobEngine.getAttempt(input.admission.attemptId);
-          if (
-            !admittedJob
-            || !admittedAttempt
-            || admittedAttempt.rowId !== input.admission.runId
-            || admittedAttempt.jobId !== input.admission.jobId
-            || admittedJob.activeAttemptId !== input.admission.attemptId
-          ) {
-            throw new Error('Durable daemon admission does not resolve to the active Attempt');
-          }
-          admitted = input.admission;
-        } else if (input.resume?.taskId && opts.jobEngine.getJob(input.resume.taskId)) {
-          const prior = opts.jobEngine.listAttempts(input.resume.taskId)
-            .find((attempt) => attempt.rowId === input.resume!.ofRunId);
-          if (!prior) throw new Error(`Durable recovery Attempt not found for run ${input.resume.ofRunId}`);
-          const recovery = opts.jobEngine.createRecoveryAttempt({
-            jobId: input.resume.taskId,
-            recoveryOfAttemptId: prior.id,
-            instanceId: input.instanceId,
-            triggerReason: 'resume',
-            eventIdempotencyKey: `attempt-resume:${input.triggerEventId}`,
-            producer: 'daemon',
-          });
-          admitted = { jobId: input.resume.taskId, attemptId: recovery.attemptId, runId: recovery.runId };
-        } else {
-          admitted = opts.jobEngine.submitJob({
-            entryPoint: 'daemon',
-            source: input.triggerContext.source,
-            sessionId: input.sessionId,
-            instanceId: input.instanceId,
-            idempotencyNamespace: `trigger:${input.triggerContext.source}:${input.triggerContext.triggerId}`,
-            idempotencyKey: String(input.triggerEventId),
-            goal: input.initialMessage,
-            title: input.initialMessage,
-            triggerEventId: input.triggerEventId,
-          });
-        }
-        durableJobId = admitted.jobId;
-        durableAttemptId = admitted.attemptId;
-        durableRunId = admitted.runId;
-        durableJobVersion = opts.jobEngine.getJob(admitted.jobId)?.stateVersion ?? 0;
-        const lease = opts.jobEngine.claimAttempt({
-          attemptId: admitted.attemptId, ownerId: input.instanceId, ttlMs: 60_000, now: now(),
-        });
-        if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
-          throw new Error(`Durable daemon Attempt lease unavailable: ${lease.conflict ?? 'unknown'}`);
-        }
-        durableGeneration = lease.generation;
-        durableFenceToken = lease.fenceToken;
-        durableAttemptVersion = lease.stateVersion;
-        const attemptStarted = opts.jobEngine.transitionAttempt({
-          attemptId: admitted.attemptId,
-          expectedStateVersion: durableAttemptVersion,
-          generation: durableGeneration,
-          fenceToken: durableFenceToken,
-          to: 'running',
-          eventIdempotencyKey: `attempt-running:${admitted.attemptId}:${durableGeneration}`,
-          producer: 'daemon',
-          now: now(),
-        });
-        if (!attemptStarted.applied || attemptStarted.stateVersion === undefined) {
-          throw new Error(`Durable daemon Attempt start rejected: ${attemptStarted.conflict ?? 'unknown'}`);
-        }
-        durableAttemptVersion = attemptStarted.stateVersion;
-        const jobStarted = opts.jobEngine.transitionJob({
-          jobId: admitted.jobId,
-          attemptId: admitted.attemptId,
-          generation: durableGeneration,
-          fenceToken: durableFenceToken,
-          expectedStateVersion: durableJobVersion,
-          to: 'running',
-          eventIdempotencyKey: `job-running:${admitted.jobId}:${durableGeneration}`,
-          producer: 'daemon',
-        });
-        if (!jobStarted.applied || jobStarted.stateVersion === undefined) {
-          throw new Error(`Durable daemon Job start rejected: ${jobStarted.conflict ?? 'unknown'}`);
-        }
-        durableJobVersion = jobStarted.stateVersion;
-        durableLeaseHeartbeat = setInterval(() => {
-          if (!opts.jobEngine || !durableAttemptId || durableGeneration === null || !durableFenceToken) return;
-          const renewed = opts.jobEngine.renewAttemptLease({
-            attemptId: durableAttemptId,
-            ownerId: input.instanceId,
-            generation: durableGeneration,
-            fenceToken: durableFenceToken,
-            ttlMs: 60_000,
-            now: now(),
-          });
-          if (!renewed.applied || renewed.stateVersion === undefined) {
-            stopDurableHeartbeat();
-            durableAbort.abort(new Error(`Durable daemon lease renewal failed: ${renewed.conflict ?? 'unknown'}`));
-            return;
-          }
-          durableAttemptVersion = renewed.stateVersion;
-        }, 20_000);
-        durableLeaseHeartbeat.unref?.();
-        // Commands can be written by another process (Workbench/API). Observe
-        // the authoritative Job row and physically abort the active provider or
-        // tool when cancellation wins, rather than merely changing a status.
-        durableControlWatcher = setInterval(() => {
-          if (!opts.jobEngine || !durableJobId || durableAbort.signal.aborted) return;
-          const status = opts.jobEngine.getJob(durableJobId)?.status;
-          if (status === 'cancelled' || status === 'cancelling') {
-            durableAbort.abort(new Error('Durable Job cancellation requested'));
-          }
-        }, 250);
-        durableControlWatcher.unref?.();
-      }
 
       // ── 1: pre-turn budget gate ────────────────────────────────────────
       const verdict = evaluatePreTurn({ tracker, dailyBudget, now: now() });
@@ -385,14 +229,7 @@ export function createRealAgentRunner(
           visibility: 'system',
           source:     'daemon',
         });
-        if (opts.jobEngine) {
-          finishDurable({
-            status: 'failed', attemptStatus: 'failed', outcome: 'failed',
-            finishReason: 'budget_exhausted', evidence: { reason: 'budget_exhausted' },
-          });
-        } else {
-          opts.runStore.setStatus(runId, 'failed', { finishReason: 'budget_exhausted' });
-        }
+        opts.runStore.setStatus(runId, 'failed', { finishReason: 'budget_exhausted' });
         log('warn', `[real-runner] rejected eventId=${input.triggerEventId}: ${verdict.reason}`);
         return {
           runId,
@@ -430,7 +267,7 @@ export function createRealAgentRunner(
       // resume (the card accumulates evidence across attempts). Best-
       // effort — a card failure never blocks dispatch.
       let taskId: string | null = durableJobId;
-      if (!opts.jobEngine && opts.taskStore) {
+      if (opts.taskStore) {
         try {
           if (input.resume?.taskId && opts.taskStore.get(input.resume.taskId)) {
             taskId = input.resume.taskId;
@@ -531,14 +368,7 @@ export function createRealAgentRunner(
           visibility:'system',
           source:    'daemon',
         });
-        if (opts.jobEngine) {
-          finishDurable({
-            status: 'failed', attemptStatus: 'failed', outcome: 'failed',
-            finishReason: 'error', evidence: { errorClass: e instanceof Error ? e.name : 'Error' },
-          });
-        } else {
-          opts.runStore.setStatus(runId, 'failed', { finishReason: 'error' });
-        }
+        opts.runStore.setStatus(runId, 'failed', { finishReason: 'error' });
         return { runId, finishReason: 'error', error: msg };
       }
 
@@ -549,9 +379,11 @@ export function createRealAgentRunner(
       // status) feeds the verify-before-done gate below, same as the REPL.
       let declaredTaskStatus: string | null = null;
       try {
-        const invocationSignal = opts.jobEngine
-          ? AbortSignal.any([perTurnWatcher.signal, durableAbort.signal])
-          : perTurnWatcher.signal;
+        const invocationSignals = [perTurnWatcher.signal];
+        if (opts.executionSignal) invocationSignals.push(opts.executionSignal);
+        const invocationSignal = invocationSignals.length === 1
+          ? invocationSignals[0]!
+          : AbortSignal.any(invocationSignals);
         const invokeAgent = () => runWithProviderUsageContext({
           sessionId: input.sessionId,
           taskId,
@@ -571,10 +403,6 @@ export function createRealAgentRunner(
             const paused = jobControls.commands.applyPendingAtBoundary({ jobId: durableJobId, now: now() });
             if (!paused.applied) return;
             pausedAtBoundary = true;
-            if (durableLeaseHeartbeat !== null) {
-              clearInterval(durableLeaseHeartbeat);
-              durableLeaseHeartbeat = null;
-            }
             throw new Error('Durable Job paused at safe boundary');
           },
           // The agent honours its own abort signal via per-tool aborts;
@@ -615,16 +443,7 @@ export function createRealAgentRunner(
             } catch { /* persistence faults must never break dispatch */ }
           },
         }));
-        result = opts.jobEngine && durableJobId && durableAttemptId && durableGeneration !== null && durableFenceToken
-          ? await runWithJobExecutionContext({
-              engine: opts.jobEngine,
-              jobId: durableJobId,
-              attemptId: durableAttemptId,
-              generation: durableGeneration,
-              fenceToken: durableFenceToken,
-              producer: 'daemon',
-            }, invokeAgent)
-          : await invokeAgent();
+        result = await invokeAgent();
         // Stamp the actual token usage onto the watcher for the
         // post-turn snapshot below.
         const tokens = extractLedgerTokens(runId) ?? extractTokens(result);
@@ -635,7 +454,6 @@ export function createRealAgentRunner(
       }
 
       if (pausedAtBoundary) {
-        stopDurableHeartbeat();
         try {
           opts.runStore.emitEventRich({
             runId,
@@ -651,11 +469,6 @@ export function createRealAgentRunner(
           });
         } catch { /* the authoritative Job event is already durable */ }
         return { runId, finishReason: 'interrupted', error: 'paused' };
-      }
-
-      if (opts.jobEngine && durableJobId && opts.jobEngine.getJob(durableJobId)?.status === 'cancelled') {
-        stopDurableHeartbeat();
-        return { runId, finishReason: 'interrupted', error: 'cancelled' };
       }
 
       if (durableJobId && durableAttemptId && durableGeneration !== null) {
@@ -739,65 +552,59 @@ export function createRealAgentRunner(
         finishReason === 'budget_exhausted'  ? 'failed'    :
         finishReason === 'error'             ? 'failed'    :
         finishReason === 'tool_loop'         ? 'failed'    : 'completed';
-      if (opts.jobEngine) {
-        const fin = computeTaskFinalization(
-          {
-            finishReason: finishReason === 'delivered' ? 'stop' : finishReason,
-            toolCallTrace: result?.toolCallTrace,
-            declaredStatus: declaredTaskStatus,
-          },
-          { approvalMode: approvalPolicy, now: now() },
-        );
-        const jobStatus = finishReason === 'interrupted'
-          ? 'cancelled'
-          : finishReason === 'stop' || finishReason === 'delivered'
-            ? (fin.status === 'completed' || fin.status === 'completed_unverified' ? 'completed' : 'failed')
-            : 'failed';
-        finishDurable({
-          status: jobStatus,
-          attemptStatus: jobStatus === 'completed' ? 'succeeded' : jobStatus === 'cancelled' ? 'cancelled' : 'failed',
-          outcome: fin.status,
-          finishReason,
-          evidence: fin.evidence,
-          jobCard: fin.jobCard,
-        });
-      } else {
-        opts.runStore.setStatus(runId, runStatus, { finishReason });
-      }
+      const durableVerification = computeTaskFinalization(
+        {
+          finishReason: finishReason === 'delivered' ? 'stop' : finishReason,
+          toolCallTrace: result?.toolCallTrace,
+          declaredStatus: declaredTaskStatus,
+        },
+        { approvalMode: approvalPolicy, now: now() },
+      );
+      const durableJobStatus = finishReason === 'interrupted'
+        ? 'cancelled'
+        : finishReason === 'stop' || finishReason === 'delivered'
+          ? (durableVerification.status === 'completed' || durableVerification.status === 'completed_unverified'
+            ? 'completed'
+            : 'failed')
+          : 'failed';
+      const durableFinalization = {
+        status: durableJobStatus,
+        outcome: durableVerification.status,
+        finishReason,
+        evidence: durableVerification.evidence,
+        jobCard: durableVerification.jobCard,
+      } as const;
+      opts.runStore.setStatus(runId, runStatus, { finishReason });
 
       // v4.13 Gap 4 — finalize the job-card through the SAME verify-
       // before-done gate the REPL uses (computeTaskFinalization): a
       // daemon task can no more complete on prose than a REPL one.
       // pending_verification lands first (crash honesty), then the
       // verdict + evidence + card in one UPDATE. Best-effort.
-      if (!opts.jobEngine && opts.taskStore && taskId) {
+      if (opts.taskStore && taskId) {
         try {
-          const fin = computeTaskFinalization(
-            {
-              // 'delivered' is a successful non-agent finish; treat as clean.
-              finishReason:   finishReason === 'delivered' ? 'stop' : finishReason,
-              toolCallTrace:  result?.toolCallTrace,
-              declaredStatus: declaredTaskStatus,
-            },
-            { approvalMode: approvalPolicy, now: now() },
-          );
           const presentation = mapTaskOutcomePresentation(taskOutcomeInputFromFinalization({
-            finalization: fin,
+            finalization: durableVerification,
             trace: result?.toolCallTrace,
             finishReason: finishReason === 'delivered' ? 'stop' : finishReason,
             taskId: taskId ?? undefined,
           }));
           if (result) result.taskOutcome = presentation;
           opts.taskStore.setStatus(taskId, 'pending_verification');
-          opts.taskStore.finalizeVerification(taskId, fin.status, fin.evidence, fin.jobCard);
+          opts.taskStore.finalizeVerification(
+            taskId,
+            durableVerification.status,
+            durableVerification.evidence,
+            durableVerification.jobCard,
+          );
           // v4.14 Pillar 5 Slice C — artifact_verified onto the run's stream.
           try {
             emitArtifactVerified(
               { runStore: opts.runStore as unknown as PillarEventSink['runStore'], runId },
               {
-                verdict:  fin.status,
-                outcome:  fin.outcome,
-                handles:  fin.evidence.handles?.length ?? 0,
+                verdict:  durableVerification.status,
+                outcome:  durableVerification.outcome,
+                handles:  durableVerification.evidence.handles?.length ?? 0,
                 taskId:   taskId ?? undefined,
                 presentation,
               },
@@ -823,12 +630,139 @@ export function createRealAgentRunner(
         finishReason,
         totalTokens: perTurnWatcher.used() > 0 ? perTurnWatcher.used() : undefined,
         error: invocationError ?? (perTurnWatcher.hit() ? perTurnWatcher.reason() ?? undefined : undefined),
+        finalization: durableFinalization,
       };
     },
   };
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+async function invokeDurableDaemon(
+  input: DaemonAgentInput,
+  opts: CreateRealAgentRunnerOptions & { jobEngine: JobEngine },
+  jobControls: JobControlAuthority,
+): Promise<DaemonAgentResult> {
+  let activeHandle: DurableJobHandle | null = null;
+  let projectedResult: DaemonAgentResult | null = null;
+  const admission = input.admission
+    ? { existing: { ...input.admission, reused: true }, source: 'daemon' } as const
+    : input.resume?.taskId && opts.jobEngine.getJob(input.resume.taskId)
+      ? (() => {
+        const prior = opts.jobEngine.listAttempts(input.resume!.taskId)
+          .find((attempt) => attempt.rowId === input.resume!.ofRunId);
+        if (!prior) throw new Error(`Durable recovery Attempt not found for run ${input.resume!.ofRunId}`);
+        return {
+          recovery: {
+            jobId: input.resume!.taskId,
+            recoveryOfAttemptId: prior.id,
+            instanceId: input.instanceId,
+            triggerReason: 'resume',
+            eventIdempotencyKey: `attempt-resume:${input.triggerEventId}`,
+            producer: 'daemon',
+          },
+          source: 'daemon',
+        } as const;
+      })()
+      : {
+        entryPoint: 'daemon',
+        source: input.triggerContext.source,
+        sessionId: input.sessionId,
+        instanceId: input.instanceId,
+        idempotencyNamespace: `trigger:${input.triggerContext.source}:${input.triggerContext.triggerId}`,
+        idempotencyKey: String(input.triggerEventId),
+        goal: input.initialMessage,
+        title: input.initialMessage,
+        triggerEventId: input.triggerEventId,
+      };
+
+  try {
+    const execution = await executeDurableJob({
+      engine: opts.jobEngine,
+      ownerId: input.instanceId,
+      leaseTtlMs: 60_000,
+      admission,
+      controlAuthority: jobControls,
+      initialInput: {
+        sessionId: input.sessionId,
+        source: input.triggerContext.source,
+        kind: 'message',
+        content: input.initialMessage,
+        idempotencyNamespace: `daemon-input:${input.triggerContext.triggerId}`,
+        idempotencyKey: String(input.triggerEventId),
+      },
+      execute: async (handle) => {
+        activeHandle = handle;
+        const projectedRunStore: RunStore = {
+          ...opts.runStore,
+          create: () => handle.runId,
+          setStatus: () => { /* JobEngine owns the canonical Attempt row. */ },
+        };
+        const projectedRunner = createRealAgentRunner({
+          ...opts,
+          runStore: projectedRunStore,
+          jobEngine: undefined,
+          taskStore: undefined,
+          jobControlAuthority: jobControls,
+          executionSignal: handle.signal,
+          agentBuilder: (builderInput) => opts.agentBuilder({
+            ...builderInput,
+            abortSignal: AbortSignal.any([builderInput.abortSignal, handle.signal]),
+          }),
+        });
+        projectedResult = await projectedRunner.invoke({
+          ...input,
+          admission: {
+            jobId: handle.jobId,
+            attemptId: handle.attemptId,
+            runId: handle.runId,
+            generation: handle.generation,
+            fenceToken: handle.fenceToken,
+          },
+        });
+        if (opts.jobEngine.getJob(handle.jobId)?.status === 'cancelled') {
+          projectedResult = {
+            ...projectedResult,
+            finishReason: 'interrupted',
+            error: 'cancelled',
+            finalization: {
+              status: 'cancelled',
+              outcome: 'cancelled',
+              finishReason: 'interrupted',
+              evidence: { cancelled: true },
+            },
+          };
+        }
+        currentProviderAttemptLedger()?.reconcileJobLinkage({
+          taskId: handle.jobId,
+          runId: handle.runId,
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          attemptGeneration: handle.generation,
+        });
+        return projectedResult;
+      },
+      finalize: (result) => result.finalization ?? {
+        status: result.finishReason === 'interrupted' ? 'cancelled' : 'failed',
+        outcome: result.finishReason === 'interrupted' ? 'cancelled' : 'failed',
+        finishReason: result.finishReason,
+        evidence: { error: result.error ?? null },
+      },
+    });
+    return execution.value;
+  } catch (error) {
+    const identity = activeHandle;
+    const job = identity ? opts.jobEngine.getJob(identity.jobId) : null;
+    if (projectedResult && (job?.status === 'paused' || job?.status === 'cancelled')) {
+      return projectedResult;
+    }
+    return {
+      runId: identity?.runId ?? input.admission?.runId ?? 0,
+      finishReason: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
 
 /** Read the trigger spec row + extract Phase 7 spec fields. */
 function readTriggerSpec(db: Db, triggerId: string): {

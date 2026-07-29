@@ -5,9 +5,9 @@
  * Aiden — local-first agent.
  */
 /**
- * v4.9.0 pre-ship UI — prompt-zone rule boundaries.
- * TOP rule = `printTurnSeparator()` (already shipping).
- * BOTTOM rule = NEW seam in chatSession right before `runAgentTurn`.
+ * Turn-transition separator ownership.
+ * Completed output or a completed local command owns one separator;
+ * composer acquisition owns none.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
@@ -27,12 +27,11 @@ describe('prompt-zone rule boundaries', () => {
     expect(/─{10,}/.test(stripAnsi(chunks.join('')))).toBe(true);
   });
 
-  it('chatSession.ts emits BOTTOM rule immediately before runAgentTurn', () => {
+  it('chatSession does not add separator rules while acquiring the next composer', () => {
     const src = readFileSync(path.join(__dirname, '../../../../cli/v4/chatSession.ts'), 'utf8');
-    const lines = src.split('\n');
-    const idx = lines.findIndex((l) => /await this\.runAgentTurn\(input(?:,\s*inputAlreadyPersisted)?\)/.test(l));
-    expect(idx).toBeGreaterThan(0);
-    const preceding = lines.slice(Math.max(0, idx - 8), idx).join('\n');
-    expect(preceding).toMatch(/display\.write\(\s*`\s+\$\{this\.opts\.display\.rule\(\)\}\\n`\s*\)/);
+    expect(src).not.toMatch(/if \(iter > 1\) this\.opts\.display\.printTurnSeparator\(\)/);
+    const dispatch = src.indexOf('await this.runAgentTurn(input, inputAlreadyPersisted, queuedDurableInputId)');
+    expect(dispatch).toBeGreaterThan(0);
+    expect(src.slice(Math.max(0, dispatch - 500), dispatch)).not.toMatch(/display\.rule\(\)/);
   });
 });

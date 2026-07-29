@@ -114,7 +114,37 @@ describe('durable Job and Attempt migration', () => {
     ]));
     expect([...columns('side_effect_ledger')]).toEqual(expect.arrayContaining([
       'job_id', 'attempt_id', 'generation', 'tool_call_id', 'effect_state',
+      'effect_classification', 'effect_kind', 'retry_safety', 'idempotency_key',
+      'idempotency_supported', 'reconciliation_supported', 'verification_supported',
+      'approval_requirement', 'approval_state', 'approval_id', 'action_digest',
+      'sensitive_fields_json', 'redaction_rules_json', 'result_ref', 'updated_at',
+      'reconciliation_data_json', 'reconciliation_outcome',
+      'reconciliation_required', 'last_reconciled_at',
     ]));
+    expect([...columns('approvals')]).toContain('effect_id');
+    expect([...columns('effect_reconciliations')]).toEqual(expect.arrayContaining([
+      'reconciliation_id', 'effect_id', 'job_id', 'attempt_id', 'generation',
+      'outcome', 'confidence', 'evidence_json', 'retry_recommendation',
+      'human_resolution_required', 'idempotency_key', 'created_at',
+    ]));
+    expect([...columns('execution_graphs')]).toEqual(expect.arrayContaining([
+      'graph_id', 'job_id', 'plan_digest', 'state', 'version', 'next_event_sequence',
+    ]));
+    expect([...columns('execution_graph_nodes')]).toEqual(expect.arrayContaining([
+      'node_id', 'node_key', 'graph_id', 'job_id', 'kind', 'state', 'ordinal',
+      'output_ref', 'verification_ref', 'requires_verification', 'state_version',
+    ]));
+    expect([...columns('execution_node_attempts')]).toEqual(expect.arrayContaining([
+      'node_execution_id', 'node_id', 'attempt_id', 'generation', 'state', 'output_ref',
+    ]));
+    expect([...columns('job_waits')]).toEqual(expect.arrayContaining([
+      'wait_id', 'job_id', 'attempt_id', 'generation', 'sequence', 'graph_node_key', 'kind',
+      'state', 'deadline_at', 'external_key', 'resolved_by_input_id', 'resolution_ref',
+    ]));
+    expect([...columns('job_wait_events')]).toEqual(expect.arrayContaining([
+      'wait_event_id', 'wait_id', 'job_id', 'type', 'payload_json', 'idempotency_key',
+    ]));
+    expect([...columns('approvals')]).toContain('fence_token_digest');
   });
 
   it('backfills stable Attempt identities and deterministic per-Job event order', () => {

@@ -612,10 +612,10 @@ describe('CliCallbacks Phase 23.5 onToolCall', () => {
     // v4.1.5 Issue N: clean-success now writes a completed row so the
     // log scrollback captures the action timeline. The exact ms suffix
     // is non-deterministic in tests (depends on fake-clock advance);
-    // assert the row chrome + verb appear.
+    // assert the row chrome + terminal state appear.
     const out = output();
     expect(out).toContain('┊');
-    expect(out).toContain('fetching');
+    expect(out).toContain('completed');
   });
 
   it('uses "blocked" suffix when result.error mentions URL provenance gate', () => {

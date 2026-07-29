@@ -67,6 +67,8 @@ export interface ChatSessionLike {
   getBusyMode?(): 'queue' | 'interrupt' | 'redirect';
   /** The pending type-next queue (copy). */
   listQueue?(): string[];
+  /** Pending messages paired with their durable identities when available. */
+  listQueueEntries?(): Array<{ inputId: string | null; message: string }>;
   /** Empty the queue; returns how many were dropped. */
   clearQueue?(): number;
   queueCount?(): number;

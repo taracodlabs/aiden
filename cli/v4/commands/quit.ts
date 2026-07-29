@@ -16,8 +16,5 @@ export const quit: SlashCommand = {
   category: 'system',
   icon: '🚪',
   aliases: ['q', 'exit'],
-  handler: async (ctx) => {
-    ctx.display.dim('Goodbye.');
-    return { exit: true };
-  },
+  handler: async () => ({ exit: true }),
 };

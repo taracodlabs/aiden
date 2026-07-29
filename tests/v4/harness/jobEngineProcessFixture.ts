@@ -151,6 +151,23 @@ async function main(): Promise<void> {
         normalizedArgsDigest: `${toolCallId}-digest`,
         riskTier: payload.mutates ? 'caution' : 'safe',
         mutates: payload.mutates ?? false,
+        ...(payload.mutates ? {
+          effect: {
+            classification: 'unsafe_mutation' as const,
+            kind: 'fixture.process',
+            target: 'fixture-target',
+            retrySafety: 'never_automatic' as const,
+            idempotencySupported: false,
+            idempotencyKey: null,
+            reconciliationSupported: false,
+            verificationSupported: false,
+            approvalRequirement: 'policy' as const,
+            approvalState: 'not_required' as const,
+            sensitiveFields: [] as string[],
+            redactionRules: ['digest_arguments'],
+            trusted: true,
+          },
+        } : {}),
         producer: 'process-test',
         now: (payload.now ?? Date.now()) + 1,
       });

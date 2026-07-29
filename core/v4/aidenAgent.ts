@@ -55,7 +55,7 @@ import {
   type ToolResultArtifactStore,
 } from './toolResultBoundary';
 import { selectEconomyTools } from './usagePolicy';
-import { recordDurableToolVerification } from './daemon/jobExecutionContext';
+import { currentJobExecutionContext, recordDurableToolVerification } from './daemon/jobExecutionContext';
 import {
   createLogicalProviderCallId,
   currentProviderAttemptLedger,
@@ -2664,6 +2664,23 @@ export class AidenAgent {
         ? { attemptBudgets: runOptions.providerAttemptBudgets }
         : {}),
     };
+    const durableJob = currentJobExecutionContext();
+    if (
+      durableJob
+      && durableJob.engine.resources.getBudgets(durableJob.jobId).some((budget) => budget.kind === 'model_calls')
+    ) {
+      const debit = durableJob.engine.resources.debit({
+        jobId: durableJob.jobId,
+        attemptId: durableJob.attemptId,
+        generation: durableJob.generation,
+        fenceToken: durableJob.fenceToken,
+        kind: 'model_calls',
+        amount: 1,
+        certainty: 'confirmed',
+        idempotencyKey: `model-call:${usageContext.logicalCallId}`,
+      });
+      if (debit.exhausted) throw new Error('Model-call budget exhausted');
+    }
     if (!wantStream) {
       // v4.6 prep — forward the abort signal into the provider call so
       // an in-flight HTTP request can be cancelled mid-flight.

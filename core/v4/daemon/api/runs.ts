@@ -33,6 +33,7 @@ import express from 'express';
 import type { TriggerBus } from '../triggerBus';
 import type { Db } from '../db/connection';
 import { IdempotencyConflictError, type JobEngine } from '../jobEngine';
+import { admitDurableJob } from '../jobLifecycle';
 import { createJobControlAuthority, type JobControlAuthority } from '../jobControlAuthority';
 import { fingerprintCanonical } from '../idempotency/runIdempotencyStore';
 // v4.9.0 Slice 7 — inbound trace adoption.
@@ -148,7 +149,7 @@ export function mountRunsRoutes(opts: MountRunsRoutesOptions): MountedRunsRoutes
               },
             });
             const sessionId = `api:${sourceKey}:${idempotencyKey.slice(0, 24)}`;
-            const admission = opts.jobEngine.submitJob({
+            const admission = admitDurableJob(opts.jobEngine, {
               entryPoint: 'daemon_api',
               source: 'api',
               sessionId,

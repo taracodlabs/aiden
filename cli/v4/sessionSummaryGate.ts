@@ -31,11 +31,12 @@ export interface SessionSummaryGateInput {
   userTurns:     number;
   unconfigured:  boolean;
   memoryPath:    string | undefined;
+  disabled?:     boolean;
 }
 
 export type SessionSummaryGateResult =
   | { fire: true }
-  | { fire: false; reason: 'short' | 'unconfigured' | 'no-paths' };
+  | { fire: false; reason: 'short' | 'unconfigured' | 'no-paths' | 'disabled' };
 
 /**
  * Decide whether the /quit auto-summary should fire. Threshold lives
@@ -45,6 +46,7 @@ export type SessionSummaryGateResult =
 export function shouldAutoSummarize(
   input: SessionSummaryGateInput,
 ): SessionSummaryGateResult {
+  if (input.disabled) return { fire: false, reason: 'disabled' };
   if (input.userTurns < SESSION_SUMMARY_MIN_TURNS) {
     return { fire: false, reason: 'short' };
   }

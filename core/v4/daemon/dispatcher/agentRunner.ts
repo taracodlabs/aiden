@@ -40,6 +40,7 @@ import type { Message } from '../../../../providers/v4/types';
 import type { TriggerSource } from '../types';
 import type { RunStore } from '../runStore';
 import type { JobEngine } from '../jobEngine';
+import { executeDurableJob, type DurableJobFinalization } from '../jobLifecycle';
 // v4.10 Slice 10.2b — shared event taxonomy.
 import { categorizeEvent } from '../eventCategories';
 
@@ -79,6 +80,8 @@ export interface DaemonAgentInput {
     jobId: string;
     attemptId: string;
     runId: number;
+    generation?: number;
+    fenceToken?: string;
   };
   /**
    * v4.13 Gap 4 — set when this invocation RESUMES a dead run. The
@@ -102,6 +105,8 @@ export interface DaemonAgentResult {
   totalTokens?: number;
   /** Populated when finishReason === 'error'. */
   error?:       string;
+  /** Verification-derived settlement supplied to the durable lifecycle. */
+  finalization?: DurableJobFinalization;
 }
 
 /** The function-shaped agent invocation seam. */
@@ -140,102 +145,59 @@ export function buildInitialHistory(input: DaemonAgentInput): Message[] {
  * "delivery" happened (logs only) so operators can verify the
  * code path via run_events without yet wiring a transport.
  */
-export function deliverOnlyStub(
+export async function deliverOnlyStub(
   input: DaemonAgentInput,
   runStore: RunStore,
   jobEngine?: JobEngine,
-): DaemonAgentResult {
+): Promise<DaemonAgentResult> {
   if (jobEngine) {
-    const admitted = input.admission ?? jobEngine.submitJob({
-      entryPoint: 'daemon',
-      source: input.triggerContext.source,
-      sessionId: input.sessionId,
-      instanceId: input.instanceId,
-      idempotencyNamespace: `trigger:${input.triggerContext.source}:${input.triggerContext.triggerId}`,
-      idempotencyKey: String(input.triggerEventId),
-      goal: input.initialMessage,
-      title: input.initialMessage,
-      triggerEventId: input.triggerEventId,
-    });
-    const job = jobEngine.getJob(admitted.jobId);
-    const attempt = jobEngine.getAttempt(admitted.attemptId);
-    if (!job || !attempt || attempt.rowId !== admitted.runId || job.activeAttemptId !== admitted.attemptId) {
-      throw new Error('Durable delivery admission does not resolve to the active Attempt');
-    }
-    const lease = jobEngine.claimAttempt({
-      attemptId: admitted.attemptId, ownerId: input.instanceId, ttlMs: 30_000,
-    });
-    if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
-      throw new Error(`Durable delivery lease unavailable: ${lease.conflict ?? 'unknown'}`);
-    }
-    const attemptStarted = jobEngine.transitionAttempt({
-      attemptId: admitted.attemptId,
-      expectedStateVersion: lease.stateVersion,
-      generation: lease.generation,
-      fenceToken: lease.fenceToken,
-      to: 'running',
-      eventIdempotencyKey: `attempt-running:${admitted.attemptId}:${lease.generation}`,
-      producer: 'daemon-delivery',
-    });
-    const jobStarted = jobEngine.transitionJob({
-      jobId: admitted.jobId,
-      attemptId: admitted.attemptId,
-      generation: lease.generation,
-      fenceToken: lease.fenceToken,
-      expectedStateVersion: job.stateVersion,
-      to: 'running',
-      eventIdempotencyKey: `job-running:${admitted.jobId}:${lease.generation}`,
-      producer: 'daemon-delivery',
-    });
-    if (!attemptStarted.applied || attemptStarted.stateVersion === undefined || !jobStarted.applied || jobStarted.stateVersion === undefined) {
-      throw new Error('Durable delivery start was rejected');
-    }
-    const tags = categorizeEvent('delivered');
-    runStore.emitEventRich({
-      runId: admitted.runId,
-      category: tags.category,
-      kind: tags.kind,
-      name: 'delivered',
-      sessionId: input.sessionId,
-      status: 'ok',
-      summary: `delivered ${input.triggerContext.source}/${input.triggerContext.triggerId}`,
-      payload: {
-        source: input.triggerContext.source,
-        triggerId: input.triggerContext.triggerId,
-        eventId: input.triggerEventId,
-        messageBytes: input.initialMessage.length,
-        deliverOnly: true,
+    const execution = await executeDurableJob({
+      engine: jobEngine,
+      ownerId: input.instanceId,
+      leaseTtlMs: 30_000,
+      admission: input.admission
+        ? { existing: { ...input.admission, reused: true }, source: 'daemon-delivery' }
+        : {
+          entryPoint: 'daemon',
+          source: input.triggerContext.source,
+          sessionId: input.sessionId,
+          instanceId: input.instanceId,
+          idempotencyNamespace: `trigger:${input.triggerContext.source}:${input.triggerContext.triggerId}`,
+          idempotencyKey: String(input.triggerEventId),
+          goal: input.initialMessage,
+          title: input.initialMessage,
+          triggerEventId: input.triggerEventId,
+        },
+      execute: async (handle) => {
+        const tags = categorizeEvent('delivered');
+        runStore.emitEventRich({
+          runId: handle.runId,
+          category: tags.category,
+          kind: tags.kind,
+          name: 'delivered',
+          sessionId: input.sessionId,
+          status: 'ok',
+          summary: `delivered ${input.triggerContext.source}/${input.triggerContext.triggerId}`,
+          payload: {
+            source: input.triggerContext.source,
+            triggerId: input.triggerContext.triggerId,
+            eventId: input.triggerEventId,
+            messageBytes: input.initialMessage.length,
+            deliverOnly: true,
+          },
+          visibility: 'system',
+          source: 'daemon',
+        });
+        return { runId: handle.runId, finishReason: 'delivered' as const };
       },
-      visibility: 'system',
-      source: 'daemon',
+      finalize: () => ({
+        status: 'completed',
+        outcome: 'delivered',
+        finishReason: 'delivered',
+        evidence: { delivered: true, messageBytes: input.initialMessage.length },
+      }),
     });
-    const attemptFinished = jobEngine.transitionAttempt({
-      attemptId: admitted.attemptId,
-      expectedStateVersion: attemptStarted.stateVersion,
-      generation: lease.generation,
-      fenceToken: lease.fenceToken,
-      to: 'succeeded',
-      eventIdempotencyKey: `attempt-succeeded:${admitted.attemptId}:${lease.generation}`,
-      producer: 'daemon-delivery',
-      finishReason: 'delivered',
-    });
-    const jobFinished = jobEngine.finalizeJob({
-      jobId: admitted.jobId,
-      attemptId: admitted.attemptId,
-      generation: lease.generation,
-      fenceToken: lease.fenceToken,
-      expectedStateVersion: jobStarted.stateVersion,
-      status: 'completed',
-      outcome: 'delivered',
-      finishReason: 'delivered',
-      evidence: { delivered: true, messageBytes: input.initialMessage.length },
-      eventIdempotencyKey: `job-finalized:${admitted.jobId}:${lease.generation}`,
-      producer: 'daemon-delivery',
-    });
-    if (!attemptFinished.applied || !jobFinished.applied) {
-      throw new Error('Durable delivery finalization was rejected');
-    }
-    return { runId: admitted.runId, finishReason: 'delivered' };
+    return execution.value;
   }
   const runId = runStore.create({
     sessionId:      input.sessionId,

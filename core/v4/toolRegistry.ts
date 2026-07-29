@@ -28,6 +28,8 @@
  * Status: PHASE 8.
  */
 
+import { resolve as resolvePath } from 'node:path';
+
 import type {
   ToolSchema,
   ToolCallRequest,
@@ -66,7 +68,11 @@ import {
   currentDurableToolCallId,
   currentJobExecutionContext,
   executeWithDurableToolCall,
+  prepareDurableToolCall,
+  recordDurableToolApproval,
+  type PreparedDurableToolCall,
 } from './daemon/jobExecutionContext';
+import { describeToolEffect, type DurableEffectDescriptor } from './effectContract';
 import {
   normalizeExecutionPlan,
   type ActionAuthority,
@@ -248,6 +254,8 @@ export interface ToolHandler {
    * the `checkApproval` call site below.
    */
   effects?: import('../../moat/approvalEngine').ToolEffects;
+  /** Durable mutation semantics used by the canonical ToolCall/Effect authority. */
+  effectContract?: import('./effectContract').ToolEffectContract;
   /**
    * v4.6 Phase 1 — the execution contexts in which this tool is
    * visible to the LLM. Default behaviour (when the field is
@@ -458,8 +466,12 @@ export class ToolRegistry {
         toolCallId: string;
         actionDigest: string;
         policySnapshotId: string;
+        effectId: string | null;
         riskTier: string;
       } | undefined;
+      let preparedToolCall: PreparedDurableToolCall | null | undefined;
+      let effectDescriptor: DurableEffectDescriptor | undefined;
+      let approvalWaitId: string | null = null;
       const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
         try { onActivity?.({ phase, at: Date.now(), attempt, timing }); } catch { /* observational */ }
       };
@@ -570,9 +582,89 @@ export class ToolRegistry {
       // a forgotten declaration must not become a silent bypass.
       const assumeMutates = handler.mutates ?? true;
       const durableJobContext = currentJobExecutionContext();
+      const effectiveMutates = assumeMutates && !readOnlyShell;
+      const preliminaryEffect = describeToolEffect(
+        effectiveMutates ? handler : { ...handler, mutates: false },
+        args,
+        context.cwd ?? process.cwd(),
+      );
+      const resourceAuthority = durableJobContext?.engine.resources;
+      if (durableJobContext && resourceAuthority) {
+        if (!resourceAuthority.authorize({ jobId: durableJobContext.jobId, kind: 'tool', value: call.name })) {
+          return finish({ id: call.id, name: call.name, result: null, error: 'Tool is outside this Job capability boundary' }, 'blocked');
+        }
+        for (const key of ['path', 'from', 'to', 'source', 'destination']) {
+          const value = args[key];
+          if (
+            typeof value === 'string' && value.length > 0
+            && !resourceAuthority.authorize({
+              jobId: durableJobContext.jobId,
+              kind: 'path',
+              value: resolvePath(context.cwd ?? process.cwd(), value),
+            })
+          ) {
+            return finish({ id: call.id, name: call.name, result: null, error: 'Path is outside this Job capability boundary' }, 'blocked');
+          }
+        }
+        if (
+          effectiveMutates
+          && !resourceAuthority.authorize({ jobId: durableJobContext.jobId, kind: 'effect', value: preliminaryEffect.kind })
+        ) {
+          return finish({ id: call.id, name: call.name, result: null, error: 'Effect is outside this Job capability boundary' }, 'blocked');
+        }
+        if (resourceAuthority.getBudgets(durableJobContext.jobId).some((budget) => budget.kind === 'tool_calls')) {
+          const debit = resourceAuthority.debit({
+            jobId: durableJobContext.jobId,
+            attemptId: durableJobContext.attemptId,
+            generation: durableJobContext.generation,
+            fenceToken: durableJobContext.fenceToken,
+            kind: 'tool_calls',
+            amount: 1,
+            certainty: 'confirmed',
+            idempotencyKey: `tool-call:${call.id}`,
+          });
+          if (debit.exhausted) {
+            return finish({ id: call.id, name: call.name, result: null, error: 'Tool-call budget exhausted' }, 'blocked');
+          }
+        }
+      }
+      const approvalGated = effectiveMutates && preliminaryEffect.approvalRequirement !== 'none' && (
+        context.approvalEngine !== undefined || (context.actionAuthority !== undefined && durableJobContext !== undefined)
+      );
+      effectDescriptor = preliminaryEffect;
+      if (effectiveMutates && durableJobContext) {
+        try {
+          preparedToolCall = prepareDurableToolCall({
+            toolCallId: call.id,
+            toolName: call.name,
+            args,
+            riskTier: handler.riskTier ?? 'caution',
+            mutates: true,
+            effect: effectDescriptor,
+            approvalState: approvalGated ? 'pending' : 'not_required',
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          return finish({ id: call.id, name: call.name, result: null, error: message }, 'blocked');
+        }
+      }
       if (
-        assumeMutates && !readOnlyShell &&
-        (context.approvalEngine || (context.actionAuthority && durableJobContext))
+        effectiveMutates && durableJobContext &&
+        (!effectDescriptor.trusted || effectDescriptor.approvalRequirement === 'always') &&
+        !context.approvalEngine && !context.actionAuthority
+      ) {
+        try { recordDurableToolApproval({ prepared: preparedToolCall ?? null, state: 'blocked' }); } catch { /* durable conflict is reported below */ }
+        return finish({
+          id: call.id,
+          name: call.name,
+          result: null,
+          error: effectDescriptor.trusted
+            ? 'Interactive approval is required for this mutation'
+            : 'Mutating tool has no trusted effect contract and cannot run unattended',
+        }, 'blocked');
+      }
+      if (
+        approvalGated
       ) {
         // Pre-classify shell_exec commands so smart-mode has a tier.
         let riskTier: 'safe' | 'caution' | 'dangerous' | undefined;
@@ -664,16 +756,29 @@ export class ToolRegistry {
             },
           });
           const persistedToolCallId = currentDurableToolCallId(call.id) ?? call.id;
-          const record = context.actionAuthority.request({
-            jobId: jobContext.jobId,
-            attemptId: jobContext.attemptId,
-            generation: jobContext.generation,
-            toolCallId: persistedToolCallId,
-            toolName: call.name,
-            riskTier: effectiveTier ?? 'caution',
-            riskReasons: reason ? [reason] : [],
-            normalized,
-          });
+          let record: ReturnType<ActionAuthority['request']>;
+          try {
+            record = context.actionAuthority.request({
+              jobId: jobContext.jobId,
+              attemptId: jobContext.attemptId,
+              generation: jobContext.generation,
+              fenceToken: jobContext.fenceToken,
+              toolCallId: persistedToolCallId,
+              effectId: preparedToolCall?.effectId ?? null,
+              toolName: call.name,
+              riskTier: effectiveTier ?? 'caution',
+              riskReasons: reason ? [reason] : [],
+              normalized,
+            });
+          } catch (error) {
+            try { recordDurableToolApproval({ prepared: preparedToolCall ?? null, state: 'blocked' }); } catch { /* binding failure remains authoritative */ }
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: error instanceof Error ? error.message : String(error),
+            }, 'blocked');
+          }
           if (context.approvalEngine) context.actionAuthority.markDisplayed(record.approvalId);
           durableApproval = {
             approvalId: record.approvalId,
@@ -681,15 +786,43 @@ export class ToolRegistry {
             actionDigest: normalized.actionDigest,
             policySnapshotId: normalized.policySnapshot.policySnapshotId,
             riskTier: effectiveTier ?? 'caution',
+            effectId: preparedToolCall?.effectId ?? null,
           };
         }
         if (!context.approvalEngine) {
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: 'blocked',
+              approvalId: durableApproval?.approvalId,
+              actionDigest: durableApproval?.actionDigest,
+            });
+          } catch { /* the approval error remains authoritative */ }
           return finish({
             id: call.id,
             name: call.name,
             result: null,
             error: `Approval required: ${durableApproval?.approvalId ?? 'interactive approval channel unavailable'}`,
           }, 'blocked');
+        }
+        if (jobContext?.controlAuthority) {
+          try {
+            approvalWaitId = jobContext.controlAuthority.waits.create({
+              jobId: jobContext.jobId,
+              attemptId: jobContext.attemptId,
+              generation: jobContext.generation,
+              kind: 'approval',
+              payloadRef: durableApproval?.approvalId ?? null,
+              producer: jobContext.producer,
+              idempotencyNamespace: `approval-wait:${jobContext.jobId}`,
+              idempotencyKey: durableApproval?.approvalId ?? call.id,
+            }).record.waitId;
+          } catch (error) {
+            return finish({
+              id: call.id, name: call.name, result: null,
+              error: `Approval wait could not be persisted: ${error instanceof Error ? error.message : String(error)}`,
+            }, 'blocked');
+          }
         }
         timing.approvalStartedAt = Date.now();
         emit('awaiting_approval');
@@ -730,9 +863,36 @@ export class ToolRegistry {
           const terminal = signal?.aborted
             ? 'cancelled'
             : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
+          if (approvalWaitId && jobContext?.controlAuthority) {
+            jobContext.controlAuthority.waits.cancel({
+              waitId: approvalWaitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+              producer: jobContext.producer, idempotencyKey: `approval-prompt-ended:${call.id}`,
+            });
+          }
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: signal?.aborted ? 'interrupted' : terminal === 'timed_out' ? 'timed_out' : 'blocked',
+              approvalId: durableApproval?.approvalId,
+              actionDigest: durableApproval?.actionDigest,
+            });
+          } catch { /* the prompt failure remains authoritative */ }
           return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);
         }
         timing.approvalEndedAt = Date.now();
+        if (approvalWaitId && jobContext?.controlAuthority) {
+          const waitResult = jobContext.controlAuthority.waits.resolve({
+            waitId: approvalWaitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+            producer: jobContext.producer, idempotencyKey: `approval-decision:${call.id}`,
+            resolutionRef: `approval:${approvalDecision?.state ?? (allowed ? 'approved' : 'denied')}`,
+          });
+          if (allowed && !waitResult.applied && !waitResult.duplicate) {
+            return finish({
+              id: call.id, name: call.name, result: null,
+              error: `Approval wait settlement rejected: ${waitResult.conflict ?? 'unknown'}`,
+            }, 'blocked');
+          }
+        }
         if (durableApproval && context.actionAuthority && jobContext) {
           context.actionAuthority.decide({
             approvalId: durableApproval.approvalId,
@@ -746,9 +906,20 @@ export class ToolRegistry {
               : approvalDecision?.state === 'interrupted' ? 'cancelled' : 'denied',
             decidedBy: 'user',
             decisionChannel: 'interactive',
+            decisionScope: approvalDecision?.scope ?? 'once',
           });
         }
         if (!allowed) {
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: approvalDecision?.state === 'interrupted'
+                ? 'interrupted'
+                : approvalDecision?.state === 'blocked' ? 'blocked' : 'denied',
+              approvalId: durableApproval?.approvalId,
+              actionDigest: durableApproval?.actionDigest,
+            });
+          } catch { /* the approval decision remains authoritative */ }
           if (approvalDecision?.state === 'interrupted') {
             return finish({
               id: call.id,
@@ -776,6 +947,21 @@ export class ToolRegistry {
             result: null,
             error: `Tool execution denied by approval engine — ${why}`,
           }, signal?.aborted ? 'cancelled' : 'denied');
+        }
+        try {
+          recordDurableToolApproval({
+            prepared: preparedToolCall ?? null,
+            state: 'approved',
+            approvalId: durableApproval?.approvalId,
+            actionDigest: durableApproval?.actionDigest,
+          });
+        } catch (error) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: error instanceof Error ? error.message : String(error),
+          }, 'blocked');
         }
       }
 
@@ -855,8 +1041,67 @@ export class ToolRegistry {
           toolName: call.name,
           args: a,
           riskTier: handler.riskTier ?? (handler.mutates === false ? 'safe' : 'caution'),
-          mutates: handler.mutates ?? true,
-          execute: () => handler.execute(a, signal ? { ...context, signal } : context),
+          mutates: effectiveMutates,
+          effect: effectDescriptor,
+          prepared: preparedToolCall,
+          execute: async () => {
+            const jobContext = currentJobExecutionContext();
+            if (
+              effectiveMutates && jobContext
+              && jobContext.engine.resources.getBudgets(jobContext.jobId).some((budget) => budget.kind === 'effects')
+            ) {
+              const debit = jobContext.engine.resources.debit({
+                jobId: jobContext.jobId,
+                attemptId: jobContext.attemptId,
+                generation: jobContext.generation,
+                fenceToken: jobContext.fenceToken,
+                kind: 'effects',
+                amount: 1,
+                certainty: 'confirmed',
+                idempotencyKey: `effect:${call.id}`,
+              });
+              if (debit.exhausted) throw new Error('Effect budget exhausted');
+            }
+            const interactive = isExclusiveToolInteraction(handler.interaction);
+            let waitId: string | null = null;
+            if (interactive && jobContext?.controlAuthority) {
+              waitId = jobContext.controlAuthority.waits.create({
+                jobId: jobContext.jobId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                kind: handler.interaction?.decision === 'batch_approval' ? 'approval' : 'clarification',
+                producer: jobContext.producer,
+                idempotencyNamespace: `interaction-wait:${jobContext.jobId}`,
+                idempotencyKey: `${jobContext.attemptId}:${call.id}`,
+              }).record.waitId;
+            }
+            try {
+              const value = await handler.execute(a, signal ? { ...context, signal } : context);
+              if (waitId && jobContext?.controlAuthority) {
+                const status = value && typeof value === 'object'
+                  ? String((value as Record<string, unknown>).status ?? '') : '';
+                if (status === 'cancelled' || status === 'interrupted') {
+                  jobContext.controlAuthority.waits.cancel({
+                    waitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                    producer: jobContext.producer, idempotencyKey: `interaction-cancelled:${call.id}`,
+                  });
+                } else {
+                  jobContext.controlAuthority.waits.resolve({
+                    waitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                    producer: jobContext.producer, idempotencyKey: `interaction-resolved:${call.id}`,
+                    resolutionRef: `interaction:${status || 'completed'}`,
+                  });
+                }
+              }
+              return value;
+            } catch (error) {
+              if (waitId && jobContext?.controlAuthority) {
+                jobContext.controlAuthority.waits.cancel({
+                  waitId, attemptId: jobContext.attemptId, generation: jobContext.generation,
+                  producer: jobContext.producer, idempotencyKey: `interaction-failed:${call.id}`,
+                });
+              }
+              throw error;
+            }
+          },
         });
 
       // ── P1B-2B — FAIL-SAFE pre-state snapshot (shadow, non-authoritative) ──
@@ -910,10 +1155,19 @@ export class ToolRegistry {
           generation: jobContext.generation,
           fenceToken: jobContext.fenceToken,
           toolCallId: durableApproval.toolCallId,
+          effectId: durableApproval.effectId,
           actionDigest: current.actionDigest,
           policySnapshotId: current.policySnapshot.policySnapshotId,
         });
         if (!authorization.authorized) {
+          try {
+            recordDurableToolApproval({
+              prepared: preparedToolCall ?? null,
+              state: 'blocked',
+              approvalId: durableApproval.approvalId,
+              actionDigest: durableApproval.actionDigest,
+            });
+          } catch { /* authorization failure remains authoritative */ }
           return finish({
             id: call.id,
             name: call.name,
@@ -1029,6 +1283,7 @@ export class ToolRegistry {
         const message = err instanceof Error ? err.message : String(err);
         const terminal = signal?.aborted
           ? 'cancelled'
+          : preparedToolCall?.mutates ? 'unknown'
           : /timed?\s*out|timeout/i.test(message) ? 'timed_out' : 'failed';
         executionAttempt.terminalResult = terminal;
         return finish({ id: call.id, name: call.name, result: null, error: message }, terminal);

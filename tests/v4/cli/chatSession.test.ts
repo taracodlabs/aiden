@@ -15,6 +15,11 @@ import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { Message } from '../../../providers/v4/types';
 import { DuringTurnInput } from '../../../cli/v4/duringTurnInput';
+import Database from 'better-sqlite3';
+import { runMigrations } from '../../../core/v4/daemon/db/migrations';
+import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
+import { createJobControlAuthority } from '../../../core/v4/daemon/jobControlAuthority';
+import { currentJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
 
 function mkDisplay() {
   const chunks: string[] = [];
@@ -722,6 +727,140 @@ describe('ChatSession — v4.6 Phase 2Q-B REPL parent-run row', () => {
 });
 
 describe('ChatSession durable Job admission', () => {
+  it('uses a fresh durable input identity after restarting the same session', async () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    for (const instanceId of ['instance_first', 'instance_restart']) {
+      db.prepare(
+        `INSERT INTO daemon_instances
+           (instance_id, pid, hostname, started_at, last_heartbeat, version)
+         VALUES (?, 1, 'localhost', ?, ?, '4.16.1')`,
+      ).run(instanceId, now, now);
+    }
+    const jobEngine = createJobEngine({ db });
+    const controls = createJobControlAuthority({ db, jobEngine });
+
+    try {
+      for (const [instanceId, input] of [
+        ['instance_first', 'first turn'],
+        ['instance_restart', 'restart turn'],
+      ] as const) {
+        const { agent } = mkAgent({ finalContent: 'ok' });
+        const session = new ChatSession(buildOpts({
+          agent: agent as never,
+          promptApi: mkPromptApi({ inputs: [input, '/quit'] }),
+          replInstanceId: instanceId,
+          jobEngine: jobEngine as never,
+          jobControlAuthority: controls,
+        }));
+        await session.run();
+        expect(agent.runConversation).toHaveBeenCalledTimes(1);
+      }
+
+      const inputs = db.prepare(
+        `SELECT content, idempotency_key
+           FROM durable_inputs
+          ORDER BY created_at, input_id`,
+      ).all() as Array<{ content: string; idempotency_key: string }>;
+      expect(inputs).toHaveLength(2);
+      expect(inputs.map((record) => record.content).sort()).toEqual(['first turn', 'restart turn']);
+      expect(new Set(inputs.map((record) => record.idempotency_key)).size).toBe(2);
+      expect(inputs.map((record) => record.idempotency_key)).toEqual(expect.arrayContaining([
+        'initial:instance_first:0',
+        'initial:instance_restart:0',
+      ]));
+    } finally {
+      db.close();
+    }
+  });
+
+  it('finishes shutdown work before printing Goodbye', async () => {
+    const { display, out } = mkDisplay();
+    const reg = new CommandRegistry();
+    reg.register({ name: 'quit', description: 'quit', category: 'system', handler: async () => ({ exit: true }) });
+    const session = new ChatSession(buildOpts({
+      display,
+      commandRegistry: reg,
+      promptApi: mkPromptApi({ inputs: ['/quit'] }),
+    }));
+    await session.run();
+    const text = out.join('');
+    expect(text.indexOf('Finalizing session')).toBeGreaterThanOrEqual(0);
+    expect(text.indexOf('Goodbye.')).toBeGreaterThan(text.indexOf('Finalizing session'));
+  });
+
+  it('honors the configured shutdown-distillation opt-out', async () => {
+    const { display, out } = mkDisplay();
+    const { agent } = mkAgent();
+    const reg = new CommandRegistry();
+    reg.register({ name: 'quit', description: 'quit', category: 'system', handler: async () => ({ exit: true }) });
+    const session = new ChatSession(buildOpts({
+      agent: agent as never,
+      display,
+      commandRegistry: reg,
+      config: { getValue: vi.fn(() => false) } as never,
+      promptApi: mkPromptApi({ inputs: ['one', 'two', 'three', '/quit'] }),
+    }));
+
+    await session.run();
+
+    const text = out.join('');
+    expect(agent.runConversation).toHaveBeenCalledTimes(3);
+    expect(text).toContain('Skipping session summary');
+    expect(text).toContain('disabled by configuration');
+    expect(text).not.toContain('Generating session distillation');
+    expect(text.indexOf('Goodbye.')).toBeGreaterThan(text.indexOf('disabled by configuration'));
+  });
+
+  it('cancels staged continuation Jobs when the durable queue is cleared', () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('instance_job', 1, 'localhost', ?, ?, '4.16.1')`,
+    ).run(now, now);
+    const jobEngine = createJobEngine({ db });
+    const controls = createJobControlAuthority({ db, jobEngine });
+    const staged = jobEngine.submitJob({
+      entryPoint: 'interactive', source: 'repl', sessionId: 'session_queue_clear',
+      instanceId: 'instance_job', idempotencyNamespace: 'queue-clear',
+      idempotencyKey: 'staged-job', goal: 'queued message',
+    });
+    const input = controls.inputs.receive({
+      jobId: staged.jobId,
+      targetAttemptId: staged.attemptId,
+      sessionId: 'session_queue_clear',
+      source: 'tui',
+      kind: 'message',
+      content: 'queued message',
+      idempotencyNamespace: 'queue-clear-input',
+      idempotencyKey: 'staged-input',
+    });
+    const session = new ChatSession(buildOpts({
+      jobEngine: jobEngine as never,
+      jobControlAuthority: controls,
+    }));
+    const internals = session as unknown as {
+      sessionId: string;
+      duringTurnInput: DuringTurnInput;
+      durableQueueInputIds: string[];
+    };
+    internals.sessionId = 'session_queue_clear';
+    internals.duringTurnInput.enqueue('queued message');
+    internals.durableQueueInputIds.push(input.record.inputId);
+
+    try {
+      expect(session.clearQueue()).toBe(1);
+      expect(jobEngine.getJob(staged.jobId)?.status).toBe('cancelled');
+      expect(controls.inputs.get(input.record.inputId)?.state).toBe('cancelled');
+    } finally {
+      db.close();
+    }
+  });
+
   it('creates and leases the Job Attempt before the first provider call', async () => {
     const order: string[] = [];
     const { agent } = mkAgent({ finalContent: 'ok' });
@@ -734,32 +873,40 @@ describe('ChatSession durable Job admission', () => {
         compressionEvents: [], auxiliaryUsage: [],
       } as never;
     });
-    const jobEngine = {
-      submitJob: vi.fn(() => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('instance_job', 1, 'localhost', ?, ?, '4.16.1')`,
+    ).run(now, now);
+    const jobEngine = createJobEngine({ db });
+    const submitJob = jobEngine.submitJob.bind(jobEngine);
+    const claimAttempt = jobEngine.claimAttempt.bind(jobEngine);
+    const transitionAttempt = jobEngine.transitionAttempt.bind(jobEngine);
+    const transitionJob = jobEngine.transitionJob.bind(jobEngine);
+    const finalizeJob = jobEngine.finalizeJob.bind(jobEngine);
+    vi.spyOn(jobEngine, 'submitJob').mockImplementation((command) => {
         order.push('submit');
-        return { jobId: 'task_job', attemptId: 'attempt_job', runId: 41, reused: false };
-      }),
-      claimAttempt: vi.fn(() => {
+        return submitJob(command);
+      });
+    vi.spyOn(jobEngine, 'claimAttempt').mockImplementation((command) => {
         order.push('claim');
-        return {
-          acquired: true, applied: true, leaseId: 'lease_job',
-          fenceToken: 'fence_job', generation: 1, stateVersion: 1,
-        };
-      }),
-      transitionAttempt: vi.fn((command: { to: string }) => {
+        return claimAttempt(command);
+      });
+    vi.spyOn(jobEngine, 'transitionAttempt').mockImplementation((command) => {
         order.push(`attempt:${command.to}`);
-        return { applied: true, stateVersion: command.to === 'running' ? 2 : 3 };
-      }),
-      transitionJob: vi.fn((command: { to: string }) => {
+        return transitionAttempt(command);
+      });
+    vi.spyOn(jobEngine, 'transitionJob').mockImplementation((command) => {
         order.push(`job:${command.to}`);
-        return { applied: true, stateVersion: 1 };
-      }),
-      finalizeJob: vi.fn(() => {
+        return transitionJob(command);
+      });
+    vi.spyOn(jobEngine, 'finalizeJob').mockImplementation((command) => {
         order.push('job:finalized');
-        return { applied: true, stateVersion: 2 };
-      }),
-      renewAttemptLease: vi.fn(() => ({ applied: true, stateVersion: 3 })),
-    };
+        return finalizeJob(command);
+      });
     const ref: { runId: number | null; sessionId: string | null } = { runId: null, sessionId: null };
     const session = new ChatSession(buildOpts({
       agent: agent as never,
@@ -769,7 +916,14 @@ describe('ChatSession durable Job admission', () => {
       jobEngine: jobEngine as never,
     }));
 
-    await session.run();
+    let eventTypes: string[] = [];
+    try {
+      await session.run();
+      const [job] = jobEngine.listJobs({ sessionId: 'sess-abc-123' });
+      if (job) eventTypes = jobEngine.listEvents(job.id).map((event) => event.type);
+    } finally {
+      db.close();
+    }
 
     expect(order.slice(0, 5)).toEqual([
       'submit', 'claim', 'attempt:running', 'job:running', 'provider',
@@ -781,10 +935,73 @@ describe('ChatSession durable Job admission', () => {
       goal: 'hello',
     }));
     expect(jobEngine.transitionAttempt).toHaveBeenCalledWith(expect.objectContaining({
-      attemptId: 'attempt_job', generation: 1, fenceToken: 'fence_job',
+      generation: 1,
     }));
     expect(jobEngine.finalizeJob).toHaveBeenCalledTimes(1);
+    expect(eventTypes).toEqual([
+      'job.submitted', 'attempt.created', 'attempt.leased', 'attempt.running',
+      'job.running', 'attempt.succeeded', 'job.finalized',
+    ]);
     expect(ref.runId).toBeNull();
+  });
+
+  it('uses required proof instead of a recovered optional helper failure for final truth', async () => {
+    const db = new Database(':memory:');
+    runMigrations(db);
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES ('instance_proof_turn', 1, 'localhost', ?, ?, '4.16.1')`,
+    ).run(now, now);
+    const jobEngine = createJobEngine({ db });
+    const { agent } = mkAgent();
+    agent.runConversation.mockImplementation(async (history: Message[]) => {
+      const context = currentJobExecutionContext();
+      if (!context) throw new Error('missing durable execution context');
+      const claim = jobEngine.proof.createClaim({
+        jobId: context.jobId, attemptId: context.attemptId, generation: context.generation,
+        category: 'contract', statement: 'required artifact verified', required: true,
+      });
+      const evidence = jobEngine.proof.recordEvidence({
+        jobId: context.jobId, attemptId: context.attemptId, generation: context.generation,
+        fenceToken: context.fenceToken, source: 'filesystem.readback', producer: 'test',
+        observedAt: Date.now(), coverage: 'full', verificationResult: 'verified',
+        payload: { exists: true, exact: true },
+      });
+      jobEngine.proof.checkClaim({
+        claimId: claim.claimId, attemptId: context.attemptId, generation: context.generation,
+        evidenceIds: [evidence.evidenceId], state: 'verified',
+      });
+      return {
+        finalContent: 'done', messages: [...history, { role: 'assistant', content: 'done' }],
+        turnCount: 1, toolCallCount: 2, fallbackActivated: false, finishReason: 'stop',
+        totalUsage: { inputTokens: 10, outputTokens: 2 }, compressionEvents: 0, auxiliaryUsage: {},
+        toolCallTrace: [{
+          name: 'shell_exec', result: null, error: 'optional lookup failed', handlerMutates: true,
+          verification: { ok: false, confidence: 1, code: 'failed', reason: 'optional lookup failed' },
+        }],
+      } as never;
+    });
+    const session = new ChatSession(buildOpts({
+      agent: agent as never,
+      promptApi: mkPromptApi({ inputs: ['create verified artifact', '/quit'] }),
+      replInstanceId: 'instance_proof_turn',
+      jobEngine: jobEngine as never,
+    }));
+    try {
+      await session.run();
+      const [job] = jobEngine.listJobs({ sessionId: 'sess-abc-123' });
+      expect(job?.status).toBe('completed');
+      expect(job?.terminalOutcome).toBe('verified');
+      expect(agent.runConversation).toHaveBeenCalledTimes(1);
+      expect(jobEngine.proof.getVerdict(job!.id)?.verdict).toBe('verified');
+      expect(jobEngine.proof.exportJson(job!.id)).toMatchObject({
+        evidence: [expect.objectContaining({ verificationResult: 'verified' })],
+      });
+    } finally {
+      db.close();
+    }
   });
 
   it('does not call the provider when durable admission fails', async () => {

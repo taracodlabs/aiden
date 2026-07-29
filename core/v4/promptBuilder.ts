@@ -89,6 +89,8 @@ export interface PromptBuilderOptions {
   initialBudget?:       { used: number; max: number };
   platform?:            'windows' | 'linux' | 'macos';
   cwd?:                 string;
+  /** Authoritative local temporary directory. Injectable for deterministic tests. */
+  tempDir?:             string;
   /** When true the SOUL.md disk read is skipped entirely (used by tests). */
   skipFilesystem?:      boolean;
   /**
@@ -494,12 +496,14 @@ function formatBudgetSection(used: number, max: number): string {
   return [HEADER_BUDGET, '', renderBudgetLine(used, max)].join('\n');
 }
 
-function formatEnvironmentSection(platform: string, cwd: string): string {
+function formatEnvironmentSection(platform: string, cwd: string, tempDir: string): string {
   return [
     HEADER_ENVIRONMENT,
     '',
     `Platform: ${platform}`,
     `Working directory: ${cwd}`,
+    `Temporary directory: ${tempDir}`,
+    'Use this path directly; do not run a shell command to discover it.',
     `Date: ${dateStamp()}`,
   ].join('\n');
 }
@@ -684,7 +688,7 @@ export class PromptBuilder {
     const cwd      = opts.cwd      ?? process.cwd();
     slots.push({
       name:     'environment',
-      content:  formatEnvironmentSection(platform, cwd),
+      content:  formatEnvironmentSection(platform, cwd, opts.tempDir ?? os.tmpdir()),
       optional: false,
     });
 

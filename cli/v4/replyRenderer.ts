@@ -421,7 +421,7 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     // line wrap, the bg painting may show a visual seam at the wrap
     // point. Acceptable for v4.1.3 — revertable to Path A (no bg) if
     // visual smoke surfaces a real problem.
-    codespan:     (text: string) => `${CODE_BG_ON} ${paint('accent')(decodeColonToken(text))} ${CODE_BG_OFF}`,
+    codespan:     (text: string) => `${CODE_BG_ON}${paint('accent')(decodeColonToken(text))}${CODE_BG_OFF}`,
     del:          paint('muted'),
     // marked-terminal calls opts.link with the ASSEMBLED visual
     // (already OSC8-wrapped when the host terminal supports it),

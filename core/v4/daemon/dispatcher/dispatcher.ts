@@ -49,6 +49,7 @@ import type { RunStore } from '../runStore';
 import type { ClaimedEvent, TriggerSource } from '../types';
 import type { Db } from '../db/connection';
 import type { JobEngine } from '../jobEngine';
+import { admitDurableJob } from '../jobLifecycle';
 import type { TriggerRowSql } from '../db/schema/v1.spec';
 import {
   buildTriggerSessionId,
@@ -345,7 +346,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         && typeof durable.run_id === 'number'
           ? { jobId: durable.job_id, attemptId: durable.attempt_id, runId: durable.run_id }
           : undefined;
-      const admission = existingAdmission ?? opts.jobEngine?.submitJob({
+      const admission = existingAdmission ?? (opts.jobEngine ? admitDurableJob(opts.jobEngine, {
         entryPoint: 'daemon_trigger',
         source: event.source,
         sessionId,
@@ -355,7 +356,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         requestFingerprint: event.idempotencyKey ?? String(event.id),
         goal: message,
         triggerEventId: event.id,
-      });
+      }) : undefined);
       const input: DaemonAgentInput = {
         sessionId,
         instanceId:     opts.instanceId,
@@ -369,7 +370,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
 
       let result: DaemonAgentResult;
       if (deliverOnly) {
-        result = deliverOnlyStub(input, opts.runStore, opts.jobEngine);
+        result = await deliverOnlyStub(input, opts.runStore, opts.jobEngine);
         _stats.deliverOnly += 1;
       } else {
         if (!runner) {

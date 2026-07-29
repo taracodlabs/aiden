@@ -8,6 +8,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Db } from '../daemon/db/connection';
 import { createActionAuthority, type ActionAuthority } from '../actionAuthority';
 import type { JobEngine } from '../daemon/jobEngine';
+import { admitDurableJob } from '../daemon/jobLifecycle';
 import { createJobControlAuthority, type JobControlAuthority } from '../daemon/jobControlAuthority';
 import type { RunStore } from '../daemon/runStore';
 import type { TriggerBus } from '../daemon/triggerBus';
@@ -32,7 +33,7 @@ export function createWorkbenchJobCommands(options: {
       source: 'manual', sourceKey: 'workbench-web', idempotencyKey,
       payload: { body: { prompt: task.message, source: 'workbench-web' }, sessionId: task.sessionId },
     });
-    const admission = options.jobEngine.submitJob({
+    const admission = admitDurableJob(options.jobEngine, {
       entryPoint: 'workbench', source: 'workbench',
       sessionId: task.sessionId ?? `workbench:${idempotencyKey}`,
       instanceId: options.instanceId,
