@@ -1452,6 +1452,83 @@ function applyV31(db: Database.Database): void {
   `);
 }
 
+/** Immutable repository identity and source-state captures bound to durable Attempts. */
+function applyV32(db: Database.Database): void {
+  addMissingColumns(db, 'tasks', [['repository_snapshot_id', 'TEXT']]);
+  addMissingColumns(db, 'runs', [['repository_snapshot_id', 'TEXT']]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workspace_descriptors (
+      workspace_id TEXT PRIMARY KEY,
+      requested_path TEXT NOT NULL,
+      canonical_path TEXT NOT NULL,
+      portable_path TEXT NOT NULL,
+      path_kind TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      exists_flag INTEGER NOT NULL,
+      repository_root TEXT,
+      git_directory TEXT,
+      git_common_directory TEXT,
+      outer_repository_root TEXT,
+      vcs_kind TEXT NOT NULL,
+      trust_policy_digest TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_descriptors_identity
+      ON workspace_descriptors(platform, portable_path);
+
+    CREATE TABLE IF NOT EXISTS repository_snapshots (
+      snapshot_id TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      repository_root TEXT,
+      vcs_kind TEXT NOT NULL,
+      branch TEXT,
+      head_commit TEXT,
+      upstream TEXT,
+      index_digest TEXT NOT NULL,
+      working_tree_digest TEXT NOT NULL,
+      capture_policy_digest TEXT NOT NULL,
+      capture_policy_json TEXT NOT NULL,
+      incomplete INTEGER NOT NULL DEFAULT 0,
+      incomplete_reasons_json TEXT NOT NULL DEFAULT '[]',
+      previous_snapshot_id TEXT,
+      state_digest TEXT NOT NULL,
+      captured_at INTEGER NOT NULL,
+      FOREIGN KEY (workspace_id) REFERENCES workspace_descriptors(workspace_id),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (previous_snapshot_id) REFERENCES repository_snapshots(snapshot_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_repository_snapshots_job
+      ON repository_snapshots(job_id, captured_at, snapshot_id);
+    CREATE INDEX IF NOT EXISTS idx_repository_snapshots_attempt
+      ON repository_snapshots(attempt_id, generation, captured_at, snapshot_id);
+    CREATE INDEX IF NOT EXISTS idx_repository_snapshots_workspace
+      ON repository_snapshots(workspace_id, captured_at, snapshot_id);
+    CREATE INDEX IF NOT EXISTS idx_repository_snapshots_ancestry
+      ON repository_snapshots(previous_snapshot_id);
+
+    CREATE TABLE IF NOT EXISTS repository_snapshot_entries (
+      snapshot_id TEXT NOT NULL,
+      relative_path TEXT NOT NULL,
+      canonical_identity TEXT NOT NULL,
+      classification TEXT NOT NULL,
+      git_state TEXT,
+      size INTEGER,
+      modified_at REAL,
+      mode INTEGER,
+      content_hash TEXT,
+      capture_status TEXT NOT NULL,
+      reason TEXT,
+      PRIMARY KEY (snapshot_id, relative_path),
+      FOREIGN KEY (snapshot_id) REFERENCES repository_snapshots(snapshot_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_repository_snapshot_entries_path
+      ON repository_snapshot_entries(relative_path, snapshot_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1484,6 +1561,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 29, name: 'durable claims evidence and verdicts', apply: applyV29 },
   { version: 30, name: 'durable Job event cursors', apply: applyV30 },
   { version: 31, name: 'kernel projection query indexes', apply: applyV31 },
+  { version: 32, name: 'immutable repository snapshots', apply: applyV32 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -1517,7 +1595,8 @@ function tableExists(db: Database.Database, name: string): boolean {
 }
 
 function validateLatestSchema(db: Database.Database): void {
-  const required = ['tasks', 'runs', 'run_events', 'side_effect_ledger', 'durable_inputs'];
+  const required = ['tasks', 'runs', 'run_events', 'side_effect_ledger', 'durable_inputs',
+    'workspace_descriptors', 'repository_snapshots', 'repository_snapshot_entries'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

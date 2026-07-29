@@ -275,6 +275,7 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
       'next_event_sequence', 'next_input_sequence', 'next_wait_sequence', 'parent_task_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'permissions', 'policy_snapshot_id', 'principal_id', 'recovery_state',
+      'repository_snapshot_id',
       'request_fingerprint',
       // v4.13 Gap 4 (v18 migration) — wake-loop cap.
       'resume_count', 'root_job_id', 'session_id',
