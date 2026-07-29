@@ -76,8 +76,12 @@ export const fileListTool: ToolHandler = {
     }
     const resolved = policy.resolvedPath;
     try {
-      if (ctx.repositoryInspection && isWithin(resolved, ctx.repositoryInspection.rootPath)) {
-        const relativeDirectory = path.relative(ctx.repositoryInspection.rootPath, resolved).replace(/\\/g, '/');
+      const canonicalDirectory = await fs.realpath(resolved);
+      const inspectionRoot = ctx.repositoryInspection
+        ? await fs.realpath(ctx.repositoryInspection.rootPath)
+        : undefined;
+      if (ctx.repositoryInspection && inspectionRoot && isWithin(canonicalDirectory, inspectionRoot)) {
+        const relativeDirectory = path.relative(inspectionRoot, canonicalDirectory).replace(/\\/g, '/');
         const inventory = await ctx.repositoryInspection.authority.inventory(
           ctx.repositoryInspection.snapshotId,
           { limit: 5_000 },
@@ -104,7 +108,7 @@ export const fileListTool: ToolHandler = {
         const entries = [...immediate.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
         return {
           success: true,
-          path: resolved,
+          path: canonicalDirectory,
           count: entries.length,
           entries,
           snapshotId: inventory.snapshotId,

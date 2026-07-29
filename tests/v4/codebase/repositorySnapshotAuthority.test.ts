@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -158,6 +158,32 @@ describe('RepositorySnapshot authority', () => {
     expect(read).toMatchObject({ success: true, snapshotId: snapshot.id, stateDigest: snapshot.stateDigest, content: 'snapshot content' });
     const list = await fileListTool.execute({}, context) as Record<string, unknown>;
     expect(list).toMatchObject({ success: true, snapshotId: snapshot.id, entries: [{ name: 'source.ts', type: 'file' }] });
+  });
+
+  it('keeps snapshot inspection metadata when the workspace root is a filesystem alias', async () => {
+    await writeFile(path.join(root, 'source.ts'), 'snapshot content');
+    const alias = `${root}-alias`;
+    await symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      const binding = authority();
+      const snapshot = await engine.repository.captureSnapshot({ ...binding, requestedPath: alias, producer: 'test' });
+      const context = {
+        cwd: alias,
+        paths: {} as never,
+        repositoryInspection: { snapshotId: snapshot.id, rootPath: alias, authority: engine.repository },
+      };
+      const read = await fileReadTool.execute({ path: 'source.ts' }, context) as Record<string, unknown>;
+      expect(read).toMatchObject({
+        success: true,
+        snapshotId: snapshot.id,
+        stateDigest: snapshot.stateDigest,
+        content: 'snapshot content',
+      });
+      const list = await fileListTool.execute({}, context) as Record<string, unknown>;
+      expect(list).toMatchObject({ success: true, snapshotId: snapshot.id });
+    } finally {
+      await rm(alias, { recursive: true, force: true });
+    }
   });
 
   it('records policy exclusions without hashing excluded directory changes', async () => {

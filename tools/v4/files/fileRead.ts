@@ -117,8 +117,11 @@ export const fileReadTool: ToolHandler = {
     const limit = Math.max(1, Math.min(MAX_OUTPUT, typeof args.limit === 'number' ? Math.floor(args.limit) : MAX_OUTPUT));
     try {
       const canonicalPath = await fs.realpath(resolved);
-      if (ctx.repositoryInspection && isWithin(canonicalPath, ctx.repositoryInspection.rootPath)) {
-        const relativePath = path.relative(ctx.repositoryInspection.rootPath, canonicalPath);
+      const inspectionRoot = ctx.repositoryInspection
+        ? await fs.realpath(ctx.repositoryInspection.rootPath)
+        : undefined;
+      if (ctx.repositoryInspection && inspectionRoot && isWithin(canonicalPath, inspectionRoot)) {
+        const relativePath = path.relative(inspectionRoot, canonicalPath);
         const result = await ctx.repositoryInspection.authority.readFile(
           ctx.repositoryInspection.snapshotId,
           relativePath,
