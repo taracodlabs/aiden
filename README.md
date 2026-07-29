@@ -103,7 +103,7 @@ Give Aiden a goal. It can work across your files, terminal, browser, supported a
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.16.1](https://img.shields.io/badge/Latest-v4.16.1-4ADE80?style=flat-square)
+![v4.17.0](https://img.shields.io/badge/Latest-v4.17.0-4ADE80?style=flat-square)
 
 </details>
 
@@ -204,20 +204,17 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 
 <br>
 
-## What's new in v4.16.1
+## What's new in v4.17.0
 
-**Aiden v4.16.1 hardens Windows self-update correctness while preserving the durable autonomy foundation introduced in v4.16.0.**
+**Aiden v4.17.0 unifies durable runtime authority with a responsive operator terminal.**
 
-This patch release makes in-app updates target the exact npm installation that launched Aiden, even when Node and npm are installed under a different prefix.
+- **One durable lifecycle.** Interactive, one-shot, API, Workbench, daemon, channel, child, and MCP execution share authoritative Job and Attempt transitions.
+- **Stale-result protection.** Generations, leases, fence tokens, terminal-state guards, and persist-first cancellation prevent old work from rewriting current truth.
+- **Evidence-based completion.** Proof, Verdict, exact file readback, effect reconciliation, and failure-injection coverage strengthen completion claims and recovery.
+- **Operator TUI.** The original Aiden startup identity, responsive metadata, boxed composer, status strip, themes, compact outcomes, and durable queue controls form one terminal surface.
+- **Platform reliability.** Windows process cleanup, ConPTY coverage, and cross-platform CI preserve clean startup, activity rendering, and shutdown.
 
-- **Windows self-update correctness.** The updater now resolves the running package root and installs into that exact npm prefix instead of trusting an unrelated npm configured prefix.
-- **Safer update verification.** The installer passes an explicit `--prefix`, checks the installed package version at that target, and fails honestly on mismatches.
-- **Truthful update progress.** Update output uses phase-based progress and failure categories without fabricated percentages or permission misclassification.
-- **Physical cancellation.** Active runtimes and descendant process trees are stopped so cancelled work cannot later become successful.
-- **Safe admission across surfaces.** Interactive, one-shot, API, Workbench, daemon, channel, schedule, child, and MCP work enters the same durable authority before execution.
-- **Fixed terminal composer.** A boxed composer stays usable while tools run, places the hardware cursor correctly, and keeps provider, model, context, and elapsed status separate.
-
-See the full [v4.16.1 release notes](https://github.com/taracodlabs/aiden/releases/tag/v4.16.1).
+See the full [v4.17.0 release notes](https://github.com/taracodlabs/aiden/releases/tag/v4.17.0).
 
 <details>
 <summary><strong>Earlier v4 release highlights — v4.13 through v4.5</strong></summary>
@@ -729,7 +726,7 @@ The future `skills.taracod.com` marketplace will ship community skills under the
 | 📦 **npm** | [aiden-runtime](https://www.npmjs.com/package/aiden-runtime) |
 | 🐙 **Source** | [github.com/taracodlabs/aiden](https://github.com/taracodlabs/aiden) |
 | 📁 **Standalone releases** | [github.com/taracodlabs/aiden-releases](https://github.com/taracodlabs/aiden-releases) |
-| 🧾 **Release notes** | [v4.16.1](https://github.com/taracodlabs/aiden/releases/tag/v4.16.1) · [v4.16.0](https://github.com/taracodlabs/aiden/releases/tag/v4.16.0) · [v4.15.1](https://github.com/taracodlabs/aiden/releases/tag/v4.15.1) · [v4.15.0](https://github.com/taracodlabs/aiden/releases/tag/v4.15.0) · [v4.13.0](https://github.com/taracodlabs/aiden/releases/tag/v4.13.0) · [v4.12.0](https://github.com/taracodlabs/aiden/releases/tag/v4.12.0) |
+| 🧾 **Release notes** | [v4.17.0](https://github.com/taracodlabs/aiden/releases/tag/v4.17.0) · [v4.16.1](https://github.com/taracodlabs/aiden/releases/tag/v4.16.1) · [v4.16.0](https://github.com/taracodlabs/aiden/releases/tag/v4.16.0) · [v4.15.1](https://github.com/taracodlabs/aiden/releases/tag/v4.15.1) · [v4.15.0](https://github.com/taracodlabs/aiden/releases/tag/v4.15.0) · [v4.13.0](https://github.com/taracodlabs/aiden/releases/tag/v4.13.0) · [v4.12.0](https://github.com/taracodlabs/aiden/releases/tag/v4.12.0) |
 | 📖 **Book — Omega** | [Amazon](https://amzn.to/49ceO8l) |
 | 📚 **Docs** | [`docs/v4.5/`](docs/v4.5/) (in this repo) |
 | 💖 **Sponsor (Razorpay)** | [razorpay.me/@whitelotus9625](https://razorpay.me/@whitelotus9625) |
