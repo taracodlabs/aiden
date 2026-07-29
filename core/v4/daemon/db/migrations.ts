@@ -1767,6 +1767,89 @@ function applyV35(db: Database.Database): void {
   `);
 }
 
+/** Snapshot-derived repository facts, graph-projected coding references, and source-bound Claims. */
+function applyV36(db: Database.Database): void {
+  addMissingColumns(db, 'job_claims', [
+    ['repository_snapshot_id', 'TEXT'],
+    ['source_references_json', "TEXT NOT NULL DEFAULT '[]'"],
+    ['required_validation_json', "TEXT NOT NULL DEFAULT '[]'"],
+    ['required_evidence_categories_json', "TEXT NOT NULL DEFAULT '[]'"],
+  ]);
+  addMissingColumns(db, 'job_evidence', [
+    ['repository_snapshot_id', 'TEXT'],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS repository_understanding_indexes (
+      snapshot_id TEXT PRIMARY KEY,
+      state_digest TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('completed','failed')),
+      created_count INTEGER NOT NULL DEFAULT 0,
+      reused_count INTEGER NOT NULL DEFAULT 0,
+      indexed_at INTEGER NOT NULL,
+      FOREIGN KEY (snapshot_id) REFERENCES repository_snapshots(snapshot_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS repository_understanding_records (
+      record_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      record_key TEXT NOT NULL,
+      source_path TEXT,
+      source_hash TEXT,
+      payload_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_repository_understanding_records_kind
+      ON repository_understanding_records(kind, record_key, record_id);
+
+    CREATE TABLE IF NOT EXISTS repository_understanding_snapshot_records (
+      snapshot_id TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      reused_from_snapshot_id TEXT,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (snapshot_id, record_id),
+      FOREIGN KEY (snapshot_id) REFERENCES repository_snapshots(snapshot_id) ON DELETE CASCADE,
+      FOREIGN KEY (record_id) REFERENCES repository_understanding_records(record_id) ON DELETE CASCADE,
+      FOREIGN KEY (reused_from_snapshot_id) REFERENCES repository_snapshots(snapshot_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_repository_understanding_snapshot_kind
+      ON repository_understanding_snapshot_records(snapshot_id, record_id);
+
+    CREATE TABLE IF NOT EXISTS repository_architecture_notes (
+      note_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      fence_token TEXT NOT NULL,
+      repository_snapshot_id TEXT NOT NULL,
+      statement TEXT NOT NULL,
+      source_references_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (repository_snapshot_id) REFERENCES repository_snapshots(snapshot_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_repository_architecture_notes_snapshot
+      ON repository_architecture_notes(repository_snapshot_id, created_at, note_id);
+
+    CREATE TABLE IF NOT EXISTS execution_graph_node_references (
+      reference_key TEXT PRIMARY KEY,
+      graph_id TEXT NOT NULL,
+      node_id TEXT NOT NULL,
+      reference_kind TEXT NOT NULL,
+      reference_id TEXT,
+      repository_snapshot_id TEXT,
+      relative_path TEXT,
+      line_start INTEGER,
+      line_end INTEGER,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (graph_id) REFERENCES execution_graphs(graph_id) ON DELETE CASCADE,
+      FOREIGN KEY (node_id) REFERENCES execution_graph_nodes(node_id) ON DELETE CASCADE,
+      FOREIGN KEY (repository_snapshot_id) REFERENCES repository_snapshots(snapshot_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_execution_graph_node_references_graph
+      ON execution_graph_node_references(graph_id, node_id, reference_kind);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1803,6 +1886,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 33, name: 'source-fenced repository changes', apply: applyV33 },
   { version: 34, name: 'snapshot-bound structured validation', apply: applyV34 },
   { version: 35, name: 'durable Git effects and reconciliation', apply: applyV35 },
+  { version: 36, name: 'repository understanding and durable coding plans', apply: applyV36 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -1839,7 +1923,10 @@ function validateLatestSchema(db: Database.Database): void {
   const required = ['tasks', 'runs', 'run_events', 'side_effect_ledger', 'durable_inputs',
     'workspace_descriptors', 'repository_snapshots', 'repository_snapshot_entries',
     'repository_change_intents', 'repository_change_records', 'validation_runs',
-    'test_run_details', 'build_run_details', 'validation_artifacts', 'validation_diagnostics'];
+    'test_run_details', 'build_run_details', 'validation_artifacts', 'validation_diagnostics',
+    'git_effect_operations', 'repository_understanding_indexes', 'repository_understanding_records',
+    'repository_understanding_snapshot_records', 'repository_architecture_notes',
+    'execution_graph_node_references'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

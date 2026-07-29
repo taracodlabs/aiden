@@ -9,8 +9,61 @@ import type { Db } from './db/connection';
 
 export type ExecutionNodeKind =
   | 'planning' | 'tool' | 'verification' | 'approval' | 'wait'
-  | 'child_job' | 'aggregation' | 'reconciliation' | 'finalization';
-export type ExecutionNodeState = 'pending' | 'runnable' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'blocked';
+  | 'child_job' | 'aggregation' | 'reconciliation' | 'finalization' | 'coding_step';
+export type ExecutionNodeState = 'pending' | 'runnable' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'blocked' | 'superseded';
+
+export type CodingPlanReferenceKind =
+  | 'inspected_file' | 'source_reference' | 'change_record' | 'test_run'
+  | 'build_run' | 'diagnostic' | 'git_effect' | 'claim' | 'evidence';
+
+export interface CodingPlanReference {
+  kind: CodingPlanReferenceKind;
+  id?: string | null;
+  snapshotId?: string | null;
+  path?: string | null;
+  lineStart?: number | null;
+  lineEnd?: number | null;
+}
+
+export type CodingPlanStepState = 'pending' | 'active' | 'blocked' | 'completed' | 'failed' | 'superseded' | 'cancelled';
+
+export interface CodingPlanStepDefinition {
+  stepId: string;
+  label: string;
+  repositorySnapshotId: string;
+  dependsOn?: readonly string[];
+  requiresVerification?: boolean;
+  references?: readonly CodingPlanReference[];
+}
+
+export interface CodingPlanStepRecord {
+  stepId: string;
+  label: string;
+  state: CodingPlanStepState;
+  repositorySnapshotId: string;
+  dependsOn: string[];
+  requiresVerification: boolean;
+  references: CodingPlanReference[];
+  filesInspected: string[];
+  sourceReferences: Array<{ snapshotId: string; path: string; lineStart: number; lineEnd: number }>;
+  outputRef: string | null;
+  verificationRef: string | null;
+  stateVersion: number;
+}
+
+export interface CodingPlanRecord {
+  graphId: string;
+  jobId: string;
+  goal: string;
+  planDigest: string;
+  state: string;
+  version: number;
+  steps: CodingPlanStepRecord[];
+  currentRepositorySnapshotId: string | null;
+  repositoryDriftDetected: boolean;
+  unverifiedClaimIds: string[];
+  remainingStepIds: string[];
+}
 
 export interface ExecutionNodeDefinition {
   nodeId: string;
@@ -63,6 +116,17 @@ interface GraphAuthority {
   settle(jobId: string, state: 'completed' | 'failed' | 'cancelled', producer: string, idempotencyKey: string, now?: number): GraphTransitionResult;
   nodes(jobId: string): ExecutionGraphNode[];
   events(jobId: string): ExecutionGraphEvent[];
+  createCodingPlan(command: {
+    jobId: string; planDigest: string; steps: readonly CodingPlanStepDefinition[];
+    producer: string; idempotencyKey: string; now?: number;
+  }): { graphId: string; version: number; duplicate: boolean };
+  getCodingPlan(jobId: string): CodingPlanRecord | null;
+  addNodeReferences(command: AuthorityCommand & {
+    nodeId: string; references: readonly CodingPlanReference[];
+  }): GraphTransitionResult;
+  retireNode(command: AuthorityCommand & {
+    nodeId: string; state: 'blocked' | 'superseded' | 'cancelled'; reason?: string | null;
+  }): GraphTransitionResult;
 }
 
 interface AuthorityCommand {
@@ -79,6 +143,7 @@ interface GraphRow { graph_id: string; job_id: string; plan_digest: string; stat
 interface NodeRow {
   node_id: string; node_key: string; graph_id: string; job_id: string; kind: ExecutionNodeKind;
   state: ExecutionNodeState; output_ref: string | null; verification_ref: string | null;
+  label: string | null; input_ref: string | null;
   requires_verification: number; state_version: number; created_at: number;
   ordinal: number;
 }
@@ -194,6 +259,85 @@ export function createExecutionGraphAuthority(db: Db): GraphAuthority {
     return [...byId.values()];
   };
 
+  const validateReference = (jobId: string, reference: CodingPlanReference): CodingPlanReference => {
+    const snapshotId = reference.snapshotId ?? null;
+    const relativePath = reference.path?.split('\\').join('/').replace(/^\.\//, '') ?? null;
+    const normalized = {
+      kind: reference.kind,
+      id: reference.id ?? null,
+      snapshotId,
+      path: relativePath,
+      lineStart: reference.lineStart ?? null,
+      lineEnd: reference.lineEnd ?? null,
+    } satisfies CodingPlanReference;
+    if (snapshotId) {
+      const snapshot = db.prepare('SELECT job_id FROM repository_snapshots WHERE snapshot_id=?').get(snapshotId) as { job_id: string } | undefined;
+      if (!snapshot || snapshot.job_id !== jobId) throw new Error('Coding plan reference snapshot does not belong to the Job');
+    }
+    if (reference.kind === 'inspected_file' || reference.kind === 'source_reference') {
+      if (!snapshotId || !relativePath) throw new Error('Coding plan source references require a snapshot and path');
+      const entry = db.prepare(
+        'SELECT capture_status FROM repository_snapshot_entries WHERE snapshot_id=? AND relative_path=?',
+      ).get(snapshotId, relativePath) as { capture_status: string } | undefined;
+      if (!entry || entry.capture_status !== 'captured') throw new Error('Coding plan source reference is not captured by the snapshot');
+      if (reference.kind === 'source_reference' && (
+        normalized.lineStart === null || normalized.lineEnd === null
+        || normalized.lineStart < 1 || normalized.lineEnd < normalized.lineStart
+      )) throw new Error('Coding plan source reference requires a valid line range');
+      return normalized;
+    }
+    if (!normalized.id) throw new Error(`Coding plan ${reference.kind} reference requires an identity`);
+    const checks: Record<Exclude<CodingPlanReferenceKind, 'inspected_file' | 'source_reference'>, { sql: string; params: unknown[] }> = {
+      change_record: { sql: 'SELECT 1 FROM repository_change_records WHERE change_id=? AND job_id=?', params: [normalized.id, jobId] },
+      test_run: { sql: "SELECT 1 FROM validation_runs WHERE run_id=? AND job_id=? AND kind='test'", params: [normalized.id, jobId] },
+      build_run: { sql: "SELECT 1 FROM validation_runs WHERE run_id=? AND job_id=? AND kind='build'", params: [normalized.id, jobId] },
+      diagnostic: { sql: 'SELECT 1 FROM validation_diagnostics d JOIN validation_runs r ON r.run_id=d.run_id WHERE d.diagnostic_id=? AND r.job_id=?', params: [normalized.id, jobId] },
+      git_effect: { sql: 'SELECT 1 FROM git_effect_operations WHERE operation_id=? AND job_id=?', params: [normalized.id, jobId] },
+      claim: { sql: 'SELECT 1 FROM job_claims WHERE claim_id=? AND job_id=?', params: [normalized.id, jobId] },
+      evidence: { sql: 'SELECT 1 FROM job_evidence WHERE evidence_id=? AND job_id=?', params: [normalized.id, jobId] },
+    };
+    const check = checks[reference.kind];
+    if (!db.prepare(check.sql).get(...check.params)) throw new Error(`Coding plan ${reference.kind} reference does not belong to the Job`);
+    return normalized;
+  };
+
+  const insertReferences = (
+    graph: GraphRow,
+    nodeKey: string,
+    references: readonly CodingPlanReference[],
+    now: number,
+  ): void => {
+    const nodeId = physicalNodeId(graph.graph_id, nodeKey);
+    for (const input of references) {
+      const reference = validateReference(graph.job_id, input);
+      const referenceKey = `graphref_${digest(JSON.stringify({ nodeId, ...reference }))}`;
+      db.prepare(
+        `INSERT OR IGNORE INTO execution_graph_node_references
+           (reference_key,graph_id,node_id,reference_kind,reference_id,repository_snapshot_id,
+            relative_path,line_start,line_end,created_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+      ).run(
+        referenceKey, graph.graph_id, nodeId, reference.kind, reference.id ?? null,
+        reference.snapshotId ?? null, reference.path ?? null, reference.lineStart ?? null,
+        reference.lineEnd ?? null, now,
+      );
+    }
+  };
+
+  const referencesFor = (nodeId: string): CodingPlanReference[] => (
+    db.prepare(
+      `SELECT reference_kind,reference_id,repository_snapshot_id,relative_path,line_start,line_end
+         FROM execution_graph_node_references WHERE node_id=? ORDER BY reference_kind,reference_key`,
+    ).all(nodeId) as Array<{
+      reference_kind: CodingPlanReferenceKind; reference_id: string | null;
+      repository_snapshot_id: string | null; relative_path: string | null;
+      line_start: number | null; line_end: number | null;
+    }>
+  ).map((row) => ({
+    kind: row.reference_kind, id: row.reference_id, snapshotId: row.repository_snapshot_id,
+    path: row.relative_path, lineStart: row.line_start, lineEnd: row.line_end,
+  }));
+
   const createTx = db.transaction((command: Parameters<GraphAuthority['create']>[0]) => {
     const existing = graphFor(command.jobId);
     if (existing) {
@@ -279,6 +423,157 @@ export function createExecutionGraphAuthority(db: Db): GraphAuthority {
   return {
     create: createTx,
     edit: editTx,
+    createCodingPlan(command) {
+      if (command.steps.length === 0) throw new Error('Coding plan requires at least one step');
+      const definitions: ExecutionNodeDefinition[] = command.steps.map((step) => {
+        const snapshot = db.prepare('SELECT job_id FROM repository_snapshots WHERE snapshot_id=?')
+          .get(step.repositorySnapshotId) as { job_id: string } | undefined;
+        if (!snapshot || snapshot.job_id !== command.jobId) throw new Error('Coding plan step snapshot does not belong to the Job');
+        for (const reference of step.references ?? []) validateReference(command.jobId, reference);
+        return {
+          nodeId: step.stepId, kind: 'coding_step', label: step.label,
+          inputRef: `repository_snapshot:${step.repositorySnapshotId}`,
+          dependsOn: step.dependsOn, requiresVerification: step.requiresVerification,
+        };
+      });
+      const now = command.now ?? Date.now();
+      const createPlan = db.transaction(() => {
+        const result = createTx({
+          jobId: command.jobId, planDigest: command.planDigest, nodes: definitions,
+          producer: command.producer, idempotencyKey: command.idempotencyKey, now,
+        });
+        const graph = graphFor(command.jobId)!;
+        if (!result.duplicate) {
+          for (const step of command.steps) insertReferences(graph, step.stepId, step.references ?? [], now);
+        }
+        return result;
+      });
+      return createPlan.immediate();
+    },
+    getCodingPlan(jobId) {
+      const graph = graphFor(jobId);
+      if (!graph) return null;
+      const job = db.prepare('SELECT goal FROM tasks WHERE id=?').get(jobId) as { goal: string } | undefined;
+      if (!job) return null;
+      const rows = db.prepare(
+        "SELECT * FROM execution_graph_nodes WHERE graph_id=? AND kind='coding_step' ORDER BY ordinal",
+      ).all(graph.graph_id) as NodeRow[];
+      if (rows.length === 0) return null;
+      const edges = db.prepare(
+        `SELECT source.node_key AS source_key,target.node_key AS target_key
+           FROM execution_graph_edges edge
+           JOIN execution_graph_nodes source ON source.node_id=edge.from_node_id
+           JOIN execution_graph_nodes target ON target.node_id=edge.to_node_id
+          WHERE edge.graph_id=? ORDER BY source.node_key`,
+      ).all(graph.graph_id) as Array<{ source_key: string; target_key: string }>;
+      const projectState = (state: ExecutionNodeState): CodingPlanStepState => {
+        if (state === 'running') return 'active';
+        if (state === 'succeeded') return 'completed';
+        if (state === 'failed') return 'failed';
+        if (state === 'blocked') return 'blocked';
+        if (state === 'cancelled') return 'cancelled';
+        if (state === 'superseded') return 'superseded';
+        return 'pending';
+      };
+      const steps = rows.map((row): CodingPlanStepRecord => {
+        const references = referencesFor(row.node_id);
+        const repositorySnapshotId = row.input_ref?.startsWith('repository_snapshot:')
+          ? row.input_ref.slice('repository_snapshot:'.length)
+          : references.find((reference) => reference.snapshotId)?.snapshotId ?? '';
+        return {
+          stepId: row.node_key, label: row.label ?? row.node_key, state: projectState(row.state),
+          repositorySnapshotId,
+          dependsOn: edges.filter((edge) => edge.target_key === row.node_key).map((edge) => edge.source_key),
+          requiresVerification: row.requires_verification === 1, references,
+          filesInspected: references.filter((reference) => reference.kind === 'inspected_file' && reference.path).map((reference) => reference.path!),
+          sourceReferences: references.filter((reference) => (
+            reference.kind === 'source_reference' && reference.snapshotId && reference.path
+            && reference.lineStart !== null && reference.lineStart !== undefined
+            && reference.lineEnd !== null && reference.lineEnd !== undefined
+          )).map((reference) => ({
+            snapshotId: reference.snapshotId!, path: reference.path!,
+            lineStart: reference.lineStart!, lineEnd: reference.lineEnd!,
+          })),
+          outputRef: row.output_ref, verificationRef: row.verification_ref, stateVersion: row.state_version,
+        };
+      });
+      const currentSnapshot = db.prepare(
+        `SELECT snapshot_id,state_digest FROM repository_snapshots WHERE job_id=?
+          ORDER BY captured_at DESC,rowid DESC LIMIT 1`,
+      ).get(jobId) as { snapshot_id: string; state_digest: string } | undefined;
+      const unverifiedClaims = db.prepare(
+        "SELECT claim_id FROM job_claims WHERE job_id=? AND state<>'verified' ORDER BY created_at,claim_id",
+      ).all(jobId) as Array<{ claim_id: string }>;
+      return {
+        graphId: graph.graph_id, jobId, goal: job.goal, planDigest: graph.plan_digest,
+        state: graph.state, version: graph.version, steps,
+        currentRepositorySnapshotId: currentSnapshot?.snapshot_id ?? null,
+        repositoryDriftDetected: currentSnapshot !== undefined
+          && steps.some((step) => {
+            const source = db.prepare('SELECT state_digest FROM repository_snapshots WHERE snapshot_id=?')
+              .get(step.repositorySnapshotId) as { state_digest: string } | undefined;
+            return source === undefined || source.state_digest !== currentSnapshot.state_digest;
+          }),
+        unverifiedClaimIds: unverifiedClaims.map((claim) => claim.claim_id),
+        remainingStepIds: steps.filter((step) => !['completed', 'superseded', 'cancelled'].includes(step.state)).map((step) => step.stepId),
+      };
+    },
+    addNodeReferences(command) {
+      const result = authority(command);
+      if (result.terminal) return { applied: false, conflict: 'terminal_job' };
+      if (!result.ok) return { applied: false, conflict: 'stale_fence' };
+      const node = db.prepare('SELECT * FROM execution_graph_nodes WHERE graph_id=? AND node_key=?')
+        .get(result.graph.graph_id, command.nodeId) as NodeRow | undefined;
+      if (!node) return { applied: false, conflict: 'not_found' };
+      const duplicate = db.prepare(
+        'SELECT 1 FROM execution_graph_events WHERE graph_id=? AND idempotency_key=?',
+      ).get(result.graph.graph_id, command.idempotencyKey);
+      if (duplicate) return { applied: false, duplicate: true };
+      if (node.kind !== 'coding_step' || ['succeeded', 'failed', 'cancelled', 'superseded'].includes(node.state)) {
+        return { applied: false, conflict: 'illegal_transition' };
+      }
+      for (const reference of command.references) validateReference(command.jobId, reference);
+      const now = command.now ?? Date.now();
+      const tx = db.transaction(() => {
+        insertReferences(result.graph, command.nodeId, command.references, now);
+        appendEvent(result.graph, 'graph.node_references_added', {
+          nodeId: command.nodeId, referenceKinds: command.references.map((reference) => reference.kind),
+          attemptId: command.attemptId, generation: command.generation,
+        }, command.producer, command.idempotencyKey, now);
+      });
+      tx.immediate();
+      return { applied: true };
+    },
+    retireNode(command) {
+      const result = authority(command);
+      if (result.terminal) return { applied: false, conflict: 'terminal_job' };
+      if (!result.ok) return { applied: false, conflict: 'stale_fence' };
+      const node = db.prepare('SELECT * FROM execution_graph_nodes WHERE graph_id=? AND node_key=?')
+        .get(result.graph.graph_id, command.nodeId) as NodeRow | undefined;
+      if (!node) return { applied: false, conflict: 'not_found' };
+      const duplicate = db.prepare(
+        'SELECT 1 FROM execution_graph_events WHERE graph_id=? AND idempotency_key=?',
+      ).get(result.graph.graph_id, command.idempotencyKey);
+      if (duplicate) return { applied: false, duplicate: true };
+      if (node.kind !== 'coding_step' || ['succeeded', 'failed', 'cancelled', 'superseded'].includes(node.state)) {
+        return { applied: false, conflict: 'illegal_transition' };
+      }
+      const now = command.now ?? Date.now();
+      const tx = db.transaction(() => {
+        db.prepare(
+          'UPDATE execution_graph_nodes SET state=?,state_version=state_version+1,updated_at=? WHERE node_id=?',
+        ).run(command.state, now, node.node_id);
+        db.prepare(
+          "UPDATE execution_node_attempts SET state=?,completed_at=? WHERE node_id=? AND state='running'",
+        ).run(command.state, now, node.node_id);
+        appendEvent(result.graph, `graph.node_${command.state}`, {
+          nodeId: command.nodeId, reason: command.reason ?? null,
+          attemptId: command.attemptId, generation: command.generation,
+        }, command.producer, command.idempotencyKey, now);
+      });
+      tx.immediate();
+      return { applied: true };
+    },
     schedule(command) {
       const result = authority(command);
       if (result.terminal || !result.ok) return [];
@@ -288,7 +583,7 @@ export function createExecutionGraphAuthority(db: Db): GraphAuthority {
            JOIN execution_graph_edges e ON e.to_node_id = n.node_id
            JOIN execution_graph_nodes dependency ON dependency.node_id = e.from_node_id
           WHERE n.graph_id = ? AND n.state = 'pending'
-            AND dependency.state IN ('failed','cancelled','blocked')
+            AND dependency.state IN ('failed','cancelled','blocked','superseded')
           ORDER BY n.ordinal`,
       ).all(result.graph.graph_id) as Array<{ node_id: string; node_key: string }>;
       const rows = db.prepare(
@@ -417,7 +712,7 @@ export function createExecutionGraphAuthority(db: Db): GraphAuthority {
       if (graph.state !== 'active') return { applied: false, conflict: 'illegal_transition' };
       if (state === 'completed') {
         const unfinished = db.prepare(
-          "SELECT 1 FROM execution_graph_nodes WHERE graph_id = ? AND state <> 'succeeded' LIMIT 1",
+          "SELECT 1 FROM execution_graph_nodes WHERE graph_id = ? AND state NOT IN ('succeeded','superseded') LIMIT 1",
         ).get(graph.graph_id);
         if (unfinished) return { applied: false, conflict: 'illegal_transition' };
       }

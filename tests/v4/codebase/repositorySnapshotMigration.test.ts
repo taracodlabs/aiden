@@ -31,13 +31,13 @@ describe('repository snapshot migration v32', () => {
       migration.apply!(db!);
       db!.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,32,?)').run(Date.now());
     }).immediate();
-    expect(LATEST_SCHEMA_VERSION).toBe(35);
+    expect(LATEST_SCHEMA_VERSION).toBe(36);
     expect(db.prepare('SELECT id,status,repository_snapshot_id FROM tasks WHERE id=?').get('job')).toEqual({ id: 'job', status: 'queued', repository_snapshot_id: null });
     expect(db.prepare('SELECT attempt_id,status,repository_snapshot_id FROM runs WHERE attempt_id=?').get('attempt')).toEqual({ attempt_id: 'attempt', status: 'queued', repository_snapshot_id: null });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_%' ORDER BY name").all()).toEqual([
       { name: 'repository_snapshot_entries' }, { name: 'repository_snapshots' },
     ]);
-    expect(runMigrations(db)).toEqual({ from: 32, to: 35 });
+    expect(runMigrations(db)).toEqual({ from: 32, to: 36 });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_change_%' ORDER BY name").all()).toEqual([
       { name: 'repository_change_intents' }, { name: 'repository_change_records' },
     ]);
@@ -46,7 +46,14 @@ describe('repository snapshot migration v32', () => {
     ]);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='git_effect_operations'").get())
       .toEqual({ name: 'git_effect_operations' });
-    expect(runMigrations(db)).toEqual({ from: 35, to: 35 });
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_understanding_%' ORDER BY name").all())
+      .toEqual([
+        { name: 'repository_understanding_indexes' }, { name: 'repository_understanding_records' },
+        { name: 'repository_understanding_snapshot_records' },
+      ]);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('repository_architecture_notes','execution_graph_node_references') ORDER BY name").all())
+      .toEqual([{ name: 'execution_graph_node_references' }, { name: 'repository_architecture_notes' }]);
+    expect(runMigrations(db)).toEqual({ from: 36, to: 36 });
   });
 
   it('adds validation records to a v33 database without changing repository history', () => {
@@ -70,7 +77,7 @@ describe('repository snapshot migration v32', () => {
       (session_id,instance_id,status,started_at,task_id,attempt_id,attempt_number,generation,state_version,next_event_sequence)
       VALUES ('session','instance','queued',?,'job','attempt',1,1,0,1)`).run(now);
 
-    expect(runMigrations(db)).toEqual({ from: 33, to: 35 });
+    expect(runMigrations(db)).toEqual({ from: 33, to: 36 });
     expect(db.prepare('SELECT id,status FROM tasks WHERE id=?').get('job')).toEqual({ id: 'job', status: 'queued' });
     expect(db.prepare('SELECT attempt_id,status FROM runs WHERE attempt_id=?').get('attempt'))
       .toEqual({ attempt_id: 'attempt', status: 'queued' });

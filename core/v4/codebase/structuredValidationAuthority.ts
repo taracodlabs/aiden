@@ -459,7 +459,7 @@ export function createStructuredValidationAuthority(deps: Deps): StructuredValid
       const claim = deps.proof.createClaim({
         jobId: input.jobId, attemptId: input.attemptId, generation: input.generation,
         category: 'observed', statement: `${input.plan.kind} validation completed for snapshot ${snapshot.id}`,
-        required: false, now,
+        required: false, repositorySnapshotId: snapshot.id, now,
       });
       db.transaction(() => {
         db.prepare(
@@ -583,6 +583,7 @@ export function createStructuredValidationAuthority(deps: Deps): StructuredValid
       const evidence = deps.proof.recordEvidence({
         jobId: current.jobId, attemptId: current.attemptId, generation: current.generation,
         fenceToken: current.fenceToken, effectId: current.effectId,
+        repositorySnapshotId: snapshot.id,
         source: `validation.${current.kind}`, producer: input.producer, observedAt: now,
         coverage: semanticallyVerified ? 'full' : parseState === 'parsed' ? 'partial' : 'unknown',
         verificationResult: semanticallyVerified ? 'verified' : state === 'failed' ? 'failed' : 'unknown',
