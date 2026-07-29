@@ -18,9 +18,9 @@
  * (via sweepOrphaned), and the v16 migration leaving pre-existing rows
  * untouched.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from 'vitest';
 import { Writable } from 'node:stream';
-import { promises as fs } from 'node:fs';
+import { promises as fs, mkdtempSync, rmSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
@@ -37,16 +37,40 @@ let tmp: string;
 let db: InstanceType<typeof Database>;
 let taskStore: TaskStore;
 
+// Build each schema fixture once while its database is closed, then copy it for
+// every isolated case. This keeps the real migration coverage without making
+// each test compete for a complete synchronous migration chain on Windows.
+const suiteTmp = mkdtempSync(path.join(os.tmpdir(), 'aiden-verify-gate-suite-'));
+const currentTemplate = path.join(suiteTmp, 'current.db');
+const currentTemplateDb = new Database(currentTemplate);
+runMigrations(currentTemplateDb);
+currentTemplateDb.close();
+
+const pre16Template = path.join(suiteTmp, 'pre16.db');
+const pre16TemplateDb = new Database(pre16Template);
+for (const migration of MIGRATIONS_FOR_TESTS) {
+  if (migration.version <= 15) pre16TemplateDb.exec(migration.sql);
+}
+pre16TemplateDb.prepare(
+  'INSERT OR REPLACE INTO schema_version (id, version, applied_at) VALUES (1, 15, ?)',
+).run(new Date().toISOString());
+pre16TemplateDb.close();
+
 beforeEach(async () => {
-  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-verify-gate-'));
-  db = new Database(path.join(tmp, 'daemon.db'));
-  runMigrations(db);
+  tmp = await fs.mkdtemp(path.join(suiteTmp, 'case-'));
+  const dbFile = path.join(tmp, 'daemon.db');
+  await fs.copyFile(currentTemplate, dbFile);
+  db = new Database(dbFile);
   taskStore = createTaskStore({ db });
 });
 
 afterEach(async () => {
   db.close();
   await fs.rm(tmp, { recursive: true, force: true }).catch(() => undefined);
+});
+
+afterAll(() => {
+  rmSync(suiteTmp, { recursive: true, force: true });
 });
 
 // ── ChatSession scaffolding (greeter integration-test pattern) ─────────
@@ -261,15 +285,10 @@ describe('pending_verification crash state + v16 migration', () => {
   });
 
   it('v16 migration: rows created on the v15 schema are untouched — status intact, evidence null', async () => {
-    const db2 = new Database(path.join(tmp, 'pre16.db'));
+    const pre16File = path.join(tmp, 'pre16.db');
+    await fs.copyFile(pre16Template, pre16File);
+    const db2 = new Database(pre16File);
     try {
-      // Apply everything below v16, marking the version like production.
-      for (const m of MIGRATIONS_FOR_TESTS) {
-        if (m.version <= 15) db2.exec(m.sql);
-      }
-      db2.prepare(
-        'INSERT OR REPLACE INTO schema_version (id, version, applied_at) VALUES (1, 15, ?)',
-      ).run(new Date().toISOString());
       db2.prepare(
         `INSERT INTO tasks (id, title, goal, status, created_at, updated_at,
            channel_id, session_id, parent_task_id, trace_ids, artifact_ids)
