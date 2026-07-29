@@ -138,6 +138,32 @@ describe('Codebase Mode production lifecycle acceptance', () => {
     });
   });
 
+  it('keeps an external file change on the ordinary approval path', async () => {
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'aiden-codebase-external-'));
+    const target = path.join(outside, 'denied.txt');
+    let prompts = 0;
+    try {
+      const execute = buildExecutor([fileWriteTool], async () => {
+        prompts += 1;
+        return 'deny';
+      });
+      const result = await runJob({
+        execute: async () => execute({
+          id: 'external-write', name: 'file_write',
+          arguments: { path: target, content: 'must not be written' },
+        }),
+        finalStatus: 'failed',
+      });
+
+      expect(prompts).toBe(1);
+      expect(result.value.error).toMatch(/denied/i);
+      expect(engine.changes.listRecords(result.jobId)).toHaveLength(0);
+      await expect(readFile(target, 'utf8')).rejects.toThrow();
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('completes a durable inspect-change-validate plan with source-bound Proof', async () => {
     await writeFile(path.join(root, 'calculator.ts'), 'export const add = (a: number, b: number) => a - b;\n');
     await writeFile(path.join(root, 'calculator.test.ts'), 'expect(add(2, 1)).toBe(3);\n');

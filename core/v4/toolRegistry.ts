@@ -90,6 +90,7 @@ import {
   type ValidationEnvironment,
 } from './codebase/structuredValidationAuthority';
 import { getRawValidationOutput } from './codebase/validationOutput';
+import { isWithin } from './sandboxFs';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -550,6 +551,7 @@ export class ToolRegistry {
 
       const durableJobContext = currentJobExecutionContext();
       let context = baseContext;
+      let repositoryChangeAutoBound = false;
       const needsRepositoryBinding =
         ((call.name === 'file_read' || call.name === 'file_list') && !baseContext.repositoryInspection)
         || (['file_write', 'file_patch', 'file_move', 'file_delete'].includes(call.name)
@@ -562,6 +564,7 @@ export class ToolRegistry {
         try {
           const repository = await ensureRepositoryExecutionBinding(durableJobContext);
           if (repository) {
+            repositoryChangeAutoBound = baseContext.repositoryChange === undefined;
             context = {
               ...baseContext,
               repositoryInspection: baseContext.repositoryInspection ?? repository.inspection,
@@ -711,7 +714,17 @@ export class ToolRegistry {
             context.repositoryChange.rootPath,
             priorIntent?.operation,
           );
-          if (plan) {
+          const planBelongsToRepository = !plan || (
+            isWithin(resolvePath(context.repositoryChange.rootPath, plan.path), context.repositoryChange.rootPath)
+            && (!plan.destinationPath || isWithin(
+              resolvePath(context.repositoryChange.rootPath, plan.destinationPath),
+              context.repositoryChange.rootPath,
+            ))
+          );
+          if (repositoryChangeAutoBound && !planBelongsToRepository) {
+            context = { ...context, repositoryChange: undefined };
+          }
+          if (plan && context.repositoryChange) {
             const intent = await context.repositoryChange.authority.prepare({
               jobId: durableJobContext.jobId,
               attemptId: durableJobContext.attemptId,
