@@ -28,6 +28,10 @@ import {
   type SafeChangeAuthority,
   type SafeChangeIo,
 } from '../codebase/safeChangeAuthority';
+import {
+  createStructuredValidationAuthority,
+  type StructuredValidationAuthority,
+} from '../codebase/structuredValidationAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -192,6 +196,7 @@ export interface JobEngine {
   readonly projection: JobEventProjectionAuthority;
   readonly repository: RepositorySnapshotAuthority;
   readonly changes: SafeChangeAuthority;
+  readonly validation: StructuredValidationAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -2294,6 +2299,14 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
     appendJobEvent: appendJobEventTx,
   }, opts.safeChangeIo);
+  const validation = createStructuredValidationAuthority({
+    db,
+    repository,
+    proof,
+    getJob(jobId) { const row = getJobRow(jobId); return row ? mapJob(row) : null; },
+    getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
+    appendJobEvent: appendJobEventTx,
+  });
 
   return {
     graph,
@@ -2302,6 +2315,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     projection,
     repository,
     changes,
+    validation,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);

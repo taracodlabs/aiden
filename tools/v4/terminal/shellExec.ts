@@ -32,6 +32,7 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { capToolOutput, shellOutputHandle } from '../../../core/v4/toolOutputCap';
+import { attachRawValidationOutput } from '../../../core/v4/codebase/validationOutput';
 import { localBackendExecute } from '../backends/local';
 import { dockerBackendExecute } from '../backends/docker';
 import {
@@ -158,7 +159,7 @@ export const shellExecTool: ToolHandler = {
     const outCap = capToolOutput(result.stdout ?? '');
     const errCap = capToolOutput(result.stderr ?? '');
     const omitted = outCap.omittedChars + errCap.omittedChars;
-    return {
+    return attachRawValidationOutput({
       success: result.exitCode === 0 || isGrepNoMatchExit(command, result.exitCode),
       exitCode: result.exitCode,
       stdout: outCap.text,
@@ -167,6 +168,6 @@ export const shellExecTool: ToolHandler = {
       timedOut: result.timedOut,
       backend: result.backend,
       ...(outCap.truncated || errCap.truncated ? shellOutputHandle(omitted) : {}),
-    };
+    }, { stdout: result.stdout ?? '', stderr: result.stderr ?? '' });
   },
 };
