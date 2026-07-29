@@ -102,6 +102,14 @@ async function launch(columns: number, paused = false): Promise<{
     () => output.includes(COMPOSER_READY_TOKEN),
     () => stripAnsi(output),
   );
+  await waitFor(
+    () => {
+      const lines = screen.snapshot().split('\n');
+      return (lines.at(-4)?.includes('You') ?? false)
+        && (lines.at(-1)?.includes('custom-default') ?? false);
+    },
+    () => screen.snapshot(),
+  );
   return {
     child,
     raw: () => output,

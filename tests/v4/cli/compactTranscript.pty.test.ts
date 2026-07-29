@@ -4,6 +4,7 @@
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { promises as fs } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import os from 'node:os';
 import path from 'node:path';
 import * as pty from 'node-pty';
@@ -16,13 +17,17 @@ let child: RunningPty | null = null;
 let provider: MockProvider | null = null;
 const cleanup: string[] = [];
 
-function quotePowerShellLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`;
-}
-
 function typeLine(terminal: RunningPty, value: string): void {
   terminal.write(value);
   terminal.write('\r');
+}
+
+function processTableContains(pid: number): boolean {
+  const rows = execFileSync(
+    'tasklist.exe', ['/FI', `PID eq ${pid}`, '/FO', 'CSV', '/NH'],
+    { encoding: 'utf8', windowsHide: true },
+  );
+  return new RegExp(`^"[^"]+","${pid}",`, 'm').test(rows);
 }
 
 function semanticGap(frame: string, before: string, after: string): number {
@@ -71,17 +76,8 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
     const screen = new TerminalScreen(columns, 60);
     const preloadPath = path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs');
     const cliPath = path.join(repoRoot, 'dist/cli/v4/aidenCLI.js');
-    const exitMarker = '__AIDEN_COMPACT_EXIT__';
-    const command = [
-      '&', quotePowerShellLiteral(process.execPath), '-r',
-      quotePowerShellLiteral(preloadPath), quotePowerShellLiteral(cliPath),
-      `; $aidenExitCode = $LASTEXITCODE; Write-Output "${exitMarker}$aidenExitCode"; exit $aidenExitCode`,
-    ].join(' ');
-    child = pty.spawn('powershell.exe', [
-      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command,
-    ], {
+    child = pty.spawn(process.execPath, ['-r', preloadPath, cliPath], {
       cwd, cols: columns, rows: 60,
-      useConptyDll: true,
       env: {
         ...process.env,
         AIDEN_HOME: aidenHome,
@@ -107,7 +103,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
       let settled = false;
       let dataSubscription: { dispose(): void } | null = null;
       let exitSubscription: { dispose(): void } | null = null;
-      const shellPid = child!.pid;
+      const childPid = child!.pid;
       const finish = (error?: Error): void => {
         if (settled) return;
         settled = true;
@@ -119,19 +115,20 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
         if (error) reject(error);
         else resolve();
       };
-      const observeShellExit = (): void => {
+      const observeChildExit = (): void => {
         if (exitProbe) return;
         // Repeated ConPTY resizes can occasionally lose the adapter's exit
-        // callback. The shell marker proves the CLI returned code 0; the PID
-        // probe then verifies that the host process actually terminated.
+        // callback. Verify the built CLI process disappeared directly, while
+        // requiring its clean Goodbye boundary so a crash cannot pass.
         exitProbe = setInterval(() => {
           try {
-            process.kill(shellPid, 0);
+            if (processTableContains(childPid)) return;
+            if (raw.includes('Goodbye.')) finish();
+            else finish(new Error('compact transcript process exited before clean CLI shutdown'));
           } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ESRCH') finish();
-            else finish(error as Error);
+            finish(error as Error);
           }
-        }, 25);
+        }, 250);
       };
       const armTimeout = (ms: number): void => {
         if (timeout) clearTimeout(timeout);
@@ -143,12 +140,6 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
       dataSubscription = child!.onData((chunk) => {
         raw += chunk;
         screen.write(chunk);
-        if (state === 'exit' && raw.includes(`${exitMarker}0`)) observeShellExit();
-        const failedExit = raw.match(new RegExp(`${exitMarker}(-?\\d+)`));
-        if (failedExit && failedExit[1] !== '0') {
-          finish(new Error(`compact transcript shell reported exit ${failedExit[1]}`));
-          return;
-        }
         const readyCount = raw.split(COMPOSER_READY_TOKEN).length - 1;
         const rendered = screen.snapshot();
         if (state === 'boot' && readyCount >= 1) {
@@ -179,6 +170,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
         } else if (state === 'response' && rendered.includes('COMPACT TRANSCRIPT COMPLETE') && readyCount >= 2) {
           state = 'exit';
           armTimeout(20_000);
+          observeChildExit();
           setTimeout(() => typeLine(child!, '/quit'), 250);
         }
       });
