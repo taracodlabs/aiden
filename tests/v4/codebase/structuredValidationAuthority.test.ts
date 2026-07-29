@@ -307,7 +307,9 @@ describe('snapshot-bound structured validation authority', () => {
     const first = await start(plan, source.id);
     const replay = engine.validation.start({
       ...binding(), repositorySnapshotId: source.id, toolCallId: first.toolCallId,
-      effectId: first.effectId, plan, environment: ENVIRONMENT, producer: 'test',
+      effectId: first.effectId,
+      plan: { ...plan, workingDirectory: `${root}${path.sep}alias${path.sep}..` },
+      environment: ENVIRONMENT, producer: 'test',
     });
 
     expect(replay.runId).toBe(first.run.runId);

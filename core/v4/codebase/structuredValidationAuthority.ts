@@ -422,21 +422,30 @@ export function createStructuredValidationAuthority(deps: Deps): StructuredValid
       if (!tool || tool.state !== 'started' || tool.side_effect_id !== input.effectId) {
         throw new StructuredValidationAuthorityError('TOOL_CALL_BINDING_MISMATCH', 'Validation must bind the active shell ToolCall and Effect');
       }
+      const root = rootFor(snapshot);
+      const workingDirectory = realpathWithFallback(path.resolve(input.plan.workingDirectory));
+      if (!isWithin(workingDirectory, root) && workingDirectory !== root) {
+        throw new StructuredValidationAuthorityError('WORKING_DIRECTORY_OUTSIDE_WORKSPACE', 'Validation working directory is outside the repository workspace');
+      }
+      const environmentFingerprint = fingerprint(input.environment);
       const existing = db.prepare(
         'SELECT run_id FROM validation_runs WHERE attempt_id=? AND generation=? AND tool_call_id=? AND kind=?',
       ).get(input.attemptId, input.generation, input.toolCallId, input.plan.kind) as { run_id: string } | undefined;
       if (existing) {
         const record = getRun(existing.run_id)!;
         if (record.repositorySnapshotId !== input.repositorySnapshotId
-          || record.command !== input.plan.command || record.workingDirectory !== input.plan.workingDirectory) {
+          || record.command !== input.plan.command || record.workingDirectory !== workingDirectory
+          || record.environmentFingerprint !== environmentFingerprint || record.scope !== input.plan.scope) {
           throw new StructuredValidationAuthorityError('VALIDATION_IDEMPOTENCY_CONFLICT', 'Validation ToolCall was already bound to different inputs');
         }
+        if (record.kind === 'build') {
+          const outputPaths = db.prepare('SELECT declared_output_paths_json FROM build_run_details WHERE run_id=?')
+            .get(record.runId) as { declared_output_paths_json: string };
+          if (fingerprint(JSON.parse(outputPaths.declared_output_paths_json)) !== fingerprint(input.plan.outputPaths ?? [])) {
+            throw new StructuredValidationAuthorityError('VALIDATION_IDEMPOTENCY_CONFLICT', 'Validation ToolCall was already bound to different inputs');
+          }
+        }
         return record;
-      }
-      const root = rootFor(snapshot);
-      const workingDirectory = realpathWithFallback(path.resolve(input.plan.workingDirectory));
-      if (!isWithin(workingDirectory, root) && workingDirectory !== root) {
-        throw new StructuredValidationAuthorityError('WORKING_DIRECTORY_OUTSIDE_WORKSPACE', 'Validation working directory is outside the repository workspace');
       }
       const runId = id(input.plan.kind === 'test' ? 'test_run' : 'build_run');
       const now = input.now ?? Date.now();
@@ -452,7 +461,6 @@ export function createStructuredValidationAuthority(deps: Deps): StructuredValid
         category: 'observed', statement: `${input.plan.kind} validation completed for snapshot ${snapshot.id}`,
         required: false, now,
       });
-      const environmentFingerprint = fingerprint(input.environment);
       db.transaction(() => {
         db.prepare(
           `INSERT INTO validation_runs (
