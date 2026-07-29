@@ -1703,6 +1703,70 @@ function applyV34(db: Database.Database): void {
   `);
 }
 
+/** Exact local and remote Git mutations bound to the existing Effect ledger. */
+function applyV35(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS git_effect_operations (
+      operation_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      fence_token TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      effect_id TEXT,
+      approval_id TEXT,
+      action_digest TEXT,
+      repository_snapshot_id TEXT NOT NULL,
+      resulting_snapshot_id TEXT,
+      kind TEXT NOT NULL,
+      repository_root TEXT NOT NULL,
+      base_commit TEXT NOT NULL,
+      current_branch TEXT,
+      target_ref TEXT,
+      expected_old_ref TEXT,
+      expected_new_ref TEXT,
+      remote_name TEXT,
+      remote_identity TEXT,
+      owned_paths_json TEXT NOT NULL DEFAULT '[]',
+      index_state_json TEXT NOT NULL,
+      expected_tree_hash TEXT,
+      resulting_tree_hash TEXT,
+      commit_hash TEXT,
+      author_name TEXT NOT NULL,
+      author_email TEXT NOT NULL,
+      committer_name TEXT NOT NULL,
+      committer_email TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      plan_digest TEXT NOT NULL,
+      reconciliation_strategy TEXT NOT NULL,
+      reconciliation_outcome TEXT,
+      external_reference TEXT,
+      evidence_id TEXT,
+      state TEXT NOT NULL,
+      error_code TEXT,
+      error_message TEXT,
+      created_at INTEGER NOT NULL,
+      started_at INTEGER,
+      completed_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(job_id, idempotency_key),
+      UNIQUE(attempt_id, generation, tool_call_id),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (repository_snapshot_id) REFERENCES repository_snapshots(snapshot_id),
+      FOREIGN KEY (resulting_snapshot_id) REFERENCES repository_snapshots(snapshot_id),
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key),
+      FOREIGN KEY (approval_id) REFERENCES approvals(approval_id),
+      FOREIGN KEY (evidence_id) REFERENCES job_evidence(evidence_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_git_effect_operations_job
+      ON git_effect_operations(job_id, created_at, operation_id);
+    CREATE INDEX IF NOT EXISTS idx_git_effect_operations_state
+      ON git_effect_operations(state, updated_at, operation_id);
+    CREATE INDEX IF NOT EXISTS idx_git_effect_operations_snapshot
+      ON git_effect_operations(repository_snapshot_id, created_at, operation_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1738,6 +1802,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 32, name: 'immutable repository snapshots', apply: applyV32 },
   { version: 33, name: 'source-fenced repository changes', apply: applyV33 },
   { version: 34, name: 'snapshot-bound structured validation', apply: applyV34 },
+  { version: 35, name: 'durable Git effects and reconciliation', apply: applyV35 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
