@@ -133,6 +133,7 @@ export function createHttpJobCoordinator(options: HttpJobCoordinatorOptions): Ht
         entryPoint: route.entryPoint,
         source: route.source,
         sessionId: sessionIdFor(req),
+        workspaceId: process.cwd(),
         instanceId: options.instanceId,
         idempotencyNamespace: `http:${route.entryPoint}`,
         idempotencyKey: suppliedKey || undefined,

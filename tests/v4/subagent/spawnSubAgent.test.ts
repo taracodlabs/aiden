@@ -139,6 +139,7 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
     const jobEngine = createJobEngine({ db });
     const parent = jobEngine.submitJob({
       entryPoint: 'test', source: 'test', sessionId: 'parent_session',
+      workspaceId: process.cwd(),
       instanceId: INST, idempotencyNamespace: 'parent', idempotencyKey: 'parent_1',
       requestFingerprint: 'parent_fingerprint', goal: 'parent goal',
     });
@@ -164,7 +165,12 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
     expect(started.applied).toBe(true);
     expect(result.status).toBe('completed');
     expect(children).toHaveLength(1);
-    expect(children[0]).toMatchObject({ parentJobId: parent.jobId, rootJobId: parent.jobId, status: 'completed' });
+    expect(children[0]).toMatchObject({
+      parentJobId: parent.jobId,
+      rootJobId: parent.jobId,
+      workspaceId: process.cwd(),
+      status: 'completed',
+    });
     expect(jobEngine.listAttempts(children[0]!.id)[0]).toMatchObject({ status: 'succeeded' });
     expect(jobEngine.getChildContract(children[0]!.id)).toMatchObject({
       parentJobId: parent.jobId,
