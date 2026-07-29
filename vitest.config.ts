@@ -11,8 +11,13 @@ import { defineConfig } from 'vitest/config';
 //
 // Windows pseudo-terminal helpers also share console infrastructure outside the
 // worker process. Capping file workers prevents unrelated suites from starving
-// input delivery without serializing the entire repository.
-const windowsWorkerLimit = process.platform === 'win32' ? 2 : undefined;
+// input delivery. Node 22 serializes files because its hosted Windows runtime
+// still exhibits filesystem and SQLite starvation with two concurrent workers;
+// Node 20 retains bounded parallelism.
+const nodeMajor = Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10);
+const windowsWorkerLimit = process.platform === 'win32'
+  ? (nodeMajor >= 22 ? 1 : 2)
+  : undefined;
 
 export default defineConfig({
   test: {
