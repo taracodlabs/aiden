@@ -247,7 +247,7 @@ export function normalizeExecutionPlan(command: {
   const networkTargets = ['url', 'endpoint', 'host'].map((key) => command.args[key])
     .filter((value): value is string => typeof value === 'string' && /^[a-z][a-z0-9+.-]*:\/\//i.test(value))
     .sort();
-  const affectedResources = ['path', 'file', 'source', 'destination', 'cwd']
+  const affectedResources = ['path', 'file', 'from', 'to', 'source', 'destination', 'cwd']
     .map((key) => resolveResource(command.args[key], cwd))
     .filter((value): value is string => value !== null)
     .sort();

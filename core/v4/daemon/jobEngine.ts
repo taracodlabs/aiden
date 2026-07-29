@@ -23,6 +23,11 @@ import type { JobBudgetKind, JobCapabilities } from './jobResourceAuthority';
 import { createJobProofAuthority, type JobProofAuthority } from './jobProofAuthority';
 import { createJobEventProjectionAuthority, type JobEventProjectionAuthority } from './jobEventProjection';
 import { createRepositorySnapshotAuthority, type RepositorySnapshotAuthority } from '../codebase/repositorySnapshotAuthority';
+import {
+  createSafeChangeAuthority,
+  type SafeChangeAuthority,
+  type SafeChangeIo,
+} from '../codebase/safeChangeAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -186,6 +191,7 @@ export interface JobEngine {
   readonly proof: JobProofAuthority;
   readonly projection: JobEventProjectionAuthority;
   readonly repository: RepositorySnapshotAuthority;
+  readonly changes: SafeChangeAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -412,6 +418,7 @@ export interface JobEngine {
 
 export interface CreateJobEngineOptions {
   db: Db;
+  safeChangeIo?: SafeChangeIo;
 }
 
 export class IdempotencyConflictError extends Error {
@@ -2279,6 +2286,14 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
     appendJobEvent: appendJobEventTx,
   });
+  const changes = createSafeChangeAuthority({
+    db,
+    repository,
+    proof,
+    getJob(jobId) { const row = getJobRow(jobId); return row ? mapJob(row) : null; },
+    getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
+    appendJobEvent: appendJobEventTx,
+  }, opts.safeChangeIo);
 
   return {
     graph,
@@ -2286,6 +2301,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     proof,
     projection,
     repository,
+    changes,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);

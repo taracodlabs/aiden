@@ -4,6 +4,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import type { ToolEffectContract } from '../../core/v4/effectContract';
 import { resolvePortablePath } from '../../core/v4/portablePath';
@@ -46,12 +47,47 @@ const FILE_WRITE = contract({
     };
   },
 });
+const FILE_PATCH = contract({
+  classification: 'reconcilable_mutation', kind: 'filesystem.write',
+  retrySafety: 'reconcile_before_retry', idempotencySupported: true,
+  reconciliationSupported: true, verificationSupported: true,
+  approvalRequirement: 'policy', sensitiveFields: ['find', 'replace'],
+  redactionRules: ['digest_arguments', 'omit_sensitive_values'], targetFields: ['path'],
+  reconciliationData(args, cwd) {
+    const target = typeof args.path === 'string' ? resolvePortablePath(cwd, args.path) : null;
+    const find = typeof args.find === 'string' ? args.find : null;
+    const replace = typeof args.replace === 'string' ? args.replace : null;
+    if (!target || !find || replace === null) return null;
+    try {
+      const original = readFileSync(target, 'utf8');
+      const count = original.split(find).length - 1;
+      if (count === 0 || (count > 1 && args.replace_all !== true)) return null;
+      const content = args.replace_all === true
+        ? original.split(find).join(replace)
+        : original.replace(find, replace);
+      return {
+        path: target,
+        expectedContentSha256: createHash('sha256').update(content).digest('hex'),
+        expectedSize: Buffer.byteLength(content),
+      };
+    } catch {
+      return null;
+    }
+  },
+});
 const FILE_MOVE = contract({
   classification: 'reconcilable_mutation', kind: 'filesystem.move',
   retrySafety: 'reconcile_before_retry', idempotencySupported: true,
   reconciliationSupported: true, verificationSupported: true,
   approvalRequirement: 'policy', sensitiveFields: [], redactionRules: ['digest_arguments'],
-  targetFields: ['source', 'destination'],
+  targetFields: ['from', 'to', 'source', 'destination'],
+  reconciliationData(args, cwd) {
+    const source = typeof (args.from ?? args.source) === 'string'
+      ? resolvePortablePath(cwd, String(args.from ?? args.source)) : null;
+    const destination = typeof (args.to ?? args.destination) === 'string'
+      ? resolvePortablePath(cwd, String(args.to ?? args.destination)) : null;
+    return source && destination ? { sourcePath: source, destinationPath: destination } : null;
+  },
 });
 const FILE_DELETE = contract({
   classification: 'reconcilable_mutation', kind: 'filesystem.delete',
@@ -112,7 +148,7 @@ const PACKAGE_INSTALL = contract({
 
 const CONTRACTS: Readonly<Record<string, ToolEffectContract>> = Object.freeze({
   file_write: FILE_WRITE,
-  file_patch: FILE_WRITE,
+  file_patch: FILE_PATCH,
   file_delete: FILE_DELETE,
   file_move: FILE_MOVE,
   file_copy: { ...FILE_MOVE, kind: 'filesystem.copy' },

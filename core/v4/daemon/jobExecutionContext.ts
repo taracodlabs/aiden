@@ -264,6 +264,7 @@ export async function executeWithDurableToolCall<T>(command: {
   prepared?: PreparedDurableToolCall | null;
   execute: () => Promise<T>;
   isSuccessful?: (result: T) => boolean;
+  captureFilesystemProof?: boolean;
 }): Promise<T> {
   const context = currentJobExecutionContext();
   if (!context) return command.execute();
@@ -292,7 +293,7 @@ export async function executeWithDurableToolCall<T>(command: {
       resultRef: opaqueReference('tool-result', result),
       producer: context.producer,
     }));
-    if (succeeded) captureDurableFileProof(context, prepared);
+    if (succeeded && command.captureFilesystemProof !== false) captureDurableFileProof(context, prepared);
     return result;
   } catch (error) {
     const completion = context.engine.completeToolCall({

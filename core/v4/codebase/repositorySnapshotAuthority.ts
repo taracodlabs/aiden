@@ -102,6 +102,7 @@ export interface RepositorySnapshotAuthority {
   getSnapshot(snapshotId: string): RepositorySnapshotRecord | undefined;
   getWorkspace(workspaceId: string): WorkspaceDescriptor | undefined;
   getAttemptSnapshot(jobId: string, attemptId: string): RepositorySnapshotRecord | undefined;
+  getEntry(snapshotId: string, relativePath: string): RepositorySnapshotEntry | undefined;
   compareSnapshots(baseId: string, currentId: string): { baseId: string; currentId: string; added: string[]; removed: string[]; changed: string[] };
   inventory(snapshotId: string, options?: { cursor?: string; limit?: number }): Promise<{ snapshotId: string; stateDigest: string; entries: RepositorySnapshotEntry[]; nextCursor: string | null; truncated: boolean; stale: boolean }>;
   readFile(snapshotId: string, relativePath: string, options?: { offset?: number; limit?: number }): Promise<Record<string, unknown>>;
@@ -318,6 +319,10 @@ export function createRepositorySnapshotAuthority(deps: Deps): RepositorySnapsho
     getAttemptSnapshot(jobId, attemptId) {
       const row = db.prepare(`SELECT s.* FROM runs r JOIN repository_snapshots s ON s.snapshot_id=r.repository_snapshot_id WHERE r.task_id=? AND r.attempt_id=?`).get(jobId, attemptId) as Record<string, unknown> | undefined;
       return row ? rowToRecord(row) : undefined;
+    },
+    getEntry(snapshotId, relativePath) {
+      if (!getSnapshot(snapshotId)) return undefined;
+      return entriesFor(snapshotId).find((entry) => entry.path === normalizeRelative(relativePath));
     },
     compareSnapshots(baseId, currentId) {
       const base = getSnapshot(baseId); const current = getSnapshot(currentId);

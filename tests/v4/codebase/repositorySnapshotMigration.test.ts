@@ -26,13 +26,21 @@ describe('repository snapshot migration v32', () => {
     db.prepare(`INSERT INTO tasks (id,title,goal,status,created_at,updated_at,session_id,trace_ids,artifact_ids,root_job_id,next_event_sequence) VALUES ('job','job','goal','queued',?,?, 'session','[]','[]','job',1)`).run(now,now);
     db.prepare(`INSERT INTO runs (session_id,instance_id,status,started_at,task_id,attempt_id,attempt_number,generation,state_version,next_event_sequence) VALUES ('session','instance','queued',?,'job','attempt',1,1,0,1)`).run(now);
 
-    expect(runMigrations(db)).toEqual({ from: 31, to: 32 });
-    expect(LATEST_SCHEMA_VERSION).toBe(32);
+    const migration = MIGRATIONS_FOR_TESTS.find((item) => item.version === 32)!;
+    db.transaction(() => {
+      migration.apply!(db!);
+      db!.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,32,?)').run(Date.now());
+    }).immediate();
+    expect(LATEST_SCHEMA_VERSION).toBe(33);
     expect(db.prepare('SELECT id,status,repository_snapshot_id FROM tasks WHERE id=?').get('job')).toEqual({ id: 'job', status: 'queued', repository_snapshot_id: null });
     expect(db.prepare('SELECT attempt_id,status,repository_snapshot_id FROM runs WHERE attempt_id=?').get('attempt')).toEqual({ attempt_id: 'attempt', status: 'queued', repository_snapshot_id: null });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_%' ORDER BY name").all()).toEqual([
       { name: 'repository_snapshot_entries' }, { name: 'repository_snapshots' },
     ]);
-    expect(runMigrations(db)).toEqual({ from: 32, to: 32 });
+    expect(runMigrations(db)).toEqual({ from: 32, to: 33 });
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_change_%' ORDER BY name").all()).toEqual([
+      { name: 'repository_change_intents' }, { name: 'repository_change_records' },
+    ]);
+    expect(runMigrations(db)).toEqual({ from: 33, to: 33 });
   });
 });

@@ -5,6 +5,9 @@
 
 import { describe, expect, it } from 'vitest';
 import { createHash } from 'node:crypto';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { win32 } from 'node:path';
 
 import {
@@ -85,5 +88,29 @@ describe('durable tool effect contracts', () => {
       expectedSize: Buffer.byteLength(content),
     });
     expect(JSON.stringify(descriptor.reconciliationData)).not.toContain(content);
+  });
+
+  it('derives patch verification from the exact pre-execution content', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'aiden-patch-effect-'));
+    try {
+      const target = path.join(root, 'source.ts');
+      writeFileSync(target, 'const value = 1;\n');
+      const registry = new ToolRegistry();
+      registerAllTools(registry);
+      const expected = 'const value = 2;\n';
+      const descriptor = describeToolEffect(
+        registry.get('file_patch')!,
+        { path: 'source.ts', find: 'value = 1', replace: 'value = 2' },
+        root,
+      );
+      expect(descriptor.reconciliationData).toEqual({
+        path: target,
+        expectedContentSha256: createHash('sha256').update(expected).digest('hex'),
+        expectedSize: Buffer.byteLength(expected),
+      });
+      expect(JSON.stringify(descriptor.reconciliationData)).not.toContain('value = 2');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
