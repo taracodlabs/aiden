@@ -89,6 +89,8 @@ describe('HTTP durable Job ingress', () => {
       status: 'completed',
       active_attempt_id: null,
     });
+    expect(db.prepare('SELECT workspace_id FROM tasks WHERE id = ?').get(body.job_id))
+      .toEqual({ workspace_id: process.cwd() });
     expect(db.prepare('SELECT status FROM runs WHERE id = ?').get(body.run_id)).toEqual({ status: 'succeeded' });
     expect(db.prepare('SELECT job_id, attempt_id, state FROM tool_calls').get()).toEqual({
       job_id: body.job_id,

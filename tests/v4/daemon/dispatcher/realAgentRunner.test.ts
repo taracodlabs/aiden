@@ -95,7 +95,7 @@ describe('createRealAgentRunner durable identity', () => {
     agent.runConversation = async (...args: Parameters<AidenAgent['runConversation']>) => {
       const jobs = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' });
       expect(jobs).toHaveLength(1);
-      expect(jobs[0]).toMatchObject({ status: 'running' });
+      expect(jobs[0]).toMatchObject({ status: 'running', workspaceId: process.cwd() });
       expect(jobEngine.listAttempts(jobs[0]!.id)[0]).toMatchObject({ status: 'running' });
       return original(...args);
     };

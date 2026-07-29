@@ -668,6 +668,7 @@ async function invokeDurableDaemon(
         entryPoint: 'daemon',
         source: input.triggerContext.source,
         sessionId: input.sessionId,
+        workspaceId: process.cwd(),
         instanceId: input.instanceId,
         idempotencyNamespace: `trigger:${input.triggerContext.source}:${input.triggerContext.triggerId}`,
         idempotencyKey: String(input.triggerEventId),

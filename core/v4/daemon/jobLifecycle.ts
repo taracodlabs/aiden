@@ -177,6 +177,48 @@ function isJobTerminal(job: JobRecord | null): boolean {
   return job !== null && /^(cancelled|completed|failed|dead_letter|completed_unverified|verification_failed|abandoned)$/.test(job.status);
 }
 
+function applyRequiredProof(
+  engine: JobEngine,
+  handle: DurableJobHandle,
+  finalization: DurableJobDisposition,
+): DurableJobDisposition {
+  if (!engine.proof.hasRequiredClaims(handle.jobId)) return finalization;
+  const proof = engine.proof.getVerdict(handle.jobId) ?? engine.proof.finalize({
+    jobId: handle.jobId,
+    attemptId: handle.attemptId,
+    generation: handle.generation,
+    fenceToken: handle.fenceToken,
+    cancelled: finalization.status === 'cancelled',
+  });
+  if (finalization.status !== 'completed' || proof.verdict === 'verified') return finalization;
+  const evidence = engine.proof.exportJson(handle.jobId);
+  if (proof.verdict === 'failed') {
+    return {
+      status: 'failed',
+      attemptStatus: 'failed',
+      outcome: 'failed',
+      finishReason: 'verification_failed',
+      evidence,
+      ...('jobCard' in finalization && finalization.jobCard ? { jobCard: finalization.jobCard } : {}),
+    };
+  }
+  if (proof.verdict === 'cancelled') {
+    return {
+      status: 'cancelled',
+      attemptStatus: 'cancelled',
+      outcome: 'cancelled',
+      finishReason: 'interrupted',
+      evidence,
+    };
+  }
+  return {
+    status: 'unknown',
+    outcome: proof.verdict,
+    finishReason: 'verification_incomplete',
+    evidence,
+  };
+}
+
 function assertAuthority(engine: JobEngine, handle: DurableJobHandle): { attempt: AttemptRecord; job: JobRecord } {
   const attempt = engine.getAttempt(handle.attemptId);
   const job = engine.getJob(handle.jobId);
@@ -280,6 +322,9 @@ export async function executeDurableJob<T>(
     fenceToken: handle.fenceToken,
     producer,
     controlAuthority: options.controlAuthority,
+    ...(options.engine.getJob(handle.jobId)?.workspaceId
+      ? { workspacePath: options.engine.getJob(handle.jobId)!.workspaceId! }
+      : {}),
   };
   let attemptStateVersion = lease.stateVersion;
   let jobStateVersion = options.engine.getJob(handle.jobId)?.stateVersion ?? 0;
@@ -434,6 +479,8 @@ export async function executeDurableJob<T>(
         executionContext.attemptId = handle.attemptId;
         executionContext.generation = handle.generation;
         executionContext.fenceToken = handle.fenceToken;
+        executionContext.repository = undefined;
+        executionContext.repositoryPromise = undefined;
         attemptStateVersion = attemptStarted.stateVersion;
         jobStateVersion = jobStarted.stateVersion;
         leaseLost = null;
@@ -532,9 +579,10 @@ export async function executeDurableJob<T>(
     assertAuthority(options.engine, handle);
 
     notifyPhase(options.onPhase, 'verifying', handle, handle.generation);
-    const finalization = await options.finalize(value, handle);
+    const requestedFinalization = await options.finalize(value, handle);
     if (leaseLost) throw leaseLost;
     const authority = assertAuthority(options.engine, handle);
+    const finalization = applyRequiredProof(options.engine, handle, requestedFinalization);
     attemptStateVersion = authority.attempt.stateVersion;
     jobStateVersion = authority.job.stateVersion;
     settle(options.engine, handle, finalization, attemptStateVersion, jobStateVersion, producer);

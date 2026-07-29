@@ -81,6 +81,93 @@ describe('executeDurableJob', () => {
     expect(engine.getAttempt(job.activeAttemptId!)?.status ?? engine.listAttempts(job.id)[0]?.status).toBe('failed');
   });
 
+  it('does not finalize completed while a required claim remains unknown', async () => {
+    const execution = await executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_unknown_proof',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_unknown_proof', goal: 'verify required work',
+      },
+      execute: async (handle) => {
+        engine.proof.createClaim({
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+          category: 'contract',
+          statement: 'required artifact exists',
+          required: true,
+        });
+        return 'done';
+      },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {},
+      }),
+    });
+
+    expect(engine.proof.getVerdict(execution.jobId)?.verdict).toBe('unknown');
+    expect(engine.getJob(execution.jobId)).toMatchObject({
+      status: 'unknown',
+      terminalOutcome: 'unknown',
+      finishReason: 'verification_incomplete',
+    });
+    expect(engine.getAttempt(execution.attemptId)?.status).toBe('unknown');
+  });
+
+  it('projects failed required Proof into authoritative Job failure', async () => {
+    const execution = await executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_failed_proof',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_failed_proof', goal: 'verify required work',
+      },
+      execute: async (handle) => {
+        const claim = engine.proof.createClaim({
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+          category: 'contract',
+          statement: 'required result is correct',
+          required: true,
+        });
+        const evidence = engine.proof.recordEvidence({
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+          fenceToken: handle.fenceToken,
+          source: 'test',
+          producer: 'test',
+          observedAt: Date.now(),
+          coverage: 'full',
+          verificationResult: 'failed',
+          payload: { actual: 'wrong' },
+        });
+        engine.proof.checkClaim({
+          claimId: claim.claimId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+          evidenceIds: [evidence.evidenceId],
+          state: 'failed',
+        });
+        return 'done';
+      },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {},
+      }),
+    });
+
+    expect(engine.proof.getVerdict(execution.jobId)?.verdict).toBe('failed');
+    expect(engine.getJob(execution.jobId)).toMatchObject({
+      status: 'failed',
+      terminalOutcome: 'failed',
+      finishReason: 'verification_failed',
+    });
+    expect(engine.getAttempt(execution.attemptId)?.status).toBe('failed');
+  });
+
   it('aborts active work when lease renewal loses authority', async () => {
     let sawAbort = false;
     const authorityLosingEngine: JobEngine = {

@@ -258,6 +258,7 @@ export async function spawnSubAgent(
           entryPoint: 'subagent',
           source: 'subagent',
           sessionId: childSessionId,
+          workspaceId: parentJob.workspaceId ?? deps.parentToolContext.cwd,
           instanceId: deps.instanceId,
           idempotencyNamespace: `child:${parentJobContext.jobId}`,
           idempotencyKey: childSessionId,

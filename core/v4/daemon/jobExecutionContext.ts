@@ -10,6 +10,33 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import type { JobEngine, TransitionResult } from './jobEngine';
 import type { JobControlAuthority } from './jobControlAuthority';
 import type { DurableEffectDescriptor } from '../effectContract';
+import type { RepositorySnapshotAuthority } from '../codebase/repositorySnapshotAuthority';
+import type { SafeChangeAuthority } from '../codebase/safeChangeAuthority';
+import type {
+  StructuredValidationAuthority,
+  ValidationEnvironment,
+} from '../codebase/structuredValidationAuthority';
+
+export interface RepositoryExecutionBinding {
+  rootPath: string;
+  inspection: {
+    snapshotId: string;
+    rootPath: string;
+    authority: RepositorySnapshotAuthority;
+  };
+  change: {
+    baseSnapshotId: string;
+    rootPath: string;
+    authority: SafeChangeAuthority;
+  };
+  validation: {
+    baseSnapshotId: string;
+    rootPath: string;
+    authority: StructuredValidationAuthority;
+    environment: ValidationEnvironment;
+  };
+  advance(snapshotId: string): void;
+}
 
 export interface JobExecutionContext {
   engine: JobEngine;
@@ -19,6 +46,9 @@ export interface JobExecutionContext {
   fenceToken: string;
   producer: string;
   controlAuthority?: JobControlAuthority;
+  workspacePath?: string;
+  repository?: RepositoryExecutionBinding;
+  repositoryPromise?: Promise<RepositoryExecutionBinding>;
 }
 
 const storage = new AsyncLocalStorage<JobExecutionContext>();
@@ -29,6 +59,74 @@ export function runWithJobExecutionContext<T>(context: JobExecutionContext, oper
 
 export function currentJobExecutionContext(): JobExecutionContext | undefined {
   return storage.getStore();
+}
+
+/** Lazily bind repository tools to the exact active Attempt and source snapshot. */
+export async function ensureRepositoryExecutionBinding(
+  context: JobExecutionContext,
+): Promise<RepositoryExecutionBinding | undefined> {
+  if (context.repository) return context.repository;
+  if (!context.workspacePath) return undefined;
+  if (!context.repositoryPromise) {
+    context.repositoryPromise = (async () => {
+      const existing = context.engine.repository.getAttemptSnapshot(context.jobId, context.attemptId);
+      const snapshot = existing ?? await context.engine.repository.captureSnapshot({
+        jobId: context.jobId,
+        attemptId: context.attemptId,
+        generation: context.generation,
+        fenceToken: context.fenceToken,
+        requestedPath: context.workspacePath!,
+        producer: context.producer,
+      });
+      const workspace = context.engine.repository.getWorkspace(snapshot.workspaceId);
+      if (!workspace) throw new Error('Repository workspace binding is unavailable');
+      const rootPath = snapshot.repositoryRoot ?? workspace.canonicalPath;
+      const inspection = {
+        snapshotId: snapshot.id,
+        rootPath,
+        authority: context.engine.repository,
+      };
+      const change = {
+        baseSnapshotId: snapshot.id,
+        rootPath,
+        authority: context.engine.changes,
+      };
+      const validation = {
+        baseSnapshotId: snapshot.id,
+        rootPath,
+        authority: context.engine.validation,
+        environment: {
+          platform: process.platform,
+          architecture: process.arch,
+          nodeVersion: process.version,
+          npmVersion: process.env.npm_config_user_agent?.match(/\bnpm\/([^\s]+)/)?.[1] ?? 'unknown',
+          variables: {
+            CI: process.env.CI ?? '',
+            NODE_ENV: process.env.NODE_ENV ?? '',
+          },
+        },
+      };
+      const binding: RepositoryExecutionBinding = {
+        rootPath,
+        inspection,
+        change,
+        validation,
+        advance(snapshotId) {
+          inspection.snapshotId = snapshotId;
+          change.baseSnapshotId = snapshotId;
+          validation.baseSnapshotId = snapshotId;
+        },
+      };
+      context.repository = binding;
+      return binding;
+    })();
+  }
+  try {
+    return await context.repositoryPromise;
+  } catch (error) {
+    context.repositoryPromise = undefined;
+    throw error;
+  }
 }
 
 function canonicalize(value: unknown): unknown {

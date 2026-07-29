@@ -67,6 +67,7 @@ import type { BundledManifest } from './skillBundledManifest';
 import {
   currentDurableToolCallId,
   currentJobExecutionContext,
+  ensureRepositoryExecutionBinding,
   executeWithDurableToolCall,
   prepareDurableToolCall,
   recordDurableToolApproval,
@@ -475,7 +476,7 @@ export class ToolRegistry {
    *   - Handler threw         → that error's message verbatim.
    */
   buildExecutor(
-    context: ToolContext,
+    baseContext: ToolContext,
   ): (
     call: ToolCallRequest,
     signal?: AbortSignal,
@@ -547,6 +548,37 @@ export class ToolRegistry {
         }, 'failed');
       }
 
+      const durableJobContext = currentJobExecutionContext();
+      let context = baseContext;
+      const needsRepositoryBinding =
+        ((call.name === 'file_read' || call.name === 'file_list') && !baseContext.repositoryInspection)
+        || (['file_write', 'file_patch', 'file_move', 'file_delete'].includes(call.name)
+          && !baseContext.repositoryChange)
+        || (call.name === 'shell_exec' && !baseContext.repositoryValidation);
+      if (
+        durableJobContext
+        && needsRepositoryBinding
+      ) {
+        try {
+          const repository = await ensureRepositoryExecutionBinding(durableJobContext);
+          if (repository) {
+            context = {
+              ...baseContext,
+              repositoryInspection: baseContext.repositoryInspection ?? repository.inspection,
+              repositoryChange: baseContext.repositoryChange ?? repository.change,
+              repositoryValidation: baseContext.repositoryValidation ?? repository.validation,
+            };
+          }
+        } catch (error) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: `Repository state could not be captured: ${error instanceof Error ? error.message : String(error)}`,
+          }, 'blocked');
+        }
+      }
+
       let args = call.arguments ?? {};
 
       // ── Argument-shape guard — JSON that PARSES can still be garbage ───
@@ -612,7 +644,6 @@ export class ToolRegistry {
       // registered tool that never set it) is ASSUMED to mutate and is gated —
       // a forgotten declaration must not become a silent bypass.
       const assumeMutates = handler.mutates ?? true;
-      const durableJobContext = currentJobExecutionContext();
       const effectiveMutates = assumeMutates && !readOnlyShell;
       const preliminaryEffect = describeToolEffect(
         effectiveMutates ? handler : { ...handler, mutates: false },
@@ -695,7 +726,10 @@ export class ToolRegistry {
             });
             const priorRecord = context.repositoryChange.authority.getRecord(intent.intentId);
             if (priorRecord?.state === 'committed') {
-              if (priorRecord.descendantSnapshotId) context.repositoryChange.baseSnapshotId = priorRecord.descendantSnapshotId;
+              if (priorRecord.descendantSnapshotId) {
+                context.repositoryChange.baseSnapshotId = priorRecord.descendantSnapshotId;
+                durableJobContext.repository?.advance(priorRecord.descendantSnapshotId);
+              }
               return finish({
                 id: call.id,
                 name: call.name,
@@ -1215,7 +1249,10 @@ export class ToolRegistry {
                   producer: jobContext!.producer,
                   signal,
                 });
-                if (record.descendantSnapshotId) context.repositoryChange!.baseSnapshotId = record.descendantSnapshotId;
+                if (record.descendantSnapshotId) {
+                  context.repositoryChange!.baseSnapshotId = record.descendantSnapshotId;
+                  jobContext!.repository?.advance(record.descendantSnapshotId);
+                }
                 value = projectSafeChangeResult(record, preparedRepositoryChange.intent);
               } else {
                 const validationContext = context.repositoryValidation;
@@ -1273,6 +1310,7 @@ export class ToolRegistry {
                   });
                   if (completion.run.resultingSnapshotId) {
                     validationContext!.baseSnapshotId = completion.run.resultingSnapshotId;
+                    jobContext.repository?.advance(completion.run.resultingSnapshotId);
                   }
                 } else {
                   value = await handler.execute(a, signal ? { ...context, signal } : context);

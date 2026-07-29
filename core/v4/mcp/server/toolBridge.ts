@@ -200,6 +200,7 @@ export function buildToolCallHandler(
               entryPoint: 'mcp',
               source: 'mcp-stdio',
               sessionId: `mcp:${jobAuthority.instanceId}`,
+              workspaceId: executionContext.cwd,
               instanceId: jobAuthority.instanceId,
               idempotencyNamespace: `mcp:${jobAuthority.instanceId}`,
               idempotencyKey: id,
