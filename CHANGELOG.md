@@ -1,3 +1,52 @@
+## v4.17.0 — 2026-07-29
+
+### Overview
+
+**Aiden v4.17.0 — Durable Autonomy Kernel + Operator TUI**
+
+Aiden now runs production entry points through a unified durable lifecycle authority and presents that state through a responsive operator interface.
+
+### Durable execution
+
+- A canonical lifecycle authority coordinates Job admission, Attempts, leases, heartbeats, cancellation, verification, and finalization across production entry points.
+- Job and Attempt generations, fence tokens, terminal-state protection, and ordered durable events reject stale or late execution.
+- Cancellation remains persist-first, unknown side effects remain reconcilable, and execution graphs retain durable recovery state.
+- Child supervision and budgets preserve parent authority while keeping worker results subject to parent-side verification.
+
+### Evidence and verification
+
+- Proof and Verdict projection uses authoritative execution evidence rather than model prose.
+- File mutations require fresh exact readback before verified completion is presented.
+- Replayable projections, migration coverage, and failure-injection tests protect recovery and reconciliation behavior.
+
+### Operator experience
+
+- The startup screen retains Aiden's visual identity while adapting to wide and narrow terminals.
+- A boxed composer and separate provider, model, context, and timer strip remain stable during provider and tool activity.
+- Theme-aware rendering, compact outcomes, durable queued input, and durable `/cls` and `/clear` improve terminal operation.
+- Settled activity cannot resurrect, and shutdown returns terminal ownership cleanly.
+
+### Platform reliability
+
+- Windows shell and process cleanup behavior is preserved through packaged and ConPTY validation.
+- Windows, Ubuntu, and macOS CI cover Node 20 and Node 22, with Windows suites isolated from shared runner resource starvation.
+
+### Known non-blocking polish
+
+- `/cls` may leave a visually empty terminal region.
+- `/quit` output remains more verbose than desired.
+- First-run name extraction and onboarding transitions can be polished later.
+
+### Upgrade instructions
+
+```bash
+npm install -g aiden-runtime@4.17.0
+```
+
+Restart Aiden after upgrading. Existing configuration and durable state continue through the normal migration path.
+
+---
+
 ## v4.16.1 — 2026-07-24
 
 ### Windows self-update correctness
