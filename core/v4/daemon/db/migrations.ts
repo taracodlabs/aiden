@@ -1529,6 +1529,76 @@ function applyV32(db: Database.Database): void {
   `);
 }
 
+/** Source-fenced repository change intents and their verified outcomes. */
+function applyV33(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS repository_change_intents (
+      intent_id TEXT PRIMARY KEY,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      fence_token TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      base_snapshot_id TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      canonical_target TEXT NOT NULL,
+      canonical_destination TEXT,
+      expected_scope_json TEXT NOT NULL,
+      original_hash TEXT,
+      original_metadata_json TEXT NOT NULL,
+      destination_original_metadata_json TEXT,
+      plan_digest TEXT NOT NULL,
+      planned_result_hash TEXT,
+      planned_result_size INTEGER,
+      effect_id TEXT,
+      approval_id TEXT,
+      action_digest TEXT,
+      claim_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(attempt_id, generation, tool_call_id),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (base_snapshot_id) REFERENCES repository_snapshots(snapshot_id),
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key),
+      FOREIGN KEY (approval_id) REFERENCES approvals(approval_id),
+      FOREIGN KEY (claim_id) REFERENCES job_claims(claim_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_repository_change_intents_job
+      ON repository_change_intents(job_id, created_at, intent_id);
+    CREATE INDEX IF NOT EXISTS idx_repository_change_intents_snapshot
+      ON repository_change_intents(base_snapshot_id, created_at, intent_id);
+
+    CREATE TABLE IF NOT EXISTS repository_change_records (
+      change_id TEXT PRIMARY KEY,
+      intent_id TEXT NOT NULL UNIQUE,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      fence_token TEXT NOT NULL,
+      effect_id TEXT NOT NULL,
+      base_snapshot_id TEXT NOT NULL,
+      state TEXT NOT NULL,
+      result_hash TEXT,
+      result_metadata_json TEXT,
+      diff_evidence_id TEXT,
+      descendant_snapshot_id TEXT,
+      error_code TEXT,
+      error_message TEXT,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (intent_id) REFERENCES repository_change_intents(intent_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key),
+      FOREIGN KEY (base_snapshot_id) REFERENCES repository_snapshots(snapshot_id),
+      FOREIGN KEY (diff_evidence_id) REFERENCES job_evidence(evidence_id),
+      FOREIGN KEY (descendant_snapshot_id) REFERENCES repository_snapshots(snapshot_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_repository_change_records_job
+      ON repository_change_records(job_id, created_at, change_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1562,6 +1632,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 30, name: 'durable Job event cursors', apply: applyV30 },
   { version: 31, name: 'kernel projection query indexes', apply: applyV31 },
   { version: 32, name: 'immutable repository snapshots', apply: applyV32 },
+  { version: 33, name: 'source-fenced repository changes', apply: applyV33 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -1596,7 +1667,8 @@ function tableExists(db: Database.Database, name: string): boolean {
 
 function validateLatestSchema(db: Database.Database): void {
   const required = ['tasks', 'runs', 'run_events', 'side_effect_ledger', 'durable_inputs',
-    'workspace_descriptors', 'repository_snapshots', 'repository_snapshot_entries'];
+    'workspace_descriptors', 'repository_snapshots', 'repository_snapshot_entries',
+    'repository_change_intents', 'repository_change_records'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

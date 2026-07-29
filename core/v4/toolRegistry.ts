@@ -78,6 +78,12 @@ import {
   type ActionAuthority,
   type PolicySnapshotInput,
 } from './actionAuthority';
+import {
+  fileChangePlanForTool,
+  projectSafeChangeResult,
+  type ChangeIntentRecord,
+  type FileChangePlan,
+} from './codebase/safeChangeAuthority';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -117,6 +123,12 @@ export interface ToolContext {
     snapshotId: string;
     rootPath: string;
     authority: import('./codebase/repositorySnapshotAuthority').RepositorySnapshotAuthority;
+  };
+  /** Optional source-fenced mutation authority for Codebase Mode file tools. */
+  repositoryChange?: {
+    baseSnapshotId: string;
+    rootPath: string;
+    authority: import('./codebase/safeChangeAuthority').SafeChangeAuthority;
   };
   /** Aiden user-data paths. Sessions, memory, skills, logs all live here. */
   paths: AidenPaths;
@@ -476,6 +488,7 @@ export class ToolRegistry {
         riskTier: string;
       } | undefined;
       let preparedToolCall: PreparedDurableToolCall | null | undefined;
+      let preparedRepositoryChange: { intent: ChangeIntentRecord; plan: FileChangePlan } | undefined;
       let effectDescriptor: DurableEffectDescriptor | undefined;
       let approvalWaitId: string | null = null;
       const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
@@ -638,6 +651,78 @@ export class ToolRegistry {
         context.approvalEngine !== undefined || (context.actionAuthority !== undefined && durableJobContext !== undefined)
       );
       effectDescriptor = preliminaryEffect;
+      if (effectiveMutates && durableJobContext && context.repositoryChange) {
+        try {
+          if (context.repositoryChange.authority !== durableJobContext.engine.changes) {
+            throw new Error('Repository change authority does not match the active Job');
+          }
+          const persistedToolCallId = currentDurableToolCallId(call.id) ?? call.id;
+          const priorIntent = context.repositoryChange.authority.getIntentForToolCall(
+            durableJobContext.attemptId,
+            durableJobContext.generation,
+            persistedToolCallId,
+          );
+          const plan = await fileChangePlanForTool(
+            call.name,
+            args,
+            context.repositoryChange.rootPath,
+            priorIntent?.operation,
+          );
+          if (plan) {
+            const intent = await context.repositoryChange.authority.prepare({
+              jobId: durableJobContext.jobId,
+              attemptId: durableJobContext.attemptId,
+              generation: durableJobContext.generation,
+              fenceToken: durableJobContext.fenceToken,
+              toolCallId: persistedToolCallId,
+              baseSnapshotId: priorIntent?.state === 'committed'
+                ? priorIntent.baseSnapshotId
+                : context.repositoryChange.baseSnapshotId,
+              plan,
+              producer: durableJobContext.producer,
+            });
+            const priorRecord = context.repositoryChange.authority.getRecord(intent.intentId);
+            if (priorRecord?.state === 'committed') {
+              if (priorRecord.descendantSnapshotId) context.repositoryChange.baseSnapshotId = priorRecord.descendantSnapshotId;
+              return finish({
+                id: call.id,
+                name: call.name,
+                result: projectSafeChangeResult(priorRecord, intent),
+              }, 'completed');
+            }
+            preparedRepositoryChange = { intent, plan };
+            effectDescriptor = {
+              ...effectDescriptor,
+              target: intent.canonicalDestination
+                ? `${intent.canonicalTarget} -> ${intent.canonicalDestination}`
+                : intent.canonicalTarget,
+              reconciliationData: {
+                ...effectDescriptor.reconciliationData,
+                path: intent.canonicalDestination ?? intent.canonicalTarget,
+                sourcePath: intent.canonicalTarget,
+                destinationPath: intent.canonicalDestination ?? undefined,
+                expectedContentSha256: intent.plannedResultHash ?? undefined,
+                expectedSize: intent.plannedResultSize ?? undefined,
+              },
+            };
+          }
+        } catch (error) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: error instanceof Error ? error.message : String(error),
+          }, 'blocked');
+        }
+      }
+      if (preparedRepositoryChange && (!context.actionAuthority || !context.approvalEngine)) {
+        return finish({
+          id: call.id,
+          name: call.name,
+          result: null,
+          error: 'Source-fenced repository changes require exact interactive approval',
+        }, 'blocked');
+      }
       if (effectiveMutates && durableJobContext) {
         try {
           preparedToolCall = prepareDurableToolCall({
@@ -649,6 +734,16 @@ export class ToolRegistry {
             effect: effectDescriptor,
             approvalState: approvalGated ? 'pending' : 'not_required',
           });
+          if (preparedRepositoryChange && preparedToolCall?.effectId) {
+            context.repositoryChange!.authority.bindEffect({
+              jobId: durableJobContext.jobId,
+              attemptId: durableJobContext.attemptId,
+              generation: durableJobContext.generation,
+              fenceToken: durableJobContext.fenceToken,
+              intentId: preparedRepositoryChange.intent.intentId,
+              effectId: preparedToolCall.effectId,
+            });
+          }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           return finish({ id: call.id, name: call.name, result: null, error: message }, 'blocked');
@@ -794,6 +889,18 @@ export class ToolRegistry {
             riskTier: effectiveTier ?? 'caution',
             effectId: preparedToolCall?.effectId ?? null,
           };
+          if (preparedRepositoryChange && durableApproval.effectId) {
+            context.repositoryChange!.authority.bindApproval({
+              jobId: jobContext.jobId,
+              attemptId: jobContext.attemptId,
+              generation: jobContext.generation,
+              fenceToken: jobContext.fenceToken,
+              intentId: preparedRepositoryChange.intent.intentId,
+              effectId: durableApproval.effectId,
+              approvalId: durableApproval.approvalId,
+              actionDigest: durableApproval.actionDigest,
+            });
+          }
         }
         if (!context.approvalEngine) {
           try {
@@ -1050,6 +1157,7 @@ export class ToolRegistry {
           mutates: effectiveMutates,
           effect: effectDescriptor,
           prepared: preparedToolCall,
+          captureFilesystemProof: preparedRepositoryChange === undefined,
           execute: async () => {
             const jobContext = currentJobExecutionContext();
             if (
@@ -1080,7 +1188,26 @@ export class ToolRegistry {
               }).record.waitId;
             }
             try {
-              const value = await handler.execute(a, signal ? { ...context, signal } : context);
+              let value: unknown;
+              if (preparedRepositoryChange && durableApproval?.effectId) {
+                const record = await context.repositoryChange!.authority.execute({
+                  jobId: jobContext!.jobId,
+                  attemptId: jobContext!.attemptId,
+                  generation: jobContext!.generation,
+                  fenceToken: jobContext!.fenceToken,
+                  intentId: preparedRepositoryChange.intent.intentId,
+                  effectId: durableApproval.effectId,
+                  approvalId: durableApproval.approvalId,
+                  actionDigest: durableApproval.actionDigest,
+                  plan: preparedRepositoryChange.plan,
+                  producer: jobContext!.producer,
+                  signal,
+                });
+                if (record.descendantSnapshotId) context.repositoryChange!.baseSnapshotId = record.descendantSnapshotId;
+                value = projectSafeChangeResult(record, preparedRepositoryChange.intent);
+              } else {
+                value = await handler.execute(a, signal ? { ...context, signal } : context);
+              }
               if (waitId && jobContext?.controlAuthority) {
                 const status = value && typeof value === 'object'
                   ? String((value as Record<string, unknown>).status ?? '') : '';
