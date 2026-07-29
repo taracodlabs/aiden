@@ -32,6 +32,11 @@ import {
   createStructuredValidationAuthority,
   type StructuredValidationAuthority,
 } from '../codebase/structuredValidationAuthority';
+import {
+  createGitEffectAuthority,
+  type GitEffectAuthority,
+  type GitEffectIo,
+} from '../codebase/gitEffectAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -197,6 +202,7 @@ export interface JobEngine {
   readonly repository: RepositorySnapshotAuthority;
   readonly changes: SafeChangeAuthority;
   readonly validation: StructuredValidationAuthority;
+  readonly gitEffects: GitEffectAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -424,6 +430,7 @@ export interface JobEngine {
 export interface CreateJobEngineOptions {
   db: Db;
   safeChangeIo?: SafeChangeIo;
+  gitEffectIo?: GitEffectIo;
 }
 
 export class IdempotencyConflictError extends Error {
@@ -2307,6 +2314,15 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
     appendJobEvent: appendJobEventTx,
   });
+  const gitEffects = createGitEffectAuthority({
+    db,
+    repository,
+    proof,
+    getJob(jobId) { const row = getJobRow(jobId); return row ? mapJob(row) : null; },
+    getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
+    appendJobEvent: appendJobEventTx,
+    recordEffectReconciliation: recordEffectReconciliationTx,
+  }, opts.gitEffectIo);
 
   return {
     graph,
@@ -2316,6 +2332,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     repository,
     changes,
     validation,
+    gitEffects,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);
