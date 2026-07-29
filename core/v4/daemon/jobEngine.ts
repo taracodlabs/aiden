@@ -37,6 +37,10 @@ import {
   type GitEffectAuthority,
   type GitEffectIo,
 } from '../codebase/gitEffectAuthority';
+import {
+  createRepositoryUnderstandingAuthority,
+  type RepositoryUnderstandingAuthority,
+} from '../codebase/repositoryUnderstandingAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -203,6 +207,7 @@ export interface JobEngine {
   readonly changes: SafeChangeAuthority;
   readonly validation: StructuredValidationAuthority;
   readonly gitEffects: GitEffectAuthority;
+  readonly understanding: RepositoryUnderstandingAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -2323,6 +2328,13 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     appendJobEvent: appendJobEventTx,
     recordEffectReconciliation: recordEffectReconciliationTx,
   }, opts.gitEffectIo);
+  const understanding = createRepositoryUnderstandingAuthority({
+    db,
+    repository,
+    getJob(jobId) { const row = getJobRow(jobId); return row ? mapJob(row) : null; },
+    getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
+    appendJobEvent: appendJobEventTx,
+  });
 
   return {
     graph,
@@ -2333,6 +2345,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     changes,
     validation,
     gitEffects,
+    understanding,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);
