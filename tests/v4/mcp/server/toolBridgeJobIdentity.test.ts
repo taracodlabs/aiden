@@ -5,7 +5,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import Database from 'better-sqlite3';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -118,6 +118,6 @@ describe('MCP direct durable identity', () => {
     expect(job).toMatchObject({ status: 'completed', workspaceId: root });
     const snapshot = engine.repository.getAttemptSnapshot(job.id, engine.listAttempts(job.id)[0]!.id)!;
     expect(snapshot.repositoryRoot).toBeNull();
-    expect(engine.repository.getWorkspace(snapshot.workspaceId)?.canonicalPath).toBe(root);
+    expect(engine.repository.getWorkspace(snapshot.workspaceId)?.canonicalPath).toBe(await realpath(root));
   });
 });
