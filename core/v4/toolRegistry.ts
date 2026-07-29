@@ -84,6 +84,11 @@ import {
   type ChangeIntentRecord,
   type FileChangePlan,
 } from './codebase/safeChangeAuthority';
+import {
+  structuredValidationPlanForShell,
+  type ValidationEnvironment,
+} from './codebase/structuredValidationAuthority';
+import { getRawValidationOutput } from './codebase/validationOutput';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -129,6 +134,13 @@ export interface ToolContext {
     baseSnapshotId: string;
     rootPath: string;
     authority: import('./codebase/safeChangeAuthority').SafeChangeAuthority;
+  };
+  /** Optional snapshot-bound test/build recording over the existing shell authority. */
+  repositoryValidation?: {
+    baseSnapshotId: string;
+    rootPath: string;
+    authority: import('./codebase/structuredValidationAuthority').StructuredValidationAuthority;
+    environment?: ValidationEnvironment;
   };
   /** Aiden user-data paths. Sessions, memory, skills, logs all live here. */
   paths: AidenPaths;
@@ -1206,7 +1218,65 @@ export class ToolRegistry {
                 if (record.descendantSnapshotId) context.repositoryChange!.baseSnapshotId = record.descendantSnapshotId;
                 value = projectSafeChangeResult(record, preparedRepositoryChange.intent);
               } else {
-                value = await handler.execute(a, signal ? { ...context, signal } : context);
+                const validationContext = context.repositoryValidation;
+                const validationPlan = call.name === 'shell_exec' && validationContext
+                  ? structuredValidationPlanForShell(
+                    String(a.command ?? ''),
+                    resolvePath(context.cwd ?? process.cwd(), String(a.cwd ?? '.')),
+                  )
+                  : null;
+                if (validationPlan && jobContext && preparedToolCall?.effectId) {
+                  if (validationContext!.authority !== jobContext.engine.validation) {
+                    throw new Error('Repository validation authority does not match the active Job');
+                  }
+                  const environment = validationContext!.environment ?? {
+                    platform: process.platform,
+                    architecture: process.arch,
+                    nodeVersion: process.version,
+                    npmVersion: process.env.npm_config_user_agent?.match(/\bnpm\/([^\s]+)/)?.[1] ?? 'unknown',
+                    variables: {
+                      CI: process.env.CI ?? '',
+                      NODE_ENV: process.env.NODE_ENV ?? '',
+                    },
+                  };
+                  const validationRun = validationContext!.authority.start({
+                    jobId: jobContext.jobId,
+                    attemptId: jobContext.attemptId,
+                    generation: jobContext.generation,
+                    fenceToken: jobContext.fenceToken,
+                    repositorySnapshotId: validationContext!.baseSnapshotId,
+                    toolCallId: preparedToolCall.toolCallId,
+                    effectId: preparedToolCall.effectId,
+                    plan: validationPlan,
+                    environment,
+                    producer: jobContext.producer,
+                  });
+                  value = await handler.execute(a, signal ? { ...context, signal } : context);
+                  const result = value && typeof value === 'object'
+                    ? value as Record<string, unknown> : {};
+                  const rawOutput = getRawValidationOutput(value);
+                  const completion = await validationContext!.authority.complete({
+                    jobId: jobContext.jobId,
+                    attemptId: jobContext.attemptId,
+                    generation: jobContext.generation,
+                    fenceToken: jobContext.fenceToken,
+                    runId: validationRun.runId,
+                    execution: {
+                      exitCode: typeof result.exitCode === 'number' ? result.exitCode : result.success === true ? 0 : 1,
+                      stdout: typeof result.stdout === 'string' ? result.stdout : '',
+                      stderr: typeof result.stderr === 'string' ? result.stderr : '',
+                      timedOut: result.timedOut === true,
+                      cancelled: signal?.aborted === true,
+                    },
+                    ...(rawOutput ? { rawOutput } : {}),
+                    producer: jobContext.producer,
+                  });
+                  if (completion.run.resultingSnapshotId) {
+                    validationContext!.baseSnapshotId = completion.run.resultingSnapshotId;
+                  }
+                } else {
+                  value = await handler.execute(a, signal ? { ...context, signal } : context);
+                }
               }
               if (waitId && jobContext?.controlAuthority) {
                 const status = value && typeof value === 'object'

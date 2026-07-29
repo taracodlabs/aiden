@@ -1599,6 +1599,110 @@ function applyV33(db: Database.Database): void {
   `);
 }
 
+/** Snapshot-bound test, build, diagnostic, and validation artifact records. */
+function applyV34(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS validation_runs (
+      run_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK (kind IN ('test','build')),
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      fence_token TEXT NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      effect_id TEXT NOT NULL,
+      execution_node_id TEXT,
+      repository_snapshot_id TEXT NOT NULL,
+      source_state_digest TEXT NOT NULL,
+      command TEXT NOT NULL,
+      working_directory TEXT NOT NULL,
+      environment_fingerprint TEXT NOT NULL,
+      environment_json TEXT NOT NULL,
+      scope TEXT NOT NULL CHECK (scope IN ('focused','full')),
+      state TEXT NOT NULL,
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      exit_code INTEGER,
+      timed_out INTEGER NOT NULL DEFAULT 0,
+      cancelled INTEGER NOT NULL DEFAULT 0,
+      parse_state TEXT NOT NULL DEFAULT 'pending',
+      resulting_snapshot_id TEXT,
+      source_mutations_json TEXT NOT NULL DEFAULT '[]',
+      raw_log_evidence_id TEXT,
+      claim_ids_json TEXT NOT NULL DEFAULT '[]',
+      artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+      UNIQUE(attempt_id, generation, tool_call_id, kind),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (repository_snapshot_id) REFERENCES repository_snapshots(snapshot_id),
+      FOREIGN KEY (resulting_snapshot_id) REFERENCES repository_snapshots(snapshot_id),
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key),
+      FOREIGN KEY (execution_node_id) REFERENCES execution_graph_nodes(node_id),
+      FOREIGN KEY (raw_log_evidence_id) REFERENCES job_evidence(evidence_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_validation_runs_job
+      ON validation_runs(job_id, started_at, run_id);
+    CREATE INDEX IF NOT EXISTS idx_validation_runs_snapshot
+      ON validation_runs(repository_snapshot_id, kind, completed_at, run_id);
+
+    CREATE TABLE IF NOT EXISTS test_run_details (
+      run_id TEXT PRIMARY KEY,
+      passed_count INTEGER,
+      failed_count INTEGER,
+      skipped_count INTEGER,
+      failed_test_ids_json TEXT NOT NULL DEFAULT '[]',
+      FOREIGN KEY (run_id) REFERENCES validation_runs(run_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS build_run_details (
+      run_id TEXT PRIMARY KEY,
+      declared_output_paths_json TEXT NOT NULL DEFAULT '[]',
+      output_artifacts_json TEXT NOT NULL DEFAULT '[]',
+      output_hashes_json TEXT NOT NULL DEFAULT '{}',
+      package_identity_json TEXT,
+      warnings_json TEXT NOT NULL DEFAULT '[]',
+      reproducibility_json TEXT NOT NULL DEFAULT '{}',
+      FOREIGN KEY (run_id) REFERENCES validation_runs(run_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS validation_artifacts (
+      artifact_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      relative_path TEXT,
+      sha256 TEXT NOT NULL,
+      byte_count INTEGER NOT NULL,
+      media_type TEXT NOT NULL,
+      compression TEXT,
+      content_blob BLOB,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES validation_runs(run_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_validation_artifacts_run
+      ON validation_artifacts(run_id, created_at, artifact_id);
+
+    CREATE TABLE IF NOT EXISTS validation_diagnostics (
+      diagnostic_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      repository_snapshot_id TEXT NOT NULL,
+      tool TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      message TEXT NOT NULL,
+      relative_path TEXT,
+      start_line INTEGER,
+      start_column INTEGER,
+      end_line INTEGER,
+      end_column INTEGER,
+      code TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES validation_runs(run_id) ON DELETE CASCADE,
+      FOREIGN KEY (repository_snapshot_id) REFERENCES repository_snapshots(snapshot_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_validation_diagnostics_run
+      ON validation_diagnostics(run_id, created_at, diagnostic_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1633,6 +1737,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 31, name: 'kernel projection query indexes', apply: applyV31 },
   { version: 32, name: 'immutable repository snapshots', apply: applyV32 },
   { version: 33, name: 'source-fenced repository changes', apply: applyV33 },
+  { version: 34, name: 'snapshot-bound structured validation', apply: applyV34 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -1668,7 +1773,8 @@ function tableExists(db: Database.Database, name: string): boolean {
 function validateLatestSchema(db: Database.Database): void {
   const required = ['tasks', 'runs', 'run_events', 'side_effect_ledger', 'durable_inputs',
     'workspace_descriptors', 'repository_snapshots', 'repository_snapshot_entries',
-    'repository_change_intents', 'repository_change_records'];
+    'repository_change_intents', 'repository_change_records', 'validation_runs',
+    'test_run_details', 'build_run_details', 'validation_artifacts', 'validation_diagnostics'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {
