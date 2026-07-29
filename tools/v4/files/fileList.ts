@@ -20,7 +20,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
+import { isPathAllowed, isWithin, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 function expandPath(input: string, cwd: string): string {
   const home = os.homedir();
@@ -76,6 +76,47 @@ export const fileListTool: ToolHandler = {
     }
     const resolved = policy.resolvedPath;
     try {
+      const canonicalDirectory = await fs.realpath(resolved);
+      const inspectionRoot = ctx.repositoryInspection
+        ? await fs.realpath(ctx.repositoryInspection.rootPath)
+        : undefined;
+      if (ctx.repositoryInspection && inspectionRoot && isWithin(canonicalDirectory, inspectionRoot)) {
+        const relativeDirectory = path.relative(inspectionRoot, canonicalDirectory).replace(/\\/g, '/');
+        const inventory = await ctx.repositoryInspection.authority.inventory(
+          ctx.repositoryInspection.snapshotId,
+          { limit: 5_000 },
+        );
+        const prefix = relativeDirectory ? `${relativeDirectory}/` : '';
+        const immediate = new Map<string, Record<string, unknown>>();
+        for (const entry of inventory.entries) {
+          if (!entry.path.startsWith(prefix)) continue;
+          const remainder = entry.path.slice(prefix.length);
+          if (!remainder) continue;
+          const slash = remainder.indexOf('/');
+          if (slash >= 0) {
+            const name = remainder.slice(0, slash);
+            immediate.set(name, { name, type: 'dir' });
+          } else {
+            immediate.set(remainder, {
+              name: remainder,
+              type: 'file',
+              ...(args.stat === true || args.hash === true ? { size: entry.size, mtimeMs: entry.modifiedAt } : {}),
+              ...(args.hash === true && entry.contentHash ? { sha256: entry.contentHash } : {}),
+            });
+          }
+        }
+        const entries = [...immediate.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+        return {
+          success: true,
+          path: canonicalDirectory,
+          count: entries.length,
+          entries,
+          snapshotId: inventory.snapshotId,
+          stateDigest: inventory.stateDigest,
+          stale: inventory.stale,
+          truncated: inventory.truncated,
+        };
+      }
       const entries = await fs.readdir(resolved, { withFileTypes: true });
       // v4.13 Phase D — optional stat + content hash. `hash` implies
       // `stat`; sha256 is size-guarded (files over the cap get

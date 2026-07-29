@@ -22,6 +22,7 @@ import { createJobResourceAuthority, type JobResourceAuthority } from './jobReso
 import type { JobBudgetKind, JobCapabilities } from './jobResourceAuthority';
 import { createJobProofAuthority, type JobProofAuthority } from './jobProofAuthority';
 import { createJobEventProjectionAuthority, type JobEventProjectionAuthority } from './jobEventProjection';
+import { createRepositorySnapshotAuthority, type RepositorySnapshotAuthority } from '../codebase/repositorySnapshotAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -47,10 +48,12 @@ export interface JobRecord {
   goal: string;
   entryPoint: string | null;
   source: string | null;
+  workspaceId?: string | null;
   terminalAt: number | null;
   terminalOutcome: string | null;
   finishReason: string | null;
   nextEventSequence: number;
+  repositorySnapshotId?: string | null;
 }
 
 export interface AttemptRecord {
@@ -67,6 +70,7 @@ export interface AttemptRecord {
   leaseHeartbeatAt: number | null;
   fenceToken: string | null;
   recoveryOfAttemptId: string | null;
+  repositorySnapshotId?: string | null;
 }
 
 export interface JobEventRecord {
@@ -181,6 +185,7 @@ export interface JobEngine {
   readonly resources: JobResourceAuthority;
   readonly proof: JobProofAuthority;
   readonly projection: JobEventProjectionAuthority;
+  readonly repository: RepositorySnapshotAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -428,10 +433,12 @@ interface JobSqlRow {
   goal: string;
   entry_point: string | null;
   source: string | null;
+  workspace_id: string | null;
   terminal_at: number | null;
   terminal_outcome: string | null;
   finish_reason: string | null;
   next_event_sequence: number;
+  repository_snapshot_id: string | null;
 }
 
 interface AttemptSqlRow {
@@ -449,6 +456,7 @@ interface AttemptSqlRow {
   fence_token: string | null;
   recovery_of_attempt_id: string | null;
   session_id: string;
+  repository_snapshot_id: string | null;
 }
 
 interface ToolCallSqlRow {
@@ -548,10 +556,12 @@ function mapJob(row: JobSqlRow): JobRecord {
     goal: row.goal,
     entryPoint: row.entry_point,
     source: row.source,
+    workspaceId: row.workspace_id,
     terminalAt: row.terminal_at,
     terminalOutcome: row.terminal_outcome,
     finishReason: row.finish_reason,
     nextEventSequence: row.next_event_sequence,
+    repositorySnapshotId: row.repository_snapshot_id,
   };
 }
 
@@ -570,6 +580,7 @@ function mapAttempt(row: AttemptSqlRow): AttemptRecord {
     leaseHeartbeatAt: row.lease_heartbeat_at,
     fenceToken: row.fence_token,
     recoveryOfAttemptId: row.recovery_of_attempt_id,
+    repositorySnapshotId: row.repository_snapshot_id,
   };
 }
 
@@ -628,15 +639,17 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
 
   const getJobRow = (jobId: string): JobSqlRow | undefined => db.prepare(
     `SELECT id, status, state_version, active_attempt_id, root_job_id,
-            parent_task_id, session_id, goal, entry_point, source,
-            terminal_at, terminal_outcome, finish_reason, next_event_sequence
+            parent_task_id, session_id, goal, entry_point, source, workspace_id,
+            terminal_at, terminal_outcome, finish_reason, next_event_sequence,
+            repository_snapshot_id
        FROM tasks WHERE id = ?`,
   ).get(jobId) as JobSqlRow | undefined;
 
   const getAttemptRow = (attemptId: string): AttemptSqlRow | undefined => db.prepare(
     `SELECT id, attempt_id, task_id, status, attempt_number, generation,
             state_version, lease_id, lease_owner, lease_expires_at,
-            lease_heartbeat_at, fence_token, recovery_of_attempt_id, session_id
+            lease_heartbeat_at, fence_token, recovery_of_attempt_id, session_id,
+            repository_snapshot_id
        FROM runs WHERE attempt_id = ?`,
   ).get(attemptId) as AttemptSqlRow | undefined;
 
@@ -2260,11 +2273,19 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     return { jobId: job.id, expiredAttemptId: attempt.attempt_id, recoveryAttemptId, decision };
   }).immediate;
 
+  const repository = createRepositorySnapshotAuthority({
+    db,
+    getJob(jobId) { const row = getJobRow(jobId); return row ? mapJob(row) : null; },
+    getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
+    appendJobEvent: appendJobEventTx,
+  });
+
   return {
     graph,
     resources,
     proof,
     projection,
+    repository,
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);
@@ -2279,8 +2300,9 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       const limit = Math.max(1, Math.min(1_000, filters.limit ?? 100));
       const rows = db.prepare(
         `SELECT id, status, state_version, active_attempt_id, root_job_id,
-                parent_task_id, session_id, goal, entry_point, source,
-                terminal_at, terminal_outcome, finish_reason, next_event_sequence
+                parent_task_id, session_id, goal, entry_point, source, workspace_id,
+                terminal_at, terminal_outcome, finish_reason, next_event_sequence,
+                repository_snapshot_id
            FROM tasks
           ${clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''}
           ORDER BY created_at ASC, id ASC
@@ -2307,7 +2329,8 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       const rows = db.prepare(
         `SELECT id, attempt_id, task_id, status, attempt_number, generation,
                 state_version, lease_id, lease_owner, lease_expires_at,
-                lease_heartbeat_at, fence_token, recovery_of_attempt_id, session_id
+                lease_heartbeat_at, fence_token, recovery_of_attempt_id, session_id,
+                repository_snapshot_id
            FROM runs WHERE task_id = ? ORDER BY attempt_number`,
       ).all(jobId) as AttemptSqlRow[];
       return rows.map(mapAttempt);

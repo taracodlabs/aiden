@@ -22,7 +22,7 @@ import os from 'node:os';
 import crypto from 'node:crypto';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
+import { isPathAllowed, isWithin, violationEnvelope } from '../../../core/v4/sandboxFs';
 import { fileReadHandle } from '../../../core/v4/toolOutputCap';
 import { protectedPathMessage } from '../utils/paths';
 
@@ -117,6 +117,18 @@ export const fileReadTool: ToolHandler = {
     const limit = Math.max(1, Math.min(MAX_OUTPUT, typeof args.limit === 'number' ? Math.floor(args.limit) : MAX_OUTPUT));
     try {
       const canonicalPath = await fs.realpath(resolved);
+      const inspectionRoot = ctx.repositoryInspection
+        ? await fs.realpath(ctx.repositoryInspection.rootPath)
+        : undefined;
+      if (ctx.repositoryInspection && inspectionRoot && isWithin(canonicalPath, inspectionRoot)) {
+        const relativePath = path.relative(inspectionRoot, canonicalPath);
+        const result = await ctx.repositoryInspection.authority.readFile(
+          ctx.repositoryInspection.snapshotId,
+          relativePath,
+          { offset, limit },
+        );
+        return { success: true, ...result };
+      }
       const [content, fileStat] = await Promise.all([
         fs.readFile(canonicalPath, 'utf-8'),
         fs.stat(canonicalPath),

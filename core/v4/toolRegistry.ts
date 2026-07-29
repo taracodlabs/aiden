@@ -112,6 +112,12 @@ export type ExecutionContext = 'repl' | 'daemon';
 export interface ToolContext {
   /** Current working directory (for relative paths in file tools). */
   cwd: string;
+  /** Optional immutable repository view for snapshot-aware read-only file tools. */
+  repositoryInspection?: {
+    snapshotId: string;
+    rootPath: string;
+    authority: import('./codebase/repositorySnapshotAuthority').RepositorySnapshotAuthority;
+  };
   /** Aiden user-data paths. Sessions, memory, skills, logs all live here. */
   paths: AidenPaths;
   /**
