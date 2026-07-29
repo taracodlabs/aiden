@@ -6,7 +6,7 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer, type Server } from 'node:http';
+import { createServer, request, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -452,9 +452,19 @@ describe('kernel deterministic failure boundaries', () => {
     });
     engine.startToolCall({ toolCallId: 'tool-network', ...authority, producer: 'test', now: 102 });
 
-    await expect(fetch(target, { method: 'POST', body: 'received-before-disconnect' })).rejects.toThrow();
+    await expect(new Promise<void>((resolve, reject) => {
+      const client = request(target, { method: 'POST' }, (response) => {
+        response.resume();
+        response.once('end', resolve);
+      });
+      client.once('error', reject);
+      client.end('received-before-disconnect');
+    })).rejects.toThrow();
     expect(received).toBe(true);
-    await new Promise<void>((resolve) => server!.close(() => resolve()));
+    await new Promise<void>((resolve, reject) => {
+      server!.close((error) => error ? reject(error) : resolve());
+      server!.closeAllConnections();
+    });
     server = null;
     engine.completeToolCall({
       toolCallId: 'tool-network', ...authority, state: 'unknown', sideEffectState: 'unknown',

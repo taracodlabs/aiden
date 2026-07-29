@@ -71,12 +71,17 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
     const screen = new TerminalScreen(columns, 60);
     const preloadPath = path.join(repoRoot, 'tests/v4/harness/builtProviderPreload.cjs');
     const cliPath = path.join(repoRoot, 'dist/cli/v4/aidenCLI.js');
-    const command = ['&', quotePowerShellLiteral(process.execPath), '-r',
-      quotePowerShellLiteral(preloadPath), quotePowerShellLiteral(cliPath)].join(' ');
+    const exitMarker = '__AIDEN_COMPACT_EXIT__';
+    const command = [
+      '&', quotePowerShellLiteral(process.execPath), '-r',
+      quotePowerShellLiteral(preloadPath), quotePowerShellLiteral(cliPath),
+      `; $aidenExitCode = $LASTEXITCODE; Write-Output "${exitMarker}$aidenExitCode"; exit $aidenExitCode`,
+    ].join(' ');
     child = pty.spawn('powershell.exe', [
       '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command,
     ], {
       cwd, cols: columns, rows: 60,
+      useConptyDll: true,
       env: {
         ...process.env,
         AIDEN_HOME: aidenHome,
@@ -98,16 +103,52 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
     const heights = [60, 45, 35, 24, 16];
     await new Promise<void>((resolve, reject) => {
       let timeout: ReturnType<typeof setTimeout> | null = null;
+      let exitProbe: ReturnType<typeof setInterval> | null = null;
+      let settled = false;
+      let dataSubscription: { dispose(): void } | null = null;
+      let exitSubscription: { dispose(): void } | null = null;
+      const shellPid = child!.pid;
+      const finish = (error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        if (timeout) clearTimeout(timeout);
+        if (exitProbe) clearInterval(exitProbe);
+        dataSubscription?.dispose();
+        exitSubscription?.dispose();
+        child = null;
+        if (error) reject(error);
+        else resolve();
+      };
+      const observeShellExit = (): void => {
+        if (exitProbe) return;
+        // Repeated ConPTY resizes can occasionally lose the adapter's exit
+        // callback. The shell marker proves the CLI returned code 0; the PID
+        // probe then verifies that the host process actually terminated.
+        exitProbe = setInterval(() => {
+          try {
+            process.kill(shellPid, 0);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === 'ESRCH') finish();
+            else finish(error as Error);
+          }
+        }, 25);
+      };
       const armTimeout = (ms: number): void => {
         if (timeout) clearTimeout(timeout);
-        timeout = setTimeout(() => reject(new Error(
+        timeout = setTimeout(() => finish(new Error(
           `compact transcript timeout (${state}, calls=${provider?.callCount() ?? -1}):\n${screen.snapshot()}\nRAW:\n${raw.slice(-4000)}`,
         )), ms);
       };
       armTimeout(30_000);
-      child!.onData((chunk) => {
+      dataSubscription = child!.onData((chunk) => {
         raw += chunk;
         screen.write(chunk);
+        if (state === 'exit' && raw.includes(`${exitMarker}0`)) observeShellExit();
+        const failedExit = raw.match(new RegExp(`${exitMarker}(-?\\d+)`));
+        if (failedExit && failedExit[1] !== '0') {
+          finish(new Error(`compact transcript shell reported exit ${failedExit[1]}`));
+          return;
+        }
         const readyCount = raw.split(COMPOSER_READY_TOKEN).length - 1;
         const rendered = screen.snapshot();
         if (state === 'boot' && readyCount >= 1) {
@@ -138,14 +179,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
         } else if (state === 'response' && rendered.includes('COMPACT TRANSCRIPT COMPLETE') && readyCount >= 2) {
           state = 'exit';
           armTimeout(20_000);
-          setTimeout(() => typeLine(child!, '/exit'), 250);
+          setTimeout(() => typeLine(child!, '/quit'), 250);
         }
       });
-      child!.onExit(({ exitCode }) => {
-        if (timeout) clearTimeout(timeout);
-        child = null;
-        if (state === 'exit' && exitCode === 0) resolve();
-        else reject(new Error(`compact transcript exited ${exitCode} in ${state}`));
+      exitSubscription = child!.onExit(({ exitCode }) => {
+        if (state === 'exit' && exitCode === 0) finish();
+        else finish(new Error(`compact transcript exited ${exitCode} in ${state}`));
       });
     });
 
