@@ -46,6 +46,7 @@ import { pwClose } from '../core/playwrightBridge'
 // runtime lock, crash recovery, health endpoints, signal handlers.
 import { bootstrapDaemon } from '../core/v4/daemon'
 import { resolveAidenPaths } from '../core/v4/paths'
+import { resolveRuntimeStorageRoot } from '../core/v4/runtimeStorage'
 import { daemonDbPath } from '../core/v4/daemon/daemonConfig'
 import { openDaemonDb } from '../core/v4/daemon/db/connection'
 import { createJobEngine } from '../core/v4/daemon/jobEngine'
@@ -360,8 +361,9 @@ function handleChatError(
 }
 
 
-// Workspace root — AIDEN_USER_DATA in packaged Electron, cwd in dev
-const WORKSPACE_ROOT = process.env.AIDEN_USER_DATA || process.cwd()
+// Runtime-owned state belongs under the canonical Aiden data root, never the
+// caller's active repository. Packaged shells may provide AIDEN_USER_DATA.
+const WORKSPACE_ROOT = resolveRuntimeStorageRoot()
 
 // Package root — where workspace-templates/ ships inside the npm tarball.
 // In esbuild bundle (dist-bundle/index.js): __dirname = <pkg>/dist-bundle/ → parent is <pkg>
@@ -373,7 +375,7 @@ const PACKAGE_ROOT = fs.existsSync(path.join(_pkgCandidate1, 'workspace-template
   ? _pkgCandidate1
   : fs.existsSync(path.join(_pkgCandidate2, 'workspace-templates'))
     ? _pkgCandidate2
-    : WORKSPACE_ROOT  // dev mode: cwd has workspace-templates
+    : process.cwd()  // dev mode: cwd has workspace-templates
 
 // Per-session soul hash for Option-B protected-context injection.
 // First turn: undefined → full SOUL inject. Subsequent turns: compare → emit

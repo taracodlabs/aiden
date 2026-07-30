@@ -190,8 +190,9 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
     expect(task!.status).toBe('verification_failed');
     expect(task!.evidence!.verdict).toBe('verification_failed');
     expect(task!.evidence!.failures[0].tool).toBe('file_write');
-    expect(chunks.join('')).toMatch(/\? Outcome unknown/i);
-    expect(chunks.join('').match(/Outcome unknown/gi)).toHaveLength(1);
+    expect(chunks.join('')).toMatch(/\? Could not verify required outcome/i);
+    expect(chunks.join('').match(/Could not verify required outcome/gi)).toHaveLength(1);
+    expect(chunks.join('')).toContain('Verification unknown');
     expect(chunks.join('')).not.toMatch(/\u2713 Verified/i);
   });
 

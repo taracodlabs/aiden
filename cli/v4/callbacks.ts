@@ -534,6 +534,12 @@ export class CliCallbacks {
     if (!settled) return;
 
     try { this.renderBlockerCardIfPresent(result); } catch { /* defensive */ }
+    try {
+      const payload = result?.result && typeof result.result === 'object'
+        ? { ...(result.result as Record<string, unknown>), ...(result.error ? { error: result.error } : {}) }
+        : result?.result;
+      this.display.toolEffect(call.name, payload);
+    } catch { /* presentation must never affect execution */ }
     if (err) {
       if (result?.capabilityCard) {
         this.display.capabilityCard(result.capabilityCard);
@@ -590,7 +596,7 @@ export class CliCallbacks {
     // Yellow distinguishes the awaiting-attention state from the
     // brand-orange (informational) frames used by setup-complete and
     // /doctor.
-    this.display.write(renderApprovalBox(req, this.display) + '\n');
+    this.display.writeTransient(renderApprovalBox(req, this.display) + '\n');
 
     const prompts = await this.promptsPromise;
     let choice: string;

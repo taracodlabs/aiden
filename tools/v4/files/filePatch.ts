@@ -104,6 +104,7 @@ export const filePatchTool: ToolHandler = {
       return {
         success: true,
         skipped: true,
+        operation: 'patch',
         reason:  'source_absent',
         likely:  'already handled by an earlier operation',
         path:    resolved,
@@ -135,6 +136,7 @@ export const filePatchTool: ToolHandler = {
       const verified = await writeFileVerified(resolved, next);
       return {
         success: true,
+        operation: 'patch',
         path: resolved,
         replacements: replaceAll ? occurrences : 1,
         bytes: verified.bytes,

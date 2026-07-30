@@ -175,6 +175,13 @@ describe('safe change file-tool integration', () => {
     expect(first.result).toMatchObject({ success: true, changeId: expect.any(String) });
     expect(second.result).toEqual(first.result);
     expect(engine.changes.listRecords(context.admission.jobId)).toHaveLength(1);
+    expect(engine.graph.getCodingPlan(context.admission.jobId)).toMatchObject({
+      remainingStepIds: [],
+      steps: [
+        expect.objectContaining({ stepId: 'inspect-source', state: 'completed', filesInspected: [] }),
+        expect.objectContaining({ state: 'completed', label: 'Apply create' }),
+      ],
+    });
   });
 
   it('repairs patch proof by linking one fresh readback to the patch Effect', async () => {

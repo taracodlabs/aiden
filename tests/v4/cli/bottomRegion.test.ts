@@ -9,6 +9,7 @@ import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import { renderBottomSurface } from '../../../cli/v4/composerLane';
+import { primeFrameAsync } from '../../../cli/v4/display/frame';
 import { TerminalScreen } from '../harness/terminalScreen';
 
 class ScreenStream extends Writable {
@@ -243,6 +244,72 @@ function semanticGap(lines: string[], before: string, after: string): number {
 }
 
 describe('compact hybrid transcript geometry', () => {
+  it('renders distinct prompt and answer blocks without attaching to activity output', () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(80, 24);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.submitIdleComposer('Fix `src/math.mjs` and run its focused test.', 'Type your message · /help');
+    const activity = display.toolRow('shell_exec', { command: 'npm test -- math' }, undefined, {
+      activityId: 'tool_test', externalTicker: true,
+    });
+    activity.ok(40);
+    display.printTurnSeparator();
+    display.write(display.agentTurn('Fixed `src/math.mjs`. The focused test passed.'));
+
+    const transcript = screen.lines().slice(0, composerGeometry(screen).top);
+    const userRow = transcript.findIndex((line) => line.includes('You'));
+    const toolRow = transcript.findIndex((line) => line.includes('npm test'));
+    const answerRow = transcript.findIndex((line) => line.includes('Aiden'));
+    expect(userRow).toBeGreaterThanOrEqual(0);
+    expect(toolRow).toBeGreaterThan(userRow);
+    expect(answerRow).toBeGreaterThan(toolRow);
+    expect(transcript.slice(userRow, toolRow).some((line) => /^\s*─{10,}\s*$/u.test(line))).toBe(true);
+    expect(transcript.slice(toolRow, answerRow).some((line) => /^\s*─{10,}\s*$/u.test(line))).toBe(true);
+  });
+  it('wraps transcript prose at word boundaries when the word fits the terminal', async () => {
+    await primeFrameAsync();
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(44, 18);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+    display.write('12345678901234567890123456789012345678 ownership remains stable\n');
+
+    const surface = composerGeometry(screen);
+    const transcript = screen.lines().slice(0, surface.top);
+    expect(transcript.some((line) => line.includes('ownership')), screen.snapshot()).toBe(true);
+    expect(transcript.some((line) => /owner$|^ship\b/u.test(line.trim()))).toBe(false);
+  });
+
+  it('replaces repeated task updates in one stable live row before settlement', () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen } = createDisplay(80, 18);
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setIdleComposer('', 'Type your message · /help');
+
+    display.renderUiEvent('ui_task_update', {
+      task_id: 'task_index', label: 'Index repository', status: 'running',
+    });
+    display.renderUiEvent('ui_task_update', {
+      task_id: 'task_index', label: 'Index repository: 42 files', status: 'running',
+    });
+
+    const visible = screen.snapshot();
+    expect(visible.match(/Index repository/gu)).toHaveLength(1);
+    expect(visible).toContain('Index repository: 42 files');
+
+    display.renderUiEvent('ui_task_done', {
+      task_id: 'task_index', status: 'success', summary: '42 files indexed',
+    });
+    display.renderUiEvent('ui_task_done', {
+      task_id: 'task_index', status: 'success', summary: '42 files indexed',
+    });
+    const completed = screen.snapshot();
+    expect(completed.match(/Index repository: 42 files/gu)).toHaveLength(1);
+    expect(completed.match(/42 files indexed/gu)).toHaveLength(1);
+    expect(completed).toContain('✓ 42 files indexed');
+    expect(completed).not.toContain('◐ Working');
+  });
   it.each([16, 24, 35, 45, 60])(
     'keeps provider activity adjacent to a short prompt at %i rows',
     (rows) => {

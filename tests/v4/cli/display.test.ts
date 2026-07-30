@@ -130,7 +130,7 @@ describe('Display', () => {
 
   it('userTurn formats with a "you" marker', () => {
     const out = stripAnsi(display.userTurn('hello'));
-    expect(out).toMatch(/you/);
+    expect(out).toMatch(/You/);
     expect(out).toContain('hello');
   });
 
@@ -209,17 +209,19 @@ describe('Display Phase 14b helpers', () => {
       inspectable: true,
       prominent: true,
     });
-    expect(chunks.join('')).toContain('? Outcome unknown · Task: 7');
+    expect(chunks.join('')).toContain('? Could not verify required outcome');
+    expect(chunks.join('')).toContain('Verification unknown');
+    expect(chunks.join('')).toContain('Task: 7');
     expect(chunks.join('')).not.toContain('Next:');
-    expect(chunks.join('').match(/Outcome unknown/g)).toHaveLength(1);
+    expect(chunks.join('').match(/Could not verify required outcome/g)).toHaveLength(1);
   });
 
   it.each([
-    ['verified', 'success', 'Verified', '✓ Verified'],
-    ['completed_limited', 'warning', 'Completed · limited evidence', '! Completed · limited evidence'],
-    ['failed', 'error', 'Failed', '× Failed'],
-    ['unverified_required', 'error', 'Could not verify required outcome', '? Outcome unknown'],
-    ['cancelled', 'info', 'Cancelled', '■ Cancelled'],
+    ['verified', 'success', 'Verified', '✓ Verified · Execution succeeded · Validation not reported · Verification verified · Verdict complete'],
+    ['completed_limited', 'warning', 'Completed · limited evidence', '! Completed · limited evidence · Execution completed · Validation not reported · Verification limited · Verdict complete'],
+    ['failed', 'error', 'Failed', '× Failed · Execution failed · Validation unknown · Verification not completed · Verdict failed'],
+    ['unverified_required', 'error', 'Could not verify required outcome', '? Could not verify required outcome · Execution succeeded · Validation unknown · Verification unknown · Verdict incomplete'],
+    ['cancelled', 'info', 'Cancelled', '■ Cancelled · Execution interrupted · Validation not completed · Verification not completed · Verdict cancelled'],
   ] as const)('renders the compact %s verdict badge', (kind, severity, label, expected) => {
     const { d, chunks } = captureDisplay();
     d.taskOutcome({
@@ -1493,7 +1495,8 @@ describe('Display v4.8.0 ui_* event renderers', () => {
     d.renderUiEvent('ui_task_update', { task_id: 't1', label: 'researching', status: 'running' });
     const out = stripAnsi(chunks.join(''));
     expect(out).toContain('┊');
-    expect(out).toContain('⟳');
+    expect(out).toContain('◐ Working');
+    expect(out).toContain('┌ researching');
     expect(out).toContain('researching');
   });
 
@@ -1510,8 +1513,9 @@ describe('Display v4.8.0 ui_* event renderers', () => {
       task_id: 's1', label: 'nested', status: 'running', kind: 'subagent', depth: 2,
     });
     const out = stripAnsi(chunks.join(''));
-    // `┊ ` then 4-space indent (depth 2 × 2 spaces) then glyph + label
-    expect(out).toMatch(/┊ {5}⟳ nested/);
+    // `┊ ` then 4-space indent (depth 2 × 2 spaces) before both card rows.
+    expect(out).toMatch(/┊ {5}┌ nested/);
+    expect(out).toMatch(/┊ {5}└ ◐ Working/);
   });
 
   // ── ui_task_done ──────────────────────────────────────────────────────
@@ -1531,7 +1535,7 @@ describe('Display v4.8.0 ui_* event renderers', () => {
     const { d, chunks } = captureDisplay({ tty: true });
     d.renderUiEvent('ui_task_done', { task_id: 'orphan', status: 'failure' });
     const out = stripAnsi(chunks.join(''));
-    expect(out).toContain('✗');
+    expect(out).toContain('✕');
     expect(out).toContain('orphan');
   });
 
@@ -1608,15 +1612,47 @@ describe('Display v4.8.0 ui_* event renderers', () => {
 
   // ── ui_artifact_created ───────────────────────────────────────────────
 
-  it('ui_artifact_created paints kind-glyph + path + optional preview; kind:skill uses 🛠', () => {
+  it('ui_artifact_created defers file effects to canonical tool results', () => {
     const a = captureDisplay({ tty: true });
-    a.d.renderUiEvent('ui_artifact_created', { path: '/tmp/hello.py', kind: 'file', preview: 'print(1)' });
-    const fileOut = stripAnsi(a.chunks.join(''));
-    expect(fileOut).toContain('📄 Created: /tmp/hello.py');
-    expect(fileOut).toContain('print(1)');
+    a.d.renderUiEvent('ui_artifact_created', {
+      path: '/tmp/hello.py', kind: 'file', operation: 'modify', preview: 'print(1)',
+    });
+    expect(a.chunks.join('')).toBe('');
     const b = captureDisplay({ tty: true });
-    b.d.renderUiEvent('ui_artifact_created', { path: 'mySkill', kind: 'skill' });
+    b.d.renderUiEvent('ui_artifact_created', { path: 'mySkill', kind: 'skill', operation: 'create' });
     expect(stripAnsi(b.chunks.join(''))).toContain('🛠 Created: mySkill');
+
+  });
+
+  it('identifies the unknown axis instead of using a vague terminal label', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.taskOutcome({
+      kind: 'unverified_required', severity: 'error',
+      label: 'Could not verify required outcome', evidenceCount: 0,
+      hasRequiredEvidenceGap: true, executionStarted: true,
+      inspectable: true, prominent: true,
+      requiredCompletedCount: 1, requiredDeniedCount: 0,
+      requiredFailedCount: 0, requiredSkippedCount: 0,
+      requiredUnresolvedCount: 0, optionalDeniedCount: 0,
+    });
+    const rendered = chunks.join('');
+    expect(rendered).toContain('Execution succeeded');
+    expect(rendered).toContain('Verification unknown');
+    expect(rendered).toContain('Verdict incomplete');
+    expect(rendered).not.toContain('Outcome unknown');
+  });
+
+  it('renders unborn and non-Git repository states without raw probe diagnostics', () => {
+    const unborn = captureDisplay({ tty: false });
+    unborn.d.repositoryState({ vcsKind: 'git', branch: 'master', headCommit: null });
+    const unbornOutput = stripAnsi(unborn.chunks.join(''));
+    expect(unbornOutput).toContain('HEAD      no commits yet');
+    expect(unbornOutput).toContain('State     unborn repository');
+    expect(unbornOutput).not.toContain('fatal:');
+
+    const nonGit = captureDisplay({ tty: false });
+    nonGit.d.repositoryState({ vcsKind: 'none', branch: null, headCommit: null });
+    expect(stripAnsi(nonGit.chunks.join(''))).toContain('State     non-Git directory');
   });
 });
 
