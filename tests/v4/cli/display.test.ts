@@ -1802,6 +1802,7 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
         elapsedMs: 0,
       }));
       expect(stringWidth(out)).toBeLessThanOrEqual(46);
+      expect(out).toContain('custom-default');
       expect(out).toContain('◉0%');
       expect(out).toContain('⧖');
     });

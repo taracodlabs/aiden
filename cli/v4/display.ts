@@ -994,7 +994,7 @@ export class Display {
       const abbreviatedProviderModel = `${args.provider.slice(0, 1)}:${args.model}`;
       const compactProviderModel = terminalVisibleLength(fullProviderModel) <= providerModelBudget
         ? fullProviderModel
-        : args.provider.length <= 8 && terminalVisibleLength(abbreviatedProviderModel) <= providerModelBudget
+        : terminalVisibleLength(abbreviatedProviderModel) <= providerModelBudget
           ? abbreviatedProviderModel
           : truncateTerminalVisible(fullProviderModel, providerModelBudget);
       segments = [
