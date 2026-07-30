@@ -189,6 +189,19 @@ describe('source-fenced safe change authority', () => {
     await writeFile(path.join(root, 'source.ts'), 'const userValue = 3;\n');
     await expect(change.execute()).rejects.toMatchObject({ code: 'STALE_SOURCE' });
     await expect(readFile(path.join(root, 'source.ts'), 'utf8')).resolves.toBe('const userValue = 3;\n');
+    expect(engine.proof.listEvidence(admission.jobId)).toContainEqual(expect.objectContaining({
+      effectId: change.effectId,
+      repositorySnapshotId: snapshot.id,
+      source: 'repository.change.conflict',
+      coverage: 'full',
+      verificationResult: 'unknown',
+      payload: expect.objectContaining({
+        intentId: change.intent.intentId,
+        errorCode: 'STALE_SOURCE',
+        expectedHash: sha256('const value = 1;\n'),
+        observedHash: sha256('const userValue = 3;\n'),
+      }),
+    }));
   });
 
   it('rejects inactive Attempts and stale fence tokens before mutation', async () => {

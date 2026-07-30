@@ -128,6 +128,16 @@ describe('Codebase Mode production lifecycle acceptance', () => {
     await expect(readFile(path.join(root, 'source.ts'), 'utf8'))
       .resolves.toBe('export const value = 2;\n');
     expect(engine.changes.listRecords(result.jobId)).toHaveLength(1);
+    expect(engine.graph.getCodingPlan(result.jobId)).toMatchObject({
+      state: 'completed',
+      remainingStepIds: [],
+      steps: [
+        expect.objectContaining({ state: 'completed', filesInspected: ['source.ts'] }),
+        expect.objectContaining({ state: 'completed', references: [
+          expect.objectContaining({ kind: 'change_record' }),
+        ] }),
+      ],
+    });
     expect(engine.proof.listEvidence(result.jobId)).toEqual([
       expect.objectContaining({ source: 'repository.change.readback', verificationResult: 'verified' }),
     ]);
@@ -162,6 +172,49 @@ describe('Codebase Mode production lifecycle acceptance', () => {
     } finally {
       await rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it('persists automatically projected change and validation steps across restart', async () => {
+    await writeFile(path.join(root, 'source.ts'), 'export const value = 1;\n');
+    const validationShell: ToolHandler = {
+      ...shellExecTool,
+      execute: async () => attachRawValidationOutput({
+        success: true, exitCode: 0, stdout: 'Tests  1 passed (1)\n', stderr: '', timedOut: false,
+      }, { stdout: 'Tests  1 passed (1)\n', stderr: '' }),
+    };
+    const execute = buildExecutor([fileReadTool, fileWriteTool, validationShell]);
+
+    const result = await runJob({
+      execute: async () => {
+        const inspected = await execute({ id: 'auto-read', name: 'file_read', arguments: { path: 'source.ts' } });
+        const changed = await execute({
+          id: 'auto-write', name: 'file_write',
+          arguments: { path: 'source.ts', content: 'export const value = 2;\n' },
+        });
+        const validated = await execute({
+          id: 'auto-test', name: 'shell_exec',
+          arguments: { command: 'npm test -- --run source.test.ts', cwd: root },
+        });
+        return { inspected, changed, validated };
+      },
+    });
+
+    expect(result.value.changed.error).toBeUndefined();
+    expect(result.value.validated.error).toBeUndefined();
+    const reopened = createJobEngine({ db });
+    expect(reopened.graph.getCodingPlan(result.jobId)).toMatchObject({
+      state: 'completed',
+      remainingStepIds: [],
+      steps: [
+        expect.objectContaining({ state: 'completed', filesInspected: ['source.ts'] }),
+        expect.objectContaining({ state: 'completed', references: [
+          expect.objectContaining({ kind: 'change_record' }),
+        ] }),
+        expect.objectContaining({ state: 'completed', references: [
+          expect.objectContaining({ kind: 'test_run' }),
+        ], verificationRef: expect.stringMatching(/^evidence_/) }),
+      ],
+    });
   });
 
   it('completes a durable inspect-change-validate plan with source-bound Proof', async () => {
@@ -332,6 +385,16 @@ describe('Codebase Mode production lifecycle acceptance', () => {
       status: 'unknown', terminalOutcome: 'unknown', finishReason: 'verification_incomplete',
     });
     expect(engine.proof.getVerdict(result.jobId)?.verdict).toBe('unknown');
+    expect(engine.proof.listEvidence(result.jobId)).toContainEqual(expect.objectContaining({
+      source: 'repository.change.conflict',
+      repositorySnapshotId: expect.stringMatching(/^repository_snapshot_/),
+      coverage: 'full',
+      verificationResult: 'unknown',
+      payload: expect.objectContaining({
+        errorCode: 'STALE_SOURCE',
+        observedHash: expect.any(String),
+      }),
+    }));
   });
 
   it('records terminal-created mutations and refuses to reuse their validation as current proof', async () => {
