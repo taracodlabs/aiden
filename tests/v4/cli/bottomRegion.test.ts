@@ -9,6 +9,7 @@ import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import { renderBottomSurface } from '../../../cli/v4/composerLane';
+import { primeFrameAsync } from '../../../cli/v4/display/frame';
 import { TerminalScreen } from '../harness/terminalScreen';
 
 class ScreenStream extends Writable {
@@ -266,7 +267,8 @@ describe('compact hybrid transcript geometry', () => {
     expect(transcript.slice(userRow, toolRow).some((line) => /^\s*─{10,}\s*$/u.test(line))).toBe(true);
     expect(transcript.slice(toolRow, answerRow).some((line) => /^\s*─{10,}\s*$/u.test(line))).toBe(true);
   });
-  it('wraps transcript prose at word boundaries when the word fits the terminal', () => {
+  it('wraps transcript prose at word boundaries when the word fits the terminal', async () => {
+    await primeFrameAsync();
     delete process.env.AIDEN_COMPOSER_LANE;
     const { display, screen } = createDisplay(44, 18);
     display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');

@@ -514,7 +514,7 @@ export class BottomRegion {
     const width = Math.max(1, this.sink.cols() - 1);
     const wrapped = output
       .split('\n')
-      .map((line) => wrapAnsiText(line, width, { trim: false, hard: true }))
+      .map((line) => wrapAnsiText(line, width, { trim: false, hard: false }))
       .join('\n');
     this.sink.write(
       `${RESTORE_TRANSCRIPT}${wrapped}${SAVE_TRANSCRIPT}` +
