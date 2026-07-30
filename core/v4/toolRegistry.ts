@@ -83,13 +83,19 @@ import {
   fileChangePlanForTool,
   projectSafeChangeResult,
   type ChangeIntentRecord,
+  type ChangeRecord,
   type FileChangePlan,
 } from './codebase/safeChangeAuthority';
 import {
   structuredValidationPlanForShell,
+  type StructuredValidationRun,
   type ValidationEnvironment,
 } from './codebase/structuredValidationAuthority';
 import { getRawValidationOutput } from './codebase/validationOutput';
+import {
+  projectCommittedRepositoryChange,
+  projectCompletedRepositoryValidation,
+} from './codebase/runtimePlanProjection';
 import { isWithin } from './sandboxFs';
 
 /**
@@ -503,6 +509,8 @@ export class ToolRegistry {
       } | undefined;
       let preparedToolCall: PreparedDurableToolCall | null | undefined;
       let preparedRepositoryChange: { intent: ChangeIntentRecord; plan: FileChangePlan } | undefined;
+      let committedRepositoryChange: { intent: ChangeIntentRecord; record: ChangeRecord } | undefined;
+      let completedRepositoryValidation: StructuredValidationRun | undefined;
       let effectDescriptor: DurableEffectDescriptor | undefined;
       let approvalWaitId: string | null = null;
       const emit = (phase: ToolActivityUpdate['phase'], attempt?: number): void => {
@@ -1266,6 +1274,7 @@ export class ToolRegistry {
                   context.repositoryChange!.baseSnapshotId = record.descendantSnapshotId;
                   jobContext!.repository?.advance(record.descendantSnapshotId);
                 }
+                committedRepositoryChange = { intent: preparedRepositoryChange.intent, record };
                 value = projectSafeChangeResult(record, preparedRepositoryChange.intent);
               } else {
                 const validationContext = context.repositoryValidation;
@@ -1321,6 +1330,7 @@ export class ToolRegistry {
                     ...(rawOutput ? { rawOutput } : {}),
                     producer: jobContext.producer,
                   });
+                  completedRepositoryValidation = completion.run;
                   if (completion.run.resultingSnapshotId) {
                     validationContext!.baseSnapshotId = completion.run.resultingSnapshotId;
                     jobContext.repository?.advance(completion.run.resultingSnapshotId);
@@ -1465,6 +1475,34 @@ export class ToolRegistry {
           );
         } else {
           result = await dispatch(args);
+        }
+        const projectionContext = currentJobExecutionContext();
+        if (projectionContext && (committedRepositoryChange || completedRepositoryValidation)) {
+          try {
+            if (committedRepositoryChange) {
+              projectCommittedRepositoryChange({
+                context: projectionContext,
+                intent: committedRepositoryChange.intent,
+                record: committedRepositoryChange.record,
+              });
+            }
+            if (completedRepositoryValidation) {
+              projectCompletedRepositoryValidation({
+                context: projectionContext,
+                run: completedRepositoryValidation,
+              });
+            }
+          } catch (error) {
+            projectionContext.engine.appendJobEvent({
+              jobId: projectionContext.jobId,
+              attemptId: projectionContext.attemptId,
+              generation: projectionContext.generation,
+              type: 'repository.plan_projection_failed',
+              payload: { message: error instanceof Error ? error.message : String(error) },
+              producer: projectionContext.producer,
+              idempotencyKey: `repository-plan-projection-failed:${call.id}`,
+            });
+          }
         }
         executionAttempt.endedAt = Date.now();
         executionAttempt.terminalResult = 'completed';

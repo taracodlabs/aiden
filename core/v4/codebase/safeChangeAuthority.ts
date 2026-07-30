@@ -449,6 +449,50 @@ export function createSafeChangeAuthority(deps: Deps, io: SafeChangeIo = {}): Sa
     return evidence.evidenceId;
   };
 
+  const recordConflictEvidence = (input: {
+    intent: ChangeIntentRecord; fenceToken: string; producer: string;
+    code: 'STALE_SOURCE' | 'STALE_DESTINATION'; message: string;
+    expected: FilePrecondition; observed: FilePrecondition;
+  }): string => {
+    const existing = deps.proof.listEvidence(input.intent.jobId).find((evidence) => (
+      evidence.source === 'repository.change.conflict'
+      && evidence.effectId === input.intent.effectId
+      && (evidence.payload as { intentId?: unknown }).intentId === input.intent.intentId
+      && (evidence.payload as { errorCode?: unknown }).errorCode === input.code
+    ));
+    const observedAt = Date.now();
+    const evidence = existing ?? deps.proof.recordEvidence({
+      jobId: input.intent.jobId, attemptId: input.intent.attemptId, generation: input.intent.generation,
+      fenceToken: input.fenceToken, effectId: input.intent.effectId,
+      repositorySnapshotId: input.intent.baseSnapshotId,
+      source: 'repository.change.conflict', producer: input.producer,
+      observedAt, freshUntil: null, coverage: 'full', verificationResult: 'unknown',
+      payload: {
+        intentId: input.intent.intentId, operation: input.intent.operation,
+        baseSnapshotId: input.intent.baseSnapshotId, target: input.intent.canonicalTarget,
+        errorCode: input.code, message: input.message, expectedHash: input.expected.contentHash,
+        observedHash: input.observed.contentHash, expectedMetadata: input.expected,
+        observedMetadata: input.observed,
+      },
+    });
+    deps.proof.checkClaim({
+      claimId: input.intent.claimId, attemptId: input.intent.attemptId,
+      generation: input.intent.generation, evidenceIds: [evidence.evidenceId], state: 'unknown',
+    });
+    db.prepare("UPDATE repository_change_intents SET state='failed',updated_at=? WHERE intent_id=? AND state='planned'")
+      .run(observedAt, input.intent.intentId);
+    deps.appendJobEvent({
+      jobId: input.intent.jobId, attemptId: input.intent.attemptId, generation: input.intent.generation,
+      type: 'repository.change_conflict', payload: {
+        intentId: input.intent.intentId, errorCode: input.code,
+        baseSnapshotId: input.intent.baseSnapshotId, evidenceId: evidence.evidenceId,
+      },
+      producer: input.producer,
+      idempotencyKey: `repository-change-conflict:${input.intent.intentId}:${input.code}`,
+    });
+    return evidence.evidenceId;
+  };
+
   return {
     async prepare(input) {
       assertAuthority(input);
@@ -641,6 +685,11 @@ export function createSafeChangeAuthority(deps: Deps, io: SafeChangeIo = {}): Sa
       const expected = intent.originalMetadata;
       if (expected.exists !== current.exists || expected.contentHash !== current.contentHash
         || expected.size !== current.size || expected.modifiedAt !== current.modifiedAt || expected.mode !== current.mode) {
+        recordConflictEvidence({
+          intent: { ...intent, effectId: input.effectId }, fenceToken: input.fenceToken,
+          producer: input.producer, code: 'STALE_SOURCE',
+          message: 'Source metadata or content changed after approval', expected, observed: current,
+        });
         throw new SafeChangeAuthorityError('STALE_SOURCE', 'Source metadata or content changed after approval');
       }
       if (intent.canonicalDestination) {
@@ -648,6 +697,17 @@ export function createSafeChangeAuthority(deps: Deps, io: SafeChangeIo = {}): Sa
         const expectedDestination = intent.destinationOriginalMetadata;
         if (!expectedDestination || destination.exists !== expectedDestination.exists
           || destination.contentHash !== expectedDestination.contentHash || destination.modifiedAt !== expectedDestination.modifiedAt) {
+          recordConflictEvidence({
+            intent: { ...intent, effectId: input.effectId }, fenceToken: input.fenceToken,
+            producer: input.producer, code: 'STALE_DESTINATION',
+            message: 'Destination changed after approval',
+            expected: expectedDestination ?? {
+              path: intent.canonicalDestination, canonicalPath: intent.canonicalDestination,
+              exists: false, size: null, modifiedAt: null, mode: null, contentHash: null,
+              encoding: 'absent', byteOrderMark: false, lineEnding: 'none',
+            },
+            observed: destination,
+          });
           throw new SafeChangeAuthorityError('STALE_DESTINATION', 'Destination changed after approval');
         }
       }
