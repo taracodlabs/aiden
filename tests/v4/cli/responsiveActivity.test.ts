@@ -238,8 +238,8 @@ describe('responsive registry-owned turn activity', () => {
     };
     const narrow = stripAnsi(display.statusFooter(args));
     expect(narrow.length).toBeLessThanOrEqual(42);
-    expect(narrow).toContain('recog');
-    expect(narrow).toContain('ready');
+    expect(narrow).toContain('provider/recognizable-model');
+    expect(narrow).toContain('│✓│');
     expect(narrow).toContain('2.5s');
     out.columns = 120;
     const wide = stripAnsi(display.statusFooter(args));

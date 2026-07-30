@@ -50,6 +50,7 @@ import {
   projectCommandPresentation,
   projectEvidenceLines,
   relativizeActivityText,
+  semanticPhaseCompactToken,
   semanticPhaseForTool,
   semanticPhaseStatusLabel,
   shouldDeferActivityTransition,
@@ -974,37 +975,31 @@ export class Display {
     const phaseText = sk.applyColors(`⌁ ${semanticPhaseStatusLabel(phase)}`, phaseColorKind(phase));
     const timer =
       `${sk.applyColors('⧖', 'muted')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted')}`;
+    const maxWidth = Math.max(1, cols - 2);
     let segments: string[];
     if (cols >= 100) {
       segments = [providerModel, contextFull, phaseText, timer];
-    } else if (cols >= 54) {
-      segments = [providerModel, contextCompact, phaseText, timer];
     } else {
-      const compactContext = `◉${pct}%`;
-      const compactPhase = sk.applyColors(semanticPhaseStatusLabel(phase), phaseColorKind(phase));
-      const providerModelBudget = Math.max(
-        8,
-        (cols - 1)
-          - terminalVisibleLength(compactContext)
-          - terminalVisibleLength(timer)
-          - terminalVisibleLength(compactPhase)
-          - 12,
+      const mediumSegments = [providerModel, contextCompact, phaseText, timer];
+      const medium = mediumSegments.join(SEP);
+      if (terminalVisibleLength(medium) <= maxWidth) return medium;
+
+      const unicode = terminalSupportsUnicode();
+      const compactSeparator = sk.applyColors(unicode ? '│' : '|', 'muted');
+      const compactIdentity =
+        `${sk.applyColors(unicode ? '◆' : '*', 'brand')}` +
+        `${sk.applyColors(`${args.provider}/${args.model}`, 'tool')}`;
+      const compactContext = sk.applyColors(`${unicode ? '◉' : ''}${pct}%`, ctxKind);
+      const compactPhase = sk.applyColors(
+        semanticPhaseCompactToken(phase, unicode),
+        phaseColorKind(phase),
       );
-      const fullProviderModel = `${args.provider}:${args.model}`;
-      const abbreviatedProviderModel = `${args.provider.slice(0, 1)}:${args.model}`;
-      const compactProviderModel = terminalVisibleLength(fullProviderModel) <= providerModelBudget
-        ? fullProviderModel
-        : terminalVisibleLength(abbreviatedProviderModel) <= providerModelBudget
-          ? abbreviatedProviderModel
-          : truncateTerminalVisible(fullProviderModel, providerModelBudget);
-      segments = [
-        `${sk.applyColors('◆', 'brand')} ${sk.applyColors(compactProviderModel, 'tool')}`,
-        sk.applyColors(compactContext, ctxKind),
-        compactPhase,
-        timer,
-      ];
+      const compactTimer = sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted');
+      const compact = [compactIdentity, compactContext, compactPhase, compactTimer]
+        .join(compactSeparator);
+      return truncateTerminalVisible(compact, maxWidth);
     }
-    return truncateTerminalVisible(segments.join(SEP), Math.max(1, cols - 2));
+    return truncateTerminalVisible(segments.join(SEP), maxWidth);
   }
 
   /**

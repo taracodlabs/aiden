@@ -1791,20 +1791,80 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     });
   });
 
-  it('48-col output budgets the wide timer glyph by terminal cell width', () => {
-    withCols(48, () => {
+  it.each([44, 60, 80, 100, 120])(
+    'preserves provider, model, context, phase, and timer identity at %i columns',
+    (cols) => {
+      withCols(cols, () => {
+        const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+        const out = stripAnsi(d.statusFooter({
+          ...BASE,
+          provider: 'custom_openai',
+          model: 'custom-default',
+          ctxUsed: 0,
+          elapsedMs: 8_000,
+          phase: 'thinking',
+        }));
+        expect(stringWidth(out)).toBeLessThanOrEqual(cols - 2);
+        expect(out).toContain('custom_openai');
+        expect(out).toContain('custom-default');
+        expect(out).toContain('0%');
+        expect(out).toContain('◉');
+        expect(out).toMatch(/thinking|T/u);
+        expect(out).toMatch(/8s/u);
+      });
+    },
+  );
+
+  it.each([
+    ['ready', '✓'],
+    ['thinking', 'T'],
+    ['planning', 'P'],
+    ['inspecting', 'I'],
+    ['working', 'W'],
+    ['testing', 'R'],
+    ['verifying', 'V'],
+    ['approval_required', 'A'],
+    ['blocked', 'B'],
+    ['failed', '✕'],
+  ] as const)('keeps compact %s phase visible at 44 columns', (phase, token) => {
+    withCols(44, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter({
         ...BASE,
         provider: 'custom_openai',
         model: 'custom-default',
         ctxUsed: 0,
-        elapsedMs: 0,
+        elapsedMs: 8_000,
+        phase,
       }));
-      expect(stringWidth(out)).toBeLessThanOrEqual(46);
-      expect(out).toContain('custom-default');
-      expect(out).toContain('◉0%');
-      expect(out).toContain('⧖');
+      expect(stringWidth(out)).toBeLessThanOrEqual(42);
+      expect(out).toContain('custom_openai/custom-default');
+      expect(out).toContain(`│${token}│`);
     });
+  });
+
+  it('uses the compact ASCII identity and phase fallback without ANSI', () => {
+    const previous = process.env.AIDEN_UI_UNICODE;
+    process.env.AIDEN_UI_UNICODE = '0';
+    try {
+      withCols(44, () => {
+        const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+        const out = d.statusFooter({
+          ...BASE,
+          provider: 'custom_openai',
+          model: 'custom-default',
+          ctxUsed: 0,
+          elapsedMs: 8_000,
+          phase: 'thinking',
+        });
+        expect(out).not.toContain('\x1b[');
+        expect(out).toContain('*custom_openai/custom-default');
+        expect(out).toContain('|T|');
+        expect(stringWidth(out)).toBeLessThanOrEqual(42);
+      });
+    } finally {
+      if (previous === undefined) delete process.env.AIDEN_UI_UNICODE;
+      else process.env.AIDEN_UI_UNICODE = previous;
+    }
   });
 });

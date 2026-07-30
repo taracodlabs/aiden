@@ -126,6 +126,27 @@ export function semanticPhaseStatusLabel(phase: SemanticActivityPhase): string {
   }
 }
 
+export function semanticPhaseCompactToken(
+  phase: SemanticActivityPhase,
+  unicode: boolean,
+): string {
+  switch (phase) {
+    case 'thinking': return 'T';
+    case 'planning': return 'P';
+    case 'inspecting': return 'I';
+    case 'working': return 'W';
+    case 'testing': return 'R';
+    case 'verifying': return 'V';
+    case 'recovering': return 'R';
+    case 'approval_required': return 'A';
+    case 'blocked': return 'B';
+    case 'completing': return 'V';
+    case 'ready':
+    case 'complete': return unicode ? '✓' : '+';
+    case 'failed': return unicode ? '✕' : 'x';
+  }
+}
+
 function unicodeGlyph(phase: SemanticActivityPhase, frame: number): string {
   switch (phase) {
     case 'thinking': return ['⠋', '⠙', '⠹', '⠸'][frame % 4]!;
