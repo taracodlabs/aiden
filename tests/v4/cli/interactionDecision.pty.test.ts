@@ -35,8 +35,7 @@ function stripAnsi(value: string): string {
 }
 
 function currentTurn(output: string, prompt: string): string {
-  const marker = `▲ You  ${prompt}`;
-  const start = output.lastIndexOf(marker);
+  const start = output.lastIndexOf(prompt);
   return start >= 0 ? output.slice(start) : output;
 }
 
@@ -199,7 +198,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (
           state === 'single-denial-settle'
           && provider!.callCount() >= 3
-          && plain.slice(turnStart).includes('Denied · Task:')
+          && plain.slice(turnStart).includes('Verdict denied · Task:')
           && readyCount >= 3
         ) {
           settled.denial = currentTurn(plain, 'request explicitly denied command');
@@ -219,7 +218,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (
           state === 'single-allow-settle'
           && provider!.callCount() >= 5
-          && plain.slice(turnStart).includes('Completed · Task:')
+          && plain.slice(turnStart).includes('Verdict complete · Task:')
           && readyCount >= 5
         ) {
           settled.allow = currentTurn(plain, 'request approved command');
@@ -239,7 +238,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (
           state === 'batch-valid-settle'
           && provider!.callCount() >= 8
-          && /(?:Partially completed|Verified) · Task:/.test(plain.slice(turnStart))
+          && /Verdict (?:partial|complete) · Task:/.test(plain.slice(turnStart))
           && readyCount >= 7
         ) {
           settled.retry = currentTurn(plain, 'request partial batch');
@@ -256,7 +255,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (
           state === 'batch-cancel-settle'
           && provider!.callCount() >= 10
-          && plain.slice(turnStart).includes('Cancelled · Task:')
+          && plain.slice(turnStart).includes('Verdict cancelled · Task:')
           && readyCount >= 9
         ) {
           settled.cancel = currentTurn(plain, 'request cancelled batch');
@@ -273,7 +272,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
         } else if (
           state === 'batch-none-settle'
           && provider!.callCount() >= 12
-          && plain.slice(turnStart).includes('Denied · Task:')
+          && plain.slice(turnStart).includes('Verdict denied · Task:')
           && readyCount >= 11
         ) {
           settled.none = currentTurn(plain, 'request denied batch');
@@ -288,7 +287,9 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
 
       child!.onExit(({ exitCode }) => {
         clearTimeout(timeout);
-        if (state !== 'done') reject(new Error(`decision CLI exited ${exitCode} in ${state}`));
+        if (state !== 'done') reject(new Error(
+          `decision CLI exited ${exitCode} in ${state}:\n${stripAnsi(output).slice(-4000)}`,
+        ));
       });
     });
 

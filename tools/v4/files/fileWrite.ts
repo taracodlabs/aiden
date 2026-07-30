@@ -83,6 +83,8 @@ export const fileWriteTool: ToolHandler = {
     }
     const content = typeof args.content === 'string' ? args.content : '';
     const resolved = policy.resolvedPath;
+    let existed = false;
+    try { existed = (await fs.stat(resolved)).isFile(); } catch { /* absent */ }
     try {
       // Shared choke-point: atomic write + read-back verification. `bytes` is
       // the ACTUAL on-disk length (verified), not the intended-length guess a
@@ -91,6 +93,7 @@ export const fileWriteTool: ToolHandler = {
       const verified = await writeFileVerified(resolved, content);
       return {
         success: true,
+        operation: existed ? 'modify' : 'create',
         path: resolved,
         bytes: verified.bytes,
         verified: true,

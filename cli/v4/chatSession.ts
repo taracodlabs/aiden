@@ -645,6 +645,7 @@ export class ChatSession implements ChatSessionLike {
    * silently fix for the user.
    */
   private streamingDisabledWarned = false;
+  private startupRendered = false;
 
   /**
    * Phase v4.1.2-memory-D:
@@ -3488,6 +3489,8 @@ export class ChatSession implements ChatSessionLike {
     // Tier-3.1a: skip entirely on non-TTY so piped/scripted callers
     // don't get scrollback chatter on stdout.
     if (!process.stdout.isTTY) return;
+    if (this.startupRendered) return;
+    this.startupRendered = true;
 
     // Channel summary — observable, not banner-essential, but kept so
     // status pills aren't the only place a user sees telegram health.

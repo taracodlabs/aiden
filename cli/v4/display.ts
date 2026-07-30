@@ -93,6 +93,8 @@ import {
 } from './composerLane';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 import type { ActivitySnapshot } from './activityRegistry';
+import { projectFileEffect, projectRepositoryState } from './effectPresentation';
+import { terminalStateSymbol, terminalSupportsUnicode } from './terminalSymbols';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
 // `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
 // through frame helpers so the visible left edge / right margin / wrap
@@ -1080,7 +1082,7 @@ export class Display {
     // surface family (▎ Aiden header, status footer, bottom hint).
     // Timestamp variant unchanged — the timestamp gutter already
     // provides its own consistent left edge.
-    const tri = this.skin.applyColors('▲', 'brand');
+    const tri = this.skin.applyColors(terminalStateSymbol('user'), 'brand');
     if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
       return `${this.timestampPrefix()}  ${tri} `;
     }
@@ -1685,7 +1687,7 @@ export class Display {
     // v4.1.3-repl-polish: icons default ON; set AIDEN_UI_ICONS=0 to
     // disable (CI / dumb terminals / narrow SSH sessions).
     // Read at call-time so env changes take effect without restart.
-    const useIcons = process.env.AIDEN_UI_ICONS !== '0';
+    const useIcons = process.env.AIDEN_UI_ICONS !== '0' && terminalSupportsUnicode();
     const { icon, verb } = trailIconForTool(name);
     const glyph = useIcons ? icon : sk.applyColors('·', 'muted');
 
@@ -1723,7 +1725,7 @@ export class Display {
       const liveSuffix = elapsed >= 1000
         ? `  ${sk.applyColors(`${phaseLabel} ${formatToolDuration(elapsed)}…`, 'muted')}`
         : '';
-      const runningGlyph = useIcons ? sk.applyColors('⚙', 'tool') : sk.applyColors('·', 'muted');
+      const runningGlyph = useIcons ? sk.applyColors('⚙', 'tool') : sk.applyColors(terminalStateSymbol('running'), 'muted');
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph}  ` +
         `${sk.applyColors(padVerb(verb), 'tool')} `;
       const suffix = `${liveSuffix}${this.composerSuffix()}`;
@@ -1740,7 +1742,9 @@ export class Display {
     // Outcome row — entire line colored by outcome kind.
     const outcomeRow = (suffix: string, kind: ColorKindForBracket): string => {
       const failed = kind === 'error' || kind === 'warn' || /^(?:cancelled|denied|blocked|timed out|fail)/u.test(suffix);
-      const outcomeGlyph = failed ? '!' : '✓';
+      const outcomeGlyph = terminalSupportsUnicode()
+        ? (failed ? '!' : '✓')
+        : terminalStateSymbol(failed ? 'failed' : 'completed');
       const terminalVerb = /^denied\b/u.test(suffix) ? 'denied'
         : /^cancelled\b/u.test(suffix) ? 'cancelled'
         : /^timed out\b/u.test(suffix) ? 'timed out'
@@ -2116,8 +2120,8 @@ export class Display {
   /** Format a user turn (e.g. echoed back from history). */
   userTurn(text: string): string {
     const sk = this.skin;
-    const arrow = sk.getActive().glyphs?.arrow ?? '>';
-    return `${sk.applyColors(`${arrow} you`, 'user')}\n${text}\n`;
+    const body = text.split('\n').map((line) => `  ${line}`).join('\n');
+    return `  ${this.rule()}\n${sk.applyColors(`  ${terminalStateSymbol('user')} You`, 'user')}\n${body}\n  ${this.rule()}\n`;
   }
 
   /**
@@ -2208,6 +2212,11 @@ export class Display {
     this.writeOutput(text);
   }
 
+  /** Write modal-only chrome without adding it to transcript projection. */
+  writeTransient(text: string): void {
+    this.out.write(text);
+  }
+
   /** Test-only control markers are emitted after fixed composer cursor setup. */
   writeAfterComposerCursor(text: string): void {
     if (this.composerSurfacePauseDepth === 0 && composerLaneEnabled() && this.out.isTTY) {
@@ -2286,7 +2295,8 @@ export class Display {
    * restore an empty ready composer. Empty Enter remains a local no-op. */
   submitIdleComposer(value: string, hint: string): void {
     if (value.length > 0) {
-      this.write(`${this.promptPrefix()}You  ${value}\n`);
+      const body = value.split('\n').map((line) => `  ${line}`).join('\n');
+      this.write(`${this.promptPrefix()}You\n${body}\n  ${this.rule()}`);
     }
     this.idleComposerContent = `${this.promptPrefix()} ${hint}`;
     this.idleComposerDraft = '';
@@ -2517,7 +2527,7 @@ export class Display {
         case 'verified': return { glyph: '✓', label: outcome.label, role: 'success' as const };
         case 'failed':
         case 'timed_out': return { glyph: '×', label: outcome.label, role: 'error' as const };
-        case 'unverified_required': return { glyph: '?', label: 'Outcome unknown', role: 'warn' as const };
+        case 'unverified_required': return { glyph: '?', label: outcome.label, role: 'warn' as const };
         case 'cancelled': return { glyph: '■', label: outcome.label, role: 'muted' as const };
         case 'completed_limited':
         case 'partial':
@@ -2525,9 +2535,17 @@ export class Display {
         case 'completed': return { glyph: '✓', label: outcome.label, role: 'success' as const };
       }
     })();
+    const axes = projectTaskOutcomeAxes(outcome);
     const summary = outcome.summary ? ` · ${outcome.summary}` : '';
-    const glyph = this.skin.applyColors(projection.glyph, projection.role);
-    this.writeOutput(`${glyph} ${projection.label}${summary}${details}\n`);
+    const stateSymbol = outcome.kind === 'unverified_required' ? 'unknown'
+      : outcome.kind === 'failed' || outcome.kind === 'timed_out' || outcome.kind === 'cancelled' ? 'failed'
+        : outcome.kind === 'partial' || outcome.kind === 'completed_limited' || outcome.kind === 'denied' ? 'warning'
+          : 'completed';
+    const glyph = this.skin.applyColors(
+      terminalSupportsUnicode() ? projection.glyph : terminalStateSymbol(stateSymbol),
+      projection.role,
+    );
+    this.writeOutput(`${glyph} ${projection.label} · ${axes.join(' · ')}${summary}${details}\n`);
   }
 
   /**
@@ -3097,6 +3115,7 @@ export class Display {
   // echo it even when the model only sends task_id + status. Cleared
   // on done. Map is per-Display-instance; one REPL session.
   private uiTaskRows = new Map<string, { label: string }>();
+  private uiTaskTerminalIds = new Set<string>();
 
   // v4.8.0 Phase 2.3 fix — set true by renderUiEvent; tryRerenderInPlace
   // early-returns when set so the cursor-up + erase-to-end-of-screen
@@ -3104,15 +3123,7 @@ export class Display {
   // boundaries (streamPartial first-delta init + streamComplete).
   private uiEventsFiredThisTurn = false;
 
-  /**
-   * v4.8.0 Phase 2.3 — render a semantic ui_* event signalled by the
-   * model via a uiOnly tool call. Append-only: each event paints one
-   * row; in-place mutation is a v4.8.x upgrade if UX demands it.
-   *
-   * Currently handles `ui_task_update` and `ui_task_done`; other 5
-   * names land in Phase 2.4 (silent ignore until then). Non-TTY out
-   * surfaces silent — matches the activityIndicator precedent.
-   */
+  /** Render semantic ui_* events. Stable task IDs replace active cards in place. */
   /**
    * v4.8.0 Phase 2.3 fix-2 — reset the per-turn ui-event flag. Called
    * by chatSession at the top of each turn. The existing reset sites
@@ -3162,15 +3173,27 @@ export class Display {
     const kindArg = typeof args.kind    === 'string' ? args.kind    : 'task';
     const depth   = typeof args.depth   === 'number' && args.depth > 0 ? args.depth : 0;
     if (!taskId || !label) return;
+    if (this.uiTaskTerminalIds.has(taskId)) return;
     this.commitStreamChunk();
-    const glyph = status === 'paused' ? '⏸' : status === 'blocked' ? '⛔' : '⟳';
+    const glyph = terminalSupportsUnicode()
+      ? (status === 'paused' ? '⏸' : status === 'blocked' ? '!' : '◐')
+      : terminalStateSymbol(status === 'blocked' ? 'warning' : 'running');
     const colorKind: ColorKind = status === 'running' ? 'tool' : 'warn';
     this.uiTaskRows.set(taskId, { label });
     const short  = label.length > 80 ? label.slice(0, 79) + '…' : label;
     // v4.8.0 Phase 2.4 — subagent kind: indent by depth inside the
     // gutter so nested rows tier below their parent.
     const indent = kindArg === 'subagent' ? '  '.repeat(depth) : '';
-    this.writeOutput(this.uiTrailRow(`${indent}${glyph} ${short}`, colorKind));
+    const stateLabel = status === 'paused' ? 'Paused' : status === 'blocked' ? 'Blocked' : 'Working';
+    const rendered = this.uiTrailRow(
+      `${indent}┌ ${short}\n${indent}└ ${glyph} ${stateLabel}`,
+      colorKind,
+    ).replace(/\n$/u, '');
+    if (this.composerLane?.isActive()) {
+      this.composerLane.setLiveRow(`ui-task:${taskId}`, rendered);
+    } else {
+      this.writeOutput(`${rendered}\n`);
+    }
     this.streamLastEndedNewline = true;
   }
 
@@ -3179,18 +3202,30 @@ export class Display {
     const status  = typeof args.status  === 'string' ? args.status  : '';
     const summary = typeof args.summary === 'string' ? args.summary : '';
     if (!taskId) return;
+    if (this.uiTaskTerminalIds.has(taskId)) return;
+    this.uiTaskTerminalIds.add(taskId);
     this.commitStreamChunk();
     const tracked = this.uiTaskRows.get(taskId);
     const label = tracked?.label ?? taskId;
     this.uiTaskRows.delete(taskId);
-    const glyph = status === 'success' ? '✓' : status === 'failure' ? '✗' : '⊘';
+    const glyph = terminalSupportsUnicode()
+      ? (status === 'success' ? '✓' : status === 'failure' ? '✕' : '!')
+      : terminalStateSymbol(status === 'success' ? 'completed' : status === 'failure' ? 'failed' : 'warning');
     const kind: ColorKind =
       status === 'success' ? 'success' :
       status === 'failure' ? 'error'   : 'warn';
     const shortLabel = label.length > 80 ? label.slice(0, 79) + '…' : label;
     const shortSum   = summary.length > 120 ? summary.slice(0, 119) + '…' : summary;
-    const tail = shortSum ? ` — ${shortSum}` : '';
-    this.writeOutput(this.uiTrailRow(`${glyph} ${shortLabel}${tail}`, kind));
+    const terminalLabel = shortSum || (status === 'success' ? 'Completed' : status === 'failure' ? 'Failed' : 'Blocked');
+    const rendered = this.uiTrailRow(`┌ ${shortLabel}\n└ ${glyph} ${terminalLabel}`, kind).replace(/\n$/u, '');
+    if (this.composerLane?.isActive()) {
+      const terminalState = status === 'success'
+        ? 'succeeded'
+        : status === 'failure' ? 'failed' : 'cancelled';
+      this.composerLane.settleLiveRow(`ui-task:${taskId}`, rendered, terminalState);
+    } else {
+      this.writeOutput(`${rendered}\n`);
+    }
     this.streamLastEndedNewline = true;
   }
 
@@ -3264,16 +3299,63 @@ export class Display {
     const path = typeof args.path === 'string' ? args.path : '';
     if (!path) return;
     const kindArg = typeof args.kind === 'string' ? args.kind : 'file';
+    if (kindArg === 'file') return;
+    const operation = typeof args.operation === 'string' ? args.operation : '';
     const preview = typeof args.preview === 'string' ? args.preview : '';
     this.commitStreamChunk();
     const glyph = kindArg === 'skill' ? '🛠' : kindArg === 'directory' ? '📁' : '📄';
-    let out = this.uiTrailRow(`${glyph} Created: ${path}`, 'accent');
+    const effectLabel = operation === 'create' ? 'Created'
+      : operation === 'modify' ? 'Modified'
+        : operation === 'delete' ? 'Deleted'
+          : operation === 'move' ? 'Moved'
+            : operation === 'rename' ? 'Renamed'
+              : 'Changed';
+    let out = this.uiTrailRow(`${glyph} ${effectLabel}: ${path}`, 'accent');
     if (preview) {
       const shortP = preview.length > 200 ? preview.slice(0, 199) + '…' : preview;
       out += this.uiTrailRow(`  ${shortP}`, 'muted');
     }
     this.writeOutput(out);
     this.streamLastEndedNewline = true;
+  }
+
+  /** Render an executed file effect from the canonical tool result. */
+  toolEffect(toolName: string, result: unknown, cwd = process.cwd()): void {
+    const effect = projectFileEffect({ toolName, result, cwd });
+    if (!effect) return;
+    const target = effect.destination ? `${effect.path} → ${effect.destination}` : effect.path;
+    this.writeOutput(`${effect.blocked ? 'Conflict' : 'Changed'}\n  ${effect.marker}  ${target}\n`);
+  }
+
+  /** Render canonical repository state without exposing expected Git probe errors. */
+  repositoryState(input: { vcsKind: 'git' | 'none'; branch: string | null; headCommit: string | null }): void {
+    const state = projectRepositoryState(input);
+    this.writeOutput(
+      `Repository\n  Branch    ${state.branch}\n  HEAD      ${state.head}\n  State     ${state.state}\n`,
+    );
+  }
+}
+
+export function projectTaskOutcomeAxes(outcome: TaskOutcomePresentation): string[] {
+  switch (outcome.kind) {
+    case 'verified': return ['Execution succeeded', 'Validation not reported', 'Verification verified', 'Verdict complete'];
+    case 'completed': return ['Execution completed', 'Validation not reported', 'Verification not required', 'Verdict complete'];
+    case 'completed_limited': return ['Execution completed', 'Validation not reported', 'Verification limited', 'Verdict complete'];
+    case 'partial': return ['Execution partial', 'Validation partial', 'Verification partial', 'Verdict partial'];
+    case 'unverified_required': return [
+      outcome.executionStarted ? 'Execution succeeded' : 'Execution unknown',
+      'Validation unknown', 'Verification unknown', 'Verdict incomplete',
+    ];
+    case 'failed': return ['Execution failed', 'Validation unknown', 'Verification not completed', 'Verdict failed'];
+    case 'denied': return ['Execution not started', 'Validation not applicable', 'Verification not applicable', 'Verdict denied'];
+    case 'cancelled': return [
+      outcome.executionStarted ? 'Execution interrupted' : 'Execution not started',
+      'Validation not completed', 'Verification not completed', 'Verdict cancelled',
+    ];
+    case 'timed_out': return [
+      outcome.executionStarted ? 'Execution timed out' : 'Execution not started',
+      'Validation not completed', 'Verification not completed', 'Verdict timed out',
+    ];
   }
 }
 

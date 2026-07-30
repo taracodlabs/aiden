@@ -38,6 +38,17 @@ describe('isReadOnlyCommand — safe reads run without approval', () => {
     'Get-Content file.txt',
     'Select-String -Path *.ts foo',
     'cat a < input.txt',         // bare input redirect is a read
+    'git status --short',
+    'git diff --stat',
+    'git diff --cached --name-status',
+    'git log -1 --oneline',
+    'git show HEAD:package.json',
+    'git rev-parse HEAD',
+    'git branch --show-current',
+    'git ls-files --modified',
+    'git -C "C:\\repo with spaces" status --short',
+    'git --git-dir="C:\\repo with spaces\\.git" --work-tree="C:\\repo with spaces" diff --stat',
+    'git status --short | head -5',
   ];
   for (const cmd of READ_ONLY) {
     it(`read-only: ${cmd}`, () => { expect(isReadOnlyCommand(cmd)).toBe(true); });
@@ -66,6 +77,18 @@ describe('isReadOnlyCommand — writes/deletes/chains STILL prompt', () => {
     'python script.py',          // arbitrary exec
     'Get-ChildItem | Remove-Item', // second stage mutates
     'node -e "require(\'fs\').unlinkSync(\'x\')"',
+    'git add package.json',
+    'git commit -m "change"',
+    'git checkout -- package.json',
+    'git switch main',
+    'git reset --hard HEAD',
+    'git clean -fd',
+    'git push origin main',
+    'git pull',
+    'git fetch origin',
+    'git config user.name Shiva',
+    'git branch topic',
+    'git tag v1',
     '',                          // empty
     '   ',                       // whitespace only
   ];

@@ -94,6 +94,7 @@ export const fileDeleteTool: ToolHandler = {
       return {
         success: true,
         skipped: true,
+        operation: 'delete',
         reason:  'source_absent',
         likely:  'already handled by an earlier operation',
         path:    resolved,
@@ -101,7 +102,7 @@ export const fileDeleteTool: ToolHandler = {
     }
     try {
       await fs.rm(resolved, { recursive, force: false });
-      return { success: true, path: resolved };
+      return { success: true, operation: 'delete', path: resolved };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       return { success: false, error: message, path: resolved };

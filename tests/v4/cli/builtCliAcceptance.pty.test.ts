@@ -219,7 +219,10 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         expect(rowsAboveFooter.filter((line) => line.includes(draft)), name).toEqual([]);
       } else {
         expect(submittedRows, `${name}\n${frame}`).toHaveLength(1);
-        expect(submittedRows[0], name).toContain(draft);
+        const headerIndex = rowsAboveFooter.indexOf(submittedRows[0]);
+        const draftRows = rowsAboveFooter.filter((line) => line.includes(draft));
+        expect(draftRows, `${name}\n${frame}`).toHaveLength(1);
+        expect(rowsAboveFooter.indexOf(draftRows[0]), name).toBeGreaterThan(headerIndex);
       }
     }
   });

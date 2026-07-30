@@ -14,6 +14,7 @@ import path   from 'path'
 import fs     from 'fs'
 import crypto from 'crypto'
 import { getUserDataDir } from './paths'
+import { runtimeArtifactDirectory } from './v4/runtimeStorage'
 import { getTabRegistry, type TabMeta } from './v4/browser/tabRegistry'
 import { getDialogSupervisor, type DialogRecord, type FileEventRecord } from './v4/browser/dialogState'
 
@@ -551,11 +552,11 @@ export async function pwNavigate(url: string): Promise<{ ok: boolean; url: strin
   finally { release() }
 }
 
-/** Take a full-page screenshot, saved to workspace/screenshots/. Returns the file path. */
+/** Take a full-page screenshot in Aiden's artifact storage. Returns the file path. */
 export async function pwScreenshot(): Promise<{ ok: boolean; path?: string; error?: string }> {
   try {
     const page   = await ensurePage()
-    const dir    = path.join(process.cwd(), 'workspace', 'screenshots')
+    const dir    = runtimeArtifactDirectory('screenshots')
     fs.mkdirSync(dir, { recursive: true })
     const file   = path.join(dir, `screenshot_${Date.now()}.png`)
     await page.screenshot({ path: file, fullPage: false })

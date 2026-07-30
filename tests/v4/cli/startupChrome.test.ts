@@ -153,6 +153,16 @@ describe('responsive startup status rows', () => {
 });
 
 describe('responsive startup dashboard integration', () => {
+  it('renders startup once when the same session is asked to render again', async () => {
+    const { session, chunks } = buildSession('Partner', 100);
+    await session.renderStartupCard();
+    await session.renderStartupCard();
+    const output = stripAnsi(chunks.join(''));
+
+    expect(output.match(/Autonomous AI Engine/g)).toHaveLength(1);
+    expect(output.match(/built solo/gi)).toHaveLength(1);
+  });
+
   it.each([
     { columns: 120, tier: 'wide', sections: true, frame: true },
     { columns: 80, tier: 'wide', sections: true, frame: true },

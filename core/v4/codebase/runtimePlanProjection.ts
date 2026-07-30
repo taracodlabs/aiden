@@ -113,6 +113,9 @@ export function projectCommittedRepositoryChange(input: {
 
   if (!existing) {
     const inspectedPath = input.intent.expectedScope[0];
+    const inspectedEntry = inspectedPath
+      ? input.context.engine.repository.getEntry(input.intent.baseSnapshotId, inspectedPath)
+      : undefined;
     completeStep({
       context: input.context,
       step: {
@@ -120,7 +123,7 @@ export function projectCommittedRepositoryChange(input: {
         label: 'Capture source state',
         repositorySnapshotId: input.intent.baseSnapshotId,
       },
-      references: inspectedPath ? [{
+      references: inspectedPath && inspectedEntry?.captureStatus === 'captured' ? [{
         kind: 'inspected_file',
         snapshotId: input.intent.baseSnapshotId,
         path: inspectedPath,

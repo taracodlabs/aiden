@@ -134,6 +134,10 @@ const READ_ONLY_COMMANDS: ReadonlySet<string> = new Set([
 const UNSAFE_META = /(?:>>?|<\(|>\(|\$\(|[;&\x60\n])/;
 // `find` flags that let it run or delete arbitrary things.
 const FIND_SIDE_EFFECTS = /\s-(?:delete|exec|execdir|ok|okdir|fprintf?|fls)\b/;
+const GIT_READ_ONLY_SUBCOMMANDS = new Set([
+  'status', 'diff', 'log', 'show', 'rev-parse', 'ls-files', 'grep', 'blame',
+]);
+const GIT_UNSAFE_READ_OPTIONS = /^(?:--output(?:=|$)|--ext-diff$|--textconv$|--exec(?:=|$)|-[MmDdCc]$|--delete$|--move$|--copy$|--edit-description$)/i;
 
 /** Remove fully-literal quoted spans so a `|`/`>` INSIDE a quoted search pattern
  *  (e.g. `rg 'foo|bar'`) can't be mistaken for a pipe/redirect. Double-quoted
@@ -151,6 +155,69 @@ function leadingToken(stage: string): string | null {
   return base || null;
 }
 
+function shellTokens(stage: string): string[] {
+  const tokens: string[] = [];
+  let token = '';
+  let quote: '"' | "'" | null = null;
+  for (const character of stage.trim()) {
+    if (quote) {
+      if (character === quote) quote = null;
+      else token += character;
+      continue;
+    }
+    if (character === '"' || character === "'") { quote = character; continue; }
+    if (/\s/u.test(character)) {
+      if (token) { tokens.push(token); token = ''; }
+      continue;
+    }
+    token += character;
+  }
+  if (token) tokens.push(token);
+  return tokens;
+}
+
+function splitPipeline(command: string): string[] {
+  const stages: string[] = [];
+  let stage = '';
+  let quote: '"' | "'" | null = null;
+  let escaped = false;
+  for (const character of command) {
+    if (escaped) { stage += character; escaped = false; continue; }
+    if (character === '\\' && quote === '"') { stage += character; escaped = true; continue; }
+    if (quote) {
+      stage += character;
+      if (character === quote) quote = null;
+      continue;
+    }
+    if (character === '"' || character === "'") { quote = character; stage += character; continue; }
+    if (character === '|') { stages.push(stage); stage = ''; continue; }
+    stage += character;
+  }
+  stages.push(stage);
+  return stages;
+}
+
+function isReadOnlyGit(stage: string): boolean {
+  const tokens = shellTokens(stage);
+  if ((tokens.shift() ?? '').replace(/^.*[\\/]/u, '').replace(/\.exe$/iu, '').toLowerCase() !== 'git') {
+    return false;
+  }
+  while (tokens[0] === '-C' || tokens[0] === '--git-dir' || tokens[0] === '--work-tree'
+    || tokens[0]?.startsWith('--git-dir=') || tokens[0]?.startsWith('--work-tree=')) {
+    if (tokens[0]?.includes('=')) { tokens.shift(); continue; }
+    tokens.shift();
+    if (!tokens.shift()) return false;
+  }
+  const subcommand = tokens.shift()?.toLowerCase();
+  if (!subcommand) return false;
+  if (subcommand === 'branch') {
+    return tokens.length > 0 && tokens.every((token) =>
+      /^(?:--show-current|--list|-a|--all|-r|--remotes|-v|-vv|--contains(?:=.+)?|--merged(?:=.+)?|--no-merged(?:=.+)?)$/u.test(token));
+  }
+  if (!GIT_READ_ONLY_SUBCOMMANDS.has(subcommand)) return false;
+  return tokens.every((token) => !GIT_UNSAFE_READ_OPTIONS.test(token));
+}
+
 /**
  * True when `command` is a genuinely read-only shell invocation — a single
  * command or a pipeline where EVERY stage leads with a known read-only command,
@@ -164,9 +231,14 @@ export function isReadOnlyCommand(command: string): boolean {
   const bare = stripLiterals(raw);
   if (UNSAFE_META.test(bare)) return false;               // redirect / chain / subst / background
   if (classifyCommand(raw).tier !== 'safe') return false; // any dangerous/caution pattern
-  for (const stage of bare.split('|')) {
-    const lead = leadingToken(stage);
-    if (!lead || !READ_ONLY_COMMANDS.has(lead)) return false;
+  for (const stage of splitPipeline(raw)) {
+    const lead = leadingToken(stripLiterals(stage));
+    if (!lead) return false;
+    if (lead === 'git') {
+      if (!isReadOnlyGit(stage)) return false;
+      continue;
+    }
+    if (!READ_ONLY_COMMANDS.has(lead)) return false;
     if (lead === 'find' && FIND_SIDE_EFFECTS.test(raw)) return false;
   }
   return true;

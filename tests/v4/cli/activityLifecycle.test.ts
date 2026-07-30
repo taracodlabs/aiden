@@ -4,6 +4,7 @@ import { CliCallbacks, type PromptApi } from '../../../cli/v4/callbacks';
 import { Display, type LiveActivityRowHandle, type ToolRowHandle } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { ToolCallRequest, ToolCallResult } from '../../../providers/v4/types';
+import { TerminalScreen } from '../harness/terminalScreen';
 
 function makeDisplay(): Display {
   const out = new Writable({
@@ -68,6 +69,40 @@ const resolveBuiltInInteraction = (name: string) =>
       : undefined;
 
 describe('central CLI activity lifecycle', () => {
+  it('does not restore approval navigation hints after modal settlement', async () => {
+    class ScreenStream extends Writable {
+      isTTY = true;
+      columns = 80;
+      rows = 20;
+      constructor(readonly screen: TerminalScreen) {
+        super({ write: (chunk, _encoding, done) => { screen.write(chunk); done(); } });
+      }
+    }
+    const screen = new TerminalScreen(80, 20);
+    const stream = new ScreenStream(screen);
+    const display = new Display({
+      skin: new SkinEngine({ forceMono: true }),
+      stdout: stream as unknown as NodeJS.WriteStream,
+    });
+    display.setStatusFooter('◆ provider · model │ ◉ context │ ⧖ 0s');
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    const callbacks = new CliCallbacks({
+      display,
+      promptModule: {
+        select: vi.fn(async () => 'allow'),
+        confirm: vi.fn(async () => true),
+        input: vi.fn(async () => ''),
+      },
+    });
+
+    await callbacks.promptApproval({
+      toolName: 'file_write', category: 'write', args: { path: 'src/math.mjs' },
+      riskTier: 'caution', effects: { writesFiles: true },
+    });
+
+    expect(screen.snapshot()).not.toMatch(/navigate|enter select|esc cancel/iu);
+    expect(screen.lines().at(-1)).toContain('provider');
+  });
   it('replaces each timer frame with one atomic terminal write', () => {
     vi.useFakeTimers();
     try {
@@ -240,6 +275,25 @@ describe('central CLI activity lifecycle', () => {
     expect(display.toolRow).toHaveBeenCalledTimes(1);
     expect(row.ok).toHaveBeenCalledTimes(1);
     expect(callbacks.activeActivityCount()).toBe(0);
+  });
+
+  it('projects one canonical file effect for duplicate terminal callbacks', () => {
+    const display = makeDisplay();
+    const row = makeRow();
+    vi.spyOn(display, 'toolRow').mockReturnValue(row);
+    const effect = vi.spyOn(display, 'toolEffect');
+    const callbacks = new CliCallbacks({ display });
+    const fileCall = call('write-1', 'file_write');
+    const done = result('write-1', 'file_write', {
+      success: true, operation: 'modify', path: 'src/math.mjs', verified: true,
+    });
+
+    callbacks.onToolCall(fileCall, 'before');
+    callbacks.onToolCall(fileCall, 'after', done);
+    callbacks.onToolCall(fileCall, 'after', done);
+
+    expect(effect).toHaveBeenCalledTimes(1);
+    expect(effect).toHaveBeenCalledWith('file_write', done.result);
   });
 
   it('sweeps orphaned rows at turn completion and stale callbacks cannot revive them', () => {

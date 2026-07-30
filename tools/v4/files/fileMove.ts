@@ -101,6 +101,7 @@ export const fileMoveTool: ToolHandler = {
     }
     const from = srcPolicy.resolvedPath;
     const to   = dstPolicy.resolvedPath;
+    const operation = path.dirname(from) === path.dirname(to) ? 'rename' : 'move';
     // v4.13 — batch-staleness guard. An approved plan may reference a
     // source an EARLIER operation already relocated/deleted (the plan
     // goes stale as it executes). An absent source is a benign SKIP —
@@ -113,6 +114,7 @@ export const fileMoveTool: ToolHandler = {
       return {
         success: true,
         skipped: true,
+        operation,
         reason:  'source_absent',
         likely:  'already handled by an earlier operation',
         from,
@@ -132,7 +134,7 @@ export const fileMoveTool: ToolHandler = {
           throw err;
         }
       }
-      return { success: true, from, to };
+      return { success: true, operation, path: from, destination: to, from, to };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       return { success: false, error: message, from, to };

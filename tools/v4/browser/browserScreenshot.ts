@@ -10,7 +10,7 @@
  * Captures a screenshot of the current Playwright page. The bridge
  * (`core/playwrightBridge.ts`) maintains one persistent Chromium
  * context across all browser tools — no fresh browser is launched
- * per call. The screenshot file lives under `workspace/screenshots/`.
+ * per call. The screenshot file lives in Aiden's runtime artifact storage.
  *
  * Capturing does not mutate the page, but it does persist an artifact.
  *
@@ -38,8 +38,8 @@ const _browserScreenshotTool: ToolHandler = {
   buildPreview() {
     return {
       tool: 'browser_screenshot', args: {}, riskTier: 'safe',
-      sideEffects: [{ type: 'create_file', path: 'workspace/screenshots/<timestamp>.png', bytes: 0 }],
-      detectedRisks: [], summary: 'Would capture the current page to a workspace screenshot artifact.',
+      sideEffects: [{ type: 'create_file', path: '<aiden-home>/artifacts/screenshots/<timestamp>.png', bytes: 0 }],
+      detectedRisks: [], summary: 'Would capture the current page to Aiden artifact storage.',
     };
   },
   async execute() {

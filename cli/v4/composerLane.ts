@@ -25,6 +25,8 @@ import {
   type OperatorActivityState,
   type OperatorProjectionState,
 } from './operatorProjection';
+import { wrap as wrapAnsiText } from './display/frame';
+import { terminalSupportsUnicode } from './terminalSymbols';
 
 const ESC = '\x1b';
 const SAVE = `${ESC}7`;
@@ -83,6 +85,7 @@ type StatusSource = string | (() => string);
 export interface BottomRegionStyle {
   brand(value: string): string;
   muted(value: string): string;
+  unicode?: boolean;
 }
 
 const PLAIN_BOTTOM_STYLE: BottomRegionStyle = {
@@ -127,15 +130,34 @@ function wrapTranscriptText(text: string, width: number): string[] {
   const rows: string[] = [];
   for (const logical of plain.split('\n')) {
     let row = '';
-    for (const character of Array.from(logical)) {
-      if (row && terminalWidth(row + character) > width) {
-        rows.push(row);
-        row = character;
-      } else {
+    let pendingWhitespace = '';
+    const pushRow = (): void => {
+      rows.push(row.replace(/\s+$/u, ''));
+      row = '';
+      pendingWhitespace = '';
+    };
+    const appendLongToken = (token: string): void => {
+      for (const character of Array.from(token)) {
+        if (row && terminalWidth(row + character) > width) pushRow();
         row += character;
       }
+    };
+
+    for (const token of logical.match(/\s+|\S+/gu) ?? []) {
+      if (/^\s+$/u.test(token)) {
+        pendingWhitespace += token;
+        continue;
+      }
+      const separator = row ? pendingWhitespace : '';
+      if (row && terminalWidth(row + separator + token) > width) pushRow();
+      if (terminalWidth(token) > width) {
+        appendLongToken(token);
+      } else {
+        row += (row ? separator : '') + token;
+      }
+      pendingWhitespace = '';
     }
-    rows.push(row);
+    rows.push(row.replace(/\s+$/u, ''));
   }
   if (plain.endsWith('\n')) rows.pop();
   return rows;
@@ -236,11 +258,12 @@ function normalizeComposer(source: ComposerSource): BottomComposerSurface {
     : source;
 }
 
-function modeTitle(mode: BottomComposerMode): string {
-  if (mode === 'idle') return '▲ You';
-  if (mode === 'queue') return '▲ You · queue mode';
-  if (mode === 'interrupt') return '▲ You · interrupt mode';
-  return '▲ You · steer mode';
+function modeTitle(mode: BottomComposerMode, unicode = terminalSupportsUnicode()): string {
+  const user = unicode ? '▲ You' : '> You';
+  if (mode === 'idle') return user;
+  if (mode === 'queue') return `${user} · queue mode`;
+  if (mode === 'interrupt') return `${user} · interrupt mode`;
+  return `${user} · steer mode`;
 }
 
 export function renderBottomSurface(
@@ -251,6 +274,10 @@ export function renderBottomSurface(
   style: BottomRegionStyle = PLAIN_BOTTOM_STYLE,
 ): RenderedSurface {
   const composer = normalizeComposer(composerSource);
+  const unicode = style.unicode ?? terminalSupportsUnicode();
+  const chrome = unicode
+    ? { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯', horizontal: '─', vertical: '│' }
+    : { topLeft: '+', topRight: '+', bottomLeft: '+', bottomRight: '+', horizontal: '-', vertical: '|' };
   // Leave the final physical cell unused so Windows ConPTY never enters its
   // pending-wrap state after painting a border or status row.
   const outerWidth = Math.max(8, cols - 1);
@@ -264,14 +291,14 @@ export function renderBottomSurface(
   );
   const content = wrapped.lines;
   const laneRows = Math.min(rows - 1, content.length + 3);
-  const title = modeTitle(composer.mode);
+  const title = modeTitle(composer.mode, unicode);
   const titleRoom = Math.max(1, outerWidth - 5);
   const fittedTitle = terminalWidth(title) <= titleRoom ? title : fitStatus(title, titleRoom);
-  const topPrefix = `╭─ ${fittedTitle} `;
-  const topTail = `${'─'.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}╮`;
-  const top = `${style.muted('╭─ ')}${style.brand(fittedTitle)}${style.muted(` ${topTail}`)}`;
-  const body = content.map((line) => `${style.muted('│')} ${padVisible(line, innerWidth)} ${style.muted('│')}`);
-  const bottom = style.muted(`╰${'─'.repeat(Math.max(0, outerWidth - 2))}╯`);
+  const topPrefix = `${chrome.topLeft}${chrome.horizontal} ${fittedTitle} `;
+  const topTail = `${chrome.horizontal.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}${chrome.topRight}`;
+  const top = `${style.muted(`${chrome.topLeft}${chrome.horizontal} `)}${style.brand(fittedTitle)}${style.muted(` ${topTail}`)}`;
+  const body = content.map((line) => `${style.muted(chrome.vertical)} ${padVisible(line, innerWidth)} ${style.muted(chrome.vertical)}`);
+  const bottom = style.muted(`${chrome.bottomLeft}${chrome.horizontal.repeat(Math.max(0, outerWidth - 2))}${chrome.bottomRight}`);
   const fittedStatus = fitStatus(status, outerWidth);
   const topRow = rows - laneRows + 1;
   return {
@@ -374,7 +401,7 @@ export class BottomRegion {
     const next = reduceOperatorProjection(this.projection, { type: 'activity.remove', id });
     if (next === this.projection) return;
     this.projection = next;
-    if (this.active) this.paintAll();
+    if (this.active) this.paintAll(true);
   }
 
   /** Replace a live row with its final transcript row exactly once. */
@@ -392,14 +419,16 @@ export class BottomRegion {
       });
       this.projection = reduceOperatorProjection(this.projection, { type: 'activity.remove', id });
     }
-    const terminal = text.endsWith('\n') ? text : `${text}\n`;
-    this.recordTranscript(terminal);
+    const priorSource = transcriptSource(this.projection);
+    const lineBreak = this.active && priorSource.length > 0 && !priorSource.endsWith('\n') ? '\n' : '';
+    const terminal = `${lineBreak}${text.endsWith('\n') ? text : `${text}\n`}`;
+    if (!this.recordTranscript(terminal, `activity-terminal:${id}`)) return;
     if (!this.active) {
       this.sink.write(terminal);
       return;
     }
     this.sink.write(`${RESTORE_TRANSCRIPT}${terminal}${SAVE_TRANSCRIPT}`);
-    this.paintAll();
+    this.paintAll(true);
   }
 
   /** Move the transcript viewport away from or toward the live tail. */
@@ -472,14 +501,23 @@ export class BottomRegion {
    * cursor to the draft insertion point without repainting or mutating draft.
    */
   writeAbove(text: string): void {
-    this.recordTranscript(text);
+    const priorSource = transcriptSource(this.projection);
+    const ownsTranscriptBoundary = this.active || this.rebuildTranscriptOnActivation;
+    const lineBreak = ownsTranscriptBoundary && priorSource.length > 0 && !priorSource.endsWith('\n') ? '\n' : '';
+    const output = `${lineBreak}${text}`;
+    this.recordTranscript(output);
     if (!this.active) {
-      this.sink.write(text);
+      this.sink.write(output);
       return;
     }
     const surface = this.surface();
+    const width = Math.max(1, this.sink.cols() - 1);
+    const wrapped = output
+      .split('\n')
+      .map((line) => wrapAnsiText(line, width, { trim: false, hard: true }))
+      .join('\n');
     this.sink.write(
-      `${RESTORE_TRANSCRIPT}${text}${SAVE_TRANSCRIPT}` +
+      `${RESTORE_TRANSCRIPT}${wrapped}${SAVE_TRANSCRIPT}` +
       `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`,
     );
   }
@@ -524,15 +562,17 @@ export class BottomRegion {
     };
   }
 
-  private recordTranscript(text: string): void {
+  private recordTranscript(text: string, identity?: string): boolean {
     const semantic = text.replace(TERMINAL_CONTROL_PATTERN, '');
-    if (!/[^\s]/u.test(semantic)) return;
-    this.projection = reduceOperatorProjection(this.projection, {
+    if (!/[^\s]/u.test(semantic)) return false;
+    const next = reduceOperatorProjection(this.projection, {
       type: 'transcript.append',
-      id: `transcript:${++this.projectionIdentity}`,
+      id: identity ?? `transcript:${++this.projectionIdentity}`,
       kind: 'system',
       sourceText: text,
     });
+    if (next === this.projection) return false;
+    this.projection = next;
     if (transcriptSource(this.projection).length > BottomRegion.MAX_TRANSCRIPT_CHARS) {
       let remaining = BottomRegion.MAX_TRANSCRIPT_CHARS;
       const retained: Array<OperatorProjectionState['transcript'][number]> = [];
@@ -546,15 +586,19 @@ export class BottomRegion {
       }
       this.projection = { ...this.projection, transcript: retained };
     }
+    return true;
   }
 
   private transcriptFrame(surface: RenderedSurface): string {
     const bottom = Math.max(0, this.sink.rows() - surface.laneRows);
     if (bottom === 0) return '';
     const width = Math.max(1, this.sink.cols() - 1);
-    const rows = wrapTranscriptText(visibleTranscriptSource(this.projection), width);
+    const source = visibleTranscriptSource(this.projection);
+    const rows = wrapTranscriptText(source, width);
+    const cursorNeedsBlankRow = source.endsWith('\n');
+    const contentRows = Math.max(0, bottom - (cursorNeedsBlankRow ? 1 : 0));
     const end = Math.max(0, rows.length - this.projection.viewport.scrollOffset);
-    const visible = rows.slice(Math.max(0, end - bottom), end);
+    const visible = rows.slice(Math.max(0, end - contentRows), end);
     if (!this.projection.viewport.stickyTail && bottom > 0) {
       const indicator = this.projection.viewport.newEventsBelow > 0
         ? `↓ ${this.projection.viewport.newEventsBelow} new events below · End to follow`
@@ -562,7 +606,7 @@ export class BottomRegion {
       if (visible.length === bottom) visible[visible.length - 1] = indicator;
       else visible.push(indicator);
     }
-    const start = bottom - visible.length + 1;
+    const start = bottom - visible.length - (cursorNeedsBlankRow ? 1 : 0) + 1;
     let sequence = '';
     for (let row = 1; row <= bottom; row += 1) {
       sequence += `${ESC}[${row};1H${ESC}[2K`;
@@ -570,7 +614,13 @@ export class BottomRegion {
     visible.forEach((line, index) => {
       sequence += `${ESC}[${start + index};1H${fitStatus(line, width)}`;
     });
-    return sequence;
+    const cursorRow = cursorNeedsBlankRow
+      ? bottom
+      : Math.max(1, start + Math.max(0, visible.length - 1));
+    const cursorCol = cursorNeedsBlankRow || visible.length === 0
+      ? 1
+      : Math.min(width, terminalWidth(visible[visible.length - 1]) + 1);
+    return `${sequence}${ESC}[${cursorRow};${cursorCol}H${SAVE_TRANSCRIPT}`;
   }
 
   private clearOwnedRows(count: number): string {
