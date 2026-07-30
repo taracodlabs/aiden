@@ -3489,6 +3489,8 @@ export async function buildAgentRuntime(
     getHistoryCount: async () => (await loadRecent(HISTORY_MAX_ENTRIES)).length,
     listTasks:     (id) => replTaskStore.listRecent({ sessionId: id, limit: 200 }),
     listArtifacts: (id) => replArtifactStore.listRecent({ sessionId: id, limit: 200 }),
+    getPresentationMode: () => callbacks.getActivityPresentationMode(),
+    setPresentationMode: (mode) => callbacks.setActivityPresentationMode(mode),
   }));
 
   // ── v4.10 Slice 10.8 — /adjust slash command ───────────────────────

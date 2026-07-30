@@ -38,6 +38,7 @@ import {
 import { LoopTracer } from '../../core/v4/loopTrace';
 import type { Display } from './display';
 import { summarizeChannelState, verbForActivity } from './display';
+import type { EvidenceProjectionInput } from './semanticActivity';
 // v4.10 Slice 10.7a — REPL-sacred defense-in-depth flag. Wired here so
 // any future stdout/stderr sink that wants to honor the
 // "user-is-typing" invariant can check isReplActive(). Pairs with the
@@ -2895,6 +2896,7 @@ export class ChatSession implements ChatSessionLike {
       let _fin: ReturnType<typeof computeTaskFinalization> | undefined;
       let _taskOutcome: TaskOutcomePresentation | undefined;
       let durableProofVerdict: ReturnType<NonNullable<typeof jobEngine>['proof']['finalize']> | undefined;
+      let durableEvidenceForDisplay: EvidenceProjectionInput[] = [];
       try {
         _fin = computeTaskFinalization(
           {
@@ -2914,6 +2916,12 @@ export class ChatSession implements ChatSessionLike {
             },
           },
         );
+        if (lifecycleContext && jobEngine) {
+          durableEvidenceForDisplay = jobEngine.proof.listEvidence(lifecycleContext.handle.jobId)
+            .filter((item) => item.attemptId === lifecycleContext!.handle.attemptId
+              && item.generation === lifecycleContext!.handle.generation
+              && !item.late);
+        }
         if (lifecycleContext && jobEngine?.proof.hasRequiredClaims(lifecycleContext.handle.jobId)) {
           durableProofVerdict = jobEngine.proof.finalize({
             jobId: lifecycleContext.handle.jobId,
@@ -2925,10 +2933,7 @@ export class ChatSession implements ChatSessionLike {
           const summary = durableProofVerdict.summary as {
             verifiedClaims?: number; failedClaims?: number; unknownClaims?: number;
           };
-          const proofEvidence = jobEngine.proof.listEvidence(lifecycleContext.handle.jobId)
-            .filter((item) => item.attemptId === lifecycleContext!.handle.attemptId
-              && item.generation === lifecycleContext!.handle.generation
-              && !item.late);
+          const proofEvidence = durableEvidenceForDisplay;
           const verifiedHandle = {
             tool: 'durable_proof', kind: 'note' as const,
             value: `${proofEvidence.length} linked evidence record${proofEvidence.length === 1 ? '' : 's'}`,
@@ -3106,6 +3111,13 @@ export class ChatSession implements ChatSessionLike {
         this.opts.display.dim('(turn interrupted)');
       }
 
+      // Durable proof is projected once from the canonical proof authority.
+      // Streaming replies may already be visible; non-streaming replies retain
+      // the preferred activity → evidence → answer ordering.
+      if (!streamingActive && durableEvidenceForDisplay.length > 0) {
+        this.opts.display.evidencePanel(durableEvidenceForDisplay);
+      }
+
       // v4.1.6 spike (TCE) — tool-loop terminal surface. When the
       // agent ended the turn via the recovery controller's surface
       // stage, render a structured-failure card instead of the
@@ -3130,6 +3142,10 @@ export class ChatSession implements ChatSessionLike {
         // `emitToolReplySeparator`.
         emitToolReplySeparator();
         this.opts.display.write(this.opts.display.agentTurn(result.finalContent));
+      }
+
+      if (streamingActive && durableEvidenceForDisplay.length > 0) {
+        this.opts.display.evidencePanel(durableEvidenceForDisplay);
       }
 
       // Pure conversation stays conversational. Tool/task turns receive one
@@ -3861,6 +3877,7 @@ export class ChatSession implements ChatSessionLike {
     // with brand prefix (`Aiden v<X.Y>`), session uptime (sessionMs
     // re-enabled), and spelled-out `last <elapsed>` for the per-turn
     // timer. Mid (≥100) and narrow (<100) tiers unchanged.
+    const registryPhase = this.opts.callbacks.currentActivityPhase?.() ?? 'ready';
     const statusArgs = {
         provider,
         model,
@@ -3870,6 +3887,12 @@ export class ChatSession implements ChatSessionLike {
         turnCount: this.turnCount,
         sessionMs: Date.now() - this.startedAt,
         state:     this.lastTurnOutcome,
+        phase:     this.statusState.kind === 'approve' ? 'approval_required'
+          : this.statusState.kind === 'retry' ? 'recovering'
+            : this.statusState.kind === 'ready' ? 'ready'
+              : registryPhase === 'ready'
+                ? this.statusState.kind === 'exec' ? 'working' : 'thinking'
+                : registryPhase,
     } as const;
 
     if (this.usesFixedBottomRegion()) {

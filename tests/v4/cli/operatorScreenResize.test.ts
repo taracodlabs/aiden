@@ -151,17 +151,17 @@ describe('operator screen resize transactions', () => {
     display.setBusyHint('Enter → queue · Ctrl+C stop');
     const activity = display.liveActivityRow('calling provider');
     activity.refresh(1);
-    expect(screen.lines().slice(0, -4).filter((line) => line.includes('provider'))).toHaveLength(1);
+    expect(screen.lines().slice(0, -4).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
 
     stream.resize(44, 16);
     activity.refresh(2);
     await settleResize();
-    expect(screen.lines().slice(0, -4).filter((line) => line.includes('provider'))).toHaveLength(1);
+    expect(screen.lines().slice(0, -4).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
 
     stream.resize(160, 45);
     activity.refresh(3);
     await settleResize();
-    expect(screen.lines().slice(0, -4).filter((line) => line.includes('provider'))).toHaveLength(1);
+    expect(screen.lines().slice(0, -4).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
     assertOneCurrentSurface(screen, '');
     activity.stop();
   });

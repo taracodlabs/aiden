@@ -13,6 +13,13 @@ colors:
     warn: "#E0A040"
     error: "#E05A5A"
     info: "#7DA7C7"
+    thinking: "#5BC0EB"
+    planning: "#A78BFA"
+    inspecting: "#60A5FA"
+    working: "#FB923C"
+    testing: "#FACC15"
+    verifying: "#2DD4BF"
+    recovering: "#A78BFA"
   metrics:
     model: "#9CDCFE"
     tokens: "#E0A040"

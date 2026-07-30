@@ -121,6 +121,8 @@ function ansiRgb(
       success: 92, warn: 93, degraded: 93, error: 31,
       tool: 96, session: 96, agent: 97, muted: 37,
       tertiary: 90, metric_turn: 95,
+      thinking: 96, planning: 95, inspecting: 94, working: 33,
+      testing: 93, verifying: 36, recovering: 95,
     };
     return `\x1b[${semanticCode[kind!] ?? rgbTo16(r, g, b)}m${text}\x1b[39m`;
   }
@@ -153,6 +155,13 @@ const COLOR_KIND_TO_TOKEN_PATH: Partial<Record<string, string>> = {
   tertiary:    'content.tertiary',
   metric_turn: 'metrics.turnCount',
   degraded:    'semantic.warn',
+  thinking:    'semantic.thinking',
+  planning:    'semantic.planning',
+  inspecting:  'semantic.inspecting',
+  working:     'semantic.working',
+  testing:     'semantic.testing',
+  verifying:   'semantic.verifying',
+  recovering:  'semantic.recovering',
   agent:       'content.primary',
   user:        'brand.primary',
 };
@@ -194,7 +203,14 @@ export type ColorKind =
   /** Dim cool grey — least-important text (unchecked task glyphs,
    *  deprecated rows, captions). v4.8.0 Slice 8 — bridges
    *  `colors.content.tertiary` from tokens.ts into runtime. */
-  | 'tertiary';
+  | 'tertiary'
+  | 'thinking'
+  | 'planning'
+  | 'inspecting'
+  | 'working'
+  | 'testing'
+  | 'verifying'
+  | 'recovering';
 
 export interface SkinDefinition {
   name: string;
@@ -247,6 +263,13 @@ const DEFAULT_SKIN: SkinDefinition = {
     // v4.8.0 Slice 8 — tertiary dim grey, dimmer than `muted` (warm
     // tint) for lowest-priority text like unchecked task markers.
     tertiary: [0x6a, 0x6a, 0x6a],
+    thinking: [0x5b, 0xc0, 0xeb],
+    planning: [0xa7, 0x8b, 0xfa],
+    inspecting: [0x60, 0xa5, 0xfa],
+    working: [0xfb, 0x92, 0x3c],
+    testing: [0xfa, 0xcc, 0x15],
+    verifying: [0x2d, 0xd4, 0xbf],
+    recovering: [0xa7, 0x8b, 0xfa],
   },
   glyphs: {
     bullet: '•',
@@ -285,6 +308,13 @@ const LIGHT_SKIN: SkinDefinition = {
     metric_turn: [0x6e, 0x50, 0xaa],
     // Slice 8 — lighter grey on light bg keeps the dim-but-readable feel.
     tertiary: [0x9a, 0x9a, 0x9a],
+    thinking: [0x00, 0x66, 0x88],
+    planning: [0x5b, 0x3f, 0xa8],
+    inspecting: [0x1d, 0x4e, 0xa0],
+    working: [0xa6, 0x3f, 0x00],
+    testing: [0x7a, 0x5a, 0x00],
+    verifying: [0x00, 0x66, 0x66],
+    recovering: [0x5b, 0x3f, 0xa8],
   },
   glyphs: { ...DEFAULT_SKIN.glyphs },
 };
@@ -307,6 +337,13 @@ const MONOCHROME_SKIN: SkinDefinition = {
     degraded: null,
     metric_turn: null,
     tertiary: null,
+    thinking: null,
+    planning: null,
+    inspecting: null,
+    working: null,
+    testing: null,
+    verifying: null,
+    recovering: null,
   },
   glyphs: {
     bullet: '*',

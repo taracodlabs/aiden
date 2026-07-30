@@ -468,19 +468,19 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
       // Advance to the 1s tick — interval fires, eraseLast + rewrite.
       vi.advanceTimersByTime(1000);
       let flat = stripAnsi(chunks.join(''));
-      expect(flat).toMatch(/running 1\.0s…|running 1000ms…/);
+      expect(flat).toMatch(/working 1\.0s…|working 1000ms…/);
 
       // 2s tick.
       chunks.length = 0;
       vi.advanceTimersByTime(1000);
       flat = stripAnsi(chunks.join(''));
-      expect(flat).toMatch(/running 2\.0s…|running 2000ms…/);
+      expect(flat).toMatch(/working 2\.0s…|working 2000ms…/);
 
       // 3s tick.
       chunks.length = 0;
       vi.advanceTimersByTime(1000);
       flat = stripAnsi(chunks.join(''));
-      expect(flat).toMatch(/running 3\.0s…|running 3000ms…/);
+      expect(flat).toMatch(/working 3\.0s…|working 3000ms…/);
     } finally {
       vi.useRealTimers();
     }
@@ -575,13 +575,13 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
       retryBackoffMs: 0, attemptCount: 0,
     };
     const row = d.toolRow('shell_exec', { command: 'echo ok' }, () => snapshot);
-    expect(stripAnsi(chunks.join(''))).toContain('awaiting approval 8.0s');
+    expect(stripAnsi(chunks.join(''))).toContain('approval required 8.0s');
     snapshot = { ...snapshot, phase: 'running', phaseElapsedMs: 6_100, executionDurationMs: 6_100, attemptCount: 1 };
     row.refresh?.();
-    expect(stripAnsi(chunks.at(-1) ?? '')).toContain('running 6.1s');
+    expect(stripAnsi(chunks.at(-1) ?? '')).toContain('working 6.1s');
     snapshot = { ...snapshot, phase: 'verifying', phaseElapsedMs: 180, verificationDurationMs: 180 };
     row.refresh?.();
-    expect(stripAnsi(chunks.at(-1) ?? '')).not.toContain('running 6.1s');
+    expect(stripAnsi(chunks.at(-1) ?? '')).not.toContain('working 6.1s');
     row.dismiss();
   });
 
@@ -1547,25 +1547,54 @@ describe('Display v4.8.0 ui_* event renderers', () => {
       command: 'npm test', stdout: 'one\ntwo', stderr: 'boom', exit_code: 2,
     });
     const out = stripAnsi(chunks.join(''));
-    expect(out).toContain('▸ npm test');
+    expect(out).toContain('✕ npm test — failed');
     expect(out).toContain('one');
     expect(out).toContain('two');
     expect(out).toContain('boom');
-    expect(out).toContain('(exit 2)');
+    expect(out).toContain('exit 2');
     // Every physical line carries the gutter.
     for (const line of out.split('\n').filter(Boolean)) {
       expect(line.startsWith('┊')).toBe(true);
     }
   });
 
-  it('ui_command_result caps stdout/stderr at 5 lines each', () => {
+  it('ui_command_result collapses successful output in summary mode', () => {
     const { d, chunks } = captureDisplay({ tty: true });
     const long = Array.from({ length: 12 }, (_, i) => `line${i}`).join('\n');
     d.renderUiEvent('ui_command_result', { command: 'spam', stdout: long });
     const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('✓ spam — completed');
+    expect(out).not.toContain('line0');
+  });
+
+  it('ui_command_result retains successful output in full activity mode', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.setActivityPresentationMode('full');
+    d.renderUiEvent('ui_command_result', {
+      command: 'npm test', stdout: 'line0\nline1', stderr: '', exit_code: 0,
+    });
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('✓ npm test — completed');
     expect(out).toContain('line0');
-    expect(out).toContain('line4');
-    expect(out).not.toContain('line5');
+    expect(out).toContain('line1');
+  });
+
+  it('renders only supplied durable evidence and reveals full identifiers only in full mode', () => {
+    const summary = captureDisplay({ tty: true });
+    summary.d.evidencePanel([{
+      evidenceId: 'evidence_1234567890', source: 'fresh_readback',
+      verificationResult: 'verified', payload: { path: 'src/math.mjs' },
+    }]);
+    expect(stripAnsi(summary.chunks.join(''))).toContain('Readback');
+    expect(stripAnsi(summary.chunks.join(''))).not.toContain('evidence_1234567890');
+
+    const full = captureDisplay({ tty: true });
+    full.d.setActivityPresentationMode('full');
+    full.d.evidencePanel([{
+      evidenceId: 'evidence_1234567890', source: 'fresh_readback',
+      verificationResult: 'verified', payload: { path: 'src/math.mjs' },
+    }]);
+    expect(stripAnsi(full.chunks.join(''))).toContain('evidence_1234567890');
   });
 
   // ── ui_test_result ────────────────────────────────────────────────────
@@ -1690,7 +1719,8 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
       expect(out).toContain('chatgpt-plus');
       expect(out).toContain('gpt-5');
       expect(out).toContain('%');
-      expect(sepCount(out)).toBe(2);
+      expect(sepCount(out)).toBe(3);
+      expect(out).toContain('ready');
       expect(out).not.toContain('#');  // turn segment dropped
     });
   });
@@ -1701,7 +1731,8 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
       const out = stripAnsi(d.statusFooter(BASE));
       // v4.9.0 pre-ship UI: turn counter removed (value-to-pixel too low).
       expect(out).not.toMatch(/↻/);
-      expect(sepCount(out)).toBe(2);
+      expect(sepCount(out)).toBe(3);
+      expect(out).toContain('ready');
     });
   });
 
@@ -1713,7 +1744,8 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
       expect(out).toContain('◆');
       expect(out).toContain('◉ context');
       expect(out).toContain('⧖');
-      expect(sepCount(out)).toBe(2);
+      expect(sepCount(out)).toBe(3);
+      expect(out).toContain('ready');
     });
   });
 
@@ -1726,7 +1758,8 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
       expect(out).toContain('groq');
       expect(out).toContain('llama-3.3');
       expect(out).not.toContain('#');
-      expect(sepCount(out)).toBe(2);
+      expect(sepCount(out)).toBe(3);
+      expect(out).toContain('ready');
     });
   });
 
@@ -1748,6 +1781,16 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     });
   });
 
+  it('projects semantic live, approval, blocked, and ready phases in the owned footer', () => {
+    withCols(120, () => {
+      const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
+      expect(stripAnsi(d.statusFooter({ ...BASE, phase: 'verifying' }))).toContain('verifying');
+      expect(stripAnsi(d.statusFooter({ ...BASE, phase: 'approval_required' }))).toContain('approval required');
+      expect(stripAnsi(d.statusFooter({ ...BASE, phase: 'blocked' }))).toContain('blocked');
+      expect(stripAnsi(d.statusFooter({ ...BASE, phase: 'ready' }))).toContain('ready');
+    });
+  });
+
   it('48-col output budgets the wide timer glyph by terminal cell width', () => {
     withCols(48, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
@@ -1759,7 +1802,7 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
         elapsedMs: 0,
       }));
       expect(stringWidth(out)).toBeLessThanOrEqual(46);
-      expect(out).toContain('◉ 0%');
+      expect(out).toContain('◉0%');
       expect(out).toContain('⧖');
     });
   });

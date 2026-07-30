@@ -120,11 +120,12 @@ describe('responsive registry-owned turn activity', () => {
       skin: new SkinEngine({ forceMono: true }),
     });
     display.setBusyHint('Enter → queue · /busy to change · Ctrl+C stop');
-    const row = display.liveActivityRow('calling provider');
+    const row = display.liveActivityRow('provider request');
     const assertLatestFrameFits = (width: number): void => {
-      const frames = screen.lines().filter((line) => line.includes('provider'));
+      const frames = screen.lines().filter((line) => line.includes('Aiden is thinking'));
       expect(frames).toHaveLength(1);
       expect(frames[0].length).toBeLessThanOrEqual(width - 1);
+      expect(frames[0]).not.toContain('provider');
     };
     assertLatestFrameFits(120);
     out.columns = 44;
@@ -135,6 +136,9 @@ describe('responsive registry-owned turn activity', () => {
     screen.resize(100, 30);
     row.refresh();
     assertLatestFrameFits(100);
+    display.setActivityPresentationMode('full');
+    row.refresh();
+    expect(screen.lines().filter((line) => line.includes('provider request'))).toHaveLength(1);
     row.stop();
   });
 
@@ -234,7 +238,9 @@ describe('responsive registry-owned turn activity', () => {
     };
     const narrow = stripAnsi(display.statusFooter(args));
     expect(narrow.length).toBeLessThanOrEqual(42);
-    expect(narrow).toContain('recognizable-model');
+    expect(narrow).toContain('recog');
+    expect(narrow).toContain('ready');
+    expect(narrow).toContain('2.5s');
     out.columns = 120;
     const wide = stripAnsi(display.statusFooter(args));
     expect(wide.length).toBeLessThanOrEqual(118);

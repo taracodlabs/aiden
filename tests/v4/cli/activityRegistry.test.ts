@@ -6,7 +6,7 @@ function handle(): ToolRowHandle {
   return {
     ok: vi.fn(), fail: vi.fn(), degraded: vi.fn(), retry: vi.fn(), blocked: vi.fn(),
     emptyRetry: vi.fn(), emptyFail: vi.fn(), cancel: vi.fn(), dismiss: vi.fn(),
-    pause: vi.fn(), resume: vi.fn(), isActive: vi.fn(() => true),
+    pause: vi.fn(), resume: vi.fn(), refresh: vi.fn(), isActive: vi.fn(() => true),
   };
 }
 
@@ -109,5 +109,30 @@ describe('ActivityRegistry', () => {
 
     expect(snapshot?.().phase).toBe('running');
     expect(snapshot?.().phaseElapsedMs).toBe(1_000);
+  });
+
+  it('projects semantic tool phase and advances animation from its single ticker', () => {
+    vi.useFakeTimers();
+    try {
+      const row = handle();
+      let read: (() => { frame: number }) | undefined;
+      const registry = new ActivityRegistry(((_name, _args, snapshot) => {
+        read = snapshot;
+        return row;
+      }) as never);
+      registry.start('read-1', 'file_read', { path: 'README.md' });
+      expect(registry.currentPhase()).toBe('inspecting');
+      expect(registry.timerCount()).toBe(1);
+      expect(read?.().frame).toBe(0);
+      vi.advanceTimersByTime(250);
+      expect(read?.().frame).toBe(1);
+      expect(row.refresh).toHaveBeenCalledTimes(1);
+      expect(registry.timerCount()).toBe(1);
+      registry.settle('read-1', { state: 'completed' });
+      expect(registry.currentPhase()).toBe('ready');
+      expect(registry.timerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

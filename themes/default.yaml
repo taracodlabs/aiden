@@ -21,6 +21,13 @@ colors:
     warn:    "#e0a040"
     error:   "#e05a5a"
     info:    "#7da7c7"
+    thinking: "#5bc0eb"
+    planning: "#a78bfa"
+    inspecting: "#60a5fa"
+    working: "#fb923c"
+    testing: "#facc15"
+    verifying: "#2dd4bf"
+    recovering: "#a78bfa"
   metrics:
     model:     "#9cdcfe" # status bar — model name (cyan)
     tokens:    "#e0a040" # status bar — token ratio (amber)

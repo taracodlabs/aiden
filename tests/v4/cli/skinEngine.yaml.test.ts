@@ -233,4 +233,27 @@ describe('SkinEngine terminal color capability', () => {
     const engine = new SkinEngine({ colorDepth: 'truecolor' });
     expect(engine.applyColors('You', 'user')).toContain('\x1b[38;2;255;107;53m');
   });
+
+  it('renders phase colors in truecolor, ANSI 16, and monochrome modes', () => {
+    const truecolor = new SkinEngine({ colorDepth: 'truecolor' });
+    expect(truecolor.applyColors('thinking', 'thinking')).toContain('\x1b[38;2;91;192;235m');
+    expect(truecolor.applyColors('working', 'working')).toContain('\x1b[38;2;251;146;60m');
+
+    const ansi16 = new SkinEngine({ colorDepth: '16' });
+    expect(ansi16.applyColors('thinking', 'thinking')).toContain('\x1b[96m');
+    expect(ansi16.applyColors('testing', 'testing')).toContain('\x1b[93m');
+
+    const mono = new SkinEngine({ colorDepth: 'none' });
+    expect(mono.applyColors('verifying', 'verifying')).toBe('verifying');
+  });
+
+  it('keeps semantic phase colors readable in neighboring light and dark skins', () => {
+    const engine = new SkinEngine({ colorDepth: 'truecolor' });
+    const dark = engine.applyColors('phase', 'inspecting');
+    engine.setActive('light');
+    const light = engine.applyColors('phase', 'inspecting');
+    expect(dark).toContain('\x1b[38;2;96;165;250m');
+    expect(light).toContain('\x1b[38;2;29;78;160m');
+    expect(light).not.toBe(dark);
+  });
 });

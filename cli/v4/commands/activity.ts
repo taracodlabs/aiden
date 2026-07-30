@@ -26,6 +26,7 @@
  */
 
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
+import type { ActivityPresentationMode } from '../semanticActivity';
 
 /** Live accessors, supplied by the REPL boot. Each mirrors one command's source. */
 export interface ActivitySources {
@@ -41,16 +42,27 @@ export interface ActivitySources {
   listTasks: (sessionId: string) => Array<{ status: string }>;
   /** replArtifactStore.listRecent({sessionId}) — the /artifacts source (rows, for counting). */
   listArtifacts: (sessionId: string) => unknown[];
+  getPresentationMode?: () => ActivityPresentationMode;
+  setPresentationMode?: (mode: ActivityPresentationMode) => void;
 }
 
 /** Build the inline `/activity` command over the supplied live accessors. */
 export function makeActivityCommand(sources: ActivitySources): SlashCommand {
   return {
     name: 'activity',
-    description: 'Session roll-up: tokens, budget, history, tasks, artifacts.',
+    description: 'Session roll-up and activity detail mode. Usage: /activity [summary|full].',
     category: 'system',
     icon: '≋',
     handler: async (ctx: SlashCommandContext) => {
+      const requestedMode = ctx.args[0]?.toLowerCase();
+      if (requestedMode && requestedMode !== 'summary' && requestedMode !== 'full') {
+        ctx.display.warn('Usage: /activity [summary|full]');
+        return {};
+      }
+      if (requestedMode === 'summary' || requestedMode === 'full') {
+        sources.setPresentationMode?.(requestedMode);
+      }
+      const presentationMode = sources.getPresentationMode?.() ?? 'summary';
       const id = sources.sessionId();
       // /usage source — best-effort (session may lack the optional accessor).
       const usage = ctx.session?.getTotalUsage?.() ?? { inputTokens: 0, outputTokens: 0 };
@@ -62,6 +74,7 @@ export function makeActivityCommand(sources: ActivitySources): SlashCommand {
 
       const totalTok = usage.inputTokens + usage.outputTokens;
       ctx.display.info('Activity — this session');
+      ctx.display.write(`  View      : ${presentationMode} (/activity summary · /activity full)\n`);
       ctx.display.write(
         `  Tokens    : ${usage.inputTokens.toLocaleString()} in · ` +
         `${usage.outputTokens.toLocaleString()} out (${totalTok.toLocaleString()} total)\n`,

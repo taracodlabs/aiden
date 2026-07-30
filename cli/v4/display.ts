@@ -43,6 +43,20 @@ import type { CapabilityCardData } from '../../providers/v4/types';
 import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
 import type { OperatorActivityState } from './operatorProjection';
 import { AIDEN_LOGO_LINES } from '../../core/v4/ui/identity';
+import {
+  normalizeActivityPhase,
+  phaseColorKind,
+  projectActivityFrame,
+  projectCommandPresentation,
+  projectEvidenceLines,
+  relativizeActivityText,
+  semanticPhaseForTool,
+  semanticPhaseStatusLabel,
+  shouldDeferActivityTransition,
+  type ActivityPresentationMode,
+  type EvidenceProjectionInput,
+  type SemanticActivityPhase,
+} from './semanticActivity';
 
 const DISPLAY_ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
 
@@ -436,6 +450,7 @@ export class Display {
   // depth pauses only composer painting and retains the exact draft/hint.
   private composerSurfacePauseDepth = 0;
   private nextLiveRowIdentity = 0;
+  private activityPresentationMode: ActivityPresentationMode = 'summary';
 
   constructor(opts: { skin?: SkinEngine; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}) {
     this.skin = opts.skin ?? getSkinEngine();
@@ -459,6 +474,14 @@ export class Display {
    */
   applyColors(text: string, kind: ColorKind): string {
     return this.skin.applyColors(text, kind);
+  }
+
+  setActivityPresentationMode(mode: ActivityPresentationMode): void {
+    this.activityPresentationMode = mode;
+  }
+
+  getActivityPresentationMode(): ActivityPresentationMode {
+    return this.activityPresentationMode;
   }
 
   /**
@@ -916,6 +939,7 @@ export class Display {
     turnCount?:  number;
     sessionMs?:  number;
     state?:      'ok' | 'warn' | 'error' | 'muted';
+    phase?:      SemanticActivityPhase;
   }): string {
     const sk = this.skin;
     const SEP = sk.applyColors(' │ ', 'muted');
@@ -943,25 +967,28 @@ export class Display {
       : 100;
     void args.turnCount;
     void args.sessionMs;
-    void args.state;
+    const phase = args.phase ?? (args.state === 'error' ? 'failed' : 'ready');
     const contextFull =
       `${sk.applyColors('◉ context', 'muted')} ${ctxRatio} ${bar} ${ctxPctText}`;
     const contextCompact = `${sk.applyColors('◉ context', 'muted')} ${ctxPctText}`;
+    const phaseText = sk.applyColors(`⌁ ${semanticPhaseStatusLabel(phase)}`, phaseColorKind(phase));
     const timer =
-      `${sk.applyColors('⧖', 'success')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')}`;
+      `${sk.applyColors('⧖', 'muted')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted')}`;
     let segments: string[];
-    if (cols >= 80) {
-      segments = [providerModel, contextFull, timer];
+    if (cols >= 100) {
+      segments = [providerModel, contextFull, phaseText, timer];
     } else if (cols >= 54) {
-      segments = [providerModel, contextCompact, timer];
+      segments = [providerModel, contextCompact, phaseText, timer];
     } else {
-      const compactContext = `◉ ${pct}%`;
+      const compactContext = `◉${pct}%`;
+      const compactPhase = sk.applyColors(semanticPhaseStatusLabel(phase), phaseColorKind(phase));
       const providerModelBudget = Math.max(
         8,
         (cols - 1)
           - terminalVisibleLength(compactContext)
           - terminalVisibleLength(timer)
-          - 8,
+          - terminalVisibleLength(compactPhase)
+          - 12,
       );
       const fullProviderModel = `${args.provider}:${args.model}`;
       const abbreviatedProviderModel = `${args.provider.slice(0, 1)}:${args.model}`;
@@ -973,10 +1000,11 @@ export class Display {
       segments = [
         `${sk.applyColors('◆', 'brand')} ${sk.applyColors(compactProviderModel, 'tool')}`,
         sk.applyColors(compactContext, ctxKind),
+        compactPhase,
         timer,
       ];
     }
-    return truncateTerminalVisible(segments.join(SEP), Math.max(1, cols - 1));
+    return truncateTerminalVisible(segments.join(SEP), Math.max(1, cols - 2));
   }
 
   /**
@@ -1542,6 +1570,10 @@ export class Display {
     const isTty = !!out.isTTY;
     let startedAt = Date.now();
     let verb = initialVerb;
+    let phase = normalizeActivityPhase(initialVerb);
+    let source: 'provider' | 'runtime' = /provider/iu.test(initialVerb) ? 'provider' : 'runtime';
+    let phaseVisibleAt = startedAt;
+    let pendingVerb: string | null = null;
     let active = true;
     let paused = !isTty;
     let printed = false;
@@ -1551,29 +1583,27 @@ export class Display {
     const rowId = `provider:${++this.nextLiveRowIdentity}`;
     const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
 
-    const animation = (width: number): string => {
-      if (width >= 60) {
-        const cells = Array.from({ length: 6 }, (_, index) => index === frameIndex % 6
-          ? this.skin.applyColors(glyphs.shimmer.block, 'brand')
-          : this.skin.applyColors(glyphs.shimmer.track, 'muted'));
-        return `${cells.join('')} `;
-      }
-      const frames = ['◐', '◓', '◑', '◒'];
-      return `${this.skin.applyColors(frames[frameIndex % frames.length], 'brand')} `;
-    };
-
     const body = (): string => {
       const width = Math.max(1, this.terminalColumns() - 2);
-      const elapsed = Math.floor((Date.now() - startedAt) / 1000);
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      const elapsed = Math.floor(elapsedMs / 1000);
       const time = elapsed > 0 && width >= 28 ? ` (${elapsed}s)` : '';
       const prefix = width >= 60 ? '  ' : '';
-      const phase = width < 28 && verb === 'calling provider' ? 'provider' : verb;
+      const projection = projectActivityFrame({
+        phase,
+        frame: frameIndex,
+        elapsedMs,
+        unicode: terminalSupportsUnicode(),
+        mode: this.activityPresentationMode,
+        source,
+      });
       const busy = this.composerSuffix().length > 0;
       const suffix = !busy ? ''
         : width >= 80 ? this.composerSuffix()
         : width >= 36 ? '  Ctrl+C stop'
         : '  Ctrl+C';
-      return truncateVisible(`${prefix}${animation(width)}${phase}${time}${suffix}`, width);
+      const activity = this.skin.applyColors(projection.text, projection.color);
+      return truncateVisible(`${prefix}${activity}${time}${suffix}`, width);
     };
     const erase = (): void => {
       if (!printed || !isTty) return;
@@ -1591,6 +1621,14 @@ export class Display {
       this.refreshStatusFooter();
       if (!active || paused || !isTty) return;
       if (typeof frame === 'number') frameIndex = frame;
+      if (pendingVerb !== null) {
+        verb = pendingVerb;
+        phase = normalizeActivityPhase(verb);
+        source = /provider/iu.test(verb) ? 'provider' : 'runtime';
+        pendingVerb = null;
+        startedAt = Date.now();
+        phaseVisibleAt = startedAt;
+      }
       const next = body();
       if (printed && !invalidated && next === lastBody) return;
       if (screenOwner) screenOwner.setLiveRow(rowId, next);
@@ -1607,8 +1645,17 @@ export class Display {
       refresh,
       setVerb: (next: string) => {
         if (!active || !next || next === verb) return;
+        const nextPhase = normalizeActivityPhase(next);
+        if (shouldDeferActivityTransition(phase, nextPhase, Date.now() - phaseVisibleAt)) {
+          pendingVerb = next;
+          return;
+        }
         verb = next;
+        phase = nextPhase;
+        source = /provider/iu.test(next) ? 'provider' : 'runtime';
+        pendingVerb = null;
         startedAt = Date.now();
+        phaseVisibleAt = startedAt;
         invalidated = true;
         refresh();
       },
@@ -1698,7 +1745,10 @@ export class Display {
     // to the generic `previewToolArgs` scan for tools the map doesn't
     // know about so unregistered MCP tools etc. still render readably.
     const mapped = buildToolPreview(name, args);
-    const detail = truncDetail(mapped ?? previewToolArgs(args));
+    const rawDetail = mapped ?? previewToolArgs(args);
+    const detailForDisplay = (): string => this.activityPresentationMode === 'full'
+      ? rawDetail
+      : truncDetail(relativizeActivityText(rawDetail, process.cwd(), 'summary'));
 
     // Semantic elapsed time comes from ActivityRegistry. A compatibility row
     // without a source advances only on its own repaint ticks.
@@ -1717,19 +1767,22 @@ export class Display {
     const runningRow = (): string => {
       const snapshot = readActivity?.();
       const elapsed = snapshot?.phaseElapsedMs ?? fallbackPhaseElapsedMs;
-      const phaseLabel = snapshot?.phase === 'awaiting_approval' ? 'awaiting approval'
-        : snapshot?.phase === 'verifying' ? 'verifying'
-        : snapshot?.phase === 'retrying' ? 'retrying'
-        : snapshot?.phase === 'queued' ? 'queued'
-        : 'running';
-      const liveSuffix = elapsed >= 1000
-        ? `  ${sk.applyColors(`${phaseLabel} ${formatToolDuration(elapsed)}…`, 'muted')}`
-        : '';
-      const runningGlyph = useIcons ? sk.applyColors('⚙', 'tool') : sk.applyColors(terminalStateSymbol('running'), 'muted');
+      const semanticPhase = semanticPhaseForTool(name, snapshot?.phase ?? 'running');
+      const projection = projectActivityFrame({
+        phase: semanticPhase,
+        frame: snapshot?.frame ?? Math.floor(fallbackPhaseElapsedMs / 1_000),
+        elapsedMs: elapsed,
+        unicode: useIcons,
+        mode: this.activityPresentationMode,
+        source: 'runtime',
+      });
+      const duration = elapsed >= 1000 ? ` ${formatToolDuration(elapsed)}` : '';
+      const liveSuffix = `  ${sk.applyColors(`${semanticPhaseStatusLabel(semanticPhase)}${duration}…`, phaseColorKind(semanticPhase))}`;
+      const runningGlyph = sk.applyColors(projection.glyph, projection.color);
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph}  ` +
         `${sk.applyColors(padVerb(verb), 'tool')} `;
       const suffix = `${liveSuffix}${this.composerSuffix()}`;
-      const detailText = sk.applyColors(detail, 'muted');
+      const detailText = sk.applyColors(detailForDisplay(), 'muted');
       const width = terminalRowWidth();
       if (width === null) return `${prefix}${detailText}${suffix}\n`;
       const availableDetail = Math.max(
@@ -1760,9 +1813,10 @@ export class Display {
       const availableDetail = width === null
         ? Number.POSITIVE_INFINITY
         : Math.max(0, width - visibleLength(prefix) - visibleLength(suffixText));
+      const displayDetail = detailForDisplay();
       const content = `${prefix}${availableDetail === Number.POSITIVE_INFINITY
-        ? detail
-        : truncateVisible(detail, availableDetail)}${suffixText}`;
+        ? displayDetail
+        : truncateVisible(displayDetail, availableDetail)}${suffixText}`;
       return `${sk.applyColors(content, kind)}\n`;
     };
 
@@ -2023,7 +2077,7 @@ export class Display {
         // v4.8.0 Slice 11c — double-space between glyph and verb (see
         // runningRow comment above for the emoji-width rationale).
         const content =
-          `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detail}  retry ${n}/${m} …`;
+          `${TRAIL_PIPE} ${glyph}  ${padVerb(verb)} ${detailForDisplay()}  retry ${n}/${m} …`;
         replaceLast(sk.applyColors(content, 'warn') + '\n');
       },
       blocked() {
@@ -2546,6 +2600,37 @@ export class Display {
       projection.role,
     );
     this.writeOutput(`${glyph} ${projection.label} · ${axes.join(' · ')}${summary}${details}\n`);
+  }
+
+  /** Project canonical durable evidence without manufacturing proof. */
+  evidencePanel(evidence: readonly EvidenceProjectionInput[]): void {
+    const projectedEvidence = this.activityPresentationMode === 'full'
+      ? evidence
+      : evidence.map((item) => {
+          if (!item.payload || typeof item.payload !== 'object' || Array.isArray(item.payload)) return item;
+          const payload = item.payload as Record<string, unknown>;
+          const adjusted = { ...payload };
+          let changed = false;
+          for (const key of ['path', 'target', 'message', 'reason'] as const) {
+            if (typeof adjusted[key] !== 'string') continue;
+            adjusted[key] = relativizeActivityText(String(adjusted[key]), process.cwd(), 'summary');
+            changed = true;
+          }
+          if (!changed) return item;
+          return {
+            ...item,
+            payload: adjusted,
+          };
+        });
+    const lines = projectEvidenceLines(projectedEvidence, this.activityPresentationMode);
+    if (lines.length === 0) return;
+    this.commitStreamChunk();
+    const rendered = lines.map((line, index) => this.uiTrailRow(
+      line,
+      index === 0 ? 'heading' : 'muted',
+    )).join('');
+    this.writeOutput(rendered);
+    this.streamLastEndedNewline = true;
   }
 
   /**
@@ -3236,12 +3321,20 @@ export class Display {
     const stderr  = typeof args.stderr  === 'string' ? args.stderr  : '';
     const exitCode = typeof args.exit_code === 'number' ? args.exit_code : 0;
     this.commitStreamChunk();
-    const ok = exitCode === 0;
-    const cap = (t: string): string => t.split('\n').slice(0, 5).join('\n');
-    let out = this.uiTrailRow(`▸ ${command}`, ok ? 'success' : 'error');
-    if (stdout) out += this.uiTrailRow(cap(stdout), 'muted');
-    if (stderr) out += this.uiTrailRow(cap(stderr), 'error');
-    if (!ok)    out += this.uiTrailRow(`(exit ${exitCode})`, 'error');
+    const projection = projectCommandPresentation({
+      command: relativizeActivityText(command, process.cwd(), this.activityPresentationMode),
+      stdout: relativizeActivityText(stdout, process.cwd(), this.activityPresentationMode),
+      stderr: relativizeActivityText(stderr, process.cwd(), this.activityPresentationMode),
+      exitCode,
+      mode: this.activityPresentationMode,
+    });
+    const kind: ColorKind = projection.outcome === 'failure'
+      ? 'error'
+      : projection.outcome === 'warning' ? 'warn' : 'success';
+    const out = projection.lines.map((line, index) => this.uiTrailRow(
+      line,
+      index === 0 ? kind : projection.outcome === 'failure' ? 'error' : 'muted',
+    )).join('');
     this.writeOutput(out);
     this.streamLastEndedNewline = true;
   }

@@ -19,6 +19,13 @@ colors:
     warn:    "#999999"
     error:   "#D97777"
     info:    "#AAAAAA"
+    thinking: "#CCCCCC"
+    planning: "#BBBBBB"
+    inspecting: "#AAAAAA"
+    working: "#DDDDDD"
+    testing: "#CCCCCC"
+    verifying: "#BBBBBB"
+    recovering: "#AAAAAA"
   metrics:
     model:     "#AAAAAA"
     tokens:    "#AAAAAA"
