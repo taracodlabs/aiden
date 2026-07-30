@@ -484,7 +484,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         if (state === 'boot' && readyCount >= 1) {
           state = 'active';
           typeLikeKeyboard(child!, 'hold the provider open');
-        } else if (state === 'active' && plain.includes('calling provider')) {
+        } else if (state === 'active' && plain.includes('Aiden is thinking')) {
           state = 'queueing';
           child!.write(`\x1b[200~${queued}\x1b[201~`);
           setTimeout(() => child!.resize(44, 40), 120);
@@ -587,7 +587,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     });
     await completion;
     const afterInterrupt = stripAnsi(output.slice(interruptedAt));
-    expect(afterInterrupt).not.toContain('calling provider');
+    expect(afterInterrupt).not.toContain('Aiden is thinking');
     expect(afterInterrupt).not.toContain('UNEXPECTED PROVIDER CONTINUATION');
     expect(afterInterrupt).toContain('(turn interrupted)');
     expect(afterInterrupt).toContain('Cancelled');
@@ -654,7 +654,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
       child!.onData((chunk) => {
         if (state === 'provider' || state === 'resizing') {
           for (const line of stripAnsi(chunk).split(/\r?\n/)) {
-            const match = line.match(/([─█◐◓◑◒ ]+)calling provider/);
+            const match = line.match(/^(.+?)Aiden is thinking/);
             if (match) providerAnimationPrefixes.push(match[1].trim());
           }
         }
@@ -664,7 +664,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
         if (state === 'boot' && isBootReady(plain, readyCount)) {
           state = 'provider';
           typeLikeKeyboard(child!, 'request resize approval');
-        } else if (state === 'provider' && plain.includes('calling provider')) {
+        } else if (state === 'provider' && plain.includes('Aiden is thinking')) {
           state = 'resizing';
           setTimeout(() => child!.resize(44, 40), 500);
           setTimeout(() => child!.resize(110, 40), 1_700);
@@ -700,7 +700,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     const plain = stripAnsi(output);
     expect(provider.callCount()).toBe(3);
     expect(new Set(providerAnimationPrefixes).size).toBeGreaterThanOrEqual(2);
-    expect(stripAnsi(output.slice(modalStart, modalEnd))).not.toContain('calling provider');
+    expect(stripAnsi(output.slice(modalStart, modalEnd))).not.toContain('Aiden is thinking');
     expect(plain).not.toContain('[preflight]');
     expect(plain).toContain('queue is empty');
     await expect(fs.access(deniedPath)).rejects.toThrow();

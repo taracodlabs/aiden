@@ -132,7 +132,7 @@ describe('physical viewport epochs', () => {
     tool.refresh?.();
 
     expect(screen.snapshot()).not.toContain('OLD ACTIVE TURN');
-    expectCleanViewport(screen, { active: 'calling provider' });
+    expectCleanViewport(screen, { active: 'Aiden is thinking' });
     expect(count(screen.lines(), 'active.txt')).toBe(1);
     tool.ok(25);
     provider.stop();
@@ -179,7 +179,7 @@ describe('physical viewport epochs', () => {
     provider.refresh(3);
 
     expect(screen.snapshot()).not.toContain('OLD BEFORE REPAINT');
-    expectCleanViewport(screen, { active: 'calling provider' });
+    expectCleanViewport(screen, { active: 'Aiden is thinking' });
     provider.stop();
   });
 
@@ -196,7 +196,7 @@ describe('physical viewport epochs', () => {
     expect(screen.snapshot()).not.toContain('OLD MODEL CONTEXT ROW');
     expect(screen.snapshot()).toContain('NEW PROMPT');
     expect(count(screen.lines(), 'NEW PROMPT')).toBe(1);
-    expect(count(screen.lines(), 'calling provider')).toBe(1);
+    expect(count(screen.lines(), 'Aiden is thinking')).toBe(1);
     provider.stop();
   });
 

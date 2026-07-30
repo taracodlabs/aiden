@@ -64,6 +64,13 @@ export const colors = {
     warn:    '#e0a040',
     error:   '#e05a5a',
     info:    '#7da7c7',
+    thinking:   '#5BC0EB',
+    planning:   '#A78BFA',
+    inspecting: '#60A5FA',
+    working:    '#FB923C',
+    testing:    '#FACC15',
+    verifying:  '#2DD4BF',
+    recovering: '#A78BFA',
   },
   /**
    * v4.8.0 Slice 7 hotfix #2 — per-metric accent palette for the

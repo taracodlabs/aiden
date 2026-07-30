@@ -321,7 +321,7 @@ describe('compact hybrid transcript geometry', () => {
       display.setBusyHint('Enter → queue · Ctrl+C stop');
       const provider = display.liveActivityRow('calling provider');
 
-      expect(semanticGap(screen.lines(), 'compact provider request', 'calling provider')).toBeLessThanOrEqual(1);
+      expect(semanticGap(screen.lines(), 'compact provider request', 'Aiden is thinking')).toBeLessThanOrEqual(1);
       provider.stop();
     },
   );
@@ -338,7 +338,7 @@ describe('compact hybrid transcript geometry', () => {
     display.setBusyHint('Enter → queue · Ctrl+C stop');
     const provider = display.liveActivityRow('calling provider');
 
-    expect(semanticGap(screen.lines(), 'FINAL-PROMPT-LINE', 'calling provider')).toBeLessThanOrEqual(1);
+    expect(semanticGap(screen.lines(), 'FINAL-PROMPT-LINE', 'Aiden is thinking')).toBeLessThanOrEqual(1);
     provider.stop();
   });
 
@@ -354,7 +354,7 @@ describe('compact hybrid transcript geometry', () => {
     for (const rows of [60, 16, 35]) {
       stream.resize(100, rows);
       await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(semanticGap(screen.lines(), 'resize provider request', 'calling provider')).toBeLessThanOrEqual(1);
+      expect(semanticGap(screen.lines(), 'resize provider request', 'Aiden is thinking')).toBeLessThanOrEqual(1);
     }
     provider.stop();
   });
@@ -372,8 +372,8 @@ describe('compact hybrid transcript geometry', () => {
     });
 
     const lines = screen.lines();
-    expect(semanticGap(lines, 'inspect the package manifest', 'calling provider')).toBeLessThanOrEqual(1);
-    expect(semanticGap(lines, 'calling provider', 'package.json')).toBe(0);
+    expect(semanticGap(lines, 'inspect the package manifest', 'Aiden is thinking')).toBeLessThanOrEqual(1);
+    expect(semanticGap(lines, 'Aiden is thinking', 'package.json')).toBe(0);
     tool.ok(20);
     provider.stop();
   });
@@ -386,7 +386,7 @@ describe('compact hybrid transcript geometry', () => {
     display.submitIdleComposer('return one concise answer', 'Type your message · /help');
     display.setBusyHint('Enter → queue · Ctrl+C stop');
     const provider = display.liveActivityRow('calling provider');
-    expect(semanticGap(screen.lines(), 'return one concise answer', 'calling provider')).toBeLessThanOrEqual(1);
+    expect(semanticGap(screen.lines(), 'return one concise answer', 'Aiden is thinking')).toBeLessThanOrEqual(1);
 
     provider.stop();
     display.write(display.agentHeader());
@@ -403,7 +403,7 @@ describe('compact hybrid transcript geometry', () => {
     display.submitIdleComposer('request a guarded action', 'Type your message · /help');
     display.setBusyHint('Enter → queue · Ctrl+C stop');
     const provider = display.liveActivityRow('calling provider');
-    expect(semanticGap(screen.lines(), 'request a guarded action', 'calling provider')).toBeLessThanOrEqual(1);
+    expect(semanticGap(screen.lines(), 'request a guarded action', 'Aiden is thinking')).toBeLessThanOrEqual(1);
 
     provider.stop();
     display.pauseComposerSurface();
@@ -426,7 +426,7 @@ describe('compact hybrid transcript geometry', () => {
     const provider = display.liveActivityRow('calling provider');
 
     expect(screen.snapshot()).not.toContain('OLD VISIBLE REQUEST');
-    expect(semanticGap(screen.lines(), `request after ${command}`, 'calling provider')).toBeLessThanOrEqual(1);
+    expect(semanticGap(screen.lines(), `request after ${command}`, 'Aiden is thinking')).toBeLessThanOrEqual(1);
     provider.stop();
   });
 });

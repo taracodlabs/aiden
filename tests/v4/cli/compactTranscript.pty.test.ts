@@ -146,7 +146,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
           state = 'provider';
           armTimeout(20_000);
           setTimeout(() => typeLine(child!, 'COMPACT HEIGHT REQUEST'), 250);
-        } else if (state === 'provider' && rendered.includes('calling provider')) {
+        } else if (state === 'provider' && rendered.includes('Aiden is thinking')) {
           state = 'resizing';
           armTimeout(20_000);
           let index = 0;
@@ -182,7 +182,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
 
     expect([...frames.keys()]).toEqual(heights);
     for (const [rows, frame] of frames) {
-      expect(semanticGap(frame, 'COMPACT HEIGHT REQUEST', 'calling provider'), `${rows} rows\n${frame}`)
+      expect(semanticGap(frame, 'COMPACT HEIGHT REQUEST', 'Aiden is thinking'), `${rows} rows\n${frame}`)
         .toBeLessThanOrEqual(1);
     }
   }, 90_000);

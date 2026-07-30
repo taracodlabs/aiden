@@ -7,6 +7,11 @@ import type {
   ToolActivityUpdate,
   ToolTerminalClassification,
 } from '../../providers/v4/types';
+import {
+  normalizeActivityPhase,
+  semanticPhaseForTool,
+  type SemanticActivityPhase,
+} from './semanticActivity';
 
 export type ActivityState = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -32,6 +37,7 @@ export interface ModalActivityOptions<T> {
 }
 
 export interface ActivitySnapshot {
+  frame?: number;
   phase: ToolActivityPhase;
   phaseElapsedMs: number;
   lifecycleElapsedMs: number;
@@ -57,6 +63,7 @@ export class ActivityRegistry {
   private readonly terminalStates = new Map<string, ActivityState>();
   private readonly pendingUpdates = new Map<string, ToolActivityUpdate>();
   private turnActivity?: LiveActivityRowHandle;
+  private turnVerb: string | null = null;
   private ticker: ReturnType<typeof setInterval> | null = null;
   private tickerFrame = 0;
   private modalDepth = 0;
@@ -75,6 +82,7 @@ export class ActivityRegistry {
 
   startTurnActivity(verb: string): boolean {
     if (this.turnActivity?.isActive() || !this.createTurnRow) return false;
+    this.turnVerb = verb;
     this.turnActivity = this.createTurnRow(verb);
     if (this.modalDepth > 0) this.turnActivity.pause();
     this.ensureTicker();
@@ -82,13 +90,18 @@ export class ActivityRegistry {
   }
 
   setTurnPhase(verb: string): void {
+    this.turnVerb = verb;
     this.turnActivity?.setVerb(verb);
   }
 
   settleTurnActivity(): boolean {
-    if (!this.turnActivity) return false;
+    if (!this.turnActivity) {
+      this.turnVerb = null;
+      return false;
+    }
     const row = this.turnActivity;
     this.turnActivity = undefined;
+    this.turnVerb = null;
     row.stop();
     this.stopTickerIfIdle();
     return true;
@@ -273,6 +286,12 @@ export class ActivityRegistry {
   activeCount(): number { return this.entries.size; }
   timerCount(): number { return this.ticker === null ? 0 : 1; }
   modalPauseDepth(): number { return this.modalDepth; }
+  currentPhase(): SemanticActivityPhase {
+    const activeEntries = [...this.entries.values()];
+    const activeTool = activeEntries[activeEntries.length - 1];
+    if (activeTool) return semanticPhaseForTool(activeTool.name, activeTool.phase);
+    return this.turnVerb ? normalizeActivityPhase(this.turnVerb) : 'ready';
+  }
   stateOf(id: string): ActivityState | null {
     return this.entries.get(id)?.state ?? this.terminalStates.get(id) ?? null;
   }
@@ -281,6 +300,7 @@ export class ActivityRegistry {
     const entry = this.entries.get(id);
     if (!entry) {
       return {
+        frame: this.tickerFrame,
         phase: 'terminal', phaseElapsedMs: 0, lifecycleElapsedMs: 0,
         approvalWaitMs: 0, executionDurationMs: 0, verificationDurationMs: 0,
         retryBackoffMs: 0, attemptCount: 0,
@@ -298,6 +318,7 @@ export class ActivityRegistry {
       (total, attempt) => total + Math.max(0, (attempt.endedAt ?? now) - attempt.startedAt), 0,
     ) ?? (entry.phase === 'running' ? Math.max(0, phaseEnd - entry.phaseStartedAt - entry.phasePausedMs) : 0);
     return {
+      frame: this.tickerFrame,
       phase: entry.phase,
       phaseElapsedMs: Math.max(0, phaseEnd - entry.phaseStartedAt - entry.phasePausedMs),
       lifecycleElapsedMs: Math.max(0, now - entry.lifecycleStartedAt),
@@ -324,12 +345,12 @@ export class ActivityRegistry {
   private ensureTicker(): void {
     if (this.ticker !== null || this.modalDepth > 0 || !this.hasRepaintableActivity()) return;
     this.ticker = setInterval(() => {
-      this.tickerFrame = (this.tickerFrame + 1) % 4;
+      // One shared counter drives every animation family. Sixty is the
+      // least common multiple of the 3-, 4-, and 5-frame projections.
+      this.tickerFrame = (this.tickerFrame + 1) % 60;
       this.turnActivity?.refresh(this.tickerFrame);
-      if (this.tickerFrame === 0) {
-        for (const entry of this.entries.values()) {
-          if (entry.repaintEligible) entry.handle.refresh?.();
-        }
+      for (const entry of this.entries.values()) {
+        if (entry.repaintEligible) entry.handle.refresh?.();
       }
     }, 250);
     this.ticker.unref?.();

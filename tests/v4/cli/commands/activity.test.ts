@@ -25,6 +25,7 @@ function mkCtx(usage?: { inputTokens: number; outputTokens: number }) {
       info:  (m: string) => out.push(m),
       write: (m: string) => out.push(m),
       dim:   (m: string) => out.push(m),
+      warn:  (m: string) => out.push(m),
     },
     session: usage ? { getTotalUsage } : undefined,
   } as any;
@@ -104,5 +105,28 @@ describe('/activity — reads the same accessors (aggregates, no recompute)', ()
     expect(getUsedTokens).not.toHaveBeenCalled();
     expect(listTasks).not.toHaveBeenCalled();
     expect(listArtifacts).not.toHaveBeenCalled();
+  });
+
+  it('switches between summary and full presentation without adding another activity source', async () => {
+    let mode: 'summary' | 'full' = 'summary';
+    const sources = {
+      sessionId: () => undefined,
+      getCap: () => 0,
+      getUsedTokens: () => 0,
+      getHistoryCount: () => 0,
+      listTasks: () => [],
+      listArtifacts: () => [],
+      getPresentationMode: () => mode,
+      setPresentationMode: vi.fn((next: 'summary' | 'full') => { mode = next; }),
+    };
+    const { ctx, out } = mkCtx();
+    ctx.args = ['full'];
+    await makeActivityCommand(sources).handler(ctx);
+    expect(sources.setPresentationMode).toHaveBeenCalledWith('full');
+    expect(out.join('\n')).toContain('View      : full');
+
+    ctx.args = ['summary'];
+    await makeActivityCommand(sources).handler(ctx);
+    expect(sources.setPresentationMode).toHaveBeenCalledWith('summary');
   });
 });

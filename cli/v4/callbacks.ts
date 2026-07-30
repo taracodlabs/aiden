@@ -48,6 +48,7 @@ import type { BlockerKind, BlockerSurface } from '../../tools/v4/browser/browser
 import { isVerbose, glyphs } from './design/tokens';
 import type { ColorKind } from './skinEngine';
 import type { InputOwner, ModalStdin } from './inputAuthority';
+import type { ActivityPresentationMode, SemanticActivityPhase } from './semanticActivity';
 /* Phase 23.6 rollback — Ink controller bridge stashed to
  * docs/sprint/_internal/v4.1-ink-stash/.  Re-introduce when v4.1 picks
  * up the Ink rebuild. */
@@ -361,6 +362,12 @@ export class CliCallbacks {
   activeActivityCount(): number { return this.activities.activeCount(); }
   activityTimerCount(): number { return this.activities.timerCount(); }
   activityModalPauseDepth(): number { return this.activities.modalPauseDepth(); }
+  currentActivityPhase(): SemanticActivityPhase { return this.activities.currentPhase(); }
+  getActivityPresentationMode(): ActivityPresentationMode { return this.display.getActivityPresentationMode(); }
+  setActivityPresentationMode(mode: ActivityPresentationMode): void {
+    this.display.setActivityPresentationMode(mode);
+    this.activities.invalidateLayout();
+  }
   beginTurnActivity(verb = 'thinking'): boolean { return this.activities.startTurnActivity(verb); }
   setTurnActivityPhase(verb: string): void { this.activities.setTurnPhase(verb); }
   settleTurnActivity(): boolean { return this.activities.settleTurnActivity(); }
@@ -438,19 +445,19 @@ export class CliCallbacks {
   // mapping a lifecycle event to a verb string. Defensive try/catch so
   // a misbehaving display sink can't unwind the agent loop.
   onMemoryRefreshStart = (): void => {
-    this.activities.startTurnActivity('refreshing memory');
-    this.activities.setTurnPhase('refreshing memory');
-    try { this.phaseVerbHook?.('refreshing memory'); } catch { /* defensive */ }
+    this.activities.startTurnActivity('inspecting memory');
+    this.activities.setTurnPhase('inspecting memory');
+    try { this.phaseVerbHook?.('inspecting memory'); } catch { /* defensive */ }
   };
   onPromptBuilt = (_info: { tools: number; skills: number; memoryFacts: number }): void => {
-    this.activities.startTurnActivity('preparing prompt');
-    this.activities.setTurnPhase('preparing prompt');
-    try { this.phaseVerbHook?.('preparing prompt'); } catch { /* defensive */ }
+    this.activities.startTurnActivity('planning');
+    this.activities.setTurnPhase('planning');
+    try { this.phaseVerbHook?.('planning'); } catch { /* defensive */ }
   };
   onProviderRequestStart = (_providerId: string): void => {
-    this.activities.startTurnActivity('calling provider');
-    this.activities.setTurnPhase('calling provider');
-    try { this.phaseVerbHook?.('calling provider'); } catch { /* defensive */ }
+    this.activities.startTurnActivity('provider request');
+    this.activities.setTurnPhase('provider request');
+    try { this.phaseVerbHook?.('provider request'); } catch { /* defensive */ }
   };
 
   /**

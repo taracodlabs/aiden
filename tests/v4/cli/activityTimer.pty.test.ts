@@ -54,23 +54,23 @@ describe.skipIf(process.platform !== 'win32')('activity timer ConPTY rendering',
 
     const frames = [...raw.matchAll(/\x1b\[(?:H|\d+;1H)([^\r\n]*)/g)]
       .map((match) => stripAnsi(match[1]))
-      .filter((line) => line.includes('calling') || line.includes('running'))
+      .filter((line) => line.includes('working'))
       // ConPTY reflows its existing screen into one synthetic chunk while a
       // resize is applied. It is not an application repaint frame.
-      .filter((line) => (line.match(/calling/g) ?? []).length <= 1);
+      .filter((line) => (line.match(/┊/gu) ?? []).length <= 1);
     expect(frames.length, JSON.stringify(raw)).toBeGreaterThanOrEqual(5);
     for (const frame of frames) {
       expect(frame.length, JSON.stringify({ frame, raw })).toBeLessThanOrEqual(48);
-      expect((frame.match(/running/g) ?? []).length).toBeLessThanOrEqual(1);
+      expect((frame.match(/working/g) ?? []).length).toBeLessThanOrEqual(1);
     }
-    expect(frames.filter((frame) => frame.includes('running')).length).toBeGreaterThanOrEqual(4);
-    const finalActivityLines = screen.lines().filter((line) => line.includes('calling') || line.includes('running'));
+    expect(frames.filter((frame) => frame.includes('working')).length).toBeGreaterThanOrEqual(4);
+    const finalActivityLines = screen.lines().filter((line) => line.includes('working'));
     expect(finalActivityLines.length, JSON.stringify({ finalActivityLines, raw })).toBeLessThanOrEqual(1);
     for (const line of finalActivityLines) {
       expect(line.length, JSON.stringify({ line, raw })).toBeLessThanOrEqual(currentWidth);
     }
     const settledAt = raw.indexOf('__ACTIVITY_SETTLED__');
     expect(settledAt).toBeGreaterThan(0);
-    expect(raw.slice(settledAt)).not.toContain('running');
+    expect(raw.slice(settledAt)).not.toContain('working');
   }, 25_000);
 });
