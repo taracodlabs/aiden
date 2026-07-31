@@ -6,10 +6,12 @@
 import { createHash } from 'node:crypto';
 
 import type { Db } from './db/connection';
+import type { WorkerReferenceKind } from '../worker/types';
 
 export type ExecutionNodeKind =
   | 'planning' | 'tool' | 'verification' | 'approval' | 'wait'
-  | 'child_job' | 'aggregation' | 'reconciliation' | 'finalization' | 'coding_step';
+  | 'child_job' | 'aggregation' | 'reconciliation' | 'finalization' | 'coding_step'
+  | 'worker_assignment' | 'worker_run';
 export type ExecutionNodeState = 'pending' | 'runnable' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'blocked' | 'superseded';
 
 export type CodingPlanReferenceKind =
@@ -91,6 +93,13 @@ export interface ExecutionGraphEvent {
   createdAt: number;
 }
 
+export interface WorkerGraphReferenceRecord {
+  nodeId: string;
+  kind: WorkerReferenceKind;
+  id: string;
+  generation: number | null;
+}
+
 export interface GraphTransitionResult {
   applied: boolean;
   duplicate?: boolean;
@@ -127,6 +136,20 @@ interface GraphAuthority {
   retireNode(command: AuthorityCommand & {
     nodeId: string; state: 'blocked' | 'superseded' | 'cancelled'; reason?: string | null;
   }): GraphTransitionResult;
+  attachWorkerAssignment(command: {
+    parentJobId: string; parentAttemptId: string; parentGeneration: number; parentFenceToken: string;
+    assignmentId: string; producer: string; idempotencyKey: string; now?: number;
+  }): GraphTransitionResult & { nodeId?: string };
+  attachWorkerRun(command: {
+    parentJobId: string; parentAttemptId: string; parentGeneration: number; parentFenceToken: string;
+    assignmentNodeId: string; workerRunId: string; childJobId: string; childAttemptId: string;
+    childGeneration: number; producer: string; idempotencyKey: string; now?: number;
+  }): GraphTransitionResult & { nodeId?: string };
+  attachWorkerResultReference(command: {
+    parentJobId: string; parentAttemptId: string; parentGeneration: number; parentFenceToken: string;
+    workerRunNodeId: string; workerResultId: string; producer: string; idempotencyKey: string; now?: number;
+  }): GraphTransitionResult;
+  workerReferences(parentJobId: string): WorkerGraphReferenceRecord[];
 }
 
 interface AuthorityCommand {
@@ -322,6 +345,24 @@ export function createExecutionGraphAuthority(db: Db): GraphAuthority {
         reference.lineEnd ?? null, now,
       );
     }
+  };
+
+  const insertWorkerReference = (
+    graph: GraphRow,
+    nodeKey: string,
+    kind: WorkerReferenceKind,
+    referenceId: string,
+    generation: number | null,
+    now: number,
+  ): void => {
+    const nodeId = physicalNodeId(graph.graph_id, nodeKey);
+    const referenceKey = `graphref_${digest(JSON.stringify({ nodeId, kind, referenceId, generation }))}`;
+    db.prepare(
+      `INSERT OR IGNORE INTO execution_graph_node_references
+         (reference_key,graph_id,node_id,reference_kind,reference_id,reference_generation,
+          repository_snapshot_id,relative_path,line_start,line_end,created_at)
+       VALUES (?,?,?,?,?,?,NULL,NULL,NULL,NULL,?)`,
+    ).run(referenceKey, graph.graph_id, nodeId, kind, referenceId, generation, now);
   };
 
   const referencesFor = (nodeId: string): CodingPlanReference[] => (
@@ -730,6 +771,177 @@ export function createExecutionGraphAuthority(db: Db): GraphAuthority {
       });
       tx.immediate();
       return { applied: true };
+    },
+    attachWorkerAssignment(command) {
+      const result = authority({
+        jobId: command.parentJobId,
+        attemptId: command.parentAttemptId,
+        generation: command.parentGeneration,
+        fenceToken: command.parentFenceToken,
+        producer: command.producer,
+        idempotencyKey: command.idempotencyKey,
+        now: command.now,
+      });
+      if (result.terminal) return { applied: false, conflict: 'terminal_job' };
+      if (!result.ok) return { applied: false, conflict: 'stale_fence' };
+      const nodeId = `worker-assignment:${command.assignmentId}`;
+      const duplicate = db.prepare(
+        'SELECT 1 FROM execution_graph_events WHERE graph_id=? AND idempotency_key=?',
+      ).get(result.graph.graph_id, command.idempotencyKey);
+      if (duplicate) return { applied: false, duplicate: true, nodeId };
+      const existing = db.prepare(
+        'SELECT kind FROM execution_graph_nodes WHERE graph_id=? AND node_key=?',
+      ).get(result.graph.graph_id, nodeId) as { kind: ExecutionNodeKind } | undefined;
+      if (existing) {
+        if (existing.kind !== 'worker_assignment') return { applied: false, conflict: 'illegal_transition' };
+        return { applied: false, duplicate: true, nodeId };
+      }
+      const now = command.now ?? Date.now();
+      const ordinal = (db.prepare(
+        'SELECT COALESCE(MAX(ordinal), -1) + 1 AS next FROM execution_graph_nodes WHERE graph_id=?',
+      ).get(result.graph.graph_id) as { next: number }).next;
+      const tx = db.transaction(() => {
+        db.prepare(
+          `INSERT INTO execution_graph_nodes
+             (node_id,node_key,graph_id,job_id,kind,state,label,input_ref,requires_verification,
+              ordinal,state_version,created_at,updated_at)
+           VALUES (?,?,?,?,?,'pending',?,?,0,?,0,?,?)`,
+        ).run(
+          physicalNodeId(result.graph.graph_id, nodeId), nodeId, result.graph.graph_id,
+          command.parentJobId, 'worker_assignment', 'Worker assignment',
+          `worker_assignment:${command.assignmentId}`, ordinal, now, now,
+        );
+        insertWorkerReference(result.graph, nodeId, 'worker_assignment', command.assignmentId, null, now);
+        db.prepare('UPDATE execution_graphs SET version=version+1,updated_at=? WHERE graph_id=?')
+          .run(now, result.graph.graph_id);
+        appendEvent(result.graph, 'graph.worker_assignment_attached', {
+          nodeId, assignmentId: command.assignmentId,
+          attemptId: command.parentAttemptId, generation: command.parentGeneration,
+        }, command.producer, command.idempotencyKey, now);
+      });
+      tx.immediate();
+      return { applied: true, nodeId };
+    },
+    attachWorkerRun(command) {
+      const result = authority({
+        jobId: command.parentJobId,
+        attemptId: command.parentAttemptId,
+        generation: command.parentGeneration,
+        fenceToken: command.parentFenceToken,
+        producer: command.producer,
+        idempotencyKey: command.idempotencyKey,
+        now: command.now,
+      });
+      if (result.terminal) return { applied: false, conflict: 'terminal_job' };
+      if (!result.ok) return { applied: false, conflict: 'stale_fence' };
+      const assignment = db.prepare(
+        'SELECT kind FROM execution_graph_nodes WHERE graph_id=? AND node_key=?',
+      ).get(result.graph.graph_id, command.assignmentNodeId) as { kind: ExecutionNodeKind } | undefined;
+      if (!assignment || assignment.kind !== 'worker_assignment') return { applied: false, conflict: 'not_found' };
+      const child = db.prepare(
+        'SELECT task_id,generation FROM runs WHERE attempt_id=?',
+      ).get(command.childAttemptId) as { task_id: string | null; generation: number } | undefined;
+      if (!child || child.task_id !== command.childJobId || child.generation !== command.childGeneration) {
+        return { applied: false, conflict: 'stale_fence' };
+      }
+      const nodeId = `worker-run:${command.workerRunId}`;
+      const duplicate = db.prepare(
+        'SELECT 1 FROM execution_graph_events WHERE graph_id=? AND idempotency_key=?',
+      ).get(result.graph.graph_id, command.idempotencyKey);
+      if (duplicate) return { applied: false, duplicate: true, nodeId };
+      const existing = db.prepare(
+        'SELECT kind FROM execution_graph_nodes WHERE graph_id=? AND node_key=?',
+      ).get(result.graph.graph_id, nodeId) as { kind: ExecutionNodeKind } | undefined;
+      if (existing) {
+        if (existing.kind !== 'worker_run') return { applied: false, conflict: 'illegal_transition' };
+        return { applied: false, duplicate: true, nodeId };
+      }
+      const now = command.now ?? Date.now();
+      const ordinal = (db.prepare(
+        'SELECT COALESCE(MAX(ordinal), -1) + 1 AS next FROM execution_graph_nodes WHERE graph_id=?',
+      ).get(result.graph.graph_id) as { next: number }).next;
+      const tx = db.transaction(() => {
+        db.prepare(
+          `INSERT INTO execution_graph_nodes
+             (node_id,node_key,graph_id,job_id,kind,state,label,input_ref,requires_verification,
+              ordinal,state_version,created_at,updated_at)
+           VALUES (?,?,?,?,?,'pending',?,?,1,?,0,?,?)`,
+        ).run(
+          physicalNodeId(result.graph.graph_id, nodeId), nodeId, result.graph.graph_id,
+          command.parentJobId, 'worker_run', 'Worker run',
+          `child_attempt:${command.childJobId}:${command.childAttemptId}:${command.childGeneration}`,
+          ordinal, now, now,
+        );
+        db.prepare(
+          'INSERT INTO execution_graph_edges (graph_id,from_node_id,to_node_id,created_at) VALUES (?,?,?,?)',
+        ).run(
+          result.graph.graph_id,
+          physicalNodeId(result.graph.graph_id, command.assignmentNodeId),
+          physicalNodeId(result.graph.graph_id, nodeId),
+          now,
+        );
+        insertWorkerReference(result.graph, nodeId, 'worker_run', command.workerRunId, null, now);
+        insertWorkerReference(result.graph, nodeId, 'child_attempt', command.childAttemptId, command.childGeneration, now);
+        db.prepare('UPDATE execution_graphs SET version=version+1,updated_at=? WHERE graph_id=?')
+          .run(now, result.graph.graph_id);
+        appendEvent(result.graph, 'graph.worker_run_attached', {
+          nodeId, assignmentNodeId: command.assignmentNodeId, workerRunId: command.workerRunId,
+          childJobId: command.childJobId, childAttemptId: command.childAttemptId,
+          childGeneration: command.childGeneration,
+        }, command.producer, command.idempotencyKey, now);
+      });
+      tx.immediate();
+      return { applied: true, nodeId };
+    },
+    attachWorkerResultReference(command) {
+      const result = authority({
+        jobId: command.parentJobId,
+        attemptId: command.parentAttemptId,
+        generation: command.parentGeneration,
+        fenceToken: command.parentFenceToken,
+        producer: command.producer,
+        idempotencyKey: command.idempotencyKey,
+        now: command.now,
+      });
+      if (result.terminal) return { applied: false, conflict: 'terminal_job' };
+      if (!result.ok) return { applied: false, conflict: 'stale_fence' };
+      const node = db.prepare(
+        'SELECT kind FROM execution_graph_nodes WHERE graph_id=? AND node_key=?',
+      ).get(result.graph.graph_id, command.workerRunNodeId) as { kind: ExecutionNodeKind } | undefined;
+      if (!node || node.kind !== 'worker_run') return { applied: false, conflict: 'not_found' };
+      const duplicate = db.prepare(
+        'SELECT 1 FROM execution_graph_events WHERE graph_id=? AND idempotency_key=?',
+      ).get(result.graph.graph_id, command.idempotencyKey);
+      if (duplicate) return { applied: false, duplicate: true };
+      const now = command.now ?? Date.now();
+      const tx = db.transaction(() => {
+        insertWorkerReference(result.graph, command.workerRunNodeId, 'worker_result', command.workerResultId, null, now);
+        appendEvent(result.graph, 'graph.worker_result_referenced', {
+          nodeId: command.workerRunNodeId, workerResultId: command.workerResultId,
+        }, command.producer, command.idempotencyKey, now);
+      });
+      tx.immediate();
+      return { applied: true };
+    },
+    workerReferences(parentJobId) {
+      const graph = graphFor(parentJobId);
+      if (!graph) return [];
+      return (db.prepare(
+        `SELECT n.node_key,r.reference_kind,r.reference_id,r.reference_generation
+           FROM execution_graph_node_references r
+           JOIN execution_graph_nodes n ON n.node_id=r.node_id
+          WHERE r.graph_id=?
+            AND r.reference_kind IN ('worker_assignment','worker_run','child_attempt','worker_result')
+          ORDER BY n.ordinal,r.reference_kind,r.reference_key`,
+      ).all(graph.graph_id) as Array<{
+        node_key: string; reference_kind: WorkerReferenceKind;
+        reference_id: string; reference_generation: number | null;
+      }>).map((row) => ({
+        nodeId: row.node_key,
+        kind: row.reference_kind,
+        id: row.reference_id,
+        generation: row.reference_generation,
+      }));
     },
     nodes(jobId) {
       const graph = graphFor(jobId);

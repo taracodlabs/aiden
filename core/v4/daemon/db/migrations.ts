@@ -1850,6 +1850,140 @@ function applyV36(db: Database.Database): void {
   `);
 }
 
+/** Immutable Worker contracts and thin child-Attempt relations. */
+function applyV37(db: Database.Database): void {
+  addMissingColumns(db, 'execution_graph_node_references', [
+    ['reference_generation', 'INTEGER'],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_provider_bindings (
+      provider_binding_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      provider_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      provider_runtime_identity TEXT NOT NULL,
+      credential_reference TEXT,
+      endpoint_reference TEXT,
+      capability_snapshot_hash TEXT NOT NULL,
+      selection_reason TEXT NOT NULL,
+      fallback_policy_id TEXT,
+      context_window INTEGER NOT NULL,
+      max_output_tokens INTEGER NOT NULL,
+      binding_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS worker_context_envelopes (
+      context_envelope_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      assignment_id TEXT NOT NULL,
+      repository_snapshot_id TEXT,
+      plan_step_ids_json TEXT NOT NULL,
+      claim_ids_json TEXT NOT NULL,
+      source_reference_ids_json TEXT NOT NULL,
+      instruction_reference_ids_json TEXT NOT NULL,
+      bounded_parent_note TEXT,
+      tool_schema_digest TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      token_estimate INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (repository_snapshot_id) REFERENCES repository_snapshots(snapshot_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS worker_assignments (
+      assignment_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      worker_definition_id TEXT NOT NULL,
+      worker_definition_version INTEGER NOT NULL,
+      parent_job_id TEXT NOT NULL,
+      parent_attempt_id TEXT NOT NULL,
+      parent_generation INTEGER NOT NULL,
+      parent_fence_digest TEXT NOT NULL,
+      child_contract_id TEXT NOT NULL,
+      child_job_id TEXT NOT NULL,
+      repository_snapshot_id TEXT,
+      execution_graph_node_id TEXT,
+      context_envelope_id TEXT NOT NULL,
+      provider_binding_id TEXT NOT NULL,
+      capability_set_id TEXT,
+      goal TEXT NOT NULL,
+      expected_result_schema_id TEXT NOT NULL,
+      expected_evidence_schema_id TEXT,
+      input_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (parent_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_contract_id) REFERENCES child_job_contracts(child_job_id) ON DELETE CASCADE,
+      FOREIGN KEY (repository_snapshot_id) REFERENCES repository_snapshots(snapshot_id),
+      FOREIGN KEY (context_envelope_id) REFERENCES worker_context_envelopes(context_envelope_id),
+      FOREIGN KEY (provider_binding_id) REFERENCES worker_provider_bindings(provider_binding_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_assignments_parent
+      ON worker_assignments(parent_job_id, parent_attempt_id, parent_generation, created_at);
+    CREATE INDEX IF NOT EXISTS idx_worker_assignments_child
+      ON worker_assignments(child_job_id, created_at);
+
+    CREATE TABLE IF NOT EXISTS worker_runs (
+      worker_run_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      assignment_id TEXT NOT NULL,
+      child_job_id TEXT NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      child_generation INTEGER NOT NULL,
+      execution_graph_node_id TEXT,
+      provider_binding_id TEXT NOT NULL,
+      context_envelope_id TEXT NOT NULL,
+      accepted_result_id TEXT,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (assignment_id) REFERENCES worker_assignments(assignment_id) ON DELETE CASCADE,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (provider_binding_id) REFERENCES worker_provider_bindings(provider_binding_id),
+      FOREIGN KEY (context_envelope_id) REFERENCES worker_context_envelopes(context_envelope_id),
+      UNIQUE (child_attempt_id, child_generation),
+      UNIQUE (assignment_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_runs_assignment
+      ON worker_runs(assignment_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_worker_runs_child
+      ON worker_runs(child_job_id, child_attempt_id, child_generation);
+
+    CREATE TABLE IF NOT EXISTS worker_results (
+      worker_result_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      worker_run_id TEXT NOT NULL,
+      assignment_id TEXT NOT NULL,
+      child_job_id TEXT NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      child_generation INTEGER NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('completed','partial','failed','cancelled','timed_out','blocked','invalid')),
+      summary TEXT NOT NULL,
+      structured_payload_json TEXT,
+      evidence_ids_json TEXT NOT NULL,
+      provider_attempt_ids_json TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      result_hash TEXT NOT NULL,
+      acceptance_state TEXT NOT NULL CHECK (acceptance_state IN ('received','accepted','rejected')),
+      rejection_code TEXT,
+      rejection_reason TEXT,
+      created_at INTEGER NOT NULL,
+      accepted_at INTEGER,
+      rejected_at INTEGER,
+      FOREIGN KEY (worker_run_id) REFERENCES worker_runs(worker_run_id) ON DELETE CASCADE,
+      FOREIGN KEY (assignment_id) REFERENCES worker_assignments(assignment_id) ON DELETE CASCADE,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (worker_run_id, idempotency_key, result_hash)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_results_run
+      ON worker_results(worker_run_id, created_at, worker_result_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_worker_results_final_accepted
+      ON worker_results(worker_run_id)
+      WHERE acceptance_state = 'accepted' AND status <> 'partial';
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -1887,6 +2021,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 34, name: 'snapshot-bound structured validation', apply: applyV34 },
   { version: 35, name: 'durable Git effects and reconciliation', apply: applyV35 },
   { version: 36, name: 'repository understanding and durable coding plans', apply: applyV36 },
+  { version: 37, name: 'durable Worker contracts and authority boundaries', apply: applyV37 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -1926,7 +2061,8 @@ function validateLatestSchema(db: Database.Database): void {
     'test_run_details', 'build_run_details', 'validation_artifacts', 'validation_diagnostics',
     'git_effect_operations', 'repository_understanding_indexes', 'repository_understanding_records',
     'repository_understanding_snapshot_records', 'repository_architecture_notes',
-    'execution_graph_node_references'];
+    'execution_graph_node_references', 'worker_assignments', 'worker_runs',
+    'worker_provider_bindings', 'worker_context_envelopes', 'worker_results'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

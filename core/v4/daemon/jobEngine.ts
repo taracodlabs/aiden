@@ -41,6 +41,7 @@ import {
   createRepositoryUnderstandingAuthority,
   type RepositoryUnderstandingAuthority,
 } from '../codebase/repositoryUnderstandingAuthority';
+import { createWorkerAuthority, type WorkerAuthority } from '../worker/workerAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -200,6 +201,7 @@ export interface LeaseResult extends TransitionResult {
 
 export interface JobEngine {
   readonly graph: ExecutionGraphAuthority;
+  readonly worker: WorkerAuthority;
   readonly resources: JobResourceAuthority;
   readonly proof: JobProofAuthority;
   readonly projection: JobEventProjectionAuthority;
@@ -2335,9 +2337,43 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
     appendJobEvent: appendJobEventTx,
   });
+  const worker = createWorkerAuthority({
+    db,
+    graph,
+    validateActiveFence(command) {
+      const attempt = activeFence(
+        command.attemptId,
+        command.generation,
+        command.fenceToken,
+        command.now,
+      );
+      const job = attempt ? getJobRow(command.jobId) : undefined;
+      const valid = Boolean(
+        attempt
+        && attempt.task_id === command.jobId
+        && job?.active_attempt_id === command.attemptId
+        && !JOB_TERMINAL.has(job.status),
+      );
+      return { valid, runId: valid ? attempt?.id : undefined };
+    },
+    appendOrderedEvent(command) {
+      const result = appendEvent({
+        jobId: command.jobId,
+        runId: command.runId,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        type: command.kind,
+        payload: command.payload,
+        producer: command.producer,
+        idempotencyKey: command.idempotencyKey,
+      });
+      return { duplicate: result.duplicate, sequence: result.jobSequence };
+    },
+  });
 
   return {
     graph,
+    worker,
     resources,
     proof,
     projection,
