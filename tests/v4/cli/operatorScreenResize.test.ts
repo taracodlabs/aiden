@@ -232,7 +232,8 @@ describe('operator screen resize transactions', () => {
 
     assertOneCurrentSurface(screen, '');
     expect(screen.lines().filter((line) => line.includes('running'))).toHaveLength(0);
-    expect(screen.bufferSnapshot()).toContain('Start-Sleep');
+    expect(screen.bufferSnapshot()).not.toContain('running');
+    expect(screen.bufferSnapshot().match(/Start-Sleep/gu) ?? []).toHaveLength(1);
   });
 
   it('virtualizes fifty active rows without overwriting composer or status', () => {

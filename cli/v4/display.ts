@@ -1153,7 +1153,7 @@ export class Display {
           if (stopped) return;
           stopped = true;
           if (finalText) screenOwner.settleLiveRow(rowId, finalText);
-          else screenOwner.removeLiveRow(rowId);
+          else screenOwner.removeLiveRow(rowId, true);
         },
       };
     }
@@ -1274,7 +1274,7 @@ export class Display {
         stop: (): void => {
           if (stopped) return;
           stopped = true;
-          screenOwner.removeLiveRow(rowId);
+          screenOwner.removeLiveRow(rowId, true);
         },
         isPaused: (): boolean => paused,
         isStopped: (): boolean => stopped,
@@ -1607,10 +1607,10 @@ export class Display {
       const activity = this.skin.applyColors(projection.text, projection.color);
       return truncateVisible(`${prefix}${activity}${time}${suffix}`, width);
     };
-    const erase = (): void => {
+    const erase = (terminal = false): void => {
       if (!printed || !isTty) return;
       if (screenOwner) {
-        screenOwner.removeLiveRow(rowId);
+        screenOwner.removeLiveRow(rowId, terminal);
         printed = false;
         lastBody = '';
         return;
@@ -1675,7 +1675,7 @@ export class Display {
       stop: () => {
         if (!active) return;
         active = false;
-        erase();
+        erase(true);
       },
       invalidateLayout: () => {
         if (!active) return;
@@ -1926,9 +1926,9 @@ export class Display {
     };
 
     // Erase the last printed line (TTY only).
-    const eraseLast = (): void => {
+    const eraseLast = (terminal = false): void => {
       if (screenOwner) {
-        screenOwner.removeLiveRow(rowId);
+        screenOwner.removeLiveRow(rowId, terminal);
         printed = false;
         return;
       }
@@ -2136,7 +2136,7 @@ export class Display {
       dismiss() {
         if (!beginSettle()) return;
         stopTick();
-        eraseLast();
+        eraseLast(true);
       },
       pause() {
         if (settled || pausedRow) return;
@@ -2828,7 +2828,7 @@ export class Display {
       owner.settleLiveRow(this.streamProjectionId, this.projectedStreamText(true));
       this.streamProjectionHeaderPending = false;
     } else {
-      owner.removeLiveRow(this.streamProjectionId);
+      owner.removeLiveRow(this.streamProjectionId, true);
     }
     this.streamBuffer = '';
     this.streamLineCount = 0;

@@ -359,7 +359,9 @@ export class BottomRegion {
   private pendingModalTranscriptOutput = '';
   private renderedSurface: RenderedSurfaceSnapshot | null = null;
   private restoreAfterModal = false;
+  private readonly terminalLiveRows = new Set<string>();
   private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
+  private static readonly MAX_TERMINAL_LIVE_ROWS = 2_048;
 
   constructor(
     private readonly sink: LaneSink,
@@ -417,6 +419,7 @@ export class BottomRegion {
 
   /** Project one identity-backed live row above the composer. */
   setLiveRow(id: string, text: string): void {
+    if (this.terminalLiveRows.has(id)) return;
     const normalized = text.replace(/\r?\n$/u, '');
     const current = this.projection.activities[id];
     const next = reduceOperatorProjection(this.projection, current
@@ -436,11 +439,14 @@ export class BottomRegion {
   }
 
   /** Hide a live row without adding it to transcript history. */
-  removeLiveRow(id: string): void {
+  removeLiveRow(id: string, terminal = false): void {
+    if (terminal) this.rememberTerminalLiveRow(id);
     const next = reduceOperatorProjection(this.projection, { type: 'activity.remove', id });
     if (next === this.projection) return;
     this.projection = next;
-    if (this.active) this.paintAll();
+    if (!this.active) return;
+    if (this.resizeBurstActive) this.finishResizeBurstNow();
+    else this.paintAll();
   }
 
   /** Replace a live row with its final transcript row exactly once. */
@@ -450,6 +456,8 @@ export class BottomRegion {
     state: Extract<OperatorActivityState,
       'succeeded' | 'failed' | 'denied' | 'interrupted' | 'cancelled' | 'timed_out' | 'unknown' | 'stale'> = 'succeeded',
   ): void {
+    if (this.terminalLiveRows.has(id)) return;
+    this.rememberTerminalLiveRow(id);
     const current = this.projection.activities[id];
     if (current) {
       this.projection = reduceOperatorProjection(this.projection, {
@@ -468,6 +476,7 @@ export class BottomRegion {
     }
     if (this.resizeBurstActive) {
       this.pendingTranscriptOutput += terminal;
+      this.finishResizeBurstNow();
       return;
     }
     this.sink.write(`${RESTORE_TRANSCRIPT}${terminal}${SAVE_TRANSCRIPT}`);
@@ -644,6 +653,13 @@ export class BottomRegion {
       this.projection = { ...this.projection, transcript: retained };
     }
     return true;
+  }
+
+  private rememberTerminalLiveRow(id: string): void {
+    this.terminalLiveRows.add(id);
+    if (this.terminalLiveRows.size <= BottomRegion.MAX_TERMINAL_LIVE_ROWS) return;
+    const oldest = this.terminalLiveRows.values().next().value as string | undefined;
+    if (oldest !== undefined) this.terminalLiveRows.delete(oldest);
   }
 
   private transcriptFrame(surface: RenderedSurface): string {
@@ -877,7 +893,7 @@ export class BottomRegion {
     if (epoch === this.projection.viewport.epoch) this.sink.write(sequence);
   }
 
-  private reanchor(resizeEpoch: number): void {
+  private reanchor(resizeEpoch: number, forceBottomAnchor = false): void {
     if (!this.active || resizeEpoch !== this.resizeEpoch) return;
     const generation = ++this.renderGeneration;
     const epoch = this.projection.viewport.epoch;
@@ -885,7 +901,7 @@ export class BottomRegion {
     const priorRows = previousGeometry?.rows ?? this.sink.rows();
     const erasePrevious = this.eraseReflowedSurface(
       this.sink.cols(),
-      this.sink.reflowSafe === true && this.sink.rows() <= priorRows,
+      forceBottomAnchor || (this.sink.reflowSafe === true && this.sink.rows() <= priorRows),
     );
     this.projection = reduceOperatorProjection(this.projection, {
       type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
@@ -928,6 +944,15 @@ export class BottomRegion {
       );
       this.sink.write(sequence);
     }
+  }
+
+  private finishResizeBurstNow(): void {
+    if (!this.active || !this.resizeBurstActive) return;
+    const resizeEpoch = this.resizeEpoch;
+    if (this.trailingResize) clearImmediate(this.trailingResize);
+    this.trailingResize = null;
+    this.resizeBurstActive = false;
+    this.reanchor(resizeEpoch, true);
   }
 
   private onResize(): void {

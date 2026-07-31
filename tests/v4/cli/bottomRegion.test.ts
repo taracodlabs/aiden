@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
-import { renderBottomSurface } from '../../../cli/v4/composerLane';
+import { BottomRegion, renderBottomSurface } from '../../../cli/v4/composerLane';
 import { primeFrameAsync } from '../../../cli/v4/display/frame';
 import { TerminalScreen } from '../harness/terminalScreen';
 
@@ -143,6 +143,37 @@ function composerGeometry(screen: TerminalScreen): {
   };
 }
 
+function createRegionHarness(reflowSafe: boolean, columns = 100, rows = 30) {
+  const screen = new TerminalScreen(columns, rows, { retainResizeHistory: true });
+  let currentColumns = columns;
+  let currentRows = rows;
+  let resizeListener: (() => void) | null = null;
+  const region = new BottomRegion({
+    write: (value) => screen.write(value),
+    cols: () => currentColumns,
+    rows: () => currentRows,
+    onResize: (listener) => {
+      resizeListener = listener;
+      return () => { resizeListener = null; };
+    },
+    reflowSafe,
+  });
+  region.activate(
+    { draft: '', mode: 'queue' },
+    '◆ provider · model │ ◉ context 2k/32k │ ⧖ 4s',
+  );
+  return {
+    region,
+    screen,
+    resize(nextColumns: number, nextRows: number) {
+      currentColumns = nextColumns;
+      currentRows = nextRows;
+      screen.resize(nextColumns, nextRows);
+      resizeListener?.();
+    },
+  };
+}
+
 function expectExclusiveSurface(screen: TerminalScreen, statusNeedle: string): ReturnType<typeof composerGeometry> {
   const geometry = composerGeometry(screen);
   const lines = screen.lines();
@@ -246,6 +277,74 @@ describe.each([100, 80, 44])('borderless fixed bottom region at %i columns', (co
 });
 
 describe('borderless fixed bottom region resize', () => {
+  it.each([false, true])(
+    'settles a live row before a second host resize can archive it (reflowSafe=%s)',
+    async (reflowSafe) => {
+      const { region, resize, screen } = createRegionHarness(reflowSafe);
+      region.setLiveRow('tool_settlement', '⚙ shell_exec running');
+
+      resize(150, 45);
+      region.settleLiveRow('tool_settlement', '✓ shell_exec completed');
+      resize(80, 24);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(screen.bufferSnapshot()).not.toContain('shell_exec running');
+      expect(screen.bufferSnapshot().match(/shell_exec completed/gu) ?? []).toHaveLength(1);
+    },
+  );
+
+  it.each([false, true])(
+    'rejects a late activity frame after terminal settlement (reflowSafe=%s)',
+    async (reflowSafe) => {
+      const { region, resize, screen } = createRegionHarness(reflowSafe);
+      region.setLiveRow('tool_late_tick', '⚙ shell_exec running frame 1');
+      region.settleLiveRow('tool_late_tick', '! shell_exec cancelled', 'cancelled');
+      resize(44, 18);
+      region.setLiveRow('tool_late_tick', '⚙ shell_exec running late frame');
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(screen.bufferSnapshot()).not.toContain('running late frame');
+      expect(screen.bufferSnapshot().match(/shell_exec cancelled/gu) ?? []).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ['succeeded', '✓ tool completed'],
+    ['failed', '! tool failed'],
+    ['cancelled', '! tool cancelled'],
+  ] as const)(
+    'keeps only one %s terminal projection through rapid resize settlement',
+    async (state, terminal) => {
+      const { region, resize, screen } = createRegionHarness(false, 100, 30);
+      region.setLiveRow(`tool_${state}`, '⚙ tool running');
+      for (const [columns, rows] of [[60, 24], [100, 30], [44, 18]] as const) {
+        resize(columns, rows);
+      }
+      region.settleLiveRow(`tool_${state}`, terminal, state);
+      for (const [columns, rows] of [[100, 30], [60, 24], [100, 30]] as const) {
+        resize(columns, rows);
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(screen.bufferSnapshot()).not.toContain('tool running');
+      expect(
+        screen.bufferSnapshot().match(new RegExp(terminal.slice(2), 'gu')) ?? [],
+        screen.bufferSnapshot(),
+      ).toHaveLength(1);
+    },
+  );
+
+  it('removes provider activity during resize without archiving its volatile frame', async () => {
+    const { region, resize, screen } = createRegionHarness(false);
+    region.setLiveRow('provider_wait', '◐ Aiden is thinking');
+    resize(150, 45);
+    region.removeLiveRow('provider_wait', true);
+    resize(80, 24);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(screen.bufferSnapshot()).not.toContain('Aiden is thinking');
+  });
+
   it('makes room without overwriting the existing transcript tail', () => {
     delete process.env.AIDEN_COMPOSER_LANE;
     const { display, screen, stream } = createDisplay(80, 14);
