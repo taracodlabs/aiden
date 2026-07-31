@@ -16,6 +16,7 @@ class ScreenStream extends Writable {
   isTTY = true;
   columns: number;
   rows: number;
+  readonly writes: string[] = [];
 
   constructor(
     readonly screen: TerminalScreen,
@@ -24,6 +25,7 @@ class ScreenStream extends Writable {
   ) {
     super({
       write: (chunk, _encoding, callback) => {
+        this.writes.push(chunk.toString());
         screen.write(chunk);
         callback();
       },
@@ -42,7 +44,7 @@ class ScreenStream extends Writable {
 
 const previousLaneSetting = process.env.AIDEN_COMPOSER_LANE;
 
-it('applies the active theme to the composer title and restrained frame without changing geometry', () => {
+it('applies the active theme to the borderless composer hierarchy without changing geometry', () => {
   const renderStyled = renderBottomSurface as unknown as (...args: unknown[]) => ReturnType<typeof renderBottomSurface>;
   const styled = renderStyled(
     24,
@@ -56,8 +58,37 @@ it('applies the active theme to the composer title and restrained frame without 
   );
   const text = styled.lines.join('\n');
   expect(text).toContain('\x1b[31m▲ You\x1b[39m');
-  expect(text).toContain('\x1b[90m╭─ \x1b[39m');
-  expect(styled.cursorCol).toBe(8);
+  expect(text).toContain(`\x1b[90m${'─'.repeat(79)}\x1b[39m`);
+  expect(text).toContain(`\x1b[90m${'─'.repeat(21)}\x1b[39m`);
+  expect(styled.cursorCol).toBe(6);
+});
+
+it('renders the borderless composer hierarchy with the draft at terminal column one', () => {
+  const surface = renderBottomSurface(
+    18,
+    44,
+    {
+      draft: 'Draft begins here and wraps naturally across the available terminal width.',
+      mode: 'idle',
+      cursorIndex: 5,
+    },
+    '◆ provider/model │ context │ phase │ timer',
+    { brand: (value) => value, muted: (value) => value, unicode: true },
+  );
+
+  expect(surface.lines[0]).toBe('─'.repeat(43));
+  expect(surface.lines[1]).toBe('▲ You');
+  expect(surface.lines[2]).toBe('─'.repeat(21));
+  expect(surface.lines[3]?.startsWith('Draft')).toBe(true);
+  expect(surface.lines[3]?.[0]).toBe('D');
+  expect(surface.lines.slice(3, -2).every((line) => line.length <= 43)).toBe(true);
+  expect(surface.lines.slice(3, -2).join('')).toBe(
+    'Draft begins here and wraps naturally across the available terminal width.',
+  );
+  expect(surface.lines.at(-2)).toBe('─'.repeat(43));
+  expect(surface.lines.at(-1)).toContain('◆ provider/model');
+  expect(surface.lines.join('\n')).not.toMatch(/[╭╮╰╯│]\s*Draft/u);
+  expect(surface.cursorCol).toBe(6);
 });
 
 afterEach(() => {
@@ -70,7 +101,7 @@ function createDisplay(columns: number, rows = 18): {
   screen: TerminalScreen;
   stream: ScreenStream;
 } {
-  const screen = new TerminalScreen(columns, rows);
+  const screen = new TerminalScreen(columns, rows, { retainResizeHistory: true });
   const stream = new ScreenStream(screen, columns, rows);
   const display = new Display({
     stdout: stream as unknown as NodeJS.WriteStream,
@@ -80,22 +111,34 @@ function createDisplay(columns: number, rows = 18): {
 }
 
 function composerGeometry(screen: TerminalScreen): {
+  topSeparator: number;
   top: number;
+  divider: number;
   bottom: number;
   content: string[];
   status: string;
 } {
   const lines = screen.lines();
-  const top = lines.findLastIndex((line) => line.startsWith('╭─ ▲ You'));
-  const bottom = lines.findLastIndex((line) => line.startsWith('╰─'));
+  const top = lines.findLastIndex((line) => line.startsWith('▲ You'));
+  const topSeparator = top - 1;
+  const divider = top + 1;
+  const bottom = lines.length - 2;
   expect(top).toBeGreaterThanOrEqual(0);
+  expect(lines[topSeparator]).toMatch(/^─+$/u);
+  expect(lines[divider]).toBe('─'.repeat(Math.min(21, lines[divider]?.length ?? 0)));
   expect(bottom).toBeGreaterThan(top);
-  expect(bottom).toBe(lines.length - 2);
-  expect(lines.slice(top + 1, bottom).every((line) => line.startsWith('│ '))).toBe(true);
+  expect(lines[bottom]).toMatch(/^─+$/u);
+  expect(lines.slice(top + 2, bottom).every((line) => !/^[ \t]/u.test(line))).toBe(true);
+  const owned = lines.slice(topSeparator);
+  expect(owned.filter((line) => line.startsWith('▲ You'))).toHaveLength(1);
+  expect(owned.filter((line) => line === lines[divider])).toHaveLength(1);
+  expect(owned.filter((line) => line === lines[topSeparator])).toHaveLength(2);
   return {
+    topSeparator,
     top,
+    divider,
     bottom,
-    content: lines.slice(top + 1, bottom),
+    content: lines.slice(top + 2, bottom),
     status: lines.at(-1) ?? '',
   };
 }
@@ -110,7 +153,11 @@ function expectExclusiveSurface(screen: TerminalScreen, statusNeedle: string): R
   return geometry;
 }
 
-describe.each([100, 80, 44])('boxed fixed bottom region at %i columns', (columns) => {
+function composerText(content: string[]): string {
+  return content.join('');
+}
+
+describe.each([100, 80, 44])('borderless fixed bottom region at %i columns', (columns) => {
   it('owns empty, normal, and Unicode drafts with the hardware cursor at insertion', () => {
     delete process.env.AIDEN_COMPOSER_LANE;
     const { display, screen } = createDisplay(columns);
@@ -121,13 +168,13 @@ describe.each([100, 80, 44])('boxed fixed bottom region at %i columns', (columns
     expect(screen.lines()[surface.top]).toContain('▲ You');
     expect(surface.content).toHaveLength(1);
     expect(surface.content[0]).not.toContain('Type your message');
-    expect(screen.cursorPosition()).toEqual({ row: surface.top + 1, col: 2 });
+    expect(screen.cursorPosition()).toEqual({ row: surface.top + 2, col: 0 });
 
     display.setIdleComposer('hello terminal', 'Type your message · /help', 5);
     surface = expectExclusiveSurface(screen, 'provider');
     expect(surface.content.join('')).toContain('hello terminal');
     expect(screen.cursorPosition().row).toBe(surface.bottom - 1);
-    expect(screen.cursorPosition().col).toBe(2 + 5);
+    expect(screen.cursorPosition().col).toBe(5);
 
     display.setIdleComposer('Unicode: नमस्ते 世界 🚀', 'Type your message · /help');
     surface = expectExclusiveSurface(screen, 'provider');
@@ -139,7 +186,7 @@ describe.each([100, 80, 44])('boxed fixed bottom region at %i columns', (columns
     expect(surface.content.join('')).toContain('A世界B');
     expect(screen.cursorPosition()).toEqual({
       row: surface.bottom - 1,
-      col: 2 + 3,
+      col: 3,
     });
   });
 
@@ -198,11 +245,11 @@ describe.each([100, 80, 44])('boxed fixed bottom region at %i columns', (columns
   });
 });
 
-describe('boxed fixed bottom region resize', () => {
+describe('borderless fixed bottom region resize', () => {
   it('makes room without overwriting the existing transcript tail', () => {
     delete process.env.AIDEN_COMPOSER_LANE;
     const { display, screen, stream } = createDisplay(80, 14);
-    stream.write(Array.from({ length: 8 }, (_, index) => `startup transcript ${index + 1}`).join('\n'));
+    display.write(Array.from({ length: 8 }, (_, index) => `startup transcript ${index + 1}`).join('\n'));
 
     display.setStatusFooter('◆ provider · model │ ◉ context 0/32k │ ⧖ 0ms');
     display.setIdleComposer('', 'Type your message · /help');
@@ -213,25 +260,216 @@ describe('boxed fixed bottom region resize', () => {
     expect(transcript).not.toContain('startup transcr▲');
   });
 
-  it('preserves draft, cursor, status, and single ownership across 100 → 44 → 80', () => {
+  it('preserves column-one draft, cursor, hierarchy, and single ownership across 100 → 44 → 100', async () => {
     delete process.env.AIDEN_COMPOSER_LANE;
     const { display, screen, stream } = createDisplay(100);
     const draft = 'a long Unicode draft 世界 that must wrap upward and survive resizing exactly';
 
     display.setStatusFooter('◆ provider · selected-model │ ◉ context 3k/32k │ ⧖ 9s');
-    display.setIdleComposer(draft, 'Type your message · /help');
+    display.setIdleComposer(draft, 'Type your message · /help', 6);
     let surface = expectExclusiveSurface(screen, 'provider');
     expect(surface.content.join(' ')).toContain('Unicode draft');
+    expect(surface.content[0]?.[0]).toBe('a');
+    expect(screen.cursorPosition().col).toBe(6);
 
     stream.resize(44, 18);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     surface = expectExclusiveSurface(screen, 'provider');
     expect(surface.content.length).toBeGreaterThan(1);
-    expect(surface.content.join(' ')).toContain('survive resizing exactly');
+    expect(composerText(surface.content)).toContain('survive resizing exactly');
+    expect(surface.content[0]?.[0]).toBe('a');
+    expect(screen.cursorPosition().col).toBe(6);
 
-    stream.resize(80, 18);
+    stream.resize(100, 18);
+    await new Promise<void>((resolve) => setImmediate(resolve));
     surface = expectExclusiveSurface(screen, 'provider');
     expect(surface.content.join(' ')).toContain('Unicode draft 世界');
-    expect(screen.cursorPosition().row).toBe(surface.bottom - 1);
+    expect(surface.content[0]?.[0]).toBe('a');
+    expect(screen.cursorPosition()).toEqual({ row: surface.top + 2, col: 6 });
+    expect(screen.scrollbackSnapshot(), screen.bufferSnapshot()).not.toContain('▲ You');
+  });
+
+  it('coalesces a resize burst into one main-buffer surface repaint', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.write('Environment\nCapabilities\nBuilt solo\n');
+    display.setStatusFooter('◆ provider · model │ ◉ context 3k/32k │ ⧖ 9s');
+    display.setIdleComposer('draft survives', 'Type your message · /help');
+    stream.writes.length = 0;
+
+    for (const [columns, rows] of [
+      [60, 24], [100, 30], [44, 18], [100, 30],
+    ] as const) {
+      stream.resize(columns, rows);
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(stream.writes, stream.writes.join('\n')).toHaveLength(1);
+    const resizeTransaction = stream.writes.join('');
+    expect(resizeTransaction).not.toContain('\x1b[?1049h');
+    expect(resizeTransaction).not.toContain('\x1b[2J\x1b[H');
+    expect(resizeTransaction).not.toContain('\n');
+    expect(resizeTransaction).not.toContain('Environment');
+    expect(resizeTransaction).not.toContain('Capabilities');
+    expect(resizeTransaction).not.toContain('Built solo');
+    const rendered = screen.snapshot();
+    expect(rendered.match(/▲ You/gu)).toHaveLength(1);
+    expect(rendered.match(/◆\s*provider/gu)).toHaveLength(1);
+    expect(rendered).toContain('draft survives');
+    const durableBuffer = screen.bufferSnapshot();
+    expect(durableBuffer.match(/Environment/gu) ?? []).toHaveLength(1);
+    expect(durableBuffer.match(/Capabilities/gu) ?? []).toHaveLength(1);
+    expect(durableBuffer.match(/Built solo/gu) ?? []).toHaveLength(1);
+    const transientHistory = screen.scrollbackSnapshot();
+    expect(transientHistory).not.toContain('▲ You');
+    expect(transientHistory).not.toContain('◆ provider');
+    expect(maxBlankRun(transientHistory)).toBeLessThanOrEqual(4);
+  });
+
+  it('projects the latest activity and status once after rapid 60 ↔ 44 oscillation', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.setStatusFooter('◆ provider · model │ ◉ context 1k/32k │ ⧖ 1s');
+    display.setIdleComposer('unsent draft', 'Type your message · /help');
+    stream.writes.length = 0;
+
+    for (const width of [60, 44, 60, 44, 100]) {
+      stream.resize(width, 30);
+      display.renderUiEvent('ui_task_update', {
+        task_id: 'task_resize', label: `Inspect at ${width}`, status: 'running',
+      });
+      display.setStatusFooter(`◆ provider · model │ ◉ context 2k/32k │ ⧖ ${width}ms`);
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(stream.writes, stream.writes.join('\n')).toHaveLength(1);
+    const rendered = screen.snapshot();
+    expect(rendered.match(/^▲ You/gmu) ?? [], rendered).toHaveLength(1);
+    expect(rendered.match(/Inspect at 100/gu) ?? [], rendered).toHaveLength(1);
+    expect(rendered, rendered).not.toContain('Inspect at 44');
+    expect(rendered, rendered).toContain('unsent draft');
+    expect(rendered.split('\n').at(-1), rendered).toContain('100ms');
+  });
+
+  it('invalidates a deferred resize repaint when the viewport epoch changes', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.setStatusFooter('◆ provider · model │ ◉ context 0/32k │ ⧖ 0ms');
+    display.setIdleComposer('draft survives clear', 'Type your message · /help');
+
+    stream.resize(44, 20);
+    display.clearScreen();
+    const writesAfterClear = stream.writes.length;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(stream.writes).toHaveLength(writesAfterClear);
+    const rendered = screen.snapshot();
+    expect(rendered.match(/^▲ You/gmu) ?? [], rendered).toHaveLength(1);
+    expect(rendered, rendered).toContain('draft survives clear');
+    expect(rendered.match(/^◆\s*provider/gmu) ?? [], rendered).toHaveLength(1);
+  });
+
+  it('restores one-shot transcript and footer after a modal resizes the terminal', () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.write('Environment │ Capabilities\nBuilt solo\n');
+    display.setStatusFooter('◆ provider · model │ ◉ context 3k/32k │ ⧖ 9s');
+    display.setIdleComposer('approval draft', 'Type your message · /help');
+
+    display.pauseComposerSurface();
+    stream.resize(44, 20);
+    display.write('Approval required\n');
+    stream.resize(100, 30);
+    display.resumeComposerSurface();
+
+    const rendered = screen.snapshot();
+    const reviewable = screen.reviewableSnapshot();
+    expect(reviewable.match(/Environment/gu), reviewable).toHaveLength(1);
+    expect(reviewable.match(/Capabilities/gu)).toHaveLength(1);
+    expect(reviewable.match(/Built solo/gu)).toHaveLength(1);
+    expect(rendered.match(/Approval required/gu)).toHaveLength(1);
+    expect(rendered.match(/▲ You/gu)).toHaveLength(1);
+    expect(rendered.match(/◆\s*provider/gu)).toHaveLength(1);
+    expect(rendered).toContain('approval draft');
+  });
+
+  it('keeps one volatile surface through fifty physical-equivalent resize sequences', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.write('Environment\nCapabilities\nBuilt solo\n');
+    display.setStatusFooter('◆ custom_openai · custom-default │ ◉ context 0/32k │ ✓ ready │ ⧖ 0ms');
+    display.setIdleComposer('unsent Windows draft', 'Type your message · /help');
+
+    const sequence = [60, 100, 44, 100, 60, 44] as const;
+    for (let iteration = 0; iteration < 50; iteration += 1) {
+      for (const width of sequence) {
+        stream.resize(width, 30);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      const rendered = screen.snapshot();
+      expect(rendered.match(/^▲ You/gmu) ?? [], rendered).toHaveLength(1);
+      expect(rendered.match(/^◆\s*custom_openai/gmu) ?? [], rendered).toHaveLength(1);
+      expect(screen.scrollbackSnapshot(), screen.bufferSnapshot()).not.toContain('▲ You');
+    }
+
+    const history = screen.reviewableSnapshot();
+    expect(history.match(/Environment/gu) ?? [], history).toHaveLength(1);
+    expect(history.match(/Capabilities/gu) ?? [], history).toHaveLength(1);
+    expect(history.match(/Built solo/gu) ?? [], history).toHaveLength(1);
+    expect(screen.snapshot(), screen.snapshot()).toContain('unsent Windows draft');
+  });
+
+  it('survives one hundred mixed-width transitions across activity and approval ownership', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.write('durable prompt\ncompleted answer\n');
+    display.setStatusFooter('◆ custom_openai · custom-default │ ◉ context 7% │ T │ ⧖ 8s');
+    display.setBusyHint('Enter → queue · Ctrl+C stop');
+    display.setComposer('queued draft remains exact', 'queue');
+
+    const widths = [100, 60, 44, 80, 40, 100, 44, 60] as const;
+    for (let index = 0; index < 100; index += 1) {
+      const width = widths[index % widths.length];
+      if (index === 20) {
+        display.renderUiEvent('ui_task_update', {
+          task_id: 'provider_resize', label: 'Provider activity', status: 'running',
+        });
+      }
+      if (index === 40) {
+        display.renderUiEvent('ui_task_update', {
+          task_id: 'tool_resize', label: 'Tool activity', status: 'running',
+        });
+      }
+      if (index === 60) {
+        display.pauseComposerSurface();
+        stream.resize(width, 24);
+        display.write('Approval required\n');
+        display.resumeComposerSurface();
+      } else {
+        stream.resize(width, index % 3 === 0 ? 24 : 30);
+      }
+      if (index === 80) {
+        display.renderUiEvent('ui_task_update', {
+          task_id: 'provider_resize', label: 'Provider complete', status: 'completed',
+        });
+        display.renderUiEvent('ui_task_update', {
+          task_id: 'tool_resize', label: 'Tool complete', status: 'completed',
+        });
+      }
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const rendered = screen.snapshot();
+      expect(rendered.match(/^▲ You · queue mode/gmu) ?? [], rendered).toHaveLength(1);
+      expect(rendered.match(/^◆\s*custom_openai/gmu) ?? [], rendered).toHaveLength(1);
+      expect(screen.scrollbackSnapshot(), screen.bufferSnapshot()).not.toContain('▲ You');
+    }
+
+    const rendered = screen.snapshot();
+    expect(rendered, rendered).toContain('queued draft remains exact');
+    expect(
+      screen.reviewableSnapshot().match(/Approval required/gu) ?? [],
+      screen.reviewableSnapshot(),
+    ).toHaveLength(1);
+    expect(screen.reviewableSnapshot(), screen.reviewableSnapshot()).toContain('completed answer');
   });
 });
 
@@ -241,6 +479,20 @@ function semanticGap(lines: string[], before: string, after: string): number {
   expect(beforeRow, `missing semantic row: ${before}`).toBeGreaterThanOrEqual(0);
   expect(afterRow, `missing semantic row: ${after}`).toBeGreaterThan(beforeRow);
   return afterRow - beforeRow - 1;
+}
+
+function maxBlankRun(value: string): number {
+  let current = 0;
+  let maximum = 0;
+  for (const line of value.split(/\r?\n/u)) {
+    if (line.trim() === '') {
+      current += 1;
+      maximum = Math.max(maximum, current);
+    } else {
+      current = 0;
+    }
+  }
+  return maximum;
 }
 
 describe('compact hybrid transcript geometry', () => {

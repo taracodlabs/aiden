@@ -40,7 +40,7 @@ function harness(columns = 100, rows = 24): {
   screen: TerminalScreen;
   stream: ViewportStream;
 } {
-  const screen = new TerminalScreen(columns, rows);
+  const screen = new TerminalScreen(columns, rows, { retainResizeHistory: true });
   const stream = new ViewportStream(screen, columns, rows);
   const display = new Display({
     stdout: stream as unknown as NodeJS.WriteStream,
@@ -60,20 +60,20 @@ function expectCleanViewport(
   opts: { draft?: string; active?: string } = {},
 ): void {
   const lines = screen.lines();
-  const composerTop = lines.findIndex((line) => line.startsWith('╭─ ▲ You'));
+  const composerTop = lines.findIndex((line) => line.startsWith('▲ You'));
   expect(composerTop).toBeGreaterThanOrEqual(0);
-  expect(count(lines, '╭─ ▲ You')).toBe(1);
-  expect(count(lines, '◆ provider')).toBe(1);
+  expect(count(lines, '▲ You'), screen.snapshot()).toBe(1);
+  expect(count(lines, '◆ provider'), screen.snapshot()).toBe(1);
   expect(lines.at(-1)).toContain('◆ provider');
-  expect(lines.at(-2)).toMatch(/^╰─/u);
+  expect(lines.at(-2)).toMatch(/^─+$/u);
   if (opts.draft) expect(lines.slice(composerTop, -1).join('\n')).toContain(opts.draft);
   if (opts.active) {
     expect(count(lines, opts.active)).toBe(1);
-    expect(lines.slice(0, composerTop).join('\n')).toContain(opts.active);
+    expect(lines.slice(0, Math.max(0, composerTop - 1)).join('\n')).toContain(opts.active);
   } else {
-    expect(lines.slice(0, composerTop).every((line) => line === '')).toBe(true);
+    expect(lines.slice(0, Math.max(0, composerTop - 1)).every((line) => line === '')).toBe(true);
   }
-  expect(screen.cursorPosition().row).toBe(composerTop + 1);
+  expect(screen.cursorPosition().row).toBe(composerTop + 2);
 }
 
 const previousLaneSetting = process.env.AIDEN_COMPOSER_LANE;
@@ -105,13 +105,14 @@ describe('physical viewport epochs', () => {
 
   it.each([
     [100, 16], [100, 24], [100, 35], [100, 45], [100, 60], [44, 24], [80, 35],
-  ])('keeps the new epoch clean through a %i x %i viewport', (columns, rows) => {
+  ])('keeps the new epoch clean through a %i x %i viewport', async (columns, rows) => {
     delete process.env.AIDEN_COMPOSER_LANE;
     const { display, screen, stream } = harness(100, 24);
     display.write('OLD BEFORE RESIZE\n'.repeat(40));
     display.clearScreen();
 
     stream.resize(columns, rows);
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
     expect(screen.snapshot()).not.toContain('OLD BEFORE RESIZE');
     expectCleanViewport(screen);

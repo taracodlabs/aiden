@@ -36,10 +36,13 @@ function assertClearedFrame(screen: TerminalScreen, oldRows: readonly string[]):
   const composerTop = lines.findIndex((line) => line.includes('▲ You'));
   expect(composerTop, frame).toBeGreaterThanOrEqual(0);
   expect(occurrence(lines, '▲ You'), frame).toBe(1);
-  expect(occurrence(lines, '◆'), frame).toBe(1);
+  expect(occurrence(lines, '◆'), screen.bufferSnapshot()).toBe(1);
   expect(lines.at(-1), frame).toContain('◆');
-  expect(lines.slice(0, composerTop).every((line) => line === ''), frame).toBe(true);
-  expect(screen.cursorPosition().row, frame).toBe(composerTop + 1);
+  expect(
+    lines.slice(0, Math.max(0, composerTop - 1)).every((line) => line === ''),
+    frame,
+  ).toBe(true);
+  expect(screen.cursorPosition().row, frame).toBe(composerTop + 2);
 }
 
 afterEach(async () => {
@@ -75,7 +78,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI physical viewport epoch
       'display:', '  streaming: true', '  renderer: frame',
     ].join('\n') + '\n', 'utf8');
 
-    const screen = new TerminalScreen(columns, 35);
+    const screen = new TerminalScreen(columns, 35, { retainResizeHistory: true });
     const preloadPath = path.join(
       repoRoot,
       'tests/v4/harness',
@@ -151,12 +154,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI physical viewport epoch
           later(() => {
             assertClearedFrame(screen, oldRows);
             const nextColumns = columns === 100 ? 44 : 100;
-            child!.resize(nextColumns, 24);
             screen.resize(nextColumns, 24);
+            child!.resize(nextColumns, 24);
             later(() => {
               assertClearedFrame(screen, oldRows);
-              child!.resize(columns, 35);
               screen.resize(columns, 35);
+              child!.resize(columns, 35);
               later(() => {
                 assertClearedFrame(screen, oldRows);
                 state = 'after';

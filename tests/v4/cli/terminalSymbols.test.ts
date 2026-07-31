@@ -14,12 +14,15 @@ describe('terminal symbol fallback', () => {
     expect(terminalStateSymbol('unknown', env)).toBe('[?]');
   });
 
-  it('uses ASCII composer chrome for a dumb terminal', () => {
+  it('uses the borderless ASCII composer hierarchy for a dumb terminal', () => {
     const surface = renderBottomSurface(16, 44, { draft: 'plain', mode: 'idle' }, 'provider', {
       brand: (value) => value, muted: (value) => value, unicode: false,
     });
-    expect(surface.lines[0]).toMatch(/^\+- > You -+\+$/u);
-    expect(surface.lines[1]).toMatch(/^\| plain\s+\|$/u);
-    expect(surface.lines[2]).toMatch(/^\+-+\+$/u);
+    expect(surface.lines[0]).toBe('-'.repeat(43));
+    expect(surface.lines[1]).toBe('> You');
+    expect(surface.lines[2]).toBe('-'.repeat(21));
+    expect(surface.lines[3]).toBe('plain');
+    expect(surface.lines[4]).toBe('-'.repeat(43));
+    expect(surface.lines[5]).toBe('provider');
   });
 });

@@ -72,7 +72,7 @@ export interface AidenPromptConfig {
   /** v4.14 — persistent plain-language idle hint shown in the footer when no
    *  ghost/dropdown is active (e.g. "Type your message · /help · /mode"). */
   hint?: string;
-  /** Route the main prompt through Display's fixed boxed terminal region.
+  /** Route the main prompt through Display's fixed borderless terminal region.
    * Inquirer remains input-only and its transient helper rows are suppressed. */
   fixedComposer?: {
     update: (value: string, hint: string, cursorIndex: number) => void;

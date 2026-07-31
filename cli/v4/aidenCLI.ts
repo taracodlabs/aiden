@@ -1840,7 +1840,7 @@ export async function buildAgentRuntime(
   // v4.5 update system — the old setImmediate dim/warn one-liner
   // here was superseded by the interactive boot prompt rendered
   // later inside `chatSession.run()::maybeShowBootUpdatePrompt`.
-  // Single surface for update notification: the boxed prompt.
+  // Single surface for update notification: the owned composer.
   // Pre-warm the registry probe so the cache is fresh by the time
   // the prompt asks — same non-blocking pattern, same opt-out
   // semantics, no user-visible output from this call.

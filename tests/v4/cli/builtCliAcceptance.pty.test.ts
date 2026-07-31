@@ -56,17 +56,21 @@ function bottomSurface(lines: string[]): {
   content: string[];
   status: string;
 } | null {
-  const top = lines.findLastIndex((line) => line.startsWith('╭─ ▲ You'));
-  const bottom = lines.findLastIndex((line) => line.startsWith('╰─'));
-  if (top < 0 || bottom <= top || bottom !== lines.length - 2) return null;
-  return { top, content: lines.slice(top + 1, bottom), status: lines.at(-1) ?? '' };
+  const top = lines.findLastIndex((line) => line.startsWith('▲ You'));
+  const bottom = lines.length - 2;
+  if (
+    top < 1
+    || lines[top - 1] === undefined
+    || !/^─+$/u.test(lines[top - 1])
+    || lines[top + 1] !== '─'.repeat(21)
+    || bottom <= top
+    || !/^─+$/u.test(lines[bottom] ?? '')
+  ) return null;
+  return { top, content: lines.slice(top + 2, bottom), status: lines.at(-1) ?? '' };
 }
 
 function bottomDraft(content: string[]): string {
-  return content
-    .map((line) => line.replace(/^│ ?/u, '').replace(/ ?│$/u, '').trimEnd())
-    .join('\n')
-    .trim();
+  return content.join('').trimEnd();
 }
 
 afterEach(async () => {
@@ -199,14 +203,14 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
       if (name === 'typing') {
         expect(surface.content.join(' '), name).toContain(composerNeedle);
         expect(typingCursor, name).toEqual({
-          row: surface.top + surface.content.length,
-          col: 2 + insertionIndex,
+          row: surface.top + 1 + surface.content.length,
+          col: insertionIndex,
         });
       } else {
         expect(surface.content.join(''), name).not.toContain('Type your message');
         expect(restoredCursor, `${name}\n${frame}`).toEqual({
-          row: surface.top + surface.content.length,
-          col: 2,
+          row: surface.top + 1 + surface.content.length,
+          col: 0,
         });
       }
       expect(surface.status, name).toContain('custom_openai');
@@ -396,12 +400,12 @@ describe.skipIf(process.platform !== 'win32')('built CLI P2A/P2C acceptance', ()
     const firstSurface = bottomSurface(frames.firstQueue.split('\n'));
     const secondSurface = bottomSurface(frames.secondQueue.split('\n'));
     expect(firstCursor).toEqual({
-      row: firstSurface!.top + firstSurface!.content.length,
-      col: 2,
+      row: firstSurface!.top + 1 + firstSurface!.content.length,
+      col: 0,
     });
     expect(secondCursor).toEqual({
-      row: secondSurface!.top + secondSurface!.content.length,
-      col: 2,
+      row: secondSurface!.top + 1 + secondSurface!.content.length,
+      col: 0,
     });
     const runningSurface = bottomSurface(frames.toolRunning.split('\n'));
     expect(runningSurface).not.toBeNull();
