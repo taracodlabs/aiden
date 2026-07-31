@@ -7,7 +7,7 @@
 /**
  * Single-owner fixed terminal bottom region.
  *
- * The owner reserves a variable-height boxed composer plus one status row.
+ * The owner reserves a variable-height borderless composer plus one status row.
  * Transcript, activity, and tool writes are restored to the scrollable region;
  * the hardware cursor is then returned to the draft insertion point. Modal
  * prompts release the complete surface and a balanced resume reconstructs it.
@@ -27,6 +27,7 @@ import {
 } from './operatorProjection';
 import { wrap as wrapAnsiText } from './display/frame';
 import { terminalSupportsUnicode } from './terminalSymbols';
+import { resizeReadyMarkerForTests } from './composerReadiness';
 
 const ESC = '\x1b';
 const SAVE = `${ESC}7`;
@@ -34,6 +35,9 @@ const RESTORE = `${ESC}8`;
 const SAVE_TRANSCRIPT = `${ESC}[s`;
 const RESTORE_TRANSCRIPT = `${ESC}[u`;
 const CLEAR_PHYSICAL_VIEWPORT = `${ESC}[?25l${ESC}[r${ESC}[3J${ESC}[2J${ESC}[H`;
+const COMPACT_STATUS_COLUMNS = 40;
+const COMPOSER_DIVIDER_COLUMNS = 21;
+const REFLOW_SAFE_ACTIVITY_COLUMNS = 40;
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
 const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
@@ -80,7 +84,7 @@ export function fitLane(text: string, cols: number): string {
   return `…${tail}`;
 }
 
-type StatusSource = string | (() => string);
+type StatusSource = string | ((columns?: number) => string);
 
 export interface BottomRegionStyle {
   brand(value: string): string;
@@ -121,8 +125,20 @@ function fitStatus(text: string, cols: number): string {
   return sawAnsi ? `${out}${ESC}[0m` : out;
 }
 
-function padVisible(text: string, width: number): string {
-  return `${text}${' '.repeat(Math.max(0, width - terminalWidth(text)))}`;
+function fitReflowSafeStatus(text: string, cols: number): string {
+  if (terminalWidth(text) <= cols) return text;
+  const plain = text.replace(ANSI_PATTERN, '');
+  const segments = plain.split(/\s*[│|]\s*/u).filter(Boolean);
+  if (segments.length < 2) return fitStatus(text, cols);
+  const identity = (segments.shift() ?? '')
+    .replace(/^([◆*])\s+/u, '$1')
+    .replace(/\s+·\s+/gu, '/');
+  const timer = segments.pop() ?? '';
+  const context = (segments.shift() ?? '')
+    .replace(/\bcontext\s*/iu, '')
+    .replace(/^([◉])\s+/u, '$1');
+  const compact = [identity, context, ...segments, timer].filter(Boolean).join('│');
+  return fitStatus(compact, cols);
 }
 
 function wrapTranscriptText(text: string, width: number): string[] {
@@ -252,6 +268,12 @@ interface SurfaceGeometry {
   topRow: number;
 }
 
+interface RenderedSurfaceSnapshot {
+  lines: string[];
+  cursorLine: number;
+  cursorColumn: number;
+}
+
 function normalizeComposer(source: ComposerSource): BottomComposerSurface {
   return typeof source === 'string'
     ? { draft: source, mode: 'idle' }
@@ -275,37 +297,36 @@ export function renderBottomSurface(
 ): RenderedSurface {
   const composer = normalizeComposer(composerSource);
   const unicode = style.unicode ?? terminalSupportsUnicode();
-  const chrome = unicode
-    ? { topLeft: '╭', topRight: '╮', bottomLeft: '╰', bottomRight: '╯', horizontal: '─', vertical: '│' }
-    : { topLeft: '+', topRight: '+', bottomLeft: '+', bottomRight: '+', horizontal: '-', vertical: '|' };
+  const horizontal = unicode ? '─' : '-';
   // Leave the final physical cell unused so Windows ConPTY never enters its
-  // pending-wrap state after painting a border or status row.
-  const outerWidth = Math.max(8, cols - 1);
-  const innerWidth = Math.max(1, outerWidth - 4);
-  const maxContentLines = Math.max(1, rows - 4);
+  // pending-wrap state after painting a separator or status row.
+  const availableWidth = Math.max(1, cols - 1);
+  const maxContentLines = Math.max(1, rows - 5);
   const wrapped = wrapDraft(
     composer.draft,
-    innerWidth,
+    availableWidth,
     maxContentLines,
     composer.cursorIndex,
   );
   const content = wrapped.lines;
-  const laneRows = Math.min(rows - 1, content.length + 3);
+  const laneRows = Math.min(rows, content.length + 5);
   const title = modeTitle(composer.mode, unicode);
-  const titleRoom = Math.max(1, outerWidth - 5);
-  const fittedTitle = terminalWidth(title) <= titleRoom ? title : fitStatus(title, titleRoom);
-  const topPrefix = `${chrome.topLeft}${chrome.horizontal} ${fittedTitle} `;
-  const topTail = `${chrome.horizontal.repeat(Math.max(0, outerWidth - terminalWidth(topPrefix) - 1))}${chrome.topRight}`;
-  const top = `${style.muted(`${chrome.topLeft}${chrome.horizontal} `)}${style.brand(fittedTitle)}${style.muted(` ${topTail}`)}`;
-  const body = content.map((line) => `${style.muted(chrome.vertical)} ${padVisible(line, innerWidth)} ${style.muted(chrome.vertical)}`);
-  const bottom = style.muted(`${chrome.bottomLeft}${chrome.horizontal.repeat(Math.max(0, outerWidth - 2))}${chrome.bottomRight}`);
-  const fittedStatus = fitStatus(status, outerWidth);
+  const fittedTitle = fitStatus(title, availableWidth);
+  const top = style.muted(horizontal.repeat(availableWidth));
+  const divider = style.muted(horizontal.repeat(Math.min(
+    COMPOSER_DIVIDER_COLUMNS,
+    availableWidth,
+  )));
+  const bottom = style.muted(horizontal.repeat(availableWidth));
+  const fittedStatus = cols <= COMPACT_STATUS_COLUMNS
+    ? fitReflowSafeStatus(status, availableWidth)
+    : fitStatus(status, availableWidth);
   const topRow = rows - laneRows + 1;
   return {
-    lines: [top, ...body, bottom, fittedStatus],
+    lines: [top, style.brand(fittedTitle), divider, ...content, bottom, fittedStatus],
     laneRows,
-    cursorRow: topRow + 1 + wrapped.cursorLine,
-    cursorCol: Math.min(outerWidth - 1, 3 + wrapped.cursorCell),
+    cursorRow: topRow + 3 + wrapped.cursorLine,
+    cursorCol: Math.min(availableWidth, 1 + wrapped.cursorCell),
   };
 }
 
@@ -314,6 +335,8 @@ export interface LaneSink {
   rows: () => number;
   cols: () => number;
   onResize: (fn: () => void) => () => void;
+  /** Windows main-buffer hosts reflow visible cells before delivering resize. */
+  reflowSafe?: boolean;
 }
 
 export class BottomRegion {
@@ -326,12 +349,19 @@ export class BottomRegion {
   private geometry: SurfaceGeometry | null = null;
   private resizeBurstActive = false;
   private trailingResize: ReturnType<typeof setImmediate> | null = null;
+  private resizeEpoch = 0;
   private renderGeneration = 0;
   private projection: OperatorProjectionState = initialOperatorProjection();
   private projectionIdentity = 0;
-  private rebuildTranscriptOnActivation = false;
   private viewportClearPending = false;
+  private pendingCursorOutput = '';
+  private pendingTranscriptOutput = '';
+  private pendingModalTranscriptOutput = '';
+  private renderedSurface: RenderedSurfaceSnapshot | null = null;
+  private restoreAfterModal = false;
+  private readonly terminalLiveRows = new Set<string>();
   private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
+  private static readonly MAX_TERMINAL_LIVE_ROWS = 2_048;
 
   constructor(
     private readonly sink: LaneSink,
@@ -342,6 +372,17 @@ export class BottomRegion {
     return this.active;
   }
 
+  usesReflowSafeRows(): boolean {
+    return this.sink.reflowSafe === true;
+  }
+
+  volatileRowWidth(): number {
+    const columns = this.sink.reflowSafe
+      ? Math.min(this.sink.cols(), REFLOW_SAFE_ACTIVITY_COLUMNS)
+      : this.sink.cols();
+    return Math.max(1, columns - 1);
+  }
+
   /** Reserve and paint the complete surface. Repeated activation is an update. */
   activate(composer: ComposerSource, status: StatusSource = this.statusSource): void {
     this.composerSource = composer;
@@ -350,17 +391,17 @@ export class BottomRegion {
       this.active = true;
       this.unsubResize = this.sink.onResize(() => this.onResize());
     }
-    // Transcript written before first activation already exists physically.
-    // A balanced modal release is different: the modal temporarily owns the
-    // same terminal rows, so restoring ownership must reconstruct the semantic
-    // transcript before repainting the footer.
-    const rebuildTranscript = this.rebuildTranscriptOnActivation;
-    this.rebuildTranscriptOnActivation = false;
+    const restoreAfterModal = this.restoreAfterModal;
+    this.restoreAfterModal = false;
     if (this.viewportClearPending) {
       this.paintClearedViewport();
       return;
     }
-    this.paintAll(rebuildTranscript);
+    if (restoreAfterModal) {
+      this.paintRestoredSurface();
+      return;
+    }
+    this.paintAll();
   }
 
   /** Backward-compatible composer update. */
@@ -378,6 +419,7 @@ export class BottomRegion {
 
   /** Project one identity-backed live row above the composer. */
   setLiveRow(id: string, text: string): void {
+    if (this.terminalLiveRows.has(id)) return;
     const normalized = text.replace(/\r?\n$/u, '');
     const current = this.projection.activities[id];
     const next = reduceOperatorProjection(this.projection, current
@@ -397,11 +439,14 @@ export class BottomRegion {
   }
 
   /** Hide a live row without adding it to transcript history. */
-  removeLiveRow(id: string): void {
+  removeLiveRow(id: string, terminal = false): void {
+    if (terminal) this.rememberTerminalLiveRow(id);
     const next = reduceOperatorProjection(this.projection, { type: 'activity.remove', id });
     if (next === this.projection) return;
     this.projection = next;
-    if (this.active) this.paintAll(true);
+    if (!this.active) return;
+    if (this.resizeBurstActive) this.finishResizeBurstNow();
+    else this.paintAll();
   }
 
   /** Replace a live row with its final transcript row exactly once. */
@@ -411,6 +456,8 @@ export class BottomRegion {
     state: Extract<OperatorActivityState,
       'succeeded' | 'failed' | 'denied' | 'interrupted' | 'cancelled' | 'timed_out' | 'unknown' | 'stale'> = 'succeeded',
   ): void {
+    if (this.terminalLiveRows.has(id)) return;
+    this.rememberTerminalLiveRow(id);
     const current = this.projection.activities[id];
     if (current) {
       this.projection = reduceOperatorProjection(this.projection, {
@@ -427,8 +474,13 @@ export class BottomRegion {
       this.sink.write(terminal);
       return;
     }
+    if (this.resizeBurstActive) {
+      this.pendingTranscriptOutput += terminal;
+      this.finishResizeBurstNow();
+      return;
+    }
     this.sink.write(`${RESTORE_TRANSCRIPT}${terminal}${SAVE_TRANSCRIPT}`);
-    this.paintAll(true);
+    this.paintAll();
   }
 
   /** Move the transcript viewport away from or toward the live tail. */
@@ -452,14 +504,17 @@ export class BottomRegion {
   /** Start a new physical viewport while retaining semantic transcript state. */
   clearViewport(): void {
     this.renderGeneration += 1;
+    this.resizeEpoch += 1;
     if (this.trailingResize) clearImmediate(this.trailingResize);
     this.trailingResize = null;
     this.resizeBurstActive = false;
     this.projection = reduceOperatorProjection(this.projection, { type: 'viewport.clear' });
     this.lastFrame = '';
+    this.renderedSurface = null;
     this.geometry = null;
     this.laneRows = 0;
-    this.rebuildTranscriptOnActivation = false;
+    this.restoreAfterModal = false;
+    this.pendingModalTranscriptOutput = '';
     this.viewportClearPending = true;
     if (this.active) this.paintClearedViewport();
   }
@@ -502,12 +557,18 @@ export class BottomRegion {
    */
   writeAbove(text: string): void {
     const priorSource = transcriptSource(this.projection);
-    const ownsTranscriptBoundary = this.active || this.rebuildTranscriptOnActivation;
-    const lineBreak = ownsTranscriptBoundary && priorSource.length > 0 && !priorSource.endsWith('\n') ? '\n' : '';
+    const ownsTranscriptBoundary = this.active || this.restoreAfterModal;
+    const lineBreak = ownsTranscriptBoundary && priorSource.length > 0
+      && !priorSource.endsWith('\n') ? '\n' : '';
     const output = `${lineBreak}${text}`;
     this.recordTranscript(output);
     if (!this.active) {
+      if (this.restoreAfterModal) this.pendingModalTranscriptOutput += output;
       this.sink.write(output);
+      return;
+    }
+    if (this.resizeBurstActive) {
+      this.pendingTranscriptOutput += output;
       return;
     }
     const surface = this.surface();
@@ -528,6 +589,10 @@ export class BottomRegion {
       this.sink.write(text);
       return;
     }
+    if (this.resizeBurstActive) {
+      this.pendingCursorOutput += text;
+      return;
+    }
     const surface = this.surface();
     this.sink.write(
       `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h${text}`,
@@ -535,17 +600,18 @@ export class BottomRegion {
   }
 
   private surface(): RenderedSurface {
+    const renderColumns = this.sink.cols();
     const rawStatus = typeof this.statusSource === 'function'
-      ? this.statusSource()
+      ? this.statusSource(renderColumns)
       : this.statusSource;
     const composer = renderBottomSurface(
       this.sink.rows(),
-      this.sink.cols(),
+      renderColumns,
       this.composerSource,
       rawStatus,
       this.style,
     );
-    const availableWidth = Math.max(1, this.sink.cols() - 1);
+    const availableWidth = this.volatileRowWidth();
     const allLive = activeActivityRows(this.projection).flatMap((activity) => (
       activity.summary.split('\n').map((line) => fitStatus(line, availableWidth))
     ));
@@ -589,6 +655,13 @@ export class BottomRegion {
     return true;
   }
 
+  private rememberTerminalLiveRow(id: string): void {
+    this.terminalLiveRows.add(id);
+    if (this.terminalLiveRows.size <= BottomRegion.MAX_TERMINAL_LIVE_ROWS) return;
+    const oldest = this.terminalLiveRows.values().next().value as string | undefined;
+    if (oldest !== undefined) this.terminalLiveRows.delete(oldest);
+  }
+
   private transcriptFrame(surface: RenderedSurface): string {
     const bottom = Math.max(0, this.sink.rows() - surface.laneRows);
     if (bottom === 0) return '';
@@ -627,6 +700,50 @@ export class BottomRegion {
     let sequence = '';
     for (let offset = Math.max(1, count) - 1; offset >= 0; offset -= 1) {
       sequence += `${ESC}[${Math.max(1, this.sink.rows() - offset)};1H${ESC}[2K`;
+    }
+    return sequence;
+  }
+
+  private rememberSurface(surface: RenderedSurface): void {
+    const topRow = Math.max(1, this.sink.rows() - surface.laneRows + 1);
+    this.renderedSurface = {
+      lines: [...surface.lines],
+      cursorLine: Math.max(0, Math.min(
+        surface.lines.length - 1,
+        surface.cursorRow - topRow,
+      )),
+      cursorColumn: surface.cursorCol,
+    };
+  }
+
+  private eraseReflowedSurface(nextColumns: number, anchorFromBottom: boolean): string {
+    const previous = this.renderedSurface;
+    if (!previous) return `${ESC}[?25l`;
+    const width = Math.max(1, nextColumns);
+    const spans = previous.lines.map((line) => (
+      Math.max(1, Math.ceil(terminalWidth(line) / width))
+    ));
+    const reflowRows = spans.reduce((sum, rows) => sum + rows, 0);
+    let sequence = `${ESC}[?25l`;
+    const rowsBeforeCursor = spans
+      .slice(0, previous.cursorLine)
+      .reduce((sum, rows) => sum + rows, 0)
+      + Math.floor(Math.max(0, previous.cursorColumn - 1) / width);
+    if (anchorFromBottom) {
+      // Multiple host reflows can relocate the hardware cursor independently
+      // of the retained surface before the coalesced callback runs.
+      const cursorRow = Math.max(
+        1,
+        this.sink.rows() - reflowRows + rowsBeforeCursor + 1,
+      );
+      const cursorColumn = (Math.max(0, previous.cursorColumn - 1) % width) + 1;
+      sequence += `${ESC}[${cursorRow};${cursorColumn}H\r`;
+    } else {
+      sequence += '\r';
+    }
+    sequence += rowsBeforeCursor > 0 ? `${ESC}[${rowsBeforeCursor}A` : '';
+    for (let row = 0; row < reflowRows; row += 1) {
+      sequence += `${ESC}[2K${row + 1 < reflowRows ? `${ESC}[1B` : ''}`;
     }
     return sequence;
   }
@@ -684,13 +801,18 @@ export class BottomRegion {
     const clear = dimensionsChanged
       ? this.clearDamagedUnion(previousGeometry, nextGeometry)
       : this.clearOwnedRows(Math.max(previousRows, nextRows));
+    if (!dimensionsChanged && nextRows < previousRows) {
+      const transcriptBottom = Math.max(1, physicalRows - nextRows);
+      return `${RESTORE_TRANSCRIPT}${SAVE}${ESC}[r${clear}` +
+        `${ESC}[1;${transcriptBottom}r${RESTORE}${SAVE_TRANSCRIPT}`;
+    }
     return `${RESTORE_TRANSCRIPT}${makeRoom}${ESC}[r` +
       `${clear}` +
       `${reserveSeq(this.sink.rows(), nextRows)}${SAVE_TRANSCRIPT}`;
   }
 
   private paintAll(rebuildTranscript = false): void {
-    if (!this.active) return;
+    if (!this.active || this.resizeBurstActive) return;
     const epoch = this.projection.viewport.epoch;
     this.projection = reduceOperatorProjection(this.projection, {
       type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
@@ -705,6 +827,7 @@ export class BottomRegion {
       return;
     }
     this.lastFrame = frame;
+    this.rememberSurface(surface);
     const topRow = this.sink.rows() - surface.laneRows + 1;
     let sequence = geometry;
     if (rebuildTranscript) sequence += this.transcriptFrame(surface);
@@ -730,9 +853,11 @@ export class BottomRegion {
       topRow: Math.max(1, this.sink.rows() - surface.laneRows + 1),
     };
     this.lastFrame = surface.lines.join('\n');
+    this.rememberSurface(surface);
     this.viewportClearPending = false;
     const topRow = this.sink.rows() - surface.laneRows + 1;
-    let sequence = `${CLEAR_PHYSICAL_VIEWPORT}${reserveSeq(this.sink.rows(), surface.laneRows)}${SAVE_TRANSCRIPT}`;
+    let sequence = `${CLEAR_PHYSICAL_VIEWPORT}` +
+      `${reserveSeq(this.sink.rows(), surface.laneRows)}${SAVE_TRANSCRIPT}`;
     surface.lines.forEach((line, index) => {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });
@@ -740,46 +865,136 @@ export class BottomRegion {
     if (epoch === this.projection.viewport.epoch) this.sink.write(sequence);
   }
 
-  private reanchor(): void {
+  private paintRestoredSurface(): void {
     if (!this.active) return;
+    const epoch = this.projection.viewport.epoch;
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
+    });
+    const surface = this.surface();
+    this.laneRows = surface.laneRows;
+    this.geometry = {
+      rows: this.sink.rows(),
+      cols: this.sink.cols(),
+      laneRows: surface.laneRows,
+      topRow: Math.max(1, this.sink.rows() - surface.laneRows + 1),
+    };
+    this.lastFrame = surface.lines.join('\n');
+    this.rememberSurface(surface);
+    const topRow = this.sink.rows() - surface.laneRows + 1;
+    let sequence = `${ESC}[?25l${RESTORE_TRANSCRIPT}\r${ESC}[0J` +
+      `${this.pendingModalTranscriptOutput}` +
+      `${reserveSeq(this.sink.rows(), surface.laneRows)}${SAVE_TRANSCRIPT}`;
+    this.pendingModalTranscriptOutput = '';
+    surface.lines.forEach((line, index) => {
+      sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
+    });
+    sequence += `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`;
+    if (epoch === this.projection.viewport.epoch) this.sink.write(sequence);
+  }
+
+  private reanchor(resizeEpoch: number, forceBottomAnchor = false): void {
+    if (!this.active || resizeEpoch !== this.resizeEpoch) return;
     const generation = ++this.renderGeneration;
-    this.lastFrame = '';
-    this.paintAll(true);
-    if (generation !== this.renderGeneration) return;
+    const epoch = this.projection.viewport.epoch;
+    const previousGeometry = this.geometry;
+    const priorRows = previousGeometry?.rows ?? this.sink.rows();
+    const erasePrevious = this.eraseReflowedSurface(
+      this.sink.cols(),
+      forceBottomAnchor || (this.sink.reflowSafe === true && this.sink.rows() <= priorRows),
+    );
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
+    });
+    const surface = this.surface();
+    this.laneRows = surface.laneRows;
+    const nextGeometry: SurfaceGeometry = {
+      rows: this.sink.rows(),
+      cols: this.sink.cols(),
+      laneRows: surface.laneRows,
+      topRow: Math.max(1, this.sink.rows() - surface.laneRows + 1),
+    };
+    this.geometry = nextGeometry;
+    this.lastFrame = surface.lines.join('\n');
+    this.rememberSurface(surface);
+    const topRow = this.sink.rows() - surface.laneRows + 1;
+    const eraseOwnedUnion = previousGeometry && nextGeometry.rows > previousGeometry.rows
+      ? this.clearDamagedUnion(previousGeometry, nextGeometry)
+      : '';
+    let sequence = `${erasePrevious}${eraseOwnedUnion}` +
+      `${reserveSeq(this.sink.rows(), surface.laneRows)}` +
+      `${SAVE_TRANSCRIPT}`;
+    if (this.pendingTranscriptOutput) {
+      sequence += `${this.pendingTranscriptOutput}${SAVE_TRANSCRIPT}`;
+    }
+    this.pendingTranscriptOutput = '';
+    surface.lines.forEach((line, index) => {
+      sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
+    });
+    sequence += `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`;
+    sequence += this.pendingCursorOutput;
+    this.pendingCursorOutput = '';
+    if (generation === this.renderGeneration
+      && resizeEpoch === this.resizeEpoch
+      && epoch === this.projection.viewport.epoch) {
+      sequence += resizeReadyMarkerForTests(
+        resizeEpoch,
+        this.sink.cols(),
+        this.sink.rows(),
+      );
+      this.sink.write(sequence);
+    }
+  }
+
+  private finishResizeBurstNow(): void {
+    if (!this.active || !this.resizeBurstActive) return;
+    const resizeEpoch = this.resizeEpoch;
+    if (this.trailingResize) clearImmediate(this.trailingResize);
+    this.trailingResize = null;
+    this.resizeBurstActive = false;
+    this.reanchor(resizeEpoch, true);
   }
 
   private onResize(): void {
     if (!this.active) return;
-    const epoch = this.projection.viewport.epoch;
-    if (!this.resizeBurstActive) {
-      this.resizeBurstActive = true;
-      this.reanchor();
-    }
+    const resizeEpoch = ++this.resizeEpoch;
+    const viewportEpoch = this.projection.viewport.epoch;
+    this.resizeBurstActive = true;
     if (this.trailingResize) clearImmediate(this.trailingResize);
     this.trailingResize = setImmediate(() => {
       this.trailingResize = null;
-      if (!this.active || epoch !== this.projection.viewport.epoch) return;
+      if (!this.active
+        || resizeEpoch !== this.resizeEpoch
+        || viewportEpoch !== this.projection.viewport.epoch) return;
       this.resizeBurstActive = false;
-      this.reanchor();
+      this.reanchor(resizeEpoch);
     });
   }
 
   /** Release and clear the complete surface exactly once. */
-  deactivate(): void {
+  deactivate(restoreAfterModal = false): void {
     if (!this.active) return;
+    this.resizeEpoch += 1;
+    const pendingTranscript = this.pendingTranscriptOutput;
     this.sink.write(
-      `${RESTORE_TRANSCRIPT}${SAVE}${ESC}[r${this.clearOwnedRows(this.laneRows)}${RESTORE}`,
+      `${RESTORE_TRANSCRIPT}${pendingTranscript}` +
+      `${pendingTranscript ? SAVE_TRANSCRIPT : ''}` +
+      `${SAVE}${ESC}[r${this.clearOwnedRows(this.laneRows)}${RESTORE}`,
     );
     this.unsubResize?.();
     this.unsubResize = null;
     if (this.trailingResize) clearImmediate(this.trailingResize);
     this.trailingResize = null;
     this.resizeBurstActive = false;
+    this.pendingCursorOutput = '';
+    this.pendingTranscriptOutput = '';
+    if (!restoreAfterModal) this.pendingModalTranscriptOutput = '';
     this.active = false;
-    this.rebuildTranscriptOnActivation = true;
+    this.restoreAfterModal = restoreAfterModal;
     this.laneRows = 0;
     this.geometry = null;
     this.lastFrame = '';
+    this.renderedSurface = null;
   }
 }
 

@@ -1105,7 +1105,7 @@ export class ChatSession implements ChatSessionLike {
       process.on('exit', exitHandler);
     }
 
-    // The interactive terminal owns a persistent boxed bottom region before
+    // The interactive terminal owns a persistent borderless bottom region before
     // the first composer mounts. Compatibility/non-TTY paths retain the
     // historical post-turn status output.
     if (this.usesFixedBottomRegion()) this.renderStatusLine();
@@ -2166,7 +2166,7 @@ export class ChatSession implements ChatSessionLike {
         },
       },
     });
-    // Establish busy-mode ownership the moment the turn starts so the boxed
+    // Establish busy-mode ownership the moment the turn starts so the borderless
     // composer is available for steering or queueing before any keystroke.
     // The existing input buffer remains the sole queue owner.
     try { this.opts.display.setBusyHint(this.duringTurnInput.busyHint()); } catch { /* defensive */ }
@@ -3896,8 +3896,9 @@ export class ChatSession implements ChatSessionLike {
     } as const;
 
     if (this.usesFixedBottomRegion()) {
-      display.setStatusFooter(() => display.statusFooter({
+      display.setStatusFooter((cols) => display.statusFooter({
         ...statusArgs,
+        cols,
         elapsedMs: this.statusState.kind === 'generating'
           ? Date.now() - this.statusState.sinceMs
           : this.lastTurnElapsedMs,

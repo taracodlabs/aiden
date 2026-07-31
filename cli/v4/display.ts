@@ -441,7 +441,7 @@ export class Display {
   private composerLane: ComposerLane | null = null;
   // The fixed status row is owned by the same controller as the composer.
   // A factory is retained so resize can select the correct width tier.
-  private statusFooterSource: string | (() => string) = '';
+  private statusFooterSource: string | ((columns?: number) => string) = '';
   // Main-prompt state is distinct from during-turn input so the existing queue
   // buffer remains the sole owner of busy type-ahead.
   private idleComposerContent = '';
@@ -941,6 +941,7 @@ export class Display {
     sessionMs?:  number;
     state?:      'ok' | 'warn' | 'error' | 'muted';
     phase?:      SemanticActivityPhase;
+    cols?:       number;
   }): string {
     const sk = this.skin;
     const SEP = sk.applyColors(' │ ', 'muted');
@@ -963,8 +964,10 @@ export class Display {
       'warn',
     );
     const ctxPctText = sk.applyColors(`${pct}%`, ctxKind);
-    const cols = (typeof this.out.columns === 'number' && this.out.columns >= 1)
-      ? this.out.columns
+    const cols = typeof args.cols === 'number' && args.cols >= 1
+      ? args.cols
+      : (typeof this.out.columns === 'number' && this.out.columns >= 1)
+        ? this.out.columns
       : 100;
     void args.turnCount;
     void args.sessionMs;
@@ -975,7 +978,7 @@ export class Display {
     const phaseText = sk.applyColors(`⌁ ${semanticPhaseStatusLabel(phase)}`, phaseColorKind(phase));
     const timer =
       `${sk.applyColors('⧖', 'muted')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted')}`;
-    const maxWidth = Math.max(1, cols - 2);
+    const maxWidth = Math.max(1, cols - (cols <= 40 ? 1 : 2));
     let segments: string[];
     if (cols >= 100) {
       segments = [providerModel, contextFull, phaseText, timer];
@@ -994,7 +997,10 @@ export class Display {
         semanticPhaseCompactToken(phase, unicode),
         phaseColorKind(phase),
       );
-      const compactTimer = sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted');
+      const compactElapsed = cols <= 40 && args.elapsedMs > 0 && args.elapsedMs < 60_000
+        ? `${Math.max(1, Math.floor(args.elapsedMs / 1_000))}s`
+        : formatElapsedShort(args.elapsedMs);
+      const compactTimer = sk.applyColors(compactElapsed, 'muted');
       const compact = [compactIdentity, compactContext, compactPhase, compactTimer]
         .join(compactSeparator);
       return truncateTerminalVisible(compact, maxWidth);
@@ -1147,7 +1153,7 @@ export class Display {
           if (stopped) return;
           stopped = true;
           if (finalText) screenOwner.settleLiveRow(rowId, finalText);
-          else screenOwner.removeLiveRow(rowId);
+          else screenOwner.removeLiveRow(rowId, true);
         },
       };
     }
@@ -1268,7 +1274,7 @@ export class Display {
         stop: (): void => {
           if (stopped) return;
           stopped = true;
-          screenOwner.removeLiveRow(rowId);
+          screenOwner.removeLiveRow(rowId, true);
         },
         isPaused: (): boolean => paused,
         isStopped: (): boolean => stopped,
@@ -1579,7 +1585,8 @@ export class Display {
     const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
 
     const body = (): string => {
-      const width = Math.max(1, this.terminalColumns() - 2);
+      const width = screenOwner?.volatileRowWidth()
+        ?? Math.max(1, this.terminalColumns() - 2);
       const elapsedMs = Math.max(0, Date.now() - startedAt);
       const elapsed = Math.floor(elapsedMs / 1000);
       const time = elapsed > 0 && width >= 28 ? ` (${elapsed}s)` : '';
@@ -1592,7 +1599,7 @@ export class Display {
         mode: this.activityPresentationMode,
         source,
       });
-      const busy = this.composerSuffix().length > 0;
+      const busy = screenOwner === null && this.composerSuffix().length > 0;
       const suffix = !busy ? ''
         : width >= 80 ? this.composerSuffix()
         : width >= 36 ? '  Ctrl+C stop'
@@ -1600,10 +1607,10 @@ export class Display {
       const activity = this.skin.applyColors(projection.text, projection.color);
       return truncateVisible(`${prefix}${activity}${time}${suffix}`, width);
     };
-    const erase = (): void => {
+    const erase = (terminal = false): void => {
       if (!printed || !isTty) return;
       if (screenOwner) {
-        screenOwner.removeLiveRow(rowId);
+        screenOwner.removeLiveRow(rowId, terminal);
         printed = false;
         lastBody = '';
         return;
@@ -1668,7 +1675,7 @@ export class Display {
       stop: () => {
         if (!active) return;
         active = false;
-        erase();
+        erase(true);
       },
       invalidateLayout: () => {
         if (!active) return;
@@ -1724,6 +1731,7 @@ export class Display {
     }
 
     const sk = this.skin;
+    const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
 
     // ── Build the fixed left portion (icon + verb + detail) ────────────
     // v4.1.3-repl-polish: icons default ON; set AIDEN_UI_ICONS=0 to
@@ -1741,9 +1749,15 @@ export class Display {
     // know about so unregistered MCP tools etc. still render readably.
     const mapped = buildToolPreview(name, args);
     const rawDetail = mapped ?? previewToolArgs(args);
-    const detailForDisplay = (): string => this.activityPresentationMode === 'full'
-      ? rawDetail
-      : truncDetail(relativizeActivityText(rawDetail, process.cwd(), 'summary'));
+    const detailForDisplay = (): string => {
+      if (screenOwner?.usesReflowSafeRows()) {
+        const segments = rawDetail.split(/[\\/]/u);
+        return segments[segments.length - 1] ?? rawDetail;
+      }
+      return this.activityPresentationMode === 'full'
+        ? rawDetail
+        : truncDetail(relativizeActivityText(rawDetail, process.cwd(), 'summary'));
+    };
 
     // Semantic elapsed time comes from ActivityRegistry. A compatibility row
     // without a source advances only on its own repaint ticks.
@@ -1774,9 +1788,27 @@ export class Display {
       const duration = elapsed >= 1000 ? ` ${formatToolDuration(elapsed)}` : '';
       const liveSuffix = `  ${sk.applyColors(`${semanticPhaseStatusLabel(semanticPhase)}${duration}…`, phaseColorKind(semanticPhase))}`;
       const runningGlyph = sk.applyColors(projection.glyph, projection.color);
+      if (screenOwner?.usesReflowSafeRows()) {
+        const width = terminalRowWidth() ?? screenOwner.volatileRowWidth();
+        const compactPrefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph} ` +
+          `${sk.applyColors(verb.trim(), 'tool')} `;
+        const compactPhase = sk.applyColors(
+          `${semanticPhaseCompactToken(semanticPhase, useIcons)}${duration}`,
+          phaseColorKind(semanticPhase),
+        );
+        const compactSuffix = ` ${compactPhase}`;
+        const availableDetail = Math.max(
+          0,
+          width - visibleLength(compactPrefix) - visibleLength(compactSuffix),
+        );
+        return `${compactPrefix}${truncateVisible(
+          sk.applyColors(detailForDisplay(), 'muted'),
+          availableDetail,
+        )}${compactSuffix}\n`;
+      }
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph}  ` +
         `${sk.applyColors(padVerb(verb), 'tool')} `;
-      const suffix = `${liveSuffix}${this.composerSuffix()}`;
+      const suffix = `${liveSuffix}${screenOwner ? '' : this.composerSuffix()}`;
       const detailText = sk.applyColors(detailForDisplay(), 'muted');
       const width = terminalRowWidth();
       if (width === null) return `${prefix}${detailText}${suffix}\n`;
@@ -1802,6 +1834,15 @@ export class Display {
         : /^partial\b/u.test(suffix) ? 'partial'
         : /^empty (?:fail|retry)\b/u.test(suffix) ? 'failed'
         : 'completed';
+      if (screenOwner?.usesReflowSafeRows()) {
+        const width = terminalRowWidth() ?? screenOwner.volatileRowWidth();
+        const compactPrefix = `${TRAIL_PIPE} ${outcomeGlyph} ${terminalVerb} `;
+        const availableDetail = Math.max(0, width - visibleLength(compactPrefix));
+        return `${sk.applyColors(
+          `${compactPrefix}${truncateVisible(detailForDisplay(), availableDetail)}`,
+          kind,
+        )}\n`;
+      }
       const prefix = `${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(terminalVerb)} `;
       const suffixText = suffix ? `  ${suffix}` : '';
       const width = terminalRowWidth();
@@ -1819,15 +1860,16 @@ export class Display {
     const out = this.out;
     const writeOutput = (text: string): void => this.writeOutput(text);
     const isTty = !!out.isTTY;
-    const screenOwner = this.composerLane?.isActive() ? this.composerLane : null;
     const rowId = opts.activityId ?? `tool:${++this.nextLiveRowIdentity}`;
     // Keep a two-cell safety margin. Windows ConPTY can report the cursor
     // width one cell beyond the last safe printable column; filling that cell
     // sets the terminal's pending-wrap flag and makes the next repaint walk
     // down the screen instead of replacing the existing activity row.
-    const terminalRowWidth = (): number | null => isTty && typeof out.columns === 'number'
-      ? Math.max(1, out.columns - 2)
-      : null;
+    const terminalRowWidth = (): number | null => {
+      if (!isTty) return null;
+      if (screenOwner) return screenOwner.volatileRowWidth();
+      return typeof out.columns === 'number' ? Math.max(1, out.columns - 2) : null;
+    };
     let printed = false;
     let pausedRow = false;
     let settled = false;
@@ -1884,9 +1926,9 @@ export class Display {
     };
 
     // Erase the last printed line (TTY only).
-    const eraseLast = (): void => {
+    const eraseLast = (terminal = false): void => {
       if (screenOwner) {
-        screenOwner.removeLiveRow(rowId);
+        screenOwner.removeLiveRow(rowId, terminal);
         printed = false;
         return;
       }
@@ -2094,7 +2136,7 @@ export class Display {
       dismiss() {
         if (!beginSettle()) return;
         stopTick();
-        eraseLast();
+        eraseLast(true);
       },
       pause() {
         if (settled || pausedRow) return;
@@ -2355,7 +2397,7 @@ export class Display {
 
   /** Set the persistent status row. The optional factory is evaluated again
    * after terminal resize so compact and wide tiers remain truthful. */
-  setStatusFooter(source: string | (() => string)): void {
+  setStatusFooter(source: string | ((columns?: number) => string)): void {
     this.statusFooterSource = source;
     if (this.composerLane?.isActive()) {
       this.composerLane.paintStatus(source);
@@ -2369,7 +2411,7 @@ export class Display {
     this.composerLane.paintStatus(this.statusFooterSource);
   }
 
-  /** True only when this interactive Display owns the boxed bottom surface. */
+  /** True only when this interactive Display owns the borderless bottom surface. */
   fixedBottomRegionEnabled(): boolean {
     return composerLaneEnabled() && !!this.out.isTTY;
   }
@@ -2456,7 +2498,7 @@ export class Display {
    * matching resume. */
   pauseComposerSurface(): void {
     this.composerSurfacePauseDepth += 1;
-    if (this.composerSurfacePauseDepth === 1) this.composerLane?.deactivate();
+    if (this.composerSurfacePauseDepth === 1) this.composerLane?.deactivate(true);
   }
 
   /** Restore the fixed surface once the outermost modal prompt has settled. */
@@ -2484,6 +2526,7 @@ export class Display {
       rows: () => (typeof this.out.rows === 'number' && this.out.rows >= 1 ? this.out.rows : 24),
       cols: () => (typeof this.out.columns === 'number' && this.out.columns >= 1 ? this.out.columns : 80),
       onResize: (fn) => { stream.on?.('resize', fn); return () => { stream.off?.('resize', fn); }; },
+      reflowSafe: process.platform === 'win32',
     };
   }
 
@@ -2785,7 +2828,7 @@ export class Display {
       owner.settleLiveRow(this.streamProjectionId, this.projectedStreamText(true));
       this.streamProjectionHeaderPending = false;
     } else {
-      owner.removeLiveRow(this.streamProjectionId);
+      owner.removeLiveRow(this.streamProjectionId, true);
     }
     this.streamBuffer = '';
     this.streamLineCount = 0;

@@ -59,8 +59,8 @@ describe('prompt-zone rule boundaries', () => {
     display.printTurnSeparator();
 
     const lines = screen.lines();
-    const composerTop = lines.findLastIndex((line) => line.startsWith('╭─ ▲ You'));
-    const transcript = lines.slice(0, composerTop);
+    const composerLabel = lines.findLastIndex((line) => line.startsWith('▲ You'));
+    const transcript = lines.slice(0, Math.max(0, composerLabel - 1));
     const submittedRows = transcript.filter((line) => (
       line.includes('▲ You') || line.includes('indented second') || line.includes('Unicode')
     ));

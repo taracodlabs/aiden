@@ -6,7 +6,7 @@
  */
 /**
  * Real-terminal regression for single ownership of the fixed composer.
- * A partial slash command must remain inside the boxed Display-owned surface;
+ * A partial slash command must remain inside the borderless Display-owned surface;
  * Inquirer's prompt, helper, ghost, and dropdown output must stay suppressed.
  *
  * The source-contract test at the end separately protects ghost placement on
@@ -90,17 +90,17 @@ describe.skipIf(SKIP_INTERACTIVE_PTY)('aidenPrompt — Bug D regression layer (P
     screen.write(term.raw());
     const lines = screen.lines();
 
-    const composerTop = lines.at(-4) ?? '';
+    const composerTop = lines.at(-5) ?? '';
     const composerLine = lines.at(-3) ?? '';
     const composerBottom = lines.at(-2) ?? '';
     const statusLine = lines.at(-1) ?? '';
     expect(composerTop).toContain('▲ You');
     expect(composerLine).toContain('/d');
-    expect(composerBottom).toMatch(/^╰─/);
+    expect(composerBottom).toMatch(/^─+$/u);
     expect(statusLine).toContain('groq');
     expect(statusLine).toContain('◉ context');
 
-    const rowsAboveFooter = lines.slice(0, -4);
+    const rowsAboveFooter = lines.slice(0, -6);
     expect(rowsAboveFooter.some((line) => line.trim() === '/d')).toBe(false);
     expect(rowsAboveFooter.some((line) => line.includes('Type your message'))).toBe(false);
     expect(rowsAboveFooter.some((line) => /aemon|octor/.test(line))).toBe(false);

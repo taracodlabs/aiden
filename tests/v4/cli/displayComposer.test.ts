@@ -38,7 +38,8 @@ describe('Display composer — live during-turn paint', () => {
     d.setComposer('deploy now', 'redirect');
     const painted = stripAnsi(chunks.join(''));
     expect(painted).toContain('▲ You · steer mode');
-    expect(painted).toContain('│ deploy now');
+    expect(painted).toContain('deploy now');
+    expect(painted).not.toContain('│ deploy now');
     ind.stop();
   });
 
@@ -47,10 +48,10 @@ describe('Display composer — live during-turn paint', () => {
     const ind = d.activityIndicator('thinking');
     chunks.length = 0;
     d.setComposer('a', 'queue');
-    // Fixed-region discipline: the draft is inside the boxed content row.
+    // Fixed-region discipline: the draft is inside the borderless content row.
     expect(chunks.join('')).toMatch(/\x1b\[22;1H\x1b\[2K/);
     expect(stripAnsi(chunks.join(''))).toContain('▲ You · queue mode');
-    expect(stripAnsi(chunks.join(''))).toContain('│ a');
+    expect(stripAnsi(chunks.join(''))).toContain('a');
     ind.stop();
   });
 
@@ -77,7 +78,7 @@ describe('Display composer — live during-turn paint', () => {
     d.setComposer('hold on!', 'queue');
     const painted = stripAnsi(chunks.join(''));
     expect(painted).toContain('▲ You · queue mode');
-    expect(painted).toContain('│ hold on!');
+    expect(painted).toContain('hold on!');
     row.ok(120);
     ind.stop();
   });
@@ -92,7 +93,7 @@ describe('Display composer — live during-turn paint', () => {
     chunks.length = 0;
     d.setComposer('back', 'redirect');
     expect(stripAnsi(chunks.join(''))).toContain('▲ You · steer mode');
-    expect(stripAnsi(chunks.join(''))).toContain('│ back');
+    expect(stripAnsi(chunks.join(''))).toContain('back');
     ind.stop();
   });
 
@@ -124,7 +125,7 @@ describe('Display composer — live during-turn paint', () => {
     chunks.length = 0;
     d.setComposer('next message', 'queue');
     expect(stripAnsi(chunks.join(''))).toContain('▲ You · queue mode');
-    expect(stripAnsi(chunks.join(''))).toContain('│ next message');
+    expect(stripAnsi(chunks.join(''))).toContain('next message');
   });
 
   it('pasted text shows clean (no paste markers reach the row)', () => {
@@ -135,7 +136,7 @@ describe('Display composer — live during-turn paint', () => {
     d.setComposer('npm run build', 'redirect');
     const painted = stripAnsi(chunks.join(''));
     expect(painted).toContain('▲ You · steer mode');
-    expect(painted).toContain('│ npm run build');
+    expect(painted).toContain('npm run build');
     expect(painted).not.toContain('[200~');
     expect(painted).not.toContain('[201~');
     ind.stop();
@@ -152,7 +153,7 @@ describe('Display composer — persistent busy hint (input lane always visible)'
     const painted = stripAnsi(chunks.join(''));
     expect(painted).toContain('▲ You · steer mode');
     expect(painted).not.toContain('Enter → steer');
-    expect(painted).toContain('│ ');
+    expect(painted).toContain('─'.repeat(21));
     ind.stop();
   });
 
@@ -161,7 +162,7 @@ describe('Display composer — persistent busy hint (input lane always visible)'
     const ind = d.activityIndicator('thinking');
     d.setBusyHint('Enter → queue · /busy to change · Ctrl+C stop');
     d.setComposer('hello', 'queue');
-    expect(stripAnsi(chunks.join(''))).toContain('│ hello');
+    expect(stripAnsi(chunks.join(''))).toContain('hello');
     chunks.length = 0;
     d.setComposer('', 'queue');                                       // user cleared their line
     expect(stripAnsi(chunks.join(''))).toContain('▲ You · queue mode');
@@ -196,7 +197,7 @@ describe('Display composer — persistent busy hint (input lane always visible)'
 
 // ── Fixed bottom surface with compatibility opt-out ───────────────────────
 describe('Display composer — fixed bottom surface compatibility opt-out', () => {
-  it('setBusyHint reserves the scroll region and pins the boxed composer', () => {
+  it('setBusyHint reserves the scroll region and pins the borderless composer', () => {
     const prev = process.env.AIDEN_COMPOSER_LANE;
     process.env.AIDEN_COMPOSER_LANE = '1';
     try {
@@ -204,9 +205,9 @@ describe('Display composer — fixed bottom surface compatibility opt-out', () =
       chunks.length = 0;
       d.setBusyHint('Enter → steer · /queue · Ctrl+C stop');
       const raw = chunks.join('');
-      expect(raw).toContain('\x1b[1;20r');                 // boxed composer + status protected
-      expect(raw).toContain('\x1b[21;1H');                 // labeled top border
-      expect(raw).toContain('\x1b[22;1H');                 // composer content row
+      expect(raw).toContain('\x1b[1;18r');                 // composer hierarchy + status protected
+      expect(raw).toContain('\x1b[20;1H');                 // label row
+      expect(raw).toContain('\x1b[22;1H');                 // draft row
       expect(raw).toContain('▲ You · queue mode');
       expect(raw).not.toContain('Enter → steer');
       // turn end tears the region back down.
@@ -229,7 +230,7 @@ describe('Display composer — fixed bottom surface compatibility opt-out', () =
 
     chunks.length = 0;
     d.resumeComposerSurface();
-    expect(chunks.join('')).toContain('\x1b[1;20r');
+    expect(chunks.join('')).toContain('\x1b[1;18r');
     expect(stripAnsi(chunks.join(''))).toContain('draft survives');
     d.clearComposer();
   });

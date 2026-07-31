@@ -44,7 +44,7 @@ afterEach(() => {
 
 function harness(columns = 100, rows = 30) {
   delete process.env.AIDEN_COMPOSER_LANE;
-  const screen = new TerminalScreen(columns, rows);
+  const screen = new TerminalScreen(columns, rows, { retainResizeHistory: true });
   const stream = new ResizableScreenStream(screen, columns, rows);
   const display = new Display({
     stdout: stream as unknown as NodeJS.WriteStream,
@@ -60,14 +60,20 @@ function assertOneCurrentSurface(
   expectedDraft = 'draft 世界',
 ): void {
   const lines = screen.lines();
-  const composerRows = lines.filter((line) => line.startsWith('╭─ ▲ You'));
-  const statusRows = lines.filter((line) => line.includes('◆ provider'));
-  const bottomBorders = lines.filter((line) => line.startsWith('╰─'));
+  const surfaceRows = lines.slice(-6);
+  const composerRows = surfaceRows.filter((line) => line.startsWith('▲ You'));
+  const statusRows = surfaceRows.filter((line) => /◆\s*provider/u.test(line));
+  const shortDividers = surfaceRows.filter((line) => line === '─'.repeat(21));
+  const fullSeparators = surfaceRows.filter((line) => /^─{22,}$/u.test(line));
   expect(composerRows, screen.snapshot()).toHaveLength(1);
   expect(statusRows, screen.snapshot()).toHaveLength(1);
-  expect(bottomBorders, screen.snapshot()).toHaveLength(1);
-  expect(lines.at(-1), screen.snapshot()).toContain('◆ provider');
-  expect(lines.at(-2), screen.snapshot()).toMatch(/^╰─/u);
+  expect(shortDividers, screen.snapshot()).toHaveLength(1);
+  expect(fullSeparators, screen.snapshot()).toHaveLength(2);
+  expect(lines.at(-1), screen.snapshot()).toMatch(/◆\s*provider/u);
+  expect(lines.at(-2), screen.snapshot()).toMatch(/^─+$/u);
+  expect(lines.at(-5), screen.snapshot()).toMatch(/^▲ You/u);
+  expect(lines.at(-3)?.startsWith(expectedDraft), screen.snapshot()).toBe(true);
+  expect(lines.join('\n'), screen.snapshot()).not.toMatch(/[╭╮╰╯]/u);
   expect(lines.join('\n'), screen.snapshot()).toContain(expectedDraft);
 }
 
@@ -108,7 +114,7 @@ describe('operator screen resize transactions', () => {
     stream.resize(columns, rows);
     await settleResize();
     assertOneCurrentSurface(screen);
-    expect(screen.cursorPosition().col).toBe(2 + 5);
+    expect(screen.cursorPosition().col).toBe(5);
   });
 
   it('preserves queue draft and one tool identity across a resize burst', async () => {
@@ -123,7 +129,10 @@ describe('operator screen resize transactions', () => {
     await settleResize();
 
     assertOneCurrentSurface(screen, 'QUEUE ONE');
-    expect(screen.lines().filter((line) => line.includes('Start-Sleep'))).toHaveLength(1);
+    expect(
+      screen.lines().filter((line) => line.includes('Start-Sleep')),
+      screen.snapshot(),
+    ).toHaveLength(1);
     expect(screen.lines().filter((line) => line.includes('▲ You · queue mode'))).toHaveLength(1);
     tool.ok(15_000);
   });
@@ -151,17 +160,17 @@ describe('operator screen resize transactions', () => {
     display.setBusyHint('Enter → queue · Ctrl+C stop');
     const activity = display.liveActivityRow('calling provider');
     activity.refresh(1);
-    expect(screen.lines().slice(0, -4).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
+    expect(screen.lines().slice(0, -6).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
 
     stream.resize(44, 16);
     activity.refresh(2);
     await settleResize();
-    expect(screen.lines().slice(0, -4).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
+    expect(screen.lines().slice(0, -6).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
 
     stream.resize(160, 45);
     activity.refresh(3);
     await settleResize();
-    expect(screen.lines().slice(0, -4).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
+    expect(screen.lines().slice(0, -6).filter((line) => line.includes('Aiden is thinking'))).toHaveLength(1);
     assertOneCurrentSurface(screen, '');
     activity.stop();
   });
@@ -180,8 +189,8 @@ describe('operator screen resize transactions', () => {
     display.streamComplete();
     stream.resize(80, 24);
     await settleResize();
-    expect(screen.lines().filter((line) => line.includes('Aiden'))).toHaveLength(1);
-    expect(screen.snapshot()).toContain('structured text');
+    expect(screen.reviewableSnapshot()).toContain('Aiden');
+    expect(screen.reviewableSnapshot()).toContain('structured text');
     assertOneCurrentSurface(screen, '');
   });
 
@@ -197,19 +206,19 @@ describe('operator screen resize transactions', () => {
     stream.resize(100, 30);
     await settleResize();
     expect(screen.snapshot()).toContain('second 世界 line');
-    expect(screen.cursorPosition().col).toBe(2 + 8);
+    expect(screen.cursorPosition().col).toBe(8);
   });
 
   it('restores one current surface after resize while a modal owns the terminal', async () => {
     const { display, screen, stream } = harness();
     display.pauseComposerSurface();
     stream.resize(44, 16);
-    display.write('Approval required\n');
+    display.writeTransient('Approval required\n');
     display.resumeComposerSurface();
     await settleResize();
 
     assertOneCurrentSurface(screen);
-    expect(screen.lines().filter((line) => line.includes('Approval required'))).toHaveLength(1);
+    expect(screen.bufferSnapshot()).not.toContain('Approval required');
   });
 
   it('does not archive animation frames when resize happens around settlement', async () => {
@@ -223,7 +232,8 @@ describe('operator screen resize transactions', () => {
 
     assertOneCurrentSurface(screen, '');
     expect(screen.lines().filter((line) => line.includes('running'))).toHaveLength(0);
-    expect(screen.lines().filter((line) => line.includes('Start-Sleep'))).toHaveLength(1);
+    expect(screen.bufferSnapshot()).not.toContain('running');
+    expect(screen.bufferSnapshot().match(/Start-Sleep/gu) ?? []).toHaveLength(1);
   });
 
   it('virtualizes fifty active rows without overwriting composer or status', () => {

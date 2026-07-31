@@ -1791,7 +1791,7 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     });
   });
 
-  it.each([44, 60, 80, 100, 120])(
+  it.each([40, 44, 60, 80, 100, 120])(
     'preserves provider, model, context, phase, and timer identity at %i columns',
     (cols) => {
       withCols(cols, () => {
@@ -1804,7 +1804,7 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
           elapsedMs: 8_000,
           phase: 'thinking',
         }));
-        expect(stringWidth(out)).toBeLessThanOrEqual(cols - 2);
+        expect(stringWidth(out)).toBeLessThanOrEqual(cols - (cols <= 40 ? 1 : 2));
         expect(out).toContain('custom_openai');
         expect(out).toContain('custom-default');
         expect(out).toContain('0%');
