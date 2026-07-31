@@ -40,7 +40,7 @@ import type { Message } from '../../../../providers/v4/types';
 import type { TriggerSource } from '../types';
 import type { RunStore } from '../runStore';
 import type { JobEngine } from '../jobEngine';
-import { executeDurableJob, type DurableJobFinalization } from '../jobLifecycle';
+import { executeDurableJob, type DurableJobDisposition } from '../jobLifecycle';
 // v4.10 Slice 10.2b — shared event taxonomy.
 import { categorizeEvent } from '../eventCategories';
 
@@ -83,6 +83,8 @@ export interface DaemonAgentInput {
     generation?: number;
     fenceToken?: string;
   };
+  /** Immutable Worker Assignment carried by the durable trigger payload. */
+  workerAssignmentId?: string;
   /**
    * v4.13 Gap 4 — set when this invocation RESUMES a dead run. The
    * runner reuses the existing task row (the job-card accumulates
@@ -106,7 +108,7 @@ export interface DaemonAgentResult {
   /** Populated when finishReason === 'error'. */
   error?:       string;
   /** Verification-derived settlement supplied to the durable lifecycle. */
-  finalization?: DurableJobFinalization;
+  finalization?: DurableJobDisposition;
 }
 
 /** The function-shaped agent invocation seam. */

@@ -217,7 +217,30 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       if (command.repositorySnapshotId) {
         const snapshot = db.prepare('SELECT job_id,attempt_id,generation FROM repository_snapshots WHERE snapshot_id=?')
           .get(command.repositorySnapshotId) as { job_id: string; attempt_id: string; generation: number } | undefined;
-        if (!snapshot || snapshot.job_id !== command.jobId || snapshot.attempt_id !== command.attemptId || snapshot.generation !== command.generation) {
+        const assignedParentSnapshot = snapshot && db.prepare(
+          `SELECT 1
+             FROM worker_assignments a
+             JOIN worker_runs r ON r.assignment_id=a.assignment_id
+             JOIN child_job_contracts c ON c.child_job_id=a.child_job_id
+            WHERE a.repository_snapshot_id=?
+              AND a.parent_job_id=? AND a.parent_attempt_id=? AND a.parent_generation=?
+              AND a.child_job_id=? AND r.child_attempt_id=? AND r.child_generation=?
+              AND c.parent_job_id=a.parent_job_id
+            LIMIT 1`,
+        ).get(
+          command.repositorySnapshotId,
+          snapshot.job_id,
+          snapshot.attempt_id,
+          snapshot.generation,
+          command.jobId,
+          command.attemptId,
+          command.generation,
+        );
+        const producingSnapshot = snapshot
+          && snapshot.job_id === command.jobId
+          && snapshot.attempt_id === command.attemptId
+          && snapshot.generation === command.generation;
+        if (!producingSnapshot && !assignedParentSnapshot) {
           throw new Error('Evidence repository snapshot does not match the producing Attempt');
         }
       }

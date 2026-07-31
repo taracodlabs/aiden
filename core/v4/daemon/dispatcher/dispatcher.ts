@@ -340,6 +340,9 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       const durable = (event.payload as {
         durable_job?: { job_id?: unknown; attempt_id?: unknown; run_id?: unknown };
       } | null)?.durable_job;
+      const workerAssignmentId = typeof event.payload.worker_assignment_id === 'string'
+        ? event.payload.worker_assignment_id
+        : undefined;
       const existingAdmission = durable
         && typeof durable.job_id === 'string'
         && typeof durable.attempt_id === 'string'
@@ -365,6 +368,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         initialMessage: message,
         deliverOnly,
         ...(admission ? { admission } : {}),
+        ...(workerAssignmentId ? { workerAssignmentId } : {}),
         ...(resume ? { resume } : {}),
       };
 

@@ -101,7 +101,7 @@ export function buildDaemonAgentBuilder(
   const log = deps.log ?? ((msg) => process.stderr.write(msg + '\n'));
   const maxTurns = deps.maxTurns ?? DEFAULT_MAX_TURNS;
 
-  return async (input) => {
+  const builder: AgentBuilder = async (input) => {
     const turnStartMs = Date.now();
 
     // Resolve a provider adapter for the chosen (provider, model)
@@ -209,4 +209,13 @@ export function buildDaemonAgentBuilder(
 
     return agent;
   };
+  builder.resolveReadOnlyWorkerProvider = async (binding) => ({
+    adapter: await deps.resolver.resolve({
+      providerId: binding.providerId,
+      modelId: binding.modelId,
+      paths: deps.paths,
+    }),
+    paths: deps.paths,
+  });
+  return builder;
 }
