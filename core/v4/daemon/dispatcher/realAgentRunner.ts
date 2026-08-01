@@ -102,6 +102,10 @@ import {
   consumePostTurn,
   createPerTurnBudgetWatcher,
 } from './budgetGate';
+import {
+  executeReadOnlyRepositoryWorker,
+  type ReadOnlyWorkerProviderResolver,
+} from '../../worker/readOnlyRepositoryWorker';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -125,7 +129,7 @@ import {
  * pieces the REPL does, or skip them for speed. That choice lives
  * in `bootstrap.ts` / the CLI's `installDaemonAgentBuilder()` hook.
  */
-export type AgentBuilder = (input: {
+export type AgentBuilder = ((input: {
   sessionId:        string;
   resolvedModel:    ResolvedDaemonModel;
   approvalPolicy:   DaemonApprovalPolicy;
@@ -135,7 +139,9 @@ export type AgentBuilder = (input: {
     onBudgetWarning:   (level: 'caution' | 'warning', turn: number, max: number) => void;
   };
   abortSignal:      AbortSignal;
-}) => Promise<AidenAgent> | AidenAgent;
+}) => Promise<AidenAgent> | AidenAgent) & {
+  resolveReadOnlyWorkerProvider?: ReadOnlyWorkerProviderResolver;
+};
 
 export interface CreateRealAgentRunnerOptions {
   db:                Db;
@@ -694,6 +700,35 @@ async function invokeDurableDaemon(
       },
       execute: async (handle) => {
         activeHandle = handle;
+        const workerAssignment = opts.jobEngine.worker.getWorkerAssignmentForChild(handle.jobId);
+        if (workerAssignment) {
+          if (input.workerAssignmentId && input.workerAssignmentId !== workerAssignment.assignmentId) {
+            throw new Error('Durable Worker trigger does not match the child Job assignment');
+          }
+          const resolveProvider = opts.agentBuilder.resolveReadOnlyWorkerProvider;
+          if (!resolveProvider) throw new Error('Read-only repository Worker provider resolver is unavailable');
+          const worker = await executeReadOnlyRepositoryWorker({
+            engine: opts.jobEngine,
+            handle,
+            assignmentId: workerAssignment.assignmentId,
+            resolveProvider,
+          });
+          projectedResult = {
+            runId: handle.runId,
+            finishReason: worker.finalization.status === 'failed' ? 'error' : 'stop',
+            totalTokens: worker.totalTokens,
+            ...(worker.finalization.status === 'failed' ? { error: worker.workerResult.summary } : {}),
+            finalization: worker.finalization,
+          };
+          currentProviderAttemptLedger()?.reconcileJobLinkage({
+            taskId: handle.jobId,
+            runId: handle.runId,
+            jobId: handle.jobId,
+            attemptId: handle.attemptId,
+            attemptGeneration: handle.generation,
+          });
+          return projectedResult;
+        }
         const projectedRunStore: RunStore = {
           ...opts.runStore,
           create: () => handle.runId,

@@ -255,6 +255,12 @@ export interface ToolHandler {
   mutates: boolean;
   /** Group label — `web`, `files`, `browser`, `sessions`, `skills`, etc. */
   toolset?: string;
+  /**
+   * Resolves a path argument into the durable capability namespace before the
+   * generic Job resource gate evaluates it. Snapshot-bound tools use this to
+   * bind repository-relative input to their assigned snapshot root.
+   */
+  resolveCapabilityPath?: (argument: string, value: string, context: ToolContext) => string;
   /** Runtime-only interaction metadata; never included in provider schemas. */
   interaction?: ToolInteraction;
   /**
@@ -668,15 +674,26 @@ export class ToolRegistry {
         }
         for (const key of ['path', 'from', 'to', 'source', 'destination']) {
           const value = args[key];
-          if (
-            typeof value === 'string' && value.length > 0
-            && !resourceAuthority.authorize({
+          if (typeof value === 'string' && value.length > 0) {
+            let capabilityPath: string;
+            try {
+              capabilityPath = handler.resolveCapabilityPath?.(key, value, context)
+                ?? resolvePath(context.cwd ?? process.cwd(), value);
+            } catch (error) {
+              return finish({
+                id: call.id,
+                name: call.name,
+                result: null,
+                error: error instanceof Error ? error.message : 'Path is not valid for this Job capability',
+              }, 'blocked');
+            }
+            if (!resourceAuthority.authorize({
               jobId: durableJobContext.jobId,
               kind: 'path',
-              value: resolvePath(context.cwd ?? process.cwd(), value),
-            })
-          ) {
-            return finish({ id: call.id, name: call.name, result: null, error: 'Path is outside this Job capability boundary' }, 'blocked');
+              value: capabilityPath,
+            })) {
+              return finish({ id: call.id, name: call.name, result: null, error: 'Path is outside this Job capability boundary' }, 'blocked');
+            }
           }
         }
         if (

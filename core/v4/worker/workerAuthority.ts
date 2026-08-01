@@ -93,17 +93,39 @@ interface RecordResultCommand extends ParentAuthorityCommand, ChildAuthorityComm
   payload: unknown;
 }
 
+type BindRunFromAssignmentCommand = ChildAuthorityCommand & Omit<WorkerRunRecord,
+  'idempotencyKey' | 'childJobId' | 'childAttemptId' | 'childGeneration'
+  | 'executionGraphNodeId' | 'acceptedResultId' | 'createdAt'> & {
+    producer: string;
+    idempotencyKey: string;
+    now?: number;
+  };
+
+interface RecordResultFromRunCommand extends ChildAuthorityCommand {
+  workerResultId: string;
+  workerRunId: string;
+  assignmentId: string;
+  payload: unknown;
+  producer: string;
+  idempotencyKey: string;
+  now?: number;
+}
+
 export interface WorkerAuthority {
   createWorkerProviderBinding(command: ProviderBindingCommand): WorkerProviderBindingRecord;
   createWorkerContextEnvelope(command: ContextEnvelopeCommand): WorkerContextEnvelopeRecord;
   createWorkerAssignment(command: AssignmentCommand): WorkerAssignmentRecord;
   bindWorkerRun(command: BindRunCommand): WorkerRunRecord;
+  bindWorkerRunFromAssignment(command: BindRunFromAssignmentCommand): WorkerRunRecord;
   recordWorkerResult(command: RecordResultCommand): WorkerResultRecord;
+  recordWorkerResultFromRun(command: RecordResultFromRunCommand): WorkerResultRecord;
   getWorkerAssignment(id: string): WorkerAssignmentRecord | null;
   getWorkerRun(id: string): WorkerRunRecord | null;
   getWorkerProviderBinding(id: string): WorkerProviderBindingRecord | null;
   getWorkerContextEnvelope(id: string): WorkerContextEnvelopeRecord | null;
   getWorkerResult(id: string): WorkerResultRecord | null;
+  listWorkerAssignmentsForParent(parentJobId: string): WorkerAssignmentRecord[];
+  getWorkerAssignmentForChild(childJobId: string): WorkerAssignmentRecord | null;
   listWorkerRunsForParent(parentJobId: string): WorkerRunRecord[];
   listWorkerRunsForChild(childJobId: string): WorkerRunRecord[];
   listWorkerEvents(parentJobId: string): WorkerEventRecord[];
@@ -428,6 +450,46 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
       throw new WorkerAuthorityError('stale_authority', 'Parent Attempt authority is no longer active');
     }
     return { runId: result.runId };
+  };
+
+  const parentAuthorityForAssignment = (
+    assignment: WorkerAssignmentRecord,
+    producer: string,
+    idempotencyKey: string,
+    now?: number,
+  ): ParentAuthorityCommand => {
+    const row = db.prepare(
+      `SELECT r.fence_token
+         FROM runs r JOIN tasks t ON t.id=r.task_id
+        WHERE r.attempt_id=? AND r.task_id=? AND r.generation=?
+          AND t.active_attempt_id=r.attempt_id
+          AND t.status IN ('queued','running','waiting','paused','cancelling','recovering')`,
+    ).get(
+      assignment.parentAttemptId,
+      assignment.parentJobId,
+      assignment.parentGeneration,
+    ) as { fence_token: string | null } | undefined;
+    if (!row?.fence_token
+      || createHash('sha256').update(row.fence_token).digest('hex') !== assignment.parentFenceDigest) {
+      throw new WorkerAuthorityError('stale_authority', 'Assignment parent authority is no longer active');
+    }
+    const active = deps.validateActiveFence({
+      jobId: assignment.parentJobId,
+      attemptId: assignment.parentAttemptId,
+      generation: assignment.parentGeneration,
+      fenceToken: row.fence_token,
+      now,
+    });
+    if (!active.valid) throw new WorkerAuthorityError('stale_authority', 'Assignment parent authority is no longer active');
+    return {
+      parentJobId: assignment.parentJobId,
+      parentAttemptId: assignment.parentAttemptId,
+      parentGeneration: assignment.parentGeneration,
+      parentFenceToken: row.fence_token,
+      producer,
+      idempotencyKey,
+      now,
+    };
   };
 
   const append = (command: ParentAuthorityCommand, runId: number, kind: WorkerEventKind, payload: Record<string, unknown>, suffix: string): void => {
@@ -843,12 +905,54 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
     createWorkerContextEnvelope: createContext,
     createWorkerAssignment: createAssignment,
     bindWorkerRun: bindRun,
+    bindWorkerRunFromAssignment(command) {
+      const assignment = getAssignment(command.assignmentId);
+      if (!assignment) throw new WorkerAuthorityError('not_found', 'Worker Assignment was not found');
+      return bindRun({
+        ...parentAuthorityForAssignment(assignment, command.producer, command.idempotencyKey, command.now),
+        childJobId: command.childJobId,
+        childAttemptId: command.childAttemptId,
+        childGeneration: command.childGeneration,
+        childFenceToken: command.childFenceToken,
+        workerRunId: command.workerRunId,
+        schemaVersion: command.schemaVersion,
+        assignmentId: command.assignmentId,
+        providerBindingId: command.providerBindingId,
+        contextEnvelopeId: command.contextEnvelopeId,
+      });
+    },
     recordWorkerResult: recordResult,
+    recordWorkerResultFromRun(command) {
+      const assignment = getAssignment(command.assignmentId);
+      if (!assignment) throw new WorkerAuthorityError('not_found', 'Worker Assignment was not found');
+      return recordResult({
+        ...parentAuthorityForAssignment(assignment, command.producer, command.idempotencyKey, command.now),
+        childJobId: command.childJobId,
+        childAttemptId: command.childAttemptId,
+        childGeneration: command.childGeneration,
+        childFenceToken: command.childFenceToken,
+        workerResultId: command.workerResultId,
+        workerRunId: command.workerRunId,
+        assignmentId: command.assignmentId,
+        payload: command.payload,
+      });
+    },
     getWorkerAssignment: getAssignment,
     getWorkerRun: getRun,
     getWorkerProviderBinding: getBinding,
     getWorkerContextEnvelope: getContext,
     getWorkerResult: getResult,
+    listWorkerAssignmentsForParent(parentJobId) {
+      return (db.prepare(
+        'SELECT * FROM worker_assignments WHERE parent_job_id=? ORDER BY created_at,assignment_id',
+      ).all(parentJobId) as AssignmentRow[]).map(mapAssignment);
+    },
+    getWorkerAssignmentForChild(childJobId) {
+      const row = db.prepare(
+        'SELECT * FROM worker_assignments WHERE child_job_id=? ORDER BY created_at,assignment_id LIMIT 1',
+      ).get(childJobId) as AssignmentRow | undefined;
+      return row ? mapAssignment(row) : null;
+    },
     listWorkerRunsForParent(parentJobId) {
       return (db.prepare(
         `SELECT r.* FROM worker_runs r JOIN worker_assignments a ON a.assignment_id=r.assignment_id
