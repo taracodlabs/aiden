@@ -3,6 +3,8 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  */
 
+import path from 'node:path';
+
 import { AidenAgent } from '../aidenAgent';
 import type { DurableJobDisposition, DurableJobHandle } from '../daemon/jobLifecycle';
 import type { JobEngine, AdmissionResult } from '../daemon/jobEngine';
@@ -349,6 +351,19 @@ function requireString(value: unknown, label: string): string {
   return value;
 }
 
+function canonicalSnapshotPath(value: unknown, label: string): string {
+  const raw = requireString(value, label);
+  if (raw.includes('\0') || path.posix.isAbsolute(raw.replace(/\\/gu, '/'))
+    || path.win32.isAbsolute(raw) || raw.startsWith('\\\\')) {
+    throw new Error('Snapshot path must be repository-relative');
+  }
+  const relative = path.posix.normalize(raw.replace(/\\/gu, '/')).replace(/^\.\//u, '');
+  if (relative === '' || relative === '.' || relative === '..' || relative.startsWith('../')) {
+    throw new Error('Snapshot path escapes the assigned repository');
+  }
+  return relative;
+}
+
 function boundedInteger(value: unknown, fallback: number, maximum: number): number {
   if (value === undefined) return fallback;
   if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error('Worker tool range must be a non-negative integer');
@@ -375,6 +390,19 @@ export function createReadOnlyRepositoryWorkerToolRegistry(
   if (!snapshot || snapshot.jobId !== assignment.parentJobId) {
     throw new Error('Assigned repository snapshot is unavailable');
   }
+  const workspace = input.engine.repository.getWorkspace(snapshot.workspaceId);
+  if (!workspace) throw new Error('Assigned repository workspace is unavailable');
+  const snapshotRoot = snapshot.repositoryRoot ?? workspace.canonicalPath;
+
+  const resolveSnapshotCapabilityPath = (argument: string, value: string): string => {
+    if (argument !== 'path') throw new Error('Worker tool path argument is not supported');
+    const relativePath = canonicalSnapshotPath(value, 'Snapshot path');
+    const entry = input.engine.repository.getEntry(snapshotId, relativePath);
+    if (!entry || entry.captureStatus !== 'captured' || !entry.contentHash) {
+      throw new Error('Path is not readable from the assigned repository snapshot');
+    }
+    return path.resolve(snapshotRoot, ...relativePath.split('/'));
+  };
 
   const assertChildAuthority = (): void => {
     const current = currentJobExecutionContext();
@@ -387,8 +415,9 @@ export function createReadOnlyRepositoryWorkerToolRegistry(
       throw new Error('Worker tool call has stale child Attempt authority');
     }
   };
-  const readSnapshot = async (relativePath: string, offset = 0, limit = 64 * 1024): Promise<Record<string, unknown>> => {
+  const readSnapshot = async (requestedPath: string, offset = 0, limit = 64 * 1024): Promise<Record<string, unknown>> => {
     assertChildAuthority();
+    const relativePath = canonicalSnapshotPath(requestedPath, 'Snapshot path');
     const entry = input.engine.repository.getEntry(snapshotId, relativePath);
     if (!entry || entry.captureStatus !== 'captured' || !entry.contentHash) {
       throw new Error('Path is not readable from the assigned repository snapshot');
@@ -461,8 +490,9 @@ export function createReadOnlyRepositoryWorkerToolRegistry(
         },
       },
       category: 'read', mutates: false, toolset: 'repository-worker', contexts: ['daemon'], riskTier: 'safe',
+      resolveCapabilityPath: resolveSnapshotCapabilityPath,
       async execute(args) {
-        const relativePath = requireString(args.path, 'Snapshot path');
+        const relativePath = canonicalSnapshotPath(args.path, 'Snapshot path');
         return readSnapshot(
           relativePath,
           boundedInteger(args.offset, 0, Number.MAX_SAFE_INTEGER),
@@ -483,11 +513,12 @@ export function createReadOnlyRepositoryWorkerToolRegistry(
         },
       },
       category: 'read', mutates: false, toolset: 'repository-worker', contexts: ['daemon'], riskTier: 'safe',
+      resolveCapabilityPath: resolveSnapshotCapabilityPath,
       async execute(args) {
         assertChildAuthority();
         const instructions = input.engine.repository.discoverInstructions(snapshotId);
         if (args.path === undefined) return { snapshotId, instructions, stale: false };
-        const relativePath = requireString(args.path, 'Instruction path');
+        const relativePath = canonicalSnapshotPath(args.path, 'Instruction path');
         if (!instructions.some((item) => item.path === relativePath)) {
           throw new Error('Path is not an instruction file in the assigned repository snapshot');
         }

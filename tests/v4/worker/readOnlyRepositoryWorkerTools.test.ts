@@ -3,7 +3,7 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  */
 
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
@@ -38,6 +38,8 @@ describe('read-only repository Worker tools', () => {
     home = await mkdtemp(path.join(os.tmpdir(), 'aiden-worker-home-'));
     await writeFile(path.join(root, 'AGENTS.md'), 'Read the source before reporting.\n');
     await writeFile(path.join(root, 'source.ts'), 'export const marker = "needle";\n');
+    await mkdir(path.join(root, 'nested directory'), { recursive: true });
+    await writeFile(path.join(root, 'nested directory', 'child.ts'), 'export const child = "needle";\n');
   });
 
   afterEach(async () => {
@@ -144,6 +146,45 @@ describe('read-only repository Worker tools', () => {
       },
       finalize: () => ({ status: 'completed', outcome: 'checked', finishReason: 'stop', evidence: {} }),
     });
+  });
+
+  it('uses canonical snapshot-relative paths instead of the caller working directory', async () => {
+    const { admitted, parent, parentLease } = await assignment();
+    const values = await executeDurableJob({
+      engine, ownerId: 'worker-instance', leaseTtlMs: 60_000,
+      admission: { existing: { ...admitted.child, reused: true }, source: 'worker-test' },
+      execute: async (handle) => {
+        const workerRunId = `worker_run_${admitted.assignment.assignmentId.slice('worker_assignment_'.length)}`;
+        engine.worker.bindWorkerRun({
+          parentJobId: parent.jobId, parentAttemptId: parent.attemptId,
+          parentGeneration: parentLease.generation!, parentFenceToken: parentLease.fenceToken!,
+          childJobId: handle.jobId, childAttemptId: handle.attemptId,
+          childGeneration: handle.generation, childFenceToken: handle.fenceToken,
+          workerRunId, schemaVersion: 1, assignmentId: admitted.assignment.assignmentId,
+          providerBindingId: admitted.providerBinding.providerBindingId,
+          contextEnvelopeId: admitted.contextEnvelope.contextEnvelopeId,
+          producer: 'test', idempotencyKey: 'canonical-path-run',
+        });
+        const executor = createReadOnlyRepositoryWorkerToolRegistry({ engine, assignmentId: admitted.assignment.assignmentId, workerRunId })
+          .buildExecutor({ cwd: path.dirname(root), paths: resolveAidenPaths({ rootOverride: home }) });
+        return {
+          windowsSeparators: await executor({ id: 'windows-separators', name: 'repository_snapshot_read', arguments: { path: 'nested directory\\child.ts' } }),
+          posixSeparators: await executor({ id: 'posix-separators', name: 'repository_snapshot_read', arguments: { path: 'nested directory/child.ts' } }),
+          escaped: await executor({ id: 'escaped', name: 'repository_snapshot_read', arguments: { path: '../outside.ts' } }),
+          absoluteWindows: await executor({ id: 'absolute-windows', name: 'repository_snapshot_read', arguments: { path: 'C:\\outside.ts' } }),
+          absolutePosix: await executor({ id: 'absolute-posix', name: 'repository_snapshot_read', arguments: { path: '/outside.ts' } }),
+          unc: await executor({ id: 'unc', name: 'repository_snapshot_read', arguments: { path: '\\\\server\\share\\outside.ts' } }),
+        };
+      },
+      finalize: () => ({ status: 'completed', outcome: 'checked', finishReason: 'stop', evidence: {} }),
+    });
+    expect(values.value.windowsSeparators.result).toMatchObject({ path: 'nested directory/child.ts', stale: false });
+    expect(values.value.posixSeparators.result).toMatchObject({ path: 'nested directory/child.ts', stale: false });
+    for (const outcome of [values.value.escaped, values.value.absoluteWindows, values.value.absolutePosix, values.value.unc]) {
+      expect(outcome.error).toMatch(/snapshot|path/i);
+    }
+    expect(db.prepare('SELECT COUNT(*) AS n FROM tool_calls WHERE job_id=?').get(admitted.child.jobId)).toEqual({ n: 2 });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM side_effect_ledger WHERE job_id=?').get(admitted.child.jobId)).toEqual({ n: 0 });
   });
 
   it('keeps every generic or mutating capability outside the Worker registry', async () => {
