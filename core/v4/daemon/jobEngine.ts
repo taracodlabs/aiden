@@ -42,6 +42,10 @@ import {
   type RepositoryUnderstandingAuthority,
 } from '../codebase/repositoryUnderstandingAuthority';
 import { createWorkerAuthority, type WorkerAuthority } from '../worker/workerAuthority';
+import {
+  createWorkerProviderCallAuthority,
+  type WorkerProviderCallAuthority,
+} from '../worker/workerProviderCallAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -202,6 +206,7 @@ export interface LeaseResult extends TransitionResult {
 export interface JobEngine {
   readonly graph: ExecutionGraphAuthority;
   readonly worker: WorkerAuthority;
+  readonly workerProviderCalls: WorkerProviderCallAuthority;
   readonly resources: JobResourceAuthority;
   readonly proof: JobProofAuthority;
   readonly projection: JobEventProjectionAuthority;
@@ -2370,10 +2375,26 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       return { duplicate: result.duplicate, sequence: result.jobSequence };
     },
   });
+  const workerProviderCalls = createWorkerProviderCallAuthority(db, (command) => {
+    const attempt = activeFence(
+      command.childAttemptId,
+      command.childGeneration,
+      command.childFenceToken,
+      command.now,
+    );
+    const job = attempt ? getJobRow(command.childJobId) : undefined;
+    return Boolean(
+      attempt
+      && attempt.task_id === command.childJobId
+      && job?.active_attempt_id === command.childAttemptId
+      && !JOB_TERMINAL.has(job.status),
+    );
+  });
 
   return {
     graph,
     worker,
+    workerProviderCalls,
     resources,
     proof,
     projection,

@@ -163,6 +163,40 @@ describe('WorkerAuthority', () => {
     ]);
   });
 
+  it('freezes provider capabilities, catalog identity, and ordered fallback references in the binding hash', () => {
+    const current = make();
+    current.engine.worker.createWorkerProviderBinding({
+      ...current.parentAuthority,
+      providerBindingId: 'provider_fallback_one', schemaVersion: 1,
+      providerId: 'groq', modelId: 'fallback-model', providerRuntimeIdentity: 'runtime:fallback',
+      credentialReference: 'credential:fallback', endpointReference: 'endpoint:fallback',
+      capabilitySnapshotHash: 'c'.repeat(64), selectionReason: 'fallback policy', fallbackPolicyId: null,
+      contextWindow: 16_384, maxOutputTokens: 2_048, producer: 'test', idempotencyKey: 'provider-fallback', now: 19,
+    });
+    const command = {
+      ...current.parentAuthority,
+      providerBindingId: 'provider_immutable', schemaVersion: 1 as const,
+      providerId: 'custom_openai', modelId: 'custom-default', providerRuntimeIdentity: 'runtime:custom',
+      credentialReference: 'credential:custom', endpointReference: 'endpoint:configured',
+      capabilitySnapshotHash: 'a'.repeat(64), selectionReason: 'runtime policy', fallbackPolicyId: 'fallback-policy-one',
+      contextWindow: 32_768, maxOutputTokens: 4_096, supportsToolCalling: true,
+      supportsStreaming: true, catalogDigest: 'b'.repeat(64), fallbackBindingIds: ['provider_fallback_one'],
+      producer: 'test', idempotencyKey: 'provider-immutable', now: 20,
+    };
+    const first = current.engine.worker.createWorkerProviderBinding(command);
+    expect(first).toMatchObject({
+      supportsToolCalling: true,
+      supportsStreaming: true,
+      catalogDigest: 'b'.repeat(64),
+      fallbackBindingIds: ['provider_fallback_one'],
+    });
+    expect(current.engine.worker.createWorkerProviderBinding(command)).toEqual(first);
+    expect(() => current.engine.worker.createWorkerProviderBinding({
+      ...command, modelId: 'model-selected-by-output',
+    })).toThrowError(expect.objectContaining({ code: 'immutable_conflict' }));
+    expect(JSON.stringify(first)).not.toContain('secret');
+  });
+
   it.each(['env', 'environment', 'conversationHistory', 'messages', 'fenceToken'])(
     'rejects context envelope ambient field %s',
     (field) => {

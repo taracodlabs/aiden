@@ -68,8 +68,53 @@ export interface WorkerProviderBindingRecord {
   readonly fallbackPolicyId: string | null;
   readonly contextWindow: number;
   readonly maxOutputTokens: number;
+  readonly supportsToolCalling: boolean;
+  readonly supportsStreaming: boolean;
+  readonly catalogDigest: string;
+  readonly fallbackBindingIds: readonly string[];
   readonly bindingHash: string;
   readonly createdAt: WorkerTimestamp;
+}
+
+export type WorkerLogicalProviderCallState =
+  | 'prepared'
+  | 'attempting'
+  | 'response_received'
+  | 'accepted'
+  | 'downstream_started'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown';
+
+export interface WorkerLogicalProviderCallRecord {
+  readonly logicalCallId: string;
+  readonly schemaVersion: 1;
+  readonly idempotencyKey: string;
+  readonly workerRunId: string;
+  readonly assignmentId: string;
+  readonly providerBindingId: string;
+  readonly childJobId: string;
+  readonly childAttemptId: string;
+  readonly childGeneration: number;
+  readonly callOrdinal: number;
+  readonly requestHash: string;
+  readonly toolSchemaHash: string;
+  readonly providerId: string;
+  readonly modelId: string;
+  readonly fallbackPolicyId: string | null;
+  readonly state: WorkerLogicalProviderCallState;
+  readonly acceptedProviderAttemptId: string | null;
+  readonly responseHash: string | null;
+  readonly providerRequestId: string | null;
+  readonly failureKind: string | null;
+  readonly outcomeKnown: boolean;
+  readonly responseReceivedAt: number | null;
+  readonly acceptedAt: number | null;
+  readonly downstreamStartedAt: number | null;
+  readonly completedAt: number | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
 }
 
 export interface WorkerContextEnvelopeRecord {

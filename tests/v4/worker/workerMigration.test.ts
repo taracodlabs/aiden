@@ -29,11 +29,35 @@ describe('Worker persistence migration', () => {
       })();
     }
     const before = new Set(tables());
-    expect(runMigrations(db)).toEqual({ from: 36, to: 37 });
-    expect(LATEST_SCHEMA_VERSION).toBe(37);
+    const migration = MIGRATIONS_FOR_TESTS.find((entry) => entry.version === 37)!;
+    db.transaction(() => {
+      if (migration.apply) migration.apply(db);
+      else db.exec(migration.sql ?? '');
+      db.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,37,1)').run();
+    })();
     expect(tables().filter((table) => !before.has(table))).toEqual([
       'worker_assignments', 'worker_context_envelopes', 'worker_provider_bindings', 'worker_results', 'worker_runs',
     ]);
+  });
+
+  it('upgrades v37 additively with provider-call and reservation records', () => {
+    for (const migration of MIGRATIONS_FOR_TESTS.filter((entry) => entry.version <= 37)) {
+      db.transaction(() => {
+        if (migration.apply) migration.apply(db);
+        else db.exec(migration.sql ?? '');
+        db.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,?,?)').run(migration.version, 1);
+      })();
+    }
+    const before = new Set(tables());
+    expect(runMigrations(db)).toEqual({ from: 37, to: 38 });
+    expect(LATEST_SCHEMA_VERSION).toBe(38);
+    expect(tables().filter((table) => !before.has(table))).toEqual([
+      'job_budget_reservation_commits', 'job_budget_reservation_items', 'job_budget_reservations',
+      'worker_logical_provider_calls', 'worker_provider_tool_links',
+    ]);
+    expect(columns('worker_provider_bindings')).toEqual(expect.arrayContaining([
+      'supports_tool_calling', 'supports_streaming', 'catalog_digest', 'fallback_binding_ids_json',
+    ]));
   });
 
   it('keeps WorkerRun as a relation without lifecycle, lease, fence, cancellation, or budget authority', () => {
@@ -77,14 +101,14 @@ describe('Worker persistence migration', () => {
       idempotencyNamespace: 'fixture', idempotencyKey: 'job', goal: 'legacy job',
     });
 
-    expect(runMigrations(db)).toEqual({ from: 36, to: 37 });
+    expect(runMigrations(db)).toEqual({ from: 36, to: 38 });
     const engine = createJobEngine({ db });
     expect(engine.getJob(before.jobId)?.goal).toBe('legacy job');
     expect(engine.worker.listWorkerRunsForParent(before.jobId)).toEqual([]);
   });
 
-  it('is idempotent when v37 is already installed', () => {
-    expect(runMigrations(db)).toEqual({ from: 0, to: 37 });
-    expect(runMigrations(db)).toEqual({ from: 37, to: 37 });
+  it('is idempotent when v38 is already installed', () => {
+    expect(runMigrations(db)).toEqual({ from: 0, to: 38 });
+    expect(runMigrations(db)).toEqual({ from: 38, to: 38 });
   });
 });

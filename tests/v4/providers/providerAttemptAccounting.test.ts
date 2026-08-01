@@ -37,6 +37,8 @@ function input() {
       sessionId: 'session-1',
       taskId: 'task-1',
       runId: 'run-1',
+      workerRunId: 'worker-run-1',
+      providerBindingId: 'provider-binding-1',
       entryPoint: 'cli',
       providerConfigured: 'groq',
       modelConfigured: 'llama-3.3-70b-versatile',
@@ -49,6 +51,7 @@ function input() {
 describe('physical provider-attempt accounting', () => {
   it('records a successful adapter attempt with provider usage', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      id: 'provider-request-1',
       choices: [{ message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
       usage: {
         prompt_tokens: 11,
@@ -78,7 +81,11 @@ describe('physical provider-attempt accounting', () => {
       providerOutputTokens: 4,
       providerReasoningTokens: 2,
       usageSource: 'provider_reported',
+      workerRunId: 'worker-run-1',
+      providerBindingId: 'provider-binding-1',
+      providerRequestId: 'provider-request-1',
     });
+    expect(record.responseHash).toMatch(/^[a-f0-9]{64}$/u);
   });
 
   it('records each adapter retry as a distinct physical attempt', async () => {
