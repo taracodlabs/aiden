@@ -307,7 +307,9 @@ describe('read-only repository Worker runtime', () => {
       ]);
     expect(db.prepare('SELECT COUNT(*) AS n FROM worker_provider_tool_links WHERE worker_run_id=?')
       .get(childExecution.value.workerRun.workerRunId)).toEqual({ n: 3 });
-    expect(engine.resources.getWorkerReservation(admitted.reservation.reservationId)).toMatchObject({ state: 'released' });
+    expect(engine.resources.getWorkerReservation(admitted.reservation.reservationId)).toMatchObject({
+      state: 'exhausted', reconciliationState: 'blocked_unknown', unknownSpendPending: true,
+    });
     expect(engine.resources.getBudgets(parent.jobId).find((budget) => budget.kind === 'model_calls')?.used).toBe(2);
     expect(engine.resources.getBudgets(parent.jobId).find((budget) => budget.kind === 'tool_calls')?.used).toBe(3);
     expect(JSON.stringify(inputs[0].messages)).not.toContain(parentLease.fenceToken!);
@@ -504,6 +506,57 @@ describe('read-only repository Worker runtime', () => {
     expect(engine.workerProviderCalls.get(logicalCallId)).toMatchObject({ state: 'unknown', outcomeKnown: false });
   });
 
+  it('rejects and accounts a provider response that arrives after durable cancellation', async () => {
+    const { admitted } = await setup();
+    const logicalCallId = 'logical_late_after_cancel';
+    const adapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      async call(input) {
+        const lifecycle = beginPhysicalProviderAttempt(input, {
+          providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: 'chat_completions',
+          transport: 'fixture-late', attemptIndex: 0, logicalCallId,
+          requestBytes: JSON.stringify(input.messages).length,
+        });
+        const output: ProviderCallOutput = {
+          content: 'late result',
+          toolCalls: [{ id: 'late-tool', name: 'repository_snapshot_read', arguments: { path: 'source.ts' } }],
+          finishReason: 'tool_use', usage: { inputTokens: 8, outputTokens: 4 },
+        };
+        expect(engine.cancelJob({
+          jobId: admitted.child.jobId,
+          reason: 'operator_cancelled',
+          producer: 'test',
+          eventIdempotencyKey: 'cancel-late-worker',
+        })).toMatchObject({ applied: true });
+        lifecycle.success(output, JSON.stringify(output).length);
+        return output;
+      },
+    };
+    const bridge = directBridge(admitted, adapter);
+    await expect(bridge.adapter.call({
+      messages: [{ role: 'user', content: 'inspect' }], tools: [], usageContext: { logicalCallId },
+    })).rejects.toMatchObject({ code: 'stale_authority' });
+    expect(engine.workerProviderCalls.get(logicalCallId)).toMatchObject({
+      state: 'attempting',
+      interruptionKind: 'cancellation',
+      retrySafety: 'blocked_unknown',
+      reconciliationState: 'blocked_unknown',
+      staleResponseRejectedAt: expect.any(Number),
+    });
+    expect(db.prepare(
+      'SELECT provider_attempt_id,response_hash FROM worker_provider_late_responses WHERE logical_call_id=?',
+    ).get(logicalCallId)).toMatchObject({
+      provider_attempt_id: expect.any(String), response_hash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    });
+    expect(db.prepare('SELECT COUNT(*) AS n FROM worker_provider_tool_links WHERE logical_call_id=?')
+      .get(logicalCallId)).toEqual({ n: 0 });
+    expect(engine.resources.getBudgets(admitted.child.jobId).find((item) => item.kind === 'model_calls')?.used).toBe(1);
+    expect(engine.resources.getBudgets(admitted.child.jobId).find((item) => item.kind === 'input_tokens')?.used).toBe(8);
+    expect(engine.resources.getWorkerReservation(admitted.reservation.reservationId)).toMatchObject({
+      reconciliationState: 'blocked_unknown', unknownSpendPending: true,
+    });
+  });
+
   it('settles a bridge-level budget denial before transport send', async () => {
     const { admitted } = await setup(1);
     db.prepare(
@@ -634,7 +687,9 @@ describe('read-only repository Worker runtime', () => {
     expect(ledger.query({ jobId: admitted.child.jobId })).toHaveLength(1);
     expect(engine.workerProviderCalls.listForWorkerRun(admitted.reservation.workerRunId))
       .toMatchObject([{ callOrdinal: 1, state: 'completed' }]);
-    expect(engine.resources.getWorkerReservation(admitted.reservation.reservationId)?.state).toBe('released');
+    expect(engine.resources.getWorkerReservation(admitted.reservation.reservationId)).toMatchObject({
+      state: 'exhausted', reconciliationState: 'blocked_unknown', unknownSpendPending: true,
+    });
   });
 
   it('prevents cancelled parent authority from creating parent Evidence or changing its Claim', async () => {

@@ -3,7 +3,7 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Database from 'better-sqlite3';
 
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
@@ -201,6 +201,13 @@ describe('executeDurableJob', () => {
   });
 
   it('expires a durable runtime budget while execution is waiting and records actual elapsed use', async () => {
+    let intentPersisted = false;
+    let persistedBeforeAbort = false;
+    const interruption = vi.spyOn(engine.workerProviderCalls, 'recordInterruptionForAttempt')
+      .mockImplementation(() => {
+        intentPersisted = true;
+        return [];
+      });
     const execution = executeDurableJob({
       engine,
       ownerId: 'instance_lifecycle',
@@ -211,7 +218,10 @@ describe('executeDurableJob', () => {
         goal: 'wait beyond budget', resourcePolicy: { budgets: { runtime_ms: 5 } },
       },
       execute: async (handle) => new Promise<string>((resolve) => {
-        handle.signal.addEventListener('abort', () => resolve('aborted'), { once: true });
+        handle.signal.addEventListener('abort', () => {
+          persistedBeforeAbort = intentPersisted;
+          resolve('aborted');
+        }, { once: true });
       }),
       finalize: () => ({ status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {} }),
     });
@@ -223,6 +233,12 @@ describe('executeDurableJob', () => {
       { kind: 'runtime_ms', limit: 5, hasUnknownUsage: false },
     ]);
     expect(engine.resources.getBudgets(job.id)[0]!.used).toBeGreaterThanOrEqual(5);
+    expect(interruption).toHaveBeenCalledWith(expect.objectContaining({
+      childJobId: job.id,
+      kind: 'timeout',
+      reason: 'runtime_budget_exceeded',
+    }));
+    expect(persistedBeforeAbort).toBe(true);
   });
 
   it('adopts an already admitted Job without creating a parallel lifecycle', async () => {

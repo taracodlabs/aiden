@@ -2104,6 +2104,90 @@ function applyV38(db: Database.Database): void {
   `);
 }
 
+/** Worker provider interruption and restart reconciliation metadata. */
+function applyV39(db: Database.Database): void {
+  addMissingColumns(db, 'worker_logical_provider_calls', [
+    ['reconciliation_state', "TEXT NOT NULL DEFAULT 'not_required'"],
+    ['outcome_knowledge', "TEXT NOT NULL DEFAULT 'no_request_started'"],
+    ['retry_safety', "TEXT NOT NULL DEFAULT 'not_applicable'"],
+    ['interruption_kind', 'TEXT'],
+    ['cancellation_requested_at', 'INTEGER'],
+    ['timeout_requested_at', 'INTEGER'],
+    ['authority_lost_at', 'INTEGER'],
+    ['stale_response_rejected_at', 'INTEGER'],
+    ['late_response_observed_at', 'INTEGER'],
+    ['reconciliation_started_at', 'INTEGER'],
+    ['reconciled_at', 'INTEGER'],
+    ['reconciliation_reason', 'TEXT'],
+    ['reconciliation_version', 'INTEGER NOT NULL DEFAULT 0'],
+    ['recovery_predecessor_logical_call_id', 'TEXT'],
+  ]);
+  addMissingColumns(db, 'job_budget_reservations', [
+    ['reconciliation_state', "TEXT NOT NULL DEFAULT 'not_required'"],
+    ['reconciliation_reason', 'TEXT'],
+    ['unknown_spend_pending', 'INTEGER NOT NULL DEFAULT 0'],
+    ['last_reconciled_at', 'INTEGER'],
+    ['settlement_blocked_at', 'INTEGER'],
+  ]);
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_worker_logical_calls_reconciliation
+      ON worker_logical_provider_calls(reconciliation_state, logical_call_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_budget_reconciliation
+      ON job_budget_reservations(reconciliation_state, updated_at, reservation_id);
+
+    CREATE TABLE IF NOT EXISTS worker_provider_call_reconciliations (
+      reconciliation_id TEXT PRIMARY KEY,
+      logical_call_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      worker_run_id TEXT NOT NULL,
+      child_job_id TEXT NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      child_generation INTEGER NOT NULL,
+      outcome_knowledge TEXT NOT NULL,
+      retry_safety TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      physical_attempt_ids_json TEXT NOT NULL DEFAULT '[]',
+      unknown_spend INTEGER NOT NULL DEFAULT 0,
+      unsettled_downstream INTEGER NOT NULL DEFAULT 0,
+      state TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      FOREIGN KEY (logical_call_id) REFERENCES worker_logical_provider_calls(logical_call_id) ON DELETE CASCADE,
+      UNIQUE (logical_call_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_provider_reconciliations_pending
+      ON worker_provider_call_reconciliations(state, created_at, reconciliation_id);
+
+    CREATE TABLE IF NOT EXISTS worker_provider_late_responses (
+      late_response_id TEXT PRIMARY KEY,
+      logical_call_id TEXT NOT NULL,
+      provider_attempt_id TEXT NOT NULL,
+      response_hash TEXT NOT NULL,
+      provider_request_id TEXT,
+      reason TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      FOREIGN KEY (logical_call_id) REFERENCES worker_logical_provider_calls(logical_call_id) ON DELETE CASCADE,
+      UNIQUE (logical_call_id, provider_attempt_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS job_budget_reservation_reconciliations (
+      reconciliation_id TEXT PRIMARY KEY,
+      reservation_id TEXT NOT NULL,
+      logical_call_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      outcome_knowledge TEXT NOT NULL,
+      retry_safety TEXT NOT NULL,
+      unknown_spend INTEGER NOT NULL DEFAULT 0,
+      safe_to_release INTEGER NOT NULL DEFAULT 0,
+      reason TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (reservation_id) REFERENCES job_budget_reservations(reservation_id) ON DELETE CASCADE,
+      FOREIGN KEY (logical_call_id) REFERENCES worker_logical_provider_calls(logical_call_id) ON DELETE CASCADE,
+      UNIQUE (reservation_id, idempotency_key)
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2143,6 +2227,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 36, name: 'repository understanding and durable coding plans', apply: applyV36 },
   { version: 37, name: 'durable Worker contracts and authority boundaries', apply: applyV37 },
   { version: 38, name: 'durable Worker provider calls and budget reservations', apply: applyV38 },
+  { version: 39, name: 'Worker provider restart and reconciliation', apply: applyV39 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2185,7 +2270,9 @@ function validateLatestSchema(db: Database.Database): void {
     'execution_graph_node_references', 'worker_assignments', 'worker_runs',
     'worker_provider_bindings', 'worker_context_envelopes', 'worker_results',
     'worker_logical_provider_calls', 'worker_provider_tool_links', 'job_budget_reservations',
-    'job_budget_reservation_items', 'job_budget_reservation_commits'];
+    'job_budget_reservation_items', 'job_budget_reservation_commits',
+    'worker_provider_call_reconciliations', 'worker_provider_late_responses',
+    'job_budget_reservation_reconciliations'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

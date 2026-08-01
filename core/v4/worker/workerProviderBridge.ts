@@ -16,6 +16,9 @@ import type { DurableJobHandle } from '../daemon/jobLifecycle';
 import type { JobEngine } from '../daemon/jobEngine';
 import type { JobBudgetKind, JobBudgetReservationRecord } from '../daemon/jobResourceAuthority';
 import { computeWorkerDigest, type WorkerAssignmentRecord, type WorkerProviderBindingRecord, type WorkerRunRecord } from './types';
+import { workerProviderUsageFacts } from './workerProviderUsage';
+import { reconcileWorkerProviderCall } from './workerProviderReconciliation';
+import { WorkerProviderCallError } from './workerProviderCallAuthority';
 
 export interface DurableWorkerProviderBridge {
   adapter: ProviderAdapter;
@@ -55,24 +58,6 @@ function event(options: BridgeOptions, type: string, payload: Record<string, unk
   if (!result.applied && !result.duplicate) throw new Error(`Worker provider event rejected: ${result.conflict ?? 'unknown'}`);
 }
 
-function knownZero(attempt: ProviderAttemptRecord): boolean {
-  return attempt.status === 'failed_before_send'
-    || attempt.errorClass === 'rate_limit'
-    || attempt.errorClass === 'authentication'
-    || attempt.errorClass === 'context_overflow'
-    || attempt.errorClass === 'request_size_limit';
-}
-
-function usageValue(attempt: ProviderAttemptRecord, kind: JobBudgetKind): number | null {
-  if (knownZero(attempt)) return 0;
-  if (kind === 'input_tokens') return attempt.providerInputTokens;
-  if (kind === 'output_tokens') return attempt.providerOutputTokens;
-  if (kind === 'reasoning_tokens') return attempt.providerReasoningTokens;
-  if (kind === 'external_cost') return attempt.costStatus === 'unknown' ? null : attempt.costAmount;
-  if (kind === 'output_bytes') return attempt.responseBytes;
-  return null;
-}
-
 function failureOutcome(attempts: readonly ProviderAttemptRecord[], error: unknown): {
   kind: string; known: boolean; cancelled: boolean;
 } {
@@ -106,41 +91,46 @@ export function createDurableWorkerProviderBridge(options: BridgeOptions): Durab
     idempotencyKey: string,
   ): void => {
     if (!reservationItem(kind)) return;
-    const result = options.engine.resources.commitWorkerUsage({
-      reservationId: options.reservation.reservationId,
-      ...authority(options),
-      kind,
-      amount,
-      certainty: amount === null ? 'unknown' : 'confirmed',
-      sourceKind: 'provider_attempt',
-      sourceId: attempt.callId,
-      idempotencyKey,
-    });
-    event(options, 'worker.budget_commit_recorded', {
-      reservationId: options.reservation.reservationId,
-      logicalCallId,
-      providerAttemptId: attempt.callId,
-      kind,
-      amountKnown: amount !== null,
-      applied: result.applied,
-      exhausted: result.exhausted === true,
-    }, `worker-budget-commit:${options.reservation.reservationId}:${idempotencyKey}`);
+    try {
+      const result = options.engine.resources.commitWorkerUsage({
+        reservationId: options.reservation.reservationId,
+        ...authority(options),
+        kind,
+        amount,
+        certainty: amount === null ? 'unknown' : 'confirmed',
+        sourceKind: 'provider_attempt',
+        sourceId: attempt.callId,
+        idempotencyKey,
+      });
+      event(options, 'worker.budget_commit_recorded', {
+        reservationId: options.reservation.reservationId,
+        logicalCallId,
+        providerAttemptId: attempt.callId,
+        kind,
+        amountKnown: amount !== null,
+        applied: result.applied,
+        exhausted: result.exhausted === true,
+      }, `worker-budget-commit:${options.reservation.reservationId}:${idempotencyKey}`);
+    } catch (error) {
+      if (!(error instanceof Error) || !/^(?:Stale worker cannot reserve or consume Job budget|Worker budget reservation Attempt is stale|Parent Worker budget authority is stale)$/iu.test(error.message)) {
+        throw error;
+      }
+      options.engine.resources.reconcileWorkerUsage({
+        reservationId: options.reservation.reservationId,
+        logicalCallId,
+        kind,
+        amount,
+        certainty: amount === null ? 'unknown' : 'confirmed',
+        providerAttemptId: attempt.callId,
+        idempotencyKey,
+      });
+    }
   };
 
   const accountAttempts = (logicalCallId: string, attempts: readonly ProviderAttemptRecord[]): void => {
     attempts.forEach((attempt, index) => {
-      commit(
-        logicalCallId,
-        attempt,
-        'model_calls',
-        1,
-        index === 0 ? `model-call:${logicalCallId}` : `provider-attempt:${attempt.callId}:model-call`,
-      );
-      if (attempt.purpose === 'retry' || attempt.purpose === 'fallback') {
-        commit(logicalCallId, attempt, 'retries', 1, `provider-attempt:${attempt.callId}:retry`);
-      }
-      for (const kind of ['input_tokens', 'output_tokens', 'reasoning_tokens', 'external_cost', 'output_bytes'] as const) {
-        commit(logicalCallId, attempt, kind, usageValue(attempt, kind), `provider-attempt:${attempt.callId}:${kind}`);
+      for (const fact of workerProviderUsageFacts(logicalCallId, attempt, index)) {
+        commit(logicalCallId, attempt, fact.kind, fact.amount, fact.idempotencyKey);
       }
     });
   };
@@ -270,13 +260,42 @@ export function createDurableWorkerProviderBridge(options: BridgeOptions): Durab
       }
       if (!acceptedAttempt) throw new Error('Worker provider response is not linked to a successful physical attempt');
       accountAttempts(logicalCallId, attempts);
-      options.engine.workerProviderCalls.recordResponseReceived({
-        ...authority(options),
-        logicalCallId,
-        providerAttemptId: acceptedAttempt.callId,
-        responseHash,
-        providerRequestId: acceptedAttempt.providerRequestId ?? extractProviderRequestId(output),
-      });
+      const providerRequestId = acceptedAttempt.providerRequestId ?? extractProviderRequestId(output);
+      try {
+        options.engine.workerProviderCalls.recordResponseReceived({
+          ...authority(options),
+          logicalCallId,
+          providerAttemptId: acceptedAttempt.callId,
+          responseHash,
+          providerRequestId,
+        });
+      } catch (error) {
+        if (!(error instanceof WorkerProviderCallError)
+          || !['stale_authority', 'interrupted', 'authority_lost'].includes(error.code)) throw error;
+        const call = options.engine.workerProviderCalls.get(logicalCallId);
+        if (!call) throw error;
+        options.engine.workerProviderCalls.rejectLateResponse({
+          logicalCallId,
+          workerRunId: call.workerRunId,
+          childJobId: call.childJobId,
+          childAttemptId: call.childAttemptId,
+          childGeneration: call.childGeneration,
+          providerAttemptId: acceptedAttempt.callId,
+          responseHash,
+          providerRequestId,
+          reason: 'response_after_authority_loss',
+          idempotencyKey: `worker-late-response:${logicalCallId}:${acceptedAttempt.callId}`,
+        });
+        reconcileWorkerProviderCall({
+          engine: options.engine,
+          ledger: currentProviderAttemptLedger(),
+          call: options.engine.workerProviderCalls.get(logicalCallId)!,
+          ownerId: 'provider-bridge',
+          producer: 'repository-worker-provider-bridge',
+          reason: 'late_response',
+        });
+        throw error;
+      }
       event(options, 'worker.provider_response_received', {
         logicalCallId,
         providerAttemptId: acceptedAttempt.callId,
@@ -303,7 +322,17 @@ export function createDurableWorkerProviderBridge(options: BridgeOptions): Durab
       const attempts = currentProviderAttemptLedger()?.query({ parentCallId: logicalCallId }) ?? [];
       if (attempts.length > 0) accountAttempts(logicalCallId, attempts);
       const call = options.engine.workerProviderCalls.get(logicalCallId);
-      if (call && call.state !== 'accepted' && call.state !== 'downstream_started' && call.state !== 'completed') {
+      if (call && (call.interruptionKind !== null || call.authorityLostAt !== null)
+        && ['not_required', 'pending', 'inspecting'].includes(call.reconciliationState)) {
+        reconcileWorkerProviderCall({
+          engine: options.engine,
+          ledger: currentProviderAttemptLedger(),
+          call,
+          ownerId: 'provider-bridge',
+          producer: 'repository-worker-provider-bridge',
+          reason: call.interruptionKind ?? 'authority_lost',
+        });
+      } else if (call && call.state !== 'accepted' && call.state !== 'downstream_started' && call.state !== 'completed') {
         const failure = failureOutcome(attempts, error);
         options.engine.workerProviderCalls.fail({
           ...authority(options), logicalCallId, failureKind: failure.kind,

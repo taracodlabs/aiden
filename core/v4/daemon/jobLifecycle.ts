@@ -556,8 +556,25 @@ export async function executeDurableJob<T>(
     if (runtimeBudget?.limit !== null && runtimeBudget !== undefined) {
       const remaining = Math.max(0, runtimeBudget.limit - runtimeBudget.used);
       runtimeBudgetTimer = setTimeout(() => {
-        runtimeBudgetExpired = true;
-        leaseAbort.abort(new DurableJobBudgetExceededError('runtime_ms', handle));
+        try {
+          options.engine.workerProviderCalls.recordInterruptionForAttempt({
+            childJobId: handle.jobId,
+            childAttemptId: handle.attemptId,
+            childGeneration: handle.generation,
+            childFenceToken: handle.fenceToken,
+            kind: 'timeout',
+            reason: 'runtime_budget_exceeded',
+            idempotencyKey: `worker-timeout:${handle.attemptId}:${handle.generation}`,
+          });
+          runtimeBudgetExpired = true;
+          leaseAbort.abort(new DurableJobBudgetExceededError('runtime_ms', handle));
+        } catch (error) {
+          leaseLost = new DurableJobAuthorityLostError(
+            `Durable Worker timeout intent could not be persisted: ${error instanceof Error ? error.message : 'unknown'}`,
+            handle,
+          );
+          leaseAbort.abort(leaseLost);
+        }
       }, remaining);
       runtimeBudgetTimer.unref?.();
     }

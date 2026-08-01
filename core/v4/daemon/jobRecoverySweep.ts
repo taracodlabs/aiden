@@ -6,6 +6,11 @@
 import type { JobEngine } from './jobEngine';
 import type { TriggerBus } from './triggerBus';
 import { reconcileFilesystemEffectSync } from '../effectReconciliation';
+import { currentProviderAttemptLedger } from '../../../providers/v4/providerAttemptAccounting';
+import {
+  reconcileWorkerProviderAttempt,
+  sweepWorkerProviderReconciliation,
+} from '../worker/workerProviderReconciliation';
 
 export interface DurableRecoverySweepResult {
   expired: number;
@@ -30,11 +35,24 @@ export function sweepDurableJobRecovery(input: {
   maxCrashes?: number;
   now?: number;
 }): DurableRecoverySweepResult {
+  const providerLedger = currentProviderAttemptLedger();
   const decisions = input.jobEngine.recoverExpiredAttempts({
     now: input.now,
     instanceId: input.instanceId,
     producer: input.producer,
     maxCrashes: input.maxCrashes ?? 3,
+    reconcileWorkerAttempt: ({ childJobId, childAttemptId, childGeneration, now }) =>
+      reconcileWorkerProviderAttempt({
+        engine: input.jobEngine,
+        ledger: providerLedger,
+        childJobId,
+        childAttemptId,
+        childGeneration,
+        ownerId: input.instanceId,
+        producer: input.producer,
+        reason: 'attempt_lease_expired',
+        now,
+      }),
   });
   const result: DurableRecoverySweepResult = {
     expired: decisions.length,
@@ -44,10 +62,20 @@ export function sweepDurableJobRecovery(input: {
     enqueued: 0,
     reconciled: 0,
   };
+  const workerSweep = sweepWorkerProviderReconciliation({
+    engine: input.jobEngine,
+    ledger: providerLedger,
+    ownerId: input.instanceId,
+    producer: input.producer,
+    now: input.now,
+  });
+  result.reconciled += workerSweep.reconciled;
 
   for (const decision of decisions.filter((item) => item.decision === 'ask_user')) {
     const job = input.jobEngine.getJob(decision.jobId);
     if (!job) continue;
+    const workerRequiresResolution = decision.workerReconciliation?.retrySafety === 'blocked_unknown'
+      || decision.workerReconciliation?.retrySafety === 'unsafe';
     const effects = input.jobEngine.listEffectsRequiringReconciliation(job.id);
     for (const effect of effects) {
       const reconciliation = reconcileFilesystemEffectSync(effect);
@@ -61,7 +89,7 @@ export function sweepDurableJobRecovery(input: {
       });
       if (recorded.applied) result.reconciled += 1;
     }
-    if (input.jobEngine.listEffectsRequiringReconciliation(job.id).length === 0) {
+    if (!workerRequiresResolution && input.jobEngine.listEffectsRequiringReconciliation(job.id).length === 0) {
       input.jobEngine.createRecoveryAttempt({
         jobId: job.id,
         recoveryOfAttemptId: decision.expiredAttemptId,

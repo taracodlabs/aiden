@@ -87,6 +87,38 @@ export type WorkerLogicalProviderCallState =
   | 'cancelled'
   | 'unknown';
 
+export type WorkerProviderCallReconciliationState =
+  | 'not_required'
+  | 'pending'
+  | 'inspecting'
+  | 'reconciled'
+  | 'blocked_unknown'
+  | 'superseded'
+  | 'terminal';
+
+export type WorkerProviderCallOutcomeKnowledge =
+  | 'no_request_started'
+  | 'request_started_no_response_proven'
+  | 'response_received'
+  | 'response_accepted'
+  | 'downstream_started'
+  | 'provider_failed_known'
+  | 'provider_cancelled_known'
+  | 'provider_timed_out_known'
+  | 'outcome_unknown';
+
+export type WorkerProviderCallRetrySafety =
+  | 'safe'
+  | 'unsafe'
+  | 'blocked_unknown'
+  | 'not_applicable';
+
+export type WorkerProviderCallInterruptionKind =
+  | 'cancellation'
+  | 'timeout'
+  | 'lease_expired'
+  | 'authority_lost';
+
 export interface WorkerLogicalProviderCallRecord {
   readonly logicalCallId: string;
   readonly schemaVersion: 1;
@@ -109,12 +141,42 @@ export interface WorkerLogicalProviderCallRecord {
   readonly providerRequestId: string | null;
   readonly failureKind: string | null;
   readonly outcomeKnown: boolean;
+  readonly reconciliationState: WorkerProviderCallReconciliationState;
+  readonly outcomeKnowledge: WorkerProviderCallOutcomeKnowledge;
+  readonly retrySafety: WorkerProviderCallRetrySafety;
+  readonly interruptionKind: WorkerProviderCallInterruptionKind | null;
+  readonly cancellationRequestedAt: number | null;
+  readonly timeoutRequestedAt: number | null;
+  readonly authorityLostAt: number | null;
+  readonly staleResponseRejectedAt: number | null;
+  readonly lateResponseObservedAt: number | null;
+  readonly reconciliationStartedAt: number | null;
+  readonly reconciledAt: number | null;
+  readonly reconciliationReason: string | null;
+  readonly reconciliationVersion: number;
+  readonly recoveryPredecessorLogicalCallId: string | null;
   readonly responseReceivedAt: number | null;
   readonly acceptedAt: number | null;
   readonly downstreamStartedAt: number | null;
   readonly completedAt: number | null;
   readonly createdAt: number;
   readonly updatedAt: number;
+}
+
+export interface WorkerProviderCallReconciliationResult {
+  readonly logicalCallId: string;
+  readonly workerRunId: string;
+  readonly childJobId: string;
+  readonly childAttemptId: string;
+  readonly childGeneration: number;
+  readonly reconciliationState: WorkerProviderCallReconciliationState;
+  readonly outcomeKnowledge: WorkerProviderCallOutcomeKnowledge;
+  readonly retrySafety: WorkerProviderCallRetrySafety;
+  readonly reason: string;
+  readonly physicalAttemptIds: readonly string[];
+  readonly unknownSpend: boolean;
+  readonly unsettledDownstream: boolean;
+  readonly reconciledAt: number | null;
 }
 
 export interface WorkerContextEnvelopeRecord {

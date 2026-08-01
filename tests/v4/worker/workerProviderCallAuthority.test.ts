@@ -136,4 +136,150 @@ describe('Worker logical provider-call authority', () => {
     expect(raw).not.toContain(current.childAuthority.childFenceToken);
     expect(raw).not.toContain('raw response');
   });
+
+  it('persists cancellation intent before rejecting a late response', () => {
+    const { current, command } = prepared();
+    current.engine.workerProviderCalls.markAttempting(command);
+    const cancelled = current.engine.workerProviderCalls.recordCancellationIntent({
+      ...command,
+      reason: 'job_cancelled',
+      idempotencyKey: 'cancel-logical-one',
+      now: 31,
+    });
+    expect(cancelled).toMatchObject({
+      interruptionKind: 'cancellation',
+      cancellationRequestedAt: 31,
+      retrySafety: 'blocked_unknown',
+    });
+    expect(() => current.engine.workerProviderCalls.recordResponseReceived({
+      ...command,
+      providerAttemptId: 'physical_attempt_late',
+      responseHash: 'e'.repeat(64),
+      providerRequestId: 'request_late',
+      now: 32,
+    })).toThrowError(expect.objectContaining({ code: 'interrupted' }));
+    const rejected = current.engine.workerProviderCalls.rejectLateResponse({
+      logicalCallId: command.logicalCallId,
+      workerRunId: command.workerRunId,
+      childJobId: command.childJobId,
+      childAttemptId: command.childAttemptId,
+      childGeneration: command.childGeneration,
+      providerAttemptId: 'physical_attempt_late',
+      responseHash: 'e'.repeat(64),
+      providerRequestId: 'request_late',
+      reason: 'response_after_cancellation',
+      idempotencyKey: 'late-logical-one',
+      now: 32,
+    });
+    expect(rejected.call).toMatchObject({
+      lateResponseObservedAt: 32,
+      staleResponseRejectedAt: 32,
+    });
+    expect(current.engine.workerProviderCalls.rejectLateResponse({
+      logicalCallId: command.logicalCallId,
+      workerRunId: command.workerRunId,
+      childJobId: command.childJobId,
+      childAttemptId: command.childAttemptId,
+      childGeneration: command.childGeneration,
+      providerAttemptId: 'physical_attempt_late',
+      responseHash: 'e'.repeat(64),
+      providerRequestId: 'request_late',
+      reason: 'response_after_cancellation',
+      idempotencyKey: 'late-logical-one',
+      now: 33,
+    })).toMatchObject({ applied: false, duplicate: true });
+    expect(() => current.engine.workerProviderCalls.rejectLateResponse({
+      logicalCallId: command.logicalCallId,
+      workerRunId: command.workerRunId,
+      childJobId: command.childJobId,
+      childAttemptId: command.childAttemptId,
+      childGeneration: command.childGeneration,
+      providerAttemptId: 'physical_attempt_late',
+      responseHash: 'a'.repeat(64),
+      providerRequestId: 'request_late',
+      reason: 'response_after_cancellation',
+      idempotencyKey: 'late-logical-one',
+      now: 34,
+    })).toThrowError(expect.objectContaining({ code: 'late_response_conflict' }));
+  });
+
+  it('classifies restart recovery from canonical physical-attempt facts', () => {
+    const { current, command } = prepared();
+    const safe = current.engine.workerProviderCalls.markAuthorityLost({
+      logicalCallId: command.logicalCallId,
+      workerRunId: command.workerRunId,
+      childJobId: command.childJobId,
+      childAttemptId: command.childAttemptId,
+      childGeneration: command.childGeneration,
+      kind: 'lease_expired',
+      reason: 'restart',
+      idempotencyKey: 'authority-lost-prepared',
+      now: 60_011,
+    });
+    expect(safe.retrySafety).toBe('safe');
+    expect(current.engine.workerProviderCalls.reconcile({
+      logicalCallId: command.logicalCallId,
+      workerRunId: command.workerRunId,
+      childJobId: command.childJobId,
+      childAttemptId: command.childAttemptId,
+      childGeneration: command.childGeneration,
+      physicalAttempts: [],
+      reason: 'restart',
+      idempotencyKey: 'reconcile-prepared',
+      now: 60_012,
+    })).toMatchObject({ outcomeKnowledge: 'no_request_started', retrySafety: 'safe' });
+
+    current.db.close();
+    const second = prepared();
+    second.current.engine.workerProviderCalls.markAttempting(second.command);
+    second.current.engine.workerProviderCalls.markAuthorityLost({
+      logicalCallId: second.command.logicalCallId,
+      workerRunId: second.command.workerRunId,
+      childJobId: second.command.childJobId,
+      childAttemptId: second.command.childAttemptId,
+      childGeneration: second.command.childGeneration,
+      kind: 'lease_expired',
+      reason: 'restart',
+      idempotencyKey: 'authority-lost-attempting',
+      now: 60_011,
+    });
+    expect(second.current.engine.workerProviderCalls.reconcile({
+      logicalCallId: second.command.logicalCallId,
+      workerRunId: second.command.workerRunId,
+      childJobId: second.command.childJobId,
+      childAttemptId: second.command.childAttemptId,
+      childGeneration: second.command.childGeneration,
+      physicalAttempts: [{ providerAttemptId: 'physical_unknown', status: 'attempting' }],
+      unknownSpend: true,
+      reason: 'restart',
+      idempotencyKey: 'reconcile-attempting',
+      now: 60_012,
+    })).toMatchObject({ outcomeKnowledge: 'outcome_unknown', retrySafety: 'blocked_unknown' });
+  });
+
+  it('distinguishes a pre-send timeout from an ambiguous in-flight timeout', () => {
+    const first = prepared();
+    expect(first.current.engine.workerProviderCalls.recordTimeoutIntent({
+      ...first.command,
+      reason: 'runtime_budget_exceeded',
+      idempotencyKey: 'timeout-before-send',
+      now: 31,
+    })).toMatchObject({
+      interruptionKind: 'timeout', timeoutRequestedAt: 31,
+      outcomeKnowledge: 'no_request_started', retrySafety: 'safe',
+    });
+    first.current.db.close();
+
+    const second = prepared();
+    second.current.engine.workerProviderCalls.markAttempting(second.command);
+    expect(second.current.engine.workerProviderCalls.recordTimeoutIntent({
+      ...second.command,
+      reason: 'runtime_budget_exceeded',
+      idempotencyKey: 'timeout-in-flight',
+      now: 31,
+    })).toMatchObject({
+      interruptionKind: 'timeout', timeoutRequestedAt: 31,
+      outcomeKnowledge: 'outcome_unknown', retrySafety: 'blocked_unknown',
+    });
+  });
 });

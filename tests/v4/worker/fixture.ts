@@ -21,12 +21,12 @@ export interface WorkerFixture {
   childAuthority: { childJobId: string; childAttemptId: string; childGeneration: number; childFenceToken: string };
 }
 
-export function createWorkerFixture(): WorkerFixture {
-  const db = new Database(':memory:');
+export function createWorkerFixture(databasePath = ':memory:'): WorkerFixture {
+  const db = new Database(databasePath);
   db.pragma('foreign_keys = ON');
   runMigrations(db);
   db.prepare(
-    `INSERT INTO daemon_instances
+    `INSERT OR IGNORE INTO daemon_instances
        (instance_id, pid, hostname, started_at, last_heartbeat, version)
      VALUES ('worker-instance', 1, 'localhost', 1, 1, '4.18.0')`,
   ).run();

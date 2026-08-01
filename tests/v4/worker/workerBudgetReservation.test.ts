@@ -5,7 +5,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { createAssignment, createWorkerFixture, type WorkerFixture } from './fixture';
+import { bindRun, createAssignment, createWorkerFixture, type WorkerFixture } from './fixture';
 
 describe('Worker JobResource reservations', () => {
   let fixture: WorkerFixture | undefined;
@@ -13,7 +13,7 @@ describe('Worker JobResource reservations', () => {
 
   function setup() {
     const current = fixture = createWorkerFixture();
-    const records = createAssignment(current);
+    const records = bindRun(current);
     current.engine.resources.configure({
       jobId: current.parent.jobId,
       budgets: { model_calls: 5, input_tokens: 100, external_cost: 10 },
@@ -29,7 +29,7 @@ describe('Worker JobResource reservations', () => {
       childJobId: current.child.jobId,
       childAttemptId: current.child.attemptId,
       childGeneration: current.childAuthority.childGeneration,
-      workerRunId: 'worker_run_reserved',
+      workerRunId: records.run.workerRunId,
       assignmentId: records.assignment.assignmentId,
       amounts: { model_calls: 3, input_tokens: 50, external_cost: 5 },
       now: 30,
@@ -227,5 +227,90 @@ describe('Worker JobResource reservations', () => {
     })).toThrow(/parent worker budget authority is stale/i);
     expect(current.engine.resources.getBudgets(current.child.jobId).find((item) => item.kind === 'model_calls')?.used).toBe(0);
     expect(current.engine.resources.getBudgets(current.parent.jobId).find((item) => item.kind === 'model_calls')?.used).toBe(0);
+  });
+
+  it('repairs a missing parent roll-up exactly once after reopen-style reconciliation', () => {
+    const { current, command } = setup();
+    const reservation = current.engine.resources.reserveWorker(command);
+    const logicalCallId = 'logical_repair_one';
+    current.engine.workerProviderCalls.prepare({
+      ...current.childAuthority,
+      logicalCallId,
+      idempotencyKey: 'logical-repair-one',
+      workerRunId: command.workerRunId,
+      assignmentId: command.assignmentId,
+      providerBindingId: 'worker_provider_one',
+      callOrdinal: 1,
+      requestHash: 'c'.repeat(64),
+      toolSchemaHash: 'd'.repeat(64),
+      now: 30,
+    });
+    current.engine.resources.commitWorkerUsage({
+      reservationId: reservation.reservationId,
+      childAttemptId: current.child.attemptId,
+      childGeneration: current.childAuthority.childGeneration,
+      childFenceToken: current.childAuthority.childFenceToken,
+      kind: 'model_calls', amount: 1, certainty: 'confirmed',
+      sourceKind: 'provider_attempt', sourceId: 'physical_repair',
+      idempotencyKey: 'physical-repair:model', now: 31,
+    });
+    current.db.prepare(
+      `DELETE FROM job_budget_debits
+        WHERE job_id=? AND idempotency_key=?`,
+    ).run(current.parent.jobId, `worker-rollup:${reservation.reservationId}:physical-repair:model`);
+    current.db.prepare(
+      `UPDATE job_budgets SET used_value=0 WHERE job_id=? AND kind='model_calls'`,
+    ).run(current.parent.jobId);
+
+    expect(current.engine.resources.reconcileWorkerUsage({
+      reservationId: reservation.reservationId,
+      logicalCallId,
+      kind: 'model_calls', amount: 1, certainty: 'confirmed',
+      providerAttemptId: 'physical_repair',
+      idempotencyKey: 'physical-repair:model', now: 32,
+    })).toMatchObject({ applied: true, repaired: true });
+    expect(current.engine.resources.getBudgets(current.parent.jobId).find((item) => item.kind === 'model_calls')?.used).toBe(1);
+    expect(current.engine.resources.reconcileWorkerUsage({
+      reservationId: reservation.reservationId,
+      logicalCallId,
+      kind: 'model_calls', amount: 1, certainty: 'confirmed',
+      providerAttemptId: 'physical_repair',
+      idempotencyKey: 'physical-repair:model', now: 33,
+    })).toMatchObject({ applied: false, duplicate: true });
+    expect(current.engine.resources.getBudgets(current.parent.jobId).find((item) => item.kind === 'model_calls')?.used).toBe(1);
+  });
+
+  it('retains reservation capacity while provider spend remains unknown', () => {
+    const { current, command } = setup();
+    const reservation = current.engine.resources.reserveWorker(command);
+    const logicalCallId = 'logical_unknown_spend';
+    current.engine.workerProviderCalls.prepare({
+      ...current.childAuthority,
+      logicalCallId,
+      idempotencyKey: 'logical-unknown-spend',
+      workerRunId: command.workerRunId,
+      assignmentId: command.assignmentId,
+      providerBindingId: 'worker_provider_one',
+      callOrdinal: 1,
+      requestHash: 'c'.repeat(64),
+      toolSchemaHash: 'd'.repeat(64),
+      now: 30,
+    });
+    const blocked = current.engine.resources.reconcileWorkerReservation({
+      reservationId: reservation.reservationId,
+      logicalCallId,
+      outcomeKnowledge: 'outcome_unknown',
+      retrySafety: 'blocked_unknown',
+      unknownSpend: true,
+      safeToRelease: false,
+      reason: 'provider_outcome_unknown',
+      idempotencyKey: 'reservation-unknown-spend',
+      now: 31,
+    });
+    expect(blocked).toMatchObject({
+      state: 'reserved', reconciliationState: 'blocked_unknown', unknownSpendPending: true,
+    });
+    expect(blocked.items.find((item) => item.kind === 'model_calls')).toMatchObject({ released: 0 });
+    expect(current.engine.resources.available(current.parent.jobId, 'model_calls')).toBe(2);
   });
 });
