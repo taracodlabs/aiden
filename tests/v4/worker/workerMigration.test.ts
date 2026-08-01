@@ -49,8 +49,12 @@ describe('Worker persistence migration', () => {
       })();
     }
     const before = new Set(tables());
-    expect(runMigrations(db)).toEqual({ from: 37, to: 38 });
-    expect(LATEST_SCHEMA_VERSION).toBe(38);
+    const migration = MIGRATIONS_FOR_TESTS.find((entry) => entry.version === 38)!;
+    db.transaction(() => {
+      if (migration.apply) migration.apply(db);
+      else db.exec(migration.sql ?? '');
+      db.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,38,1)').run();
+    })();
     expect(tables().filter((table) => !before.has(table))).toEqual([
       'job_budget_reservation_commits', 'job_budget_reservation_items', 'job_budget_reservations',
       'worker_logical_provider_calls', 'worker_provider_tool_links',
@@ -58,6 +62,45 @@ describe('Worker persistence migration', () => {
     expect(columns('worker_provider_bindings')).toEqual(expect.arrayContaining([
       'supports_tool_calling', 'supports_streaming', 'catalog_digest', 'fallback_binding_ids_json',
     ]));
+  });
+
+  it('upgrades v38 additively with reconciliation facts and keeps existing rows readable', () => {
+    for (const migration of MIGRATIONS_FOR_TESTS.filter((entry) => entry.version <= 38)) {
+      db.transaction(() => {
+        if (migration.apply) migration.apply(db);
+        else db.exec(migration.sql ?? '');
+        db.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,?,?)').run(migration.version, 1);
+      })();
+    }
+    db.pragma('foreign_keys = OFF');
+    db.prepare(
+      `INSERT INTO worker_logical_provider_calls (
+         logical_call_id,schema_version,idempotency_key,worker_run_id,assignment_id,provider_binding_id,
+         child_job_id,child_attempt_id,child_generation,call_ordinal,request_hash,tool_schema_hash,
+         provider_id,model_id,state,outcome_known,created_at,updated_at
+       ) VALUES ('logical_existing',1,'existing','run','assignment','binding','job','attempt',1,1,?,?,
+                 'provider','model','prepared',0,1,1)`,
+    ).run('a'.repeat(64), 'b'.repeat(64));
+    db.pragma('foreign_keys = ON');
+    const before = new Set(tables());
+    expect(runMigrations(db)).toEqual({ from: 38, to: 39 });
+    expect(LATEST_SCHEMA_VERSION).toBe(39);
+    expect(tables().filter((table) => !before.has(table))).toEqual([
+      'job_budget_reservation_reconciliations',
+      'worker_provider_call_reconciliations',
+      'worker_provider_late_responses',
+    ]);
+    expect(columns('worker_logical_provider_calls')).toEqual(expect.arrayContaining([
+      'reconciliation_state', 'outcome_knowledge', 'retry_safety', 'interruption_kind',
+      'cancellation_requested_at', 'timeout_requested_at', 'authority_lost_at',
+      'stale_response_rejected_at', 'late_response_observed_at', 'reconciled_at',
+    ]));
+    expect(db.prepare(
+      `SELECT reconciliation_state,outcome_knowledge,retry_safety
+         FROM worker_logical_provider_calls WHERE logical_call_id='logical_existing'`,
+    ).get()).toEqual({
+      reconciliation_state: 'not_required', outcome_knowledge: 'no_request_started', retry_safety: 'not_applicable',
+    });
   });
 
   it('keeps WorkerRun as a relation without lifecycle, lease, fence, cancellation, or budget authority', () => {
@@ -101,14 +144,14 @@ describe('Worker persistence migration', () => {
       idempotencyNamespace: 'fixture', idempotencyKey: 'job', goal: 'legacy job',
     });
 
-    expect(runMigrations(db)).toEqual({ from: 36, to: 38 });
+    expect(runMigrations(db)).toEqual({ from: 36, to: 39 });
     const engine = createJobEngine({ db });
     expect(engine.getJob(before.jobId)?.goal).toBe('legacy job');
     expect(engine.worker.listWorkerRunsForParent(before.jobId)).toEqual([]);
   });
 
-  it('is idempotent when v38 is already installed', () => {
-    expect(runMigrations(db)).toEqual({ from: 0, to: 38 });
-    expect(runMigrations(db)).toEqual({ from: 38, to: 38 });
+  it('is idempotent when v39 is already installed', () => {
+    expect(runMigrations(db)).toEqual({ from: 0, to: 39 });
+    expect(runMigrations(db)).toEqual({ from: 39, to: 39 });
   });
 });

@@ -65,6 +65,11 @@ export interface JobBudgetReservationRecord {
   createdAt: number;
   updatedAt: number;
   releasedAt: number | null;
+  reconciliationState: 'not_required' | 'pending' | 'reconciled' | 'blocked_unknown';
+  reconciliationReason: string | null;
+  unknownSpendPending: boolean;
+  lastReconciledAt: number | null;
+  settlementBlockedAt: number | null;
 }
 
 export interface JobResourceAuthority {
@@ -127,6 +132,27 @@ export interface JobResourceAuthority {
     cancelled?: boolean;
     now?: number;
   }): JobBudgetReservationRecord;
+  reconcileWorkerUsage(command: {
+    reservationId: string;
+    logicalCallId: string;
+    kind: JobBudgetKind;
+    amount: number | null;
+    certainty: BudgetCertainty;
+    providerAttemptId: string;
+    idempotencyKey: string;
+    now?: number;
+  }): { applied: boolean; duplicate?: boolean; repaired?: boolean; exhausted?: boolean; remaining: number };
+  reconcileWorkerReservation(command: {
+    reservationId: string;
+    logicalCallId: string;
+    outcomeKnowledge: string;
+    retrySafety: 'safe' | 'unsafe' | 'blocked_unknown' | 'not_applicable';
+    unknownSpend: boolean;
+    safeToRelease: boolean;
+    reason: string;
+    idempotencyKey: string;
+    now?: number;
+  }): JobBudgetReservationRecord;
   authorize(command: {
     jobId: string;
     kind: 'tool' | 'path' | 'host' | 'application' | 'connection' | 'account' | 'worker' | 'effect';
@@ -176,6 +202,9 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
     child_attempt_id: string; child_generation: number; worker_run_id: string;
     assignment_id: string; state: JobBudgetReservationState; created_at: number;
     updated_at: number; released_at: number | null;
+    reconciliation_state: JobBudgetReservationRecord['reconciliationState'];
+    reconciliation_reason: string | null; unknown_spend_pending: number;
+    last_reconciled_at: number | null; settlement_blocked_at: number | null;
   };
   type ItemRow = {
     kind: JobBudgetKind; reserved_value: number; committed_value: number;
@@ -212,6 +241,11 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
       releasedAt: row.released_at,
+      reconciliationState: row.reconciliation_state,
+      reconciliationReason: row.reconciliation_reason,
+      unknownSpendPending: row.unknown_spend_pending === 1,
+      lastReconciledAt: row.last_reconciled_at,
+      settlementBlockedAt: row.settlement_blocked_at,
     };
   };
 
@@ -442,6 +476,183 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
     return { applied: true, exhausted, remaining: Math.max(0, item.reserved - nextCommitted - item.released) };
   }).immediate;
 
+  const requireReconciliationLineage = (
+    reservation: JobBudgetReservationRecord,
+    logicalCallId: string,
+  ): void => {
+    const call = db.prepare(
+      `SELECT worker_run_id,assignment_id,child_job_id,child_attempt_id,child_generation
+         FROM worker_logical_provider_calls WHERE logical_call_id=?`,
+    ).get(logicalCallId) as {
+      worker_run_id: string; assignment_id: string; child_job_id: string;
+      child_attempt_id: string; child_generation: number;
+    } | undefined;
+    if (!call || call.worker_run_id !== reservation.workerRunId || call.assignment_id !== reservation.assignmentId
+      || call.child_job_id !== reservation.childJobId || call.child_attempt_id !== reservation.childAttemptId
+      || call.child_generation !== reservation.childGeneration) {
+      throw new Error('Worker budget reconciliation lineage is invalid');
+    }
+  };
+
+  const refreshReservationItem = (
+    reservation: JobBudgetReservationRecord,
+    kind: JobBudgetKind,
+    now: number,
+  ): { exhausted: boolean; remaining: number } => {
+    const item = getReservation(reservation.reservationId)?.items.find((candidate) => candidate.kind === kind);
+    if (!item) throw new Error(`Worker ${kind} usage is outside the reservation`);
+    const sums = db.prepare(
+      `SELECT COALESCE(SUM(CASE WHEN amount IS NULL THEN 0 ELSE amount END),0) AS known,
+              MAX(CASE WHEN amount IS NULL OR certainty='unknown' THEN 1 ELSE 0 END) AS unknown
+         FROM job_budget_reservation_commits WHERE reservation_id=? AND kind=?`,
+    ).get(reservation.reservationId, kind) as { known: number; unknown: number | null };
+    const unknown = (sums.unknown ?? 0) === 1;
+    const committed = unknown ? Math.max(item.reserved, sums.known) : sums.known;
+    const exhausted = unknown || committed >= item.reserved;
+    const state: JobBudgetReservationItemRecord['state'] = unknown
+      ? 'unknown' : committed > item.reserved ? 'exhausted' : exhausted ? 'committed' : 'partially_committed';
+    db.prepare(
+      `UPDATE job_budget_reservation_items
+          SET committed_value=?,has_unknown_usage=?,state=?,updated_at=? WHERE reservation_id=? AND kind=?`,
+    ).run(committed, unknown ? 1 : item.hasUnknownUsage ? 1 : 0, state, now, reservation.reservationId, kind);
+    const states = db.prepare('SELECT state FROM job_budget_reservation_items WHERE reservation_id=?')
+      .all(reservation.reservationId) as Array<{ state: JobBudgetReservationItemRecord['state'] }>;
+    const reservationState: JobBudgetReservationState = states.some((row) => row.state === 'unknown' || row.state === 'exhausted')
+      ? 'exhausted' : states.every((row) => row.state === 'committed') ? 'committed' : 'partially_committed';
+    db.prepare('UPDATE job_budget_reservations SET state=?,updated_at=? WHERE reservation_id=?')
+      .run(reservationState, now, reservation.reservationId);
+    return { exhausted, remaining: Math.max(0, item.reserved - committed - item.released) };
+  };
+
+  const reconcileWorkerUsage = db.transaction((command: Parameters<JobResourceAuthority['reconcileWorkerUsage']>[0]) => {
+    const reservation = getReservation(command.reservationId);
+    if (!reservation) throw new Error('Worker budget reservation was not found');
+    requireReconciliationLineage(reservation, command.logicalCallId);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(command.providerAttemptId)) {
+      throw new Error('ProviderAttempt reconciliation identity is invalid');
+    }
+    const item = reservation.items.find((candidate) => candidate.kind === command.kind);
+    if (!item) throw new Error(`Worker ${command.kind} usage is outside the reservation`);
+    const amount = command.certainty === 'unknown' ? null : command.amount;
+    if (amount !== null && (!Number.isFinite(amount) || amount < 0)) throw new Error('Worker usage must be non-negative');
+    const prior = db.prepare(
+      `SELECT kind,amount,certainty,source_kind,source_id FROM job_budget_reservation_commits
+        WHERE reservation_id=? AND idempotency_key=?`,
+    ).get(command.reservationId, command.idempotencyKey) as {
+      kind: JobBudgetKind; amount: number | null; certainty: BudgetCertainty;
+      source_kind: string; source_id: string;
+    } | undefined;
+    if (prior && (prior.kind !== command.kind || prior.amount !== amount || prior.certainty !== command.certainty
+      || prior.source_kind !== 'provider_attempt' || prior.source_id !== command.providerAttemptId)) {
+      throw new Error('Worker usage reconciliation idempotency conflict');
+    }
+    const now = command.now ?? Date.now();
+    const childApplied = applyDebit({
+      jobId: reservation.childJobId, attemptId: reservation.childAttemptId,
+      generation: reservation.childGeneration, kind: command.kind, amount,
+      certainty: command.certainty, idempotencyKey: command.idempotencyKey, now,
+    });
+    const parentApplied = applyDebit({
+      jobId: reservation.parentJobId, attemptId: reservation.parentAttemptId,
+      generation: reservation.parentGeneration, kind: command.kind, amount,
+      certainty: command.certainty,
+      idempotencyKey: `worker-rollup:${reservation.reservationId}:${command.idempotencyKey}`,
+      now,
+    });
+    if (!prior) {
+      db.prepare(
+        `INSERT INTO job_budget_reservation_commits
+           (commit_id,reservation_id,kind,amount,certainty,source_kind,source_id,idempotency_key,created_at)
+         VALUES (?,?,?,?,?,'provider_attempt',?,?,?)`,
+      ).run(
+        `budget_commit_${randomBytes(12).toString('hex')}`, reservation.reservationId,
+        command.kind, amount, command.certainty, command.providerAttemptId, command.idempotencyKey, now,
+      );
+    }
+    const refreshed = refreshReservationItem(reservation, command.kind, now);
+    const repaired = Boolean(prior && (childApplied || parentApplied));
+    return {
+      applied: !prior || repaired,
+      ...(prior && !repaired ? { duplicate: true } : {}),
+      ...(repaired ? { repaired: true } : {}),
+      ...refreshed,
+    };
+  }).immediate;
+
+  const reconcileWorkerReservation = db.transaction((
+    command: Parameters<JobResourceAuthority['reconcileWorkerReservation']>[0],
+  ) => {
+    const reservation = getReservation(command.reservationId);
+    if (!reservation) throw new Error('Worker budget reservation was not found');
+    requireReconciliationLineage(reservation, command.logicalCallId);
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(command.reason)
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(command.idempotencyKey)) {
+      throw new Error('Worker reservation reconciliation contract is invalid');
+    }
+    const existing = db.prepare(
+      `SELECT logical_call_id,outcome_knowledge,retry_safety,unknown_spend,safe_to_release,reason
+         FROM job_budget_reservation_reconciliations WHERE reservation_id=? AND idempotency_key=?`,
+    ).get(command.reservationId, command.idempotencyKey) as {
+      logical_call_id: string; outcome_knowledge: string; retry_safety: string;
+      unknown_spend: number; safe_to_release: number; reason: string;
+    } | undefined;
+    if (existing) {
+      const same = existing.logical_call_id === command.logicalCallId
+        && existing.outcome_knowledge === command.outcomeKnowledge
+        && existing.retry_safety === command.retrySafety
+        && existing.unknown_spend === (command.unknownSpend ? 1 : 0)
+        && existing.safe_to_release === (command.safeToRelease ? 1 : 0)
+        && existing.reason === command.reason;
+      if (!same) throw new Error('Worker reservation reconciliation idempotency conflict');
+      return getReservation(command.reservationId)!;
+    }
+    const now = command.now ?? Date.now();
+    const reconciliationId = `budget_reconcile_${randomBytes(12).toString('hex')}`;
+    db.prepare(
+      `INSERT INTO job_budget_reservation_reconciliations
+         (reconciliation_id,reservation_id,logical_call_id,idempotency_key,outcome_knowledge,
+          retry_safety,unknown_spend,safe_to_release,reason,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      reconciliationId, command.reservationId, command.logicalCallId, command.idempotencyKey,
+      command.outcomeKnowledge, command.retrySafety, command.unknownSpend ? 1 : 0,
+      command.safeToRelease ? 1 : 0, command.reason, now,
+    );
+    if (command.unknownSpend) {
+      db.prepare(
+        `UPDATE job_budget_reservations
+            SET reconciliation_state='blocked_unknown',reconciliation_reason=?,unknown_spend_pending=1,
+                last_reconciled_at=?,settlement_blocked_at=COALESCE(settlement_blocked_at,?),updated_at=?
+          WHERE reservation_id=?`,
+      ).run(command.reason, now, now, now, command.reservationId);
+      return getReservation(command.reservationId)!;
+    }
+    if (command.safeToRelease) {
+      for (const candidate of reservation.items) {
+        const release = candidate.hasUnknownUsage ? 0 : Math.max(0, candidate.reserved - candidate.committed - candidate.released);
+        const state: JobBudgetReservationItemRecord['state'] = candidate.hasUnknownUsage
+          ? 'unknown' : candidate.state === 'exhausted' ? 'exhausted' : 'released';
+        db.prepare(
+          `UPDATE job_budget_reservation_items SET released_value=released_value+?,state=?,updated_at=?
+            WHERE reservation_id=? AND kind=?`,
+        ).run(release, state, now, command.reservationId, candidate.kind);
+      }
+      db.prepare(
+        `UPDATE job_budget_reservations
+            SET state='reconciled',reconciliation_state='reconciled',reconciliation_reason=?,
+                unknown_spend_pending=0,last_reconciled_at=?,released_at=COALESCE(released_at,?),updated_at=?
+          WHERE reservation_id=?`,
+      ).run(command.reason, now, now, now, command.reservationId);
+    } else {
+      db.prepare(
+        `UPDATE job_budget_reservations
+            SET reconciliation_state='pending',reconciliation_reason=?,last_reconciled_at=?,updated_at=?
+          WHERE reservation_id=?`,
+      ).run(command.reason, now, now, command.reservationId);
+    }
+    return getReservation(command.reservationId)!;
+  }).immediate;
+
   const releaseWorker = db.transaction((command: Parameters<JobResourceAuthority['releaseWorker']>[0]) => {
     const reservation = getReservation(command.reservationId);
     if (!reservation) throw new Error('Worker budget reservation was not found');
@@ -453,10 +664,19 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
       reservation.childJobId, command.childAttemptId, command.childGeneration, command.childFenceToken,
     );
     const now = command.now ?? Date.now();
+    if (reservation.unknownSpendPending || reservation.items.some((item) => item.hasUnknownUsage)) {
+      db.prepare(
+        `UPDATE job_budget_reservations
+            SET reconciliation_state='blocked_unknown',unknown_spend_pending=1,
+                reconciliation_reason=COALESCE(reconciliation_reason,'unknown_spend'),
+                settlement_blocked_at=COALESCE(settlement_blocked_at,?),updated_at=?
+          WHERE reservation_id=?`,
+      ).run(now, now, reservation.reservationId);
+      return getReservation(reservation.reservationId)!;
+    }
     for (const item of reservation.items) {
-      const release = item.hasUnknownUsage ? 0 : Math.max(0, item.reserved - item.committed - item.released);
-      const state: JobBudgetReservationItemRecord['state'] = item.hasUnknownUsage
-        ? 'unknown' : item.state === 'exhausted' ? 'exhausted' : 'released';
+      const release = Math.max(0, item.reserved - item.committed - item.released);
+      const state: JobBudgetReservationItemRecord['state'] = item.state === 'exhausted' ? 'exhausted' : 'released';
       db.prepare(
         'UPDATE job_budget_reservation_items SET released_value=released_value+?,state=?,updated_at=? WHERE reservation_id=? AND kind=?',
       ).run(release, state, now, reservation.reservationId, item.kind);
@@ -484,6 +704,8 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
     available,
     commitWorkerUsage,
     releaseWorker,
+    reconcileWorkerUsage,
+    reconcileWorkerReservation,
     configure(command) {
       const now = command.now ?? Date.now();
       db.transaction(() => {

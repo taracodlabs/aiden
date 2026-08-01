@@ -431,12 +431,25 @@ export interface JobEngine {
     instanceId: string;
     producer: string;
     maxCrashes: number;
+    reconcileWorkerAttempt?: (input: {
+      childJobId: string;
+      childAttemptId: string;
+      childGeneration: number;
+      now: number;
+    }) => WorkerAttemptReconciliationSummary;
   }): Array<{
     jobId: string;
     expiredAttemptId: string;
     recoveryAttemptId?: string;
     decision: 'retry' | 'ask_user' | 'dead_letter';
+    workerReconciliation?: WorkerAttemptReconciliationSummary;
   }>;
+}
+
+export interface WorkerAttemptReconciliationSummary {
+  calls: number;
+  retrySafety: 'safe' | 'unsafe' | 'blocked_unknown' | 'not_applicable';
+  outcomeKnowledge: string[];
 }
 
 export interface CreateJobEngineOptions {
@@ -708,6 +721,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     ) return null;
     return attempt;
   };
+  let workerProviderCalls!: WorkerProviderCallAuthority;
 
   const existingEvent = (jobId: string, key: string): { id: number; job_sequence: number } | undefined => db.prepare(
     'SELECT id, job_sequence FROM run_events WHERE job_id = ? AND idempotency_key = ?',
@@ -1292,6 +1306,18 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     const attempt = job.active_attempt_id ? getAttemptRow(job.active_attempt_id) : undefined;
     if (!attempt) return { applied: false, conflict: 'not_found' };
     const now = command.now ?? Date.now();
+    if (!ATTEMPT_TERMINAL.has(attempt.status) && attempt.fence_token) {
+      workerProviderCalls.recordInterruptionForAttempt({
+        childJobId: job.id,
+        childAttemptId: attempt.attempt_id,
+        childGeneration: attempt.generation,
+        childFenceToken: attempt.fence_token,
+        kind: 'cancellation',
+        reason: command.reason,
+        idempotencyKey: `worker-cancel:${command.eventIdempotencyKey}`,
+        now,
+      });
+    }
     if (!ATTEMPT_TERMINAL.has(attempt.status)) {
       const attemptChanged = db.prepare(
         `UPDATE runs
@@ -2116,11 +2142,15 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     instanceId: string;
     producer: string;
     maxCrashes: number;
+    reconcileWorkerAttempt?: (input: {
+      childJobId: string; childAttemptId: string; childGeneration: number; now: number;
+    }) => WorkerAttemptReconciliationSummary;
   }): {
     jobId: string;
     expiredAttemptId: string;
     recoveryAttemptId?: string;
     decision: 'retry' | 'ask_user' | 'dead_letter';
+    workerReconciliation?: WorkerAttemptReconciliationSummary;
   } | null => {
     const attempt = getAttemptRow(command.attemptId);
     if (
@@ -2143,10 +2173,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     ).get(attempt.attempt_id, attempt.generation) !== undefined;
     const crashRow = db.prepare('SELECT crash_count FROM tasks WHERE id = ?').get(job.id) as { crash_count: number };
     const crashCount = crashRow.crash_count + 1;
-    const decision: 'retry' | 'ask_user' | 'dead_letter' = ambiguous
-      ? 'ask_user'
-      : crashCount >= Math.max(1, command.maxCrashes) ? 'dead_letter' : 'retry';
-    const attemptStatus = ambiguous ? 'unknown' : 'crashed';
+    let attemptStatus: 'unknown' | 'crashed' = ambiguous ? 'unknown' : 'crashed';
     const attemptVersion = attempt.state_version + 1;
     const cleared = db.prepare(
       `UPDATE runs
@@ -2202,13 +2229,71 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         });
       }
     }
+    const workerReconciliation = command.reconcileWorkerAttempt
+      ? command.reconcileWorkerAttempt({
+        childJobId: job.id,
+        childAttemptId: attempt.attempt_id,
+        childGeneration: attempt.generation,
+        now: command.now,
+      })
+      : (() => {
+        const calls = workerProviderCalls.markAuthorityLostForAttempt({
+          childJobId: job.id,
+          childAttemptId: attempt.attempt_id,
+          childGeneration: attempt.generation,
+          kind: 'lease_expired',
+          reason: 'attempt_lease_expired',
+          idempotencyKey: `worker-authority-lost:${attempt.attempt_id}:${attempt.generation}`,
+          now: command.now,
+        });
+        const reconciled = calls.map((call) => workerProviderCalls.reconcile({
+          logicalCallId: call.logicalCallId,
+          workerRunId: call.workerRunId,
+          childJobId: call.childJobId,
+          childAttemptId: call.childAttemptId,
+          childGeneration: call.childGeneration,
+          physicalAttempts: [],
+          unknownSpend: call.state === 'attempting',
+          reason: 'attempt_lease_expired',
+          idempotencyKey: `worker-reconcile:${call.logicalCallId}:${call.childGeneration}`,
+          now: command.now,
+        }));
+        const retrySafety = reconciled.some((entry) => entry.retrySafety === 'blocked_unknown')
+          ? 'blocked_unknown'
+          : reconciled.some((entry) => entry.retrySafety === 'unsafe')
+            ? 'unsafe'
+            : reconciled.some((entry) => entry.retrySafety === 'safe')
+              ? 'safe'
+              : 'not_applicable';
+        return {
+          calls: reconciled.length,
+          retrySafety,
+          outcomeKnowledge: reconciled.map((entry) => entry.outcomeKnowledge),
+        } satisfies WorkerAttemptReconciliationSummary;
+      })();
+    const workerBlocksRetry = workerReconciliation.retrySafety === 'blocked_unknown'
+      || workerReconciliation.retrySafety === 'unsafe';
+    if (workerBlocksRetry && attemptStatus !== 'unknown') {
+      db.prepare(
+        `UPDATE runs SET status = 'unknown', finish_reason = 'worker_provider_outcome_unknown'
+          WHERE attempt_id = ? AND generation = ? AND state_version = ?`,
+      ).run(attempt.attempt_id, attempt.generation, attemptVersion);
+      attemptStatus = 'unknown';
+    }
+    const decision: 'retry' | 'ask_user' | 'dead_letter' = ambiguous || workerBlocksRetry
+      ? 'ask_user'
+      : crashCount >= Math.max(1, command.maxCrashes) ? 'dead_letter' : 'retry';
+    const recoveryReason = ambiguous
+      ? 'unknown_side_effect'
+      : workerBlocksRetry ? 'worker_provider_outcome_unknown' : 'lease_expired';
+
     appendEvent({
       jobId: job.id,
       runId: attempt.id,
       attemptId: attempt.attempt_id,
       generation: attempt.generation,
       type: `attempt.${attemptStatus}`,
-      payload: { reason: ambiguous ? 'unknown_side_effect' : 'lease_expired' },
+      payload: { reason: recoveryReason, workerReconciliation },
       producer: command.producer,
       idempotencyKey: `attempt-recovered:${attempt.attempt_id}:${attempt.generation}`,
     });
@@ -2227,7 +2312,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         jobStatus,
         crashCount,
         decision === 'ask_user' ? 'user_required' : 'dead_letter',
-        ambiguous ? 'unknown_side_effect' : 'crash_loop',
+        decision === 'ask_user' ? recoveryReason : 'crash_loop',
         jobStatus,
         command.now,
         jobStatus,
@@ -2246,7 +2331,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         producer: command.producer,
         idempotencyKey: `job-recovery:${job.id}:${attempt.generation}`,
       });
-      return { jobId: job.id, expiredAttemptId: attempt.attempt_id, decision };
+      return { jobId: job.id, expiredAttemptId: attempt.attempt_id, decision, workerReconciliation };
     }
 
     const max = db.prepare(
@@ -2301,7 +2386,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       producer: command.producer,
       idempotencyKey: `attempt-created:${recoveryAttemptId}`,
     });
-    return { jobId: job.id, expiredAttemptId: attempt.attempt_id, recoveryAttemptId, decision };
+    return { jobId: job.id, expiredAttemptId: attempt.attempt_id, recoveryAttemptId, decision, workerReconciliation };
   }).immediate;
 
   const repository = createRepositorySnapshotAuthority({
@@ -2375,7 +2460,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       return { duplicate: result.duplicate, sequence: result.jobSequence };
     },
   });
-  const workerProviderCalls = createWorkerProviderCallAuthority(db, (command) => {
+  workerProviderCalls = createWorkerProviderCallAuthority(db, (command) => {
     const attempt = activeFence(
       command.childAttemptId,
       command.childGeneration,
@@ -2389,6 +2474,21 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       && job?.active_attempt_id === command.childAttemptId
       && !JOB_TERMINAL.has(job.status),
     );
+  }, ({ call, type, payload, idempotencyKey }) => {
+    const attempt = getAttemptRow(call.childAttemptId);
+    if (!attempt || attempt.task_id !== call.childJobId || attempt.generation !== call.childGeneration) {
+      throw new Error('Worker provider reconciliation event lineage is invalid');
+    }
+    appendEvent({
+      jobId: call.childJobId,
+      runId: attempt.id,
+      attemptId: call.childAttemptId,
+      generation: call.childGeneration,
+      type,
+      payload,
+      producer: 'worker-provider-reconciliation',
+      idempotencyKey,
+    });
   });
 
   return {
