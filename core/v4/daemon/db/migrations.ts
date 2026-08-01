@@ -1984,6 +1984,126 @@ function applyV37(db: Database.Database): void {
   `);
 }
 
+/** Durable Worker provider-call correlation and parent budget reservations. */
+function applyV38(db: Database.Database): void {
+  addMissingColumns(db, 'worker_provider_bindings', [
+    ['supports_tool_calling', 'INTEGER NOT NULL DEFAULT 1'],
+    ['supports_streaming', 'INTEGER NOT NULL DEFAULT 0'],
+    ['catalog_digest', "TEXT NOT NULL DEFAULT ''"],
+    ['fallback_binding_ids_json', "TEXT NOT NULL DEFAULT '[]'"],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_logical_provider_calls (
+      logical_call_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      worker_run_id TEXT NOT NULL,
+      assignment_id TEXT NOT NULL,
+      provider_binding_id TEXT NOT NULL,
+      child_job_id TEXT NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      child_generation INTEGER NOT NULL,
+      call_ordinal INTEGER NOT NULL,
+      request_hash TEXT NOT NULL,
+      tool_schema_hash TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      fallback_policy_id TEXT,
+      state TEXT NOT NULL CHECK (state IN (
+        'prepared','attempting','response_received','accepted','downstream_started',
+        'completed','failed','cancelled','unknown'
+      )),
+      accepted_provider_attempt_id TEXT,
+      response_hash TEXT,
+      provider_request_id TEXT,
+      failure_kind TEXT,
+      outcome_known INTEGER NOT NULL DEFAULT 1,
+      response_received_at INTEGER,
+      accepted_at INTEGER,
+      downstream_started_at INTEGER,
+      completed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (worker_run_id) REFERENCES worker_runs(worker_run_id) ON DELETE CASCADE,
+      FOREIGN KEY (assignment_id) REFERENCES worker_assignments(assignment_id) ON DELETE CASCADE,
+      FOREIGN KEY (provider_binding_id) REFERENCES worker_provider_bindings(provider_binding_id),
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (worker_run_id, idempotency_key),
+      UNIQUE (worker_run_id, call_ordinal)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_logical_calls_child
+      ON worker_logical_provider_calls(child_job_id, child_attempt_id, child_generation, call_ordinal);
+
+    CREATE TABLE IF NOT EXISTS worker_provider_tool_links (
+      link_id TEXT PRIMARY KEY,
+      logical_call_id TEXT NOT NULL,
+      worker_run_id TEXT NOT NULL,
+      provider_tool_call_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      arguments_hash TEXT NOT NULL,
+      response_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (logical_call_id) REFERENCES worker_logical_provider_calls(logical_call_id) ON DELETE CASCADE,
+      FOREIGN KEY (worker_run_id) REFERENCES worker_runs(worker_run_id) ON DELETE CASCADE,
+      UNIQUE (worker_run_id, provider_tool_call_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS job_budget_reservations (
+      reservation_id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL,
+      parent_job_id TEXT NOT NULL,
+      parent_attempt_id TEXT NOT NULL,
+      parent_generation INTEGER NOT NULL,
+      child_job_id TEXT NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      child_generation INTEGER NOT NULL,
+      worker_run_id TEXT NOT NULL,
+      assignment_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN (
+        'reserved','partially_committed','committed','released','exhausted','cancelled','reconciled'
+      )),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      released_at INTEGER,
+      FOREIGN KEY (parent_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (parent_job_id, idempotency_key),
+      UNIQUE (child_job_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_budget_reservations_parent
+      ON job_budget_reservations(parent_job_id, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS job_budget_reservation_items (
+      reservation_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      reserved_value REAL NOT NULL,
+      committed_value REAL NOT NULL DEFAULT 0,
+      released_value REAL NOT NULL DEFAULT 0,
+      has_unknown_usage INTEGER NOT NULL DEFAULT 0,
+      state TEXT NOT NULL CHECK (state IN ('reserved','partially_committed','committed','released','exhausted','unknown')),
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (reservation_id, kind),
+      FOREIGN KEY (reservation_id) REFERENCES job_budget_reservations(reservation_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS job_budget_reservation_commits (
+      commit_id TEXT PRIMARY KEY,
+      reservation_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      amount REAL,
+      certainty TEXT NOT NULL,
+      source_kind TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (reservation_id) REFERENCES job_budget_reservations(reservation_id) ON DELETE CASCADE,
+      UNIQUE (reservation_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_job_budget_reservation_commits_source
+      ON job_budget_reservation_commits(source_kind, source_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2022,6 +2142,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 35, name: 'durable Git effects and reconciliation', apply: applyV35 },
   { version: 36, name: 'repository understanding and durable coding plans', apply: applyV36 },
   { version: 37, name: 'durable Worker contracts and authority boundaries', apply: applyV37 },
+  { version: 38, name: 'durable Worker provider calls and budget reservations', apply: applyV38 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2062,7 +2183,9 @@ function validateLatestSchema(db: Database.Database): void {
     'git_effect_operations', 'repository_understanding_indexes', 'repository_understanding_records',
     'repository_understanding_snapshot_records', 'repository_architecture_notes',
     'execution_graph_node_references', 'worker_assignments', 'worker_runs',
-    'worker_provider_bindings', 'worker_context_envelopes', 'worker_results'];
+    'worker_provider_bindings', 'worker_context_envelopes', 'worker_results',
+    'worker_logical_provider_calls', 'worker_provider_tool_links', 'job_budget_reservations',
+    'job_budget_reservation_items', 'job_budget_reservation_commits'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

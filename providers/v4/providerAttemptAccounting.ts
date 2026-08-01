@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 
 import {
@@ -163,6 +163,8 @@ export function beginPhysicalProviderAttempt(
       jobId: context?.jobId ?? context?.taskId ?? null,
       attemptId: context?.attemptId ?? null,
       attemptGeneration: context?.attemptGeneration ?? null,
+      workerRunId: context?.workerRunId ?? null,
+      providerBindingId: context?.providerBindingId ?? null,
       entryPoint: context?.entryPoint ?? 'unknown',
       purpose: effectivePurpose(context, metadata.attemptIndex, metadata.fallbackIndex ?? 0),
       providerConfigured: context?.providerConfigured ?? metadata.providerActual,
@@ -176,6 +178,8 @@ export function beginPhysicalProviderAttempt(
       credentialLabelRedacted: context?.credentialLabelRedacted ?? 'configured',
       status,
       errorClass: classifyAttemptError(error),
+      providerRequestId: output ? extractProviderRequestId(output) : null,
+      responseHash: output ? computeProviderResponseHash(output) : null,
       startedAt,
       completedAt: Date.now(),
       estimatedInputTokens: estimates.input,
@@ -269,6 +273,57 @@ function claimAttemptBudgets(
 
 export function byteLength(value: string): number {
   return Buffer.byteLength(value, 'utf8');
+}
+
+function canonical(value: unknown): unknown {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : String(value);
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonical(item)]));
+  }
+  return String(value);
+}
+
+function digest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
+}
+
+export function computeProviderRequestHash(input: ProviderCallInput): string {
+  return digest({
+    messages: input.messages,
+    tools: input.tools,
+    maxTokens: input.maxTokens,
+    temperature: input.temperature,
+    stream: input.stream === true,
+    extraBody: input.extraBody,
+  });
+}
+
+export function computeProviderToolSchemaHash(input: ProviderCallInput): string {
+  return digest(input.tools);
+}
+
+export function computeProviderResponseHash(output: ProviderCallOutput): string {
+  return digest({
+    content: output.content,
+    toolCalls: output.toolCalls,
+    finishReason: output.finishReason,
+    usage: output.usage,
+  });
+}
+
+export function extractProviderRequestId(output: ProviderCallOutput): string | null {
+  if (!output.raw || typeof output.raw !== 'object' || Array.isArray(output.raw)) return null;
+  const raw = output.raw as Record<string, unknown>;
+  for (const key of ['requestId', 'request_id', 'id']) {
+    const value = raw[key];
+    if (typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(value)) return value;
+  }
+  return null;
 }
 
 function estimateRequest(input: ProviderCallInput): {

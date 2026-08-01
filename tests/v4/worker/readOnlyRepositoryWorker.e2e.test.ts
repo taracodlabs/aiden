@@ -16,15 +16,29 @@ import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
 import { createTriggerBus } from '../../../core/v4/daemon/triggerBus';
 import { resolveAidenPaths } from '../../../core/v4/paths';
+import { ProviderAttemptLedger } from '../../../core/v4/usageLedger';
 import {
   admitReadOnlyRepositoryWorker,
   verifyReadOnlyRepositoryWorkerResult,
 } from '../../../core/v4/worker/readOnlyRepositoryWorker';
 import type { ProviderAdapter } from '../../../providers/v4/types';
+import {
+  beginPhysicalProviderAttempt,
+  createLogicalProviderCallId,
+  setProviderAttemptLedger,
+} from '../../../providers/v4/providerAttemptAccounting';
 
 describe('read-only repository Worker durable dispatcher path', () => {
   const cleanup: string[] = [];
+  const databases: Database.Database[] = [];
+  let ledger: ProviderAttemptLedger | null = null;
   afterEach(async () => {
+    setProviderAttemptLedger(null);
+    ledger?.close();
+    ledger = null;
+    for (const database of databases.splice(0)) {
+      if (database.open) database.close();
+    }
     await Promise.all(cleanup.splice(0).map((item) => rm(item, { recursive: true, force: true })));
   });
 
@@ -36,8 +50,11 @@ describe('read-only repository Worker durable dispatcher path', () => {
     await writeFile(path.join(root, 'source.ts'), sourceBytes);
     const dbPath = path.join(home, 'worker-e2e.db');
     const db = new Database(dbPath);
+    databases.push(db);
     db.pragma('foreign_keys = ON');
     runMigrations(db);
+    ledger = new ProviderAttemptLedger(path.join(home, 'provider-usage.db'));
+    setProviderAttemptLedger(ledger);
     db.prepare(
       'INSERT INTO daemon_instances (instance_id,pid,hostname,started_at,last_heartbeat,version) VALUES (?,?,?,?,?,?)',
     ).run('worker-instance', 1, 'localhost', Date.now(), Date.now(), '4.18.0');
@@ -84,16 +101,24 @@ describe('read-only repository Worker durable dispatcher path', () => {
     let calls = 0;
     const adapter: ProviderAdapter = {
       apiMode: 'chat_completions',
-      async call() {
+      async call(input) {
         calls += 1;
+        const lifecycle = beginPhysicalProviderAttempt(input, {
+          providerActual: 'fixture', modelActual: 'fixture-model', apiMode: 'chat_completions',
+          transport: 'fixture', attemptIndex: calls - 1,
+          logicalCallId: input.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+          requestBytes: JSON.stringify(input.messages).length,
+        });
         if (calls === 1) {
-          return {
+          const output = {
             content: null,
             toolCalls: [{ id: 'read', name: 'repository_snapshot_read', arguments: { path: 'source.ts' } }],
             finishReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 5 },
-          };
+          } as const;
+          lifecycle.success(output, JSON.stringify(output).length);
+          return output;
         }
-        return {
+        const output = {
           content: JSON.stringify({
             schemaVersion: 1, status: 'completed', summary: 'The value is dispatcher-worker.',
             findings: [{
@@ -106,7 +131,9 @@ describe('read-only repository Worker durable dispatcher path', () => {
             unresolvedQuestions: [], uncertainty: { level: 'low', reasons: [] },
           }),
           toolCalls: [], finishReason: 'stop', usage: { inputTokens: 10, outputTokens: 5 },
-        };
+        } as const;
+        lifecycle.success(output, JSON.stringify(output).length);
+        return output;
       },
     };
     let normalBuilderCalls = 0;
@@ -117,7 +144,15 @@ describe('read-only repository Worker durable dispatcher path', () => {
     builder.resolveReadOnlyWorkerProvider = async (binding) => {
       expect(binding.providerId).toBe('fixture');
       expect(binding.modelId).toBe('fixture-model');
-      return { adapter, paths: resolveAidenPaths({ rootOverride: home }) };
+      return {
+        adapter,
+        paths: resolveAidenPaths({ rootOverride: home }),
+        providerId: binding.providerId,
+        modelId: binding.modelId,
+        providerRuntimeIdentity: binding.providerRuntimeIdentity,
+        credentialReference: binding.credentialReference,
+        endpointReference: binding.endpointReference,
+      };
     };
     const runner = createRealAgentRunner({
       db, runStore, jobEngine: engine, agentBuilder: builder,
@@ -158,6 +193,7 @@ describe('read-only repository Worker durable dispatcher path', () => {
     db.close();
 
     const reopenedDb = new Database(dbPath);
+    databases.push(reopenedDb);
     reopenedDb.pragma('foreign_keys = ON');
     const reopened = createJobEngine({ db: reopenedDb });
     expect(reopened.worker.getWorkerAssignment(admission.assignment.assignmentId)).toMatchObject({

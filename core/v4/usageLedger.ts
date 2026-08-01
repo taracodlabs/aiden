@@ -56,6 +56,8 @@ export interface ProviderAttemptRecord {
   readonly jobId?: string | null;
   readonly attemptId?: string | null;
   readonly attemptGeneration?: number | null;
+  readonly workerRunId?: string | null;
+  readonly providerBindingId?: string | null;
   readonly entryPoint: string;
   readonly purpose: ProviderAttemptPurpose;
   readonly providerConfigured: string | null;
@@ -69,6 +71,8 @@ export interface ProviderAttemptRecord {
   readonly credentialLabelRedacted: string | null;
   readonly status: ProviderAttemptStatus;
   readonly errorClass: string | null;
+  readonly providerRequestId?: string | null;
+  readonly responseHash?: string | null;
   readonly startedAt: number;
   readonly completedAt: number;
   readonly estimatedInputTokens: number | null;
@@ -169,6 +173,8 @@ interface ProviderAttemptRow {
   job_id: string | null;
   attempt_id: string | null;
   attempt_generation: number | null;
+  worker_run_id: string | null;
+  provider_binding_id: string | null;
   entry_point: string;
   purpose: ProviderAttemptPurpose;
   provider_configured: string | null;
@@ -182,6 +188,8 @@ interface ProviderAttemptRow {
   credential_label_redacted: string | null;
   status: ProviderAttemptStatus;
   error_class: string | null;
+  provider_request_id: string | null;
+  response_hash: string | null;
   started_at: number;
   completed_at: number;
   estimated_input_tokens: number | null;
@@ -218,7 +226,7 @@ interface ProviderAttemptRow {
   loaded_skill_tokens: number | null;
 }
 
-const LEDGER_SCHEMA_VERSION = 3;
+const LEDGER_SCHEMA_VERSION = 4;
 
 const LEDGER_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS provider_attempt_ledger_meta (
@@ -235,6 +243,8 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
   job_id TEXT,
   attempt_id TEXT,
   attempt_generation INTEGER,
+  worker_run_id TEXT,
+  provider_binding_id TEXT,
   entry_point TEXT NOT NULL,
   purpose TEXT NOT NULL,
   provider_configured TEXT,
@@ -248,6 +258,8 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
   credential_label_redacted TEXT,
   status TEXT NOT NULL,
   error_class TEXT,
+  provider_request_id TEXT,
+  response_hash TEXT,
   started_at INTEGER NOT NULL,
   completed_at INTEGER NOT NULL,
   estimated_input_tokens INTEGER,
@@ -301,10 +313,10 @@ CREATE INDEX IF NOT EXISTS idx_provider_attempts_purpose_status
 const INSERT_SQL = `
 INSERT INTO provider_attempts (
   call_id, parent_call_id, session_id, task_id, run_id,
-  job_id, attempt_id, attempt_generation, entry_point, purpose,
+  job_id, attempt_id, attempt_generation, worker_run_id, provider_binding_id, entry_point, purpose,
   provider_configured, provider_actual, model_configured, model_actual,
   api_mode, transport, attempt_index, fallback_index,
-  credential_label_redacted, status, error_class, started_at, completed_at,
+  credential_label_redacted, status, error_class, provider_request_id, response_hash, started_at, completed_at,
   estimated_input_tokens, estimated_output_tokens, estimated_schema_tokens,
   estimated_image_tokens, provider_input_tokens, provider_output_tokens,
   provider_cache_read_tokens, provider_cache_write_tokens,
@@ -318,10 +330,10 @@ INSERT INTO provider_attempts (
   skill_index_tokens, loaded_skill_tokens
 ) VALUES (
   @call_id, @parent_call_id, @session_id, @task_id, @run_id,
-  @job_id, @attempt_id, @attempt_generation, @entry_point, @purpose,
+  @job_id, @attempt_id, @attempt_generation, @worker_run_id, @provider_binding_id, @entry_point, @purpose,
   @provider_configured, @provider_actual, @model_configured, @model_actual,
   @api_mode, @transport, @attempt_index, @fallback_index,
-  @credential_label_redacted, @status, @error_class, @started_at, @completed_at,
+  @credential_label_redacted, @status, @error_class, @provider_request_id, @response_hash, @started_at, @completed_at,
   @estimated_input_tokens, @estimated_output_tokens, @estimated_schema_tokens,
   @estimated_image_tokens, @provider_input_tokens, @provider_output_tokens,
   @provider_cache_read_tokens, @provider_cache_write_tokens,
@@ -544,13 +556,19 @@ function ensureLedgerColumns(db: DatabaseType): void {
     ['job_id', 'TEXT'],
     ['attempt_id', 'TEXT'],
     ['attempt_generation', 'INTEGER'],
+    ['worker_run_id', 'TEXT'],
+    ['provider_binding_id', 'TEXT'],
+    ['provider_request_id', 'TEXT'],
+    ['response_hash', 'TEXT'],
   ];
   for (const [name, sqlType] of additions) {
     if (!existing.has(name)) db.exec(`ALTER TABLE provider_attempts ADD COLUMN ${name} ${sqlType}`);
   }
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_provider_attempts_job_attempt
-      ON provider_attempts(job_id, attempt_id, started_at)
+      ON provider_attempts(job_id, attempt_id, started_at);
+    CREATE INDEX IF NOT EXISTS idx_provider_attempts_worker_call
+      ON provider_attempts(worker_run_id, parent_call_id, started_at)
   `);
 }
 
@@ -620,6 +638,8 @@ function recordToRow(record: ProviderAttemptRecord): ProviderAttemptRow {
     job_id: record.jobId ?? null,
     attempt_id: record.attemptId ?? null,
     attempt_generation: record.attemptGeneration ?? null,
+    worker_run_id: record.workerRunId ?? null,
+    provider_binding_id: record.providerBindingId ?? null,
     entry_point: record.entryPoint,
     purpose: record.purpose,
     provider_configured: record.providerConfigured,
@@ -633,6 +653,8 @@ function recordToRow(record: ProviderAttemptRecord): ProviderAttemptRow {
     credential_label_redacted: record.credentialLabelRedacted,
     status: record.status,
     error_class: record.errorClass,
+    provider_request_id: record.providerRequestId ?? null,
+    response_hash: record.responseHash ?? null,
     started_at: record.startedAt,
     completed_at: record.completedAt,
     estimated_input_tokens: record.estimatedInputTokens,
@@ -680,6 +702,8 @@ function rowToRecord(row: ProviderAttemptRow): ProviderAttemptRecord {
     jobId: row.job_id,
     attemptId: row.attempt_id,
     attemptGeneration: row.attempt_generation,
+    workerRunId: row.worker_run_id,
+    providerBindingId: row.provider_binding_id,
     entryPoint: row.entry_point,
     purpose: row.purpose,
     providerConfigured: row.provider_configured,
@@ -693,6 +717,8 @@ function rowToRecord(row: ProviderAttemptRow): ProviderAttemptRecord {
     credentialLabelRedacted: row.credential_label_redacted,
     status: row.status,
     errorClass: row.error_class,
+    providerRequestId: row.provider_request_id,
+    responseHash: row.response_hash,
     startedAt: row.started_at,
     completedAt: row.completed_at,
     estimatedInputTokens: row.estimated_input_tokens,

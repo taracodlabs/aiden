@@ -8,6 +8,7 @@ import path from 'node:path';
 import { AidenAgent } from '../aidenAgent';
 import type { DurableJobDisposition, DurableJobHandle } from '../daemon/jobLifecycle';
 import type { JobEngine, AdmissionResult } from '../daemon/jobEngine';
+import type { JobBudgetReservationRecord } from '../daemon/jobResourceAuthority';
 import { currentJobExecutionContext } from '../daemon/jobExecutionContext';
 import type { TriggerBus } from '../daemon/triggerBus';
 import type { AidenPaths } from '../paths';
@@ -29,6 +30,7 @@ import {
   type WorkerResultSourceReference,
   type WorkerRunRecord,
 } from './types';
+import { createDurableWorkerProviderBridge, type DurableWorkerProviderBridge } from './workerProviderBridge';
 
 export const READ_ONLY_REPOSITORY_WORKER_TOOLS = Object.freeze([
   'repository_snapshot_search',
@@ -59,9 +61,11 @@ export interface ReadOnlyWorkerProviderSelection {
   credentialReference: string | null;
   endpointReference: string | null;
   supportsToolCalling: boolean;
+  supportsStreaming?: boolean;
   contextWindow: number;
   maxOutputTokens: number;
   selectionReason: string;
+  catalogDigest?: string;
 }
 
 export interface AdmitReadOnlyRepositoryWorkerInput {
@@ -81,6 +85,7 @@ export interface AdmitReadOnlyRepositoryWorkerInput {
   maxModelCalls?: number;
   maxToolCalls?: number;
   maxRuntimeMs?: number;
+  maxExternalCost?: number;
 }
 
 export interface ReadOnlyRepositoryWorkerAdmission {
@@ -88,6 +93,7 @@ export interface ReadOnlyRepositoryWorkerAdmission {
   assignment: WorkerAssignmentRecord;
   providerBinding: WorkerProviderBindingRecord;
   contextEnvelope: WorkerContextEnvelopeRecord;
+  reservation: JobBudgetReservationRecord;
   triggerEvent: { id: number; inserted: boolean };
 }
 
@@ -100,6 +106,11 @@ export interface ReadOnlyRepositoryWorkerToolRegistryInput {
 export interface ResolvedReadOnlyWorkerProvider {
   adapter: ProviderAdapter;
   paths: AidenPaths;
+  providerId: string;
+  modelId: string;
+  providerRuntimeIdentity: string;
+  credentialReference: string | null;
+  endpointReference: string | null;
 }
 
 export type ReadOnlyWorkerProviderResolver = (
@@ -239,6 +250,10 @@ export function admitReadOnlyRepositoryWorker(
     fallbackPolicyId: null,
     contextWindow: input.provider.contextWindow,
     maxOutputTokens: input.provider.maxOutputTokens,
+    supportsToolCalling: input.provider.supportsToolCalling,
+    supportsStreaming: input.provider.supportsStreaming ?? false,
+    catalogDigest: input.provider.catalogDigest ?? capabilitySnapshotHash,
+    fallbackBindingIds: [],
     idempotencyKey: `${input.idempotencyKey}:provider`,
   });
   const contextEnvelope = input.engine.worker.createWorkerContextEnvelope({
@@ -284,6 +299,9 @@ export function admitReadOnlyRepositoryWorker(
         runtime_ms: maxRuntimeMs,
         input_tokens: input.provider.contextWindow * maxModelCalls,
         output_tokens: input.provider.maxOutputTokens * maxModelCalls,
+        reasoning_tokens: input.provider.maxOutputTokens * maxModelCalls,
+        retries: Math.max(0, maxModelCalls - 1),
+        ...(input.maxExternalCost === undefined ? {} : { external_cost: input.maxExternalCost }),
         output_bytes: 512 * 1024,
         effects: 0,
         workers: 0,
@@ -310,6 +328,51 @@ export function admitReadOnlyRepositoryWorker(
     expectedResultSchemaId: READ_ONLY_REPOSITORY_WORKER.expectedResultSchemaId,
     expectedEvidenceSchemaId: READ_ONLY_REPOSITORY_WORKER.expectedEvidenceSchemaId,
     idempotencyKey: input.idempotencyKey,
+  });
+  const predictedWorkerRunId = identity('worker_run', {
+    assignmentId: assignment.assignmentId,
+    childAttemptId: child.attemptId,
+    childGeneration: 1,
+  });
+  const reservationAmounts = {
+    workers: 1,
+    model_calls: maxModelCalls,
+    retries: Math.max(0, maxModelCalls - 1),
+    tool_calls: maxToolCalls,
+    runtime_ms: maxRuntimeMs,
+    input_tokens: input.provider.contextWindow * maxModelCalls,
+    output_tokens: input.provider.maxOutputTokens * maxModelCalls,
+    reasoning_tokens: input.provider.maxOutputTokens * maxModelCalls,
+    output_bytes: 512 * 1024,
+    ...(input.maxExternalCost === undefined ? {} : { external_cost: input.maxExternalCost }),
+  } as const;
+  const reservation = input.engine.resources.reserveWorker({
+    reservationId: identity('worker_budget', requestIdentity),
+    idempotencyKey: `${input.idempotencyKey}:budget`,
+    parentJobId: input.parent.jobId,
+    parentAttemptId: input.parent.attemptId,
+    parentGeneration: input.parent.generation,
+    parentFenceToken: input.parent.fenceToken,
+    childJobId: child.jobId,
+    childAttemptId: child.attemptId,
+    childGeneration: 1,
+    workerRunId: predictedWorkerRunId,
+    assignmentId: assignment.assignmentId,
+    amounts: reservationAmounts,
+  });
+  input.engine.appendJobEvent({
+    jobId: input.parent.jobId,
+    attemptId: input.parent.attemptId,
+    generation: input.parent.generation,
+    type: 'worker.budget_reserved',
+    payload: {
+      assignmentId: assignment.assignmentId,
+      reservationId: reservation.reservationId,
+      childJobId: child.jobId,
+      kinds: reservation.items.map((item) => item.kind),
+    },
+    producer,
+    idempotencyKey: `worker-budget-reserved:${reservation.reservationId}`,
   });
   const triggerEvent = input.triggerBus.insert({
     source: 'manual',
@@ -343,7 +406,7 @@ export function admitReadOnlyRepositoryWorker(
     producer,
     idempotencyKey: `worker-dispatch-enqueued:${assignment.assignmentId}`,
   });
-  return { child, assignment, providerBinding, contextEnvelope, triggerEvent };
+  return { child, assignment, providerBinding, contextEnvelope, reservation, triggerEvent };
 }
 
 function requireString(value: unknown, label: string): string {
@@ -727,8 +790,27 @@ export async function executeReadOnlyRepositoryWorker(
     producer: 'repository-worker-runtime',
     idempotencyKey: `worker-execution-started:${workerRun.workerRunId}`,
   });
+  const reservation = engine.resources.getWorkerReservationForChild(handle.jobId);
+  if (!reservation || reservation.workerRunId !== workerRun.workerRunId
+    || reservation.assignmentId !== assignment.assignmentId
+    || reservation.childAttemptId !== handle.attemptId
+    || reservation.childGeneration !== handle.generation
+    || reservation.state === 'released' || reservation.state === 'cancelled') {
+    throw new Error('Worker provider execution requires an active durable budget reservation');
+  }
+  const executionStartedAt = Date.now();
+  let providerBridge: DurableWorkerProviderBridge | null = null;
+  try {
   const resolved = await input.resolveProvider(binding);
   if (!resolved?.adapter || !resolved.paths) throw new Error('Worker provider binding could not be resolved');
+  if (resolved.providerId !== binding.providerId
+    || resolved.modelId !== binding.modelId
+    || resolved.providerRuntimeIdentity !== binding.providerRuntimeIdentity
+    || resolved.credentialReference !== binding.credentialReference
+    || resolved.endpointReference !== binding.endpointReference) {
+    throw new Error('Resolved Worker provider does not match the immutable provider binding');
+  }
+  if (!binding.supportsToolCalling) throw new Error('Worker provider binding is not tool-call capable');
   const snapshot = engine.repository.getSnapshot(assignment.repositorySnapshotId);
   const workspace = snapshot ? engine.repository.getWorkspace(snapshot.workspaceId) : undefined;
   if (!snapshot || !workspace) throw new Error('Worker repository snapshot is unavailable');
@@ -740,15 +822,22 @@ export async function executeReadOnlyRepositoryWorker(
   if (registry.list().join('\0') !== READ_ONLY_REPOSITORY_WORKER_TOOLS.join('\0')) {
     throw new Error('Worker tool registry does not match the immutable capability set');
   }
+  providerBridge = createDurableWorkerProviderBridge({
+    engine, handle, assignment, workerRun, binding, reservation, adapter: resolved.adapter,
+  });
+  const baseExecutor = registry.buildExecutor({
+    cwd: snapshot.repositoryRoot ?? workspace.canonicalPath,
+    paths: resolved.paths,
+    sessionId: `worker:${assignment.assignmentId}`,
+  });
   const calls = new Map<string, { call: ToolCallRequest; result?: ToolCallResult }>();
   const agent = new AidenAgent({
-    provider: resolved.adapter,
+    provider: providerBridge.adapter,
     tools: registry.getSchemas(undefined, 'daemon'),
-    toolExecutor: registry.buildExecutor({
-      cwd: snapshot.repositoryRoot ?? workspace.canonicalPath,
-      paths: resolved.paths,
-      sessionId: `worker:${assignment.assignmentId}`,
-    }),
+    toolExecutor: async (call, signal, onActivity) => {
+      providerBridge!.linkToolCall(call);
+      return baseExecutor(call, signal, onActivity);
+    },
     maxTurns: 8,
     iterationBudgetInjection: false,
     providerId: binding.providerId,
@@ -759,6 +848,18 @@ export async function executeReadOnlyRepositoryWorker(
       if (phase === 'after') item.result = result;
       calls.set(call.id, item);
       if (phase === 'after') {
+        engine.resources.commitWorkerUsage({
+          reservationId: reservation.reservationId,
+          childAttemptId: handle.attemptId,
+          childGeneration: handle.generation,
+          childFenceToken: handle.fenceToken,
+          kind: 'tool_calls',
+          amount: 1,
+          certainty: 'confirmed',
+          sourceKind: 'tool_call',
+          sourceId: call.id,
+          idempotencyKey: `tool-call:${call.id}`,
+        });
         engine.appendJobEvent({
           jobId: handle.jobId,
           attemptId: handle.attemptId,
@@ -772,6 +873,7 @@ export async function executeReadOnlyRepositoryWorker(
     },
   });
   const startedAt = Date.now();
+  const modelCalls = reservation.items.find((item) => item.kind === 'model_calls')?.reserved ?? 0;
   const agentResult = await runWithProviderUsageContext({
     sessionId: `worker:${assignment.assignmentId}`,
     taskId: handle.jobId,
@@ -788,6 +890,8 @@ export async function executeReadOnlyRepositoryWorker(
     coreSchemaCount: READ_ONLY_REPOSITORY_WORKER_TOOLS.length,
     selectedProfile: 'repository-read-worker',
     selectedMode: 'economy',
+    workerRunId: workerRun.workerRunId,
+    providerBindingId: binding.providerBindingId,
   }, () => agent.runConversation([
     { role: 'system', content: workerSystemPrompt() },
     {
@@ -812,6 +916,12 @@ export async function executeReadOnlyRepositoryWorker(
     purpose: 'primary',
     selectedMode: 'economy',
     selectedProfile: 'repository-read-worker',
+    providerAttemptBudgets: [{
+      label: `worker:${workerRun.workerRunId}`,
+      maxAttempts: modelCalls,
+      usedAttempts: 0,
+      usedEstimatedTokens: 0,
+    }],
     signal: handle.signal,
   }));
   if (agentResult.finishReason === 'interrupted') throw new Error('Worker execution was cancelled');
@@ -984,6 +1094,40 @@ export async function executeReadOnlyRepositoryWorker(
     finalization,
     totalTokens: agentResult.totalUsage.inputTokens + agentResult.totalUsage.outputTokens,
   };
+  } finally {
+    providerBridge?.completeAcceptedCalls();
+    try {
+      engine.resources.commitWorkerUsage({
+        reservationId: reservation.reservationId,
+        childAttemptId: handle.attemptId,
+        childGeneration: handle.generation,
+        childFenceToken: handle.fenceToken,
+        kind: 'runtime_ms',
+        amount: Math.max(0, Date.now() - executionStartedAt),
+        certainty: 'confirmed',
+        sourceKind: 'runtime',
+        sourceId: `${handle.attemptId}:${handle.generation}`,
+        idempotencyKey: `runtime:${handle.attemptId}:${handle.generation}`,
+      });
+    } finally {
+      const released = engine.resources.releaseWorker({
+        reservationId: reservation.reservationId,
+        childAttemptId: handle.attemptId,
+        childGeneration: handle.generation,
+        childFenceToken: handle.fenceToken,
+        cancelled: handle.signal.aborted,
+      });
+      engine.appendJobEvent({
+        jobId: handle.jobId,
+        attemptId: handle.attemptId,
+        generation: handle.generation,
+        type: 'worker.budget_released',
+        payload: { reservationId: reservation.reservationId, state: released.state },
+        producer: 'repository-worker-runtime',
+        idempotencyKey: `worker-budget-released:${reservation.reservationId}`,
+      });
+    }
+  }
 }
 
 export async function verifyReadOnlyRepositoryWorkerResult(

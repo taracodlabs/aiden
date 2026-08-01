@@ -74,7 +74,12 @@ interface WorkerAuthorityDeps {
 }
 
 type ProviderBindingCommand = ParentAuthorityCommand & Omit<WorkerProviderBindingRecord,
-  'bindingHash' | 'createdAt'>;
+  'bindingHash' | 'createdAt' | 'supportsToolCalling' | 'supportsStreaming' | 'catalogDigest' | 'fallbackBindingIds'> & {
+    supportsToolCalling?: boolean;
+    supportsStreaming?: boolean;
+    catalogDigest?: string;
+    fallbackBindingIds?: readonly string[];
+  };
 
 type ContextEnvelopeCommand = ParentAuthorityCommand & Omit<WorkerContextEnvelopeRecord,
   'contentDigest' | 'createdAt'>;
@@ -153,7 +158,9 @@ type BindingRow = {
   provider_binding_id: string; schema_version: number; provider_id: string; model_id: string;
   provider_runtime_identity: string; credential_reference: string | null; endpoint_reference: string | null;
   capability_snapshot_hash: string; selection_reason: string; fallback_policy_id: string | null;
-  context_window: number; max_output_tokens: number; binding_hash: string; created_at: number;
+  context_window: number; max_output_tokens: number; supports_tool_calling: number;
+  supports_streaming: number; catalog_digest: string; fallback_binding_ids_json: string;
+  binding_hash: string; created_at: number;
 };
 
 type ContextRow = {
@@ -213,7 +220,10 @@ function mapBinding(row: BindingRow): WorkerProviderBindingRecord {
     credentialReference: row.credential_reference, endpointReference: row.endpoint_reference,
     capabilitySnapshotHash: row.capability_snapshot_hash, selectionReason: row.selection_reason,
     fallbackPolicyId: row.fallback_policy_id, contextWindow: row.context_window,
-    maxOutputTokens: row.max_output_tokens, bindingHash: row.binding_hash, createdAt: row.created_at,
+    maxOutputTokens: row.max_output_tokens, supportsToolCalling: row.supports_tool_calling === 1,
+    supportsStreaming: row.supports_streaming === 1, catalogDigest: row.catalog_digest,
+    fallbackBindingIds: array(row.fallback_binding_ids_json),
+    bindingHash: row.binding_hash, createdAt: row.created_at,
   };
 }
 
@@ -508,6 +518,20 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
       assertString(value, label, 512);
     }
     assertHash(command.capabilitySnapshotHash, 'Capability snapshot hash');
+    const supportsToolCalling = command.supportsToolCalling ?? true;
+    const supportsStreaming = command.supportsStreaming ?? false;
+    const catalogDigest = command.catalogDigest ?? command.capabilitySnapshotHash;
+    const fallbackBindingIds = [...(command.fallbackBindingIds ?? [])];
+    assertHash(catalogDigest, 'Provider catalog digest');
+    assertStringList(fallbackBindingIds, 'Fallback provider binding references');
+    if (fallbackBindingIds.includes(command.providerBindingId)) {
+      throw new WorkerAuthorityError('invalid_contract', 'Provider binding cannot fall back to itself');
+    }
+    for (const fallbackBindingId of fallbackBindingIds) {
+      if (!getBinding(fallbackBindingId)) {
+        throw new WorkerAuthorityError('reference_mismatch', 'Fallback provider binding is not registered');
+      }
+    }
     assertString(command.selectionReason, 'Selection reason', 2_048);
     if (!Number.isSafeInteger(command.contextWindow) || command.contextWindow < 1
       || !Number.isSafeInteger(command.maxOutputTokens) || command.maxOutputTokens < 1) {
@@ -519,7 +543,8 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
       credentialReference: command.credentialReference, endpointReference: command.endpointReference,
       capabilitySnapshotHash: command.capabilitySnapshotHash, selectionReason: command.selectionReason,
       fallbackPolicyId: command.fallbackPolicyId, contextWindow: command.contextWindow,
-      maxOutputTokens: command.maxOutputTokens,
+      maxOutputTokens: command.maxOutputTokens, supportsToolCalling, supportsStreaming,
+      catalogDigest, fallbackBindingIds,
     });
     const existing = getBinding(command.providerBindingId);
     if (existing) {
@@ -532,13 +557,15 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
       `INSERT INTO worker_provider_bindings
          (provider_binding_id,schema_version,provider_id,model_id,provider_runtime_identity,
           credential_reference,endpoint_reference,capability_snapshot_hash,selection_reason,
-          fallback_policy_id,context_window,max_output_tokens,binding_hash,created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+          fallback_policy_id,context_window,max_output_tokens,supports_tool_calling,supports_streaming,
+          catalog_digest,fallback_binding_ids_json,binding_hash,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     ).run(
       command.providerBindingId, 1, command.providerId, command.modelId, command.providerRuntimeIdentity,
       command.credentialReference, command.endpointReference, command.capabilitySnapshotHash,
       command.selectionReason, command.fallbackPolicyId, command.contextWindow,
-      command.maxOutputTokens, bindingHash, now,
+      command.maxOutputTokens, supportsToolCalling ? 1 : 0, supportsStreaming ? 1 : 0,
+      catalogDigest, JSON.stringify(fallbackBindingIds), bindingHash, now,
     );
     append(command, runId, 'worker.provider_binding_created', {
       providerBindingId: command.providerBindingId, bindingHash,

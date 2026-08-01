@@ -216,6 +216,11 @@ export function buildDaemonAgentBuilder(
       paths: deps.paths,
     }),
     paths: deps.paths,
+    providerId: binding.providerId,
+    modelId: binding.modelId,
+    providerRuntimeIdentity: binding.providerRuntimeIdentity,
+    credentialReference: binding.credentialReference,
+    endpointReference: binding.endpointReference,
   });
   return builder;
 }

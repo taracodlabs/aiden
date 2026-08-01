@@ -20,12 +20,14 @@ import {
   executeReadOnlyRepositoryWorker,
   verifyReadOnlyRepositoryWorkerResult,
 } from '../../../core/v4/worker/readOnlyRepositoryWorker';
+import { createDurableWorkerProviderBridge } from '../../../core/v4/worker/workerProviderBridge';
 import {
   beginPhysicalProviderAttempt,
   createLogicalProviderCallId,
   setProviderAttemptLedger,
 } from '../../../providers/v4/providerAttemptAccounting';
 import type { ProviderAdapter, ProviderCallInput, ProviderCallOutput } from '../../../providers/v4/types';
+import { ProviderRateLimitError } from '../../../providers/v4/errors';
 
 describe('read-only repository Worker runtime', () => {
   let db: Database.Database;
@@ -62,11 +64,19 @@ describe('read-only repository Worker runtime', () => {
     ]);
   });
 
-  async function setup() {
+  async function setup(maxModelCalls = 4) {
     const parent = engine.submitJob({
       entryPoint: 'test', source: 'test', sessionId: 'parent-session', workspaceId: root,
       instanceId: 'worker-instance', idempotencyNamespace: 'worker-parent', idempotencyKey: 'one',
       goal: 'Verify the durable Worker marker.',
+    });
+    engine.resources.configure({
+      jobId: parent.jobId,
+      budgets: {
+        workers: 1, model_calls: 10, retries: 4, tool_calls: 20, runtime_ms: 300_000,
+        input_tokens: 100_000, output_tokens: 40_000, reasoning_tokens: 40_000,
+        output_bytes: 2_000_000,
+      },
     });
     const parentLease = engine.claimAttempt({ attemptId: parent.attemptId, ownerId: 'worker-instance', ttlMs: 60_000 });
     if (!parentLease.acquired || !parentLease.fenceToken || parentLease.generation === undefined) throw new Error('parent lease');
@@ -100,20 +110,93 @@ describe('read-only repository Worker runtime', () => {
         credentialReference: null, endpointReference: null, supportsToolCalling: true,
         contextWindow: 8_192, maxOutputTokens: 2_048, selectionReason: 'deterministic test provider',
       },
+      maxModelCalls,
     });
     return { parent, parentLease, snapshot, entry, claim, admitted };
+  }
+
+  function resolvedProvider(adapter: ProviderAdapter) {
+    return {
+      adapter,
+      paths: resolveAidenPaths({ rootOverride: home }),
+      providerId: 'fixture',
+      modelId: 'fixture-tool-model',
+      providerRuntimeIdentity: 'runtime:fixture',
+      credentialReference: null,
+      endpointReference: null,
+    };
+  }
+
+  function directBridge(admitted: Awaited<ReturnType<typeof setup>>['admitted'], adapter: ProviderAdapter) {
+    const controller = new AbortController();
+    const lease = engine.claimAttempt({
+      attemptId: admitted.child.attemptId, ownerId: 'worker-instance', ttlMs: 60_000,
+    });
+    if (!lease.acquired || !lease.fenceToken || lease.generation === undefined) throw new Error('worker lease');
+    const handle = {
+      jobId: admitted.child.jobId,
+      attemptId: admitted.child.attemptId,
+      runId: admitted.child.runId,
+      generation: lease.generation,
+      fenceToken: lease.fenceToken,
+      signal: controller.signal,
+      pauseAtBoundary() {},
+      resumeAttempt() {},
+    };
+    const workerRun = engine.worker.bindWorkerRunFromAssignment({
+      childJobId: handle.jobId,
+      childAttemptId: handle.attemptId,
+      childGeneration: handle.generation,
+      childFenceToken: handle.fenceToken,
+      workerRunId: admitted.reservation.workerRunId,
+      schemaVersion: 1,
+      assignmentId: admitted.assignment.assignmentId,
+      providerBindingId: admitted.providerBinding.providerBindingId,
+      contextEnvelopeId: admitted.contextEnvelope.contextEnvelopeId,
+      producer: 'test',
+      idempotencyKey: `worker-run:${handle.attemptId}:${handle.generation}`,
+    });
+    return createDurableWorkerProviderBridge({
+      engine,
+      handle,
+      assignment: admitted.assignment,
+      workerRun,
+      binding: admitted.providerBinding,
+      reservation: admitted.reservation,
+      adapter,
+    });
   }
 
   async function runWorker(
     admitted: Awaited<ReturnType<typeof setup>>['admitted'],
     adapter: ProviderAdapter,
   ) {
+    let attemptIndex = 0;
+    const accounted: ProviderAdapter = {
+      apiMode: adapter.apiMode,
+      async call(providerInput) {
+        const lifecycle = beginPhysicalProviderAttempt(providerInput, {
+          providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: adapter.apiMode,
+          transport: 'fixture', attemptIndex: attemptIndex++,
+          logicalCallId: providerInput.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+          requestBytes: JSON.stringify(providerInput.messages).length,
+        });
+        try {
+          const output = await adapter.call(providerInput);
+          lifecycle.success(output, JSON.stringify(output).length);
+          return output;
+        } catch (error) {
+          lifecycle.failure(error, { sent: true });
+          throw error;
+        }
+      },
+    };
     return executeDurableJob({
       engine, ownerId: 'worker-instance', leaseTtlMs: 60_000,
       admission: { existing: { ...admitted.child, reused: true }, source: 'worker-dispatch' },
       execute: (handle) => executeReadOnlyRepositoryWorker({
         engine, handle, assignmentId: admitted.assignment.assignmentId,
-        resolveProvider: async () => ({ adapter, paths: resolveAidenPaths({ rootOverride: home }) }),
+        resolveProvider: async () => resolvedProvider(accounted),
       }),
       finalize: (value) => value.finalization,
     });
@@ -172,7 +255,7 @@ describe('read-only repository Worker runtime', () => {
       admission: { existing: { ...admitted.child, reused: true }, source: 'worker-dispatch' },
       execute: (handle) => executeReadOnlyRepositoryWorker({
         engine, handle, assignmentId: admitted.assignment.assignmentId,
-        resolveProvider: async () => ({ adapter, paths: resolveAidenPaths({ rootOverride: home }) }),
+        resolveProvider: async () => resolvedProvider(adapter),
       }),
       finalize: (value) => value.finalization,
     });
@@ -217,6 +300,16 @@ describe('read-only repository Worker runtime', () => {
     expect(inputs).toHaveLength(2);
     expect(new Set(ledger.query({ jobId: admitted.child.jobId }).map((record) => `${record.providerActual}/${record.modelActual}`)))
       .toEqual(new Set(['fixture/fixture-tool-model']));
+    expect(engine.workerProviderCalls.listForWorkerRun(childExecution.value.workerRun.workerRunId))
+      .toMatchObject([
+        { callOrdinal: 1, state: 'completed', acceptedProviderAttemptId: expect.any(String) },
+        { callOrdinal: 2, state: 'completed', acceptedProviderAttemptId: expect.any(String) },
+      ]);
+    expect(db.prepare('SELECT COUNT(*) AS n FROM worker_provider_tool_links WHERE worker_run_id=?')
+      .get(childExecution.value.workerRun.workerRunId)).toEqual({ n: 3 });
+    expect(engine.resources.getWorkerReservation(admitted.reservation.reservationId)).toMatchObject({ state: 'released' });
+    expect(engine.resources.getBudgets(parent.jobId).find((budget) => budget.kind === 'model_calls')?.used).toBe(2);
+    expect(engine.resources.getBudgets(parent.jobId).find((budget) => budget.kind === 'tool_calls')?.used).toBe(3);
     expect(JSON.stringify(inputs[0].messages)).not.toContain(parentLease.fenceToken!);
     expect(JSON.stringify(inputs[0].messages)).not.toContain(process.env.PATH ?? '<unset>');
     expect(inputs[0].tools.map((tool) => tool.name).sort()).toEqual([
@@ -254,7 +347,24 @@ describe('read-only repository Worker runtime', () => {
       admission: { existing: { ...admitted.child, reused: true }, source: 'worker-dispatch' },
       execute: (handle) => executeReadOnlyRepositoryWorker({
         engine, handle, assignmentId: admitted.assignment.assignmentId,
-        resolveProvider: async () => ({ adapter, paths: resolveAidenPaths({ rootOverride: home }) }),
+        resolveProvider: async () => {
+          let attemptIndex = 0;
+          const accounted: ProviderAdapter = {
+            apiMode: adapter.apiMode,
+            async call(providerInput) {
+              const lifecycle = beginPhysicalProviderAttempt(providerInput, {
+                providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: adapter.apiMode,
+                transport: 'fixture', attemptIndex: attemptIndex++,
+                logicalCallId: providerInput.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+                requestBytes: JSON.stringify(providerInput.messages).length,
+              });
+              const output = await adapter.call(providerInput);
+              lifecycle.success(output, JSON.stringify(output).length);
+              return output;
+            },
+          };
+          return resolvedProvider(accounted);
+        },
       }),
       finalize: (value) => value.finalization,
     })).rejects.toThrow(/source reference|snapshot/i);
@@ -298,6 +408,233 @@ describe('read-only repository Worker runtime', () => {
     expect(engine.worker.listWorkerRunsForChild(admitted.child.jobId)[0].acceptedResultId).toBeNull();
     expect(engine.worker.rebuildWorkerProjection(engine.getJob(admitted.child.jobId)?.parentJobId ?? '').acceptedResultIds)
       .toHaveLength(0);
+  });
+
+  it('blocks a resolved provider identity that differs from the immutable binding', async () => {
+    const { admitted } = await setup();
+    let calls = 0;
+    const adapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      async call() {
+        calls += 1;
+        throw new Error('must not send');
+      },
+    };
+    await expect(executeDurableJob({
+      engine, ownerId: 'worker-instance', leaseTtlMs: 60_000,
+      admission: { existing: { ...admitted.child, reused: true }, source: 'worker-dispatch' },
+      execute: (handle) => executeReadOnlyRepositoryWorker({
+        engine, handle, assignmentId: admitted.assignment.assignmentId,
+        resolveProvider: async () => ({ ...resolvedProvider(adapter), modelId: 'unapproved-model' }),
+      }),
+      finalize: (value) => value.finalization,
+    })).rejects.toThrow(/immutable provider binding/i);
+    expect(calls).toBe(0);
+    expect(ledger.query({ jobId: admitted.child.jobId })).toHaveLength(0);
+  });
+
+  it('accepts a terminal streamed response before exposing its first buffered event', async () => {
+    const { admitted } = await setup();
+    const output: ProviderCallOutput = {
+      content: 'stream complete', toolCalls: [], finishReason: 'stop',
+      usage: { inputTokens: 6, outputTokens: 3 },
+    };
+    const adapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      async call() { throw new Error('plain call must not run'); },
+      async *callStream(input) {
+        const lifecycle = beginPhysicalProviderAttempt(input, {
+          providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: 'chat_completions',
+          transport: 'fixture-stream', attemptIndex: 0,
+          logicalCallId: input.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+          requestBytes: JSON.stringify(input.messages).length,
+        });
+        yield { type: 'delta' as const, content: 'stream ' };
+        lifecycle.success(output, JSON.stringify(output).length);
+        yield { type: 'done' as const, output };
+      },
+    };
+    const bridge = directBridge(admitted, adapter);
+    const logicalCallId = 'logical_stream_acceptance';
+    const stream = bridge.adapter.callStream!({
+      messages: [{ role: 'user', content: 'inspect' }], tools: [], stream: true,
+      usageContext: { logicalCallId },
+    });
+    const first = await stream.next();
+    expect(first.value).toEqual({ type: 'delta', content: 'stream ' });
+    expect(engine.workerProviderCalls.get(logicalCallId)).toMatchObject({
+      state: 'accepted', responseHash: expect.any(String), acceptedProviderAttemptId: expect.any(String),
+    });
+    expect((await stream.next()).value).toMatchObject({ type: 'done' });
+    bridge.completeAcceptedCalls();
+    expect(engine.workerProviderCalls.get(logicalCallId)?.state).toBe('completed');
+  });
+
+  it('records a partial ambiguous stream as unknown without a second physical attempt', async () => {
+    const { admitted } = await setup();
+    let calls = 0;
+    const adapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      async call() { throw new Error('plain call must not run'); },
+      async *callStream(input) {
+        calls += 1;
+        const lifecycle = beginPhysicalProviderAttempt(input, {
+          providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: 'chat_completions',
+          transport: 'fixture-stream', attemptIndex: 0,
+          logicalCallId: input.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+          requestBytes: JSON.stringify(input.messages).length,
+        });
+        yield { type: 'delta' as const, content: 'partial' };
+        const error = new Error('stream interrupted after response bytes');
+        lifecycle.failure(error, { sent: true, status: 'interrupted' });
+        throw error;
+      },
+    };
+    const bridge = directBridge(admitted, adapter);
+    const logicalCallId = 'logical_stream_unknown';
+    const consume = async () => {
+      for await (const _event of bridge.adapter.callStream!({
+        messages: [{ role: 'user', content: 'inspect' }], tools: [], stream: true,
+        usageContext: { logicalCallId },
+      })) { /* buffered until a terminal provider response */ }
+    };
+    await expect(consume()).rejects.toThrow(/stream interrupted/i);
+    expect(calls).toBe(1);
+    expect(ledger.query({ parentCallId: logicalCallId })).toHaveLength(1);
+    expect(engine.workerProviderCalls.get(logicalCallId)).toMatchObject({ state: 'unknown', outcomeKnown: false });
+  });
+
+  it('settles a bridge-level budget denial before transport send', async () => {
+    const { admitted } = await setup(1);
+    db.prepare(
+      'UPDATE job_budget_reservation_items SET committed_value=reserved_value,state=? WHERE reservation_id=? AND kind=?',
+    ).run('committed', admitted.reservation.reservationId, 'model_calls');
+    let calls = 0;
+    const adapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      async call() {
+        calls += 1;
+        throw new Error('must not send');
+      },
+    };
+    const bridge = directBridge(admitted, adapter);
+    const logicalCallId = 'logical_budget_denied';
+    await expect(bridge.adapter.call({
+      messages: [{ role: 'user', content: 'inspect' }], tools: [],
+      usageContext: { logicalCallId },
+    })).rejects.toThrow(/budget exhausted before provider send/i);
+    expect(calls).toBe(0);
+    expect(ledger.query({ parentCallId: logicalCallId })).toHaveLength(0);
+    expect(engine.workerProviderCalls.get(logicalCallId)).toMatchObject({
+      state: 'failed', failureKind: 'budget_exhausted', outcomeKnown: true,
+    });
+  });
+
+  it('accounts a safe pre-response fallback as two physical attempts under one logical call', async () => {
+    const { admitted, snapshot, entry } = await setup();
+    let logicalCalls = 0;
+    const adapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      async call(providerInput) {
+        logicalCalls += 1;
+        const logicalCallId = providerInput.usageContext?.logicalCallId ?? createLogicalProviderCallId();
+        if (logicalCalls === 1) {
+          const primary = beginPhysicalProviderAttempt(providerInput, {
+            providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: 'chat_completions',
+            transport: 'fixture', attemptIndex: 0, fallbackIndex: 0, logicalCallId,
+            requestBytes: JSON.stringify(providerInput.messages).length,
+          });
+          primary.failure(new ProviderRateLimitError('fixture'), { sent: true });
+          const fallback = beginPhysicalProviderAttempt(providerInput, {
+            providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: 'chat_completions',
+            transport: 'fixture', attemptIndex: 1, fallbackIndex: 1, logicalCallId,
+            requestBytes: JSON.stringify(providerInput.messages).length,
+          });
+          const output: ProviderCallOutput = {
+            content: null,
+            toolCalls: [{ id: 'read-fallback', name: 'repository_snapshot_read', arguments: { path: 'source.ts' } }],
+            finishReason: 'tool_use', usage: { inputTokens: 12, outputTokens: 4 },
+          };
+          fallback.success(output, JSON.stringify(output).length);
+          return output;
+        }
+        const finalAttempt = beginPhysicalProviderAttempt(providerInput, {
+          providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: 'chat_completions',
+          transport: 'fixture', attemptIndex: 0, fallbackIndex: 0, logicalCallId,
+          requestBytes: JSON.stringify(providerInput.messages).length,
+        });
+        const output: ProviderCallOutput = {
+          content: JSON.stringify({
+            schemaVersion: 1, status: 'completed', summary: 'The marker is present.',
+            findings: [{
+              findingId: 'marker', statement: 'source.ts declares durable-worker.', uncertainty: 'low',
+              sourceReferences: [{
+                snapshotId: snapshot.id, snapshotEntryId: entry.canonicalIdentity,
+                path: 'source.ts', startLine: 1, endLine: 1, contentHash: entry.contentHash,
+              }],
+            }],
+            unresolvedQuestions: [], uncertainty: { level: 'low', reasons: [] },
+          }),
+          toolCalls: [], finishReason: 'stop', usage: { inputTokens: 14, outputTokens: 6 },
+        };
+        finalAttempt.success(output, JSON.stringify(output).length);
+        return output;
+      },
+    };
+    const result = await executeDurableJob({
+      engine, ownerId: 'worker-instance', leaseTtlMs: 60_000,
+      admission: { existing: { ...admitted.child, reused: true }, source: 'worker-dispatch' },
+      execute: (handle) => executeReadOnlyRepositoryWorker({
+        engine, handle, assignmentId: admitted.assignment.assignmentId,
+        resolveProvider: async () => resolvedProvider(adapter),
+      }),
+      finalize: (value) => value.finalization,
+    });
+    const attempts = ledger.query({ jobId: admitted.child.jobId });
+    expect(attempts.map((item) => [item.purpose, item.status])).toEqual([
+      ['primary', 'provider_error'], ['fallback', 'success'], ['primary', 'success'],
+    ]);
+    expect(engine.workerProviderCalls.listForWorkerRun(result.value.workerRun.workerRunId)).toHaveLength(2);
+    expect(engine.resources.getBudgets(result.value.workerRun.childJobId).find((item) => item.kind === 'model_calls')?.used).toBe(3);
+    expect(engine.resources.getBudgets(result.value.workerRun.childJobId).find((item) => item.kind === 'retries')?.used).toBe(1);
+  });
+
+  it('blocks the next logical call before send when the physical model-call reservation is exhausted', async () => {
+    const { admitted } = await setup(1);
+    let calls = 0;
+    const adapter: ProviderAdapter = {
+      apiMode: 'chat_completions',
+      async call(providerInput) {
+        calls += 1;
+        const lifecycle = beginPhysicalProviderAttempt(providerInput, {
+          providerActual: 'fixture', modelActual: 'fixture-tool-model', apiMode: 'chat_completions',
+          transport: 'fixture', attemptIndex: 0,
+          logicalCallId: providerInput.usageContext?.logicalCallId ?? createLogicalProviderCallId(),
+          requestBytes: JSON.stringify(providerInput.messages).length,
+        });
+        const output: ProviderCallOutput = {
+          content: null,
+          toolCalls: [{ id: 'read-once', name: 'repository_snapshot_read', arguments: { path: 'source.ts' } }],
+          finishReason: 'tool_use', usage: { inputTokens: 10, outputTokens: 4 },
+        };
+        lifecycle.success(output, JSON.stringify(output).length);
+        return output;
+      },
+    };
+    await expect(executeDurableJob({
+      engine, ownerId: 'worker-instance', leaseTtlMs: 60_000,
+      admission: { existing: { ...admitted.child, reused: true }, source: 'worker-dispatch' },
+      execute: (handle) => executeReadOnlyRepositoryWorker({
+        engine, handle, assignmentId: admitted.assignment.assignmentId,
+        resolveProvider: async () => resolvedProvider(adapter),
+      }),
+      finalize: (value) => value.finalization,
+    })).rejects.toThrow(/model-call budget exhausted/i);
+    expect(calls).toBe(1);
+    expect(ledger.query({ jobId: admitted.child.jobId })).toHaveLength(1);
+    expect(engine.workerProviderCalls.listForWorkerRun(admitted.reservation.workerRunId))
+      .toMatchObject([{ callOrdinal: 1, state: 'completed' }]);
+    expect(engine.resources.getWorkerReservation(admitted.reservation.reservationId)?.state).toBe('released');
   });
 
   it('prevents cancelled parent authority from creating parent Evidence or changing its Claim', async () => {
