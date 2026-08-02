@@ -69,6 +69,47 @@ const resolveBuiltInInteraction = (name: string) =>
       : undefined;
 
 describe('central CLI activity lifecycle', () => {
+  it('replaces the generic skill completion with one typed invocation row', () => {
+    const { display, output } = makeTtyDisplay();
+    const callbacks = new CliCallbacks({ display });
+    callbacks.onToolCall({ id: 'skill-1', name: 'skill_view', arguments: { name: 'architecture-diagram' } }, 'before');
+    callbacks.onToolCall(
+      { id: 'skill-1', name: 'skill_view', arguments: { name: 'architecture-diagram' } },
+      'after',
+      {
+        id: 'skill-1', name: 'skill_view',
+        result: { success: true, filePath: 'C:\\skills\\architecture-diagram\\SKILL.md' },
+        activityTiming: { dispatchStartedAt: 0, executionDurationMs: 6, executionAttempts: [] },
+      },
+    );
+    callbacks.onToolCall(
+      { id: 'skill-1', name: 'skill_view', arguments: { name: 'architecture-diagram' } },
+      'after',
+      {
+        id: 'skill-1', name: 'skill_view',
+        result: { success: true, filePath: 'C:\\skills\\architecture-diagram\\SKILL.md' },
+        activityTiming: { dispatchStartedAt: 0, executionDurationMs: 6, executionAttempts: [] },
+      },
+    );
+    const plain = output().replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '');
+    expect(plain.match(/skill\s+architecture-diagram/gu)).toHaveLength(1);
+    expect(plain).toContain('SKILL.md');
+    expect(plain).not.toMatch(/completed\s+architecture-diagram|completed\s+\./iu);
+  });
+
+  it('does not project a successful typed skill row when loading failed', () => {
+    const { display, output } = makeTtyDisplay();
+    const callbacks = new CliCallbacks({ display });
+    const call = { id: 'skill-failed', name: 'skill_view', arguments: { name: 'missing-skill' } } as const;
+    callbacks.onToolCall(call, 'before');
+    callbacks.onToolCall(call, 'after', {
+      id: call.id, name: call.name, result: null, error: 'Skill not found: missing-skill',
+    });
+    const plain = output().replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '');
+    expect(plain).toMatch(/failed/u);
+    expect(plain).not.toMatch(/✓\s+skill/u);
+  });
+
   it('does not restore approval navigation hints after modal settlement', async () => {
     class ScreenStream extends Writable {
       isTTY = true;

@@ -237,7 +237,9 @@ function expectCleanMainBuffer(startup: Awaited<ReturnType<typeof launch>>): voi
 
 function dashboardLines(output: string): string[] {
   const lines = output.split(/\r?\n/);
-  const start = lines.findIndex((line) => line.includes('█████╗') || /^\s*Aiden\s*$/.test(line));
+  const start = lines.findIndex((line) => (
+    line.includes('█████╗') || /^\s*(?:A I D E N|AIDEN)\s*$/u.test(line)
+  ));
   const end = lines.findIndex((line, index) => index >= start && line.startsWith('▲ You'));
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
@@ -328,7 +330,8 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
 
     const narrow = await launch(48);
     const narrowRendered = narrow.rendered();
-    expect(narrowRendered).toContain('█████╗');
+    expect(narrowRendered).toMatch(/^AIDEN$/mu);
+    expect(narrowRendered).not.toContain('█████╗');
     expect(narrowRendered).toMatch(/◇\s+Assistant\s+·\s+◆\s+custom-default/i);
     expect(narrowRendered).toMatch(/built solo/i);
     expect(narrowRendered).toContain('Environment');

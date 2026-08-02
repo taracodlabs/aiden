@@ -10,6 +10,7 @@ import {
   isPreFramedLine,
   TRAIL_HIDE_TOOLS,
   makeNoOpToolRowHandle,
+  previewToolArgs,
 } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { ActivitySnapshot } from '../../../cli/v4/activityRegistry';
@@ -24,6 +25,26 @@ function stripAnsi(s: string): string {
     '',
   );
 }
+
+describe('compact activity argument summaries', () => {
+  it('does not expose raw JSON for an unmapped structured argument object', () => {
+    const summary = previewToolArgs({ include_full: true, limit: 5, private_value: 'hidden' });
+    expect(summary).not.toContain('{');
+    expect(summary).not.toContain('private_value');
+    expect(summary).not.toContain('hidden');
+    expect(summary).toMatch(/3 (?:arguments|options)/u);
+    expect(previewToolArgs(
+      { include_full: true, limit: 5, private_value: 'hidden' },
+      'full',
+    )).toContain('"private_value":"hidden"');
+  });
+
+  it('keeps a recognizable scalar target without serializing sibling fields', () => {
+    const summary = previewToolArgs({ name: 'repository scan', include_full: true, limit: 5 });
+    expect(summary).toContain('repository scan');
+    expect(summary).not.toContain('include_full');
+  });
+});
 
 describe('SkinEngine', () => {
   let engine: SkinEngine;
@@ -98,6 +119,18 @@ describe('Display', () => {
   let display: Display;
   let skin: SkinEngine;
 
+  it('separates prompt identity/content from assistant prose and resets each span', () => {
+    const themed = new SkinEngine({ colorDepth: 'truecolor' });
+    const d = new Display({ skin: themed });
+    const submitted = d.userTurn('hello\nwrapped prompt');
+    const answer = d.agentTurn('assistant prose', { markdown: false });
+    expect(submitted).toContain('\x1b[38;2;91;192;235m');
+    expect(submitted).toContain('\x1b[38;2;156;220;254m');
+    expect(submitted).not.toContain('\x1b[38;2;255;107;53m  ▲ You');
+    expect(answer).toContain('assistant prose');
+    expect(submitted.match(/\x1b\[[0-9;]*m/g)?.at(-1)).toBe('\x1b[39m');
+  });
+
   beforeEach(() => {
     skin = new SkinEngine({ forceMono: true }); // deterministic output
     display = new Display({ skin });
@@ -152,11 +185,13 @@ describe('Display', () => {
     expect(out).toContain('/tmp/x');
   });
 
-  it('toolPreview truncates very long args', () => {
+  it('toolPreview summarizes unknown structured args without raw JSON', () => {
     const big = { blob: 'x'.repeat(2000) };
     const out = stripAnsi(display.toolPreview('huge', big));
     expect(out.length).toBeLessThan(260);
-    expect(out).toContain('...');
+    expect(out).toContain('1 argument');
+    expect(out).not.toContain('{');
+    expect(out).not.toContain('blob');
   });
 
   it('error includes suggestion when provided', () => {
@@ -1515,7 +1550,22 @@ describe('Display v4.8.0 ui_* event renderers', () => {
     const out = stripAnsi(chunks.join(''));
     // `┊ ` then 4-space indent (depth 2 × 2 spaces) before both card rows.
     expect(out).toMatch(/┊ {5}┌ nested/);
-    expect(out).toMatch(/┊ {5}└ ◐ Working/);
+    expect(out).toMatch(/┊ {5}└ ◆ Worker running/);
+  });
+
+  it('ui_task_update uses the Worker semantic token for exact subagent activity', () => {
+    const chunks: string[] = [];
+    const terminalOut = new Writable({
+      write(chunk, _enc, cb) { chunks.push(chunk.toString()); cb(); },
+    }) as unknown as NodeJS.WriteStream;
+    (terminalOut as unknown as { isTTY: boolean }).isTTY = true;
+    const d = new Display({ skin: new SkinEngine({ colorDepth: 'truecolor' }), stdout: terminalOut });
+    d.renderUiEvent('ui_task_update', {
+      task_id: 'worker-1', label: 'inspect runtime ownership', status: 'running', kind: 'subagent', depth: 1,
+    });
+    const rendered = chunks.join('');
+    expect(stripAnsi(rendered)).toContain('◆ Worker running');
+    expect(rendered).toContain('\x1b[38;2;167;139;250m◆\x1b[39m');
   });
 
   // ── ui_task_done ──────────────────────────────────────────────────────

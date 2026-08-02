@@ -173,7 +173,7 @@ describe('responsive startup dashboard integration', () => {
     await session.renderStartupCard();
     const output = stripAnsi(chunks.join(''));
 
-    const logo = columns >= 44 ? /Autonomous AI Engine/g : /^Aiden$/gm;
+    const logo = columns >= 44 ? /Autonomous AI Engine/g : /^AIDEN$/gm;
     expect(output.match(logo)).toHaveLength(1);
     expect(output).toContain('Partner');
     expect(output).toContain('llama-3.3-70b-versatile'.slice(0, columns >= 48 ? 8 : 3));

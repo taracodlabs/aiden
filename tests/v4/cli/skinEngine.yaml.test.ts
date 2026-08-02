@@ -229,9 +229,13 @@ describe('SkinEngine terminal color capability', () => {
     expect(new Set(codes).size).toBe(4);
   });
 
-  it('keeps the user label on the Aiden brand accent', () => {
+  it('keeps the user label on the prompt cyan token', () => {
     const engine = new SkinEngine({ colorDepth: 'truecolor' });
-    expect(engine.applyColors('You', 'user')).toContain('\x1b[38;2;255;107;53m');
+    expect(engine.applyColors('You', 'user')).toContain('\x1b[38;2;91;192;235m');
+    expect(engine.applyColors('draft', 'prompt_content')).toContain('\x1b[38;2;156;220;254m');
+    expect(engine.applyColors('skill', 'skill')).not.toBe(engine.applyColors('read', 'tool'));
+    expect(engine.applyColors('worker', 'worker')).toContain('\x1b[38;2;167;139;250m');
+    expect(engine.applyColors('evidence', 'evidence')).toContain('\x1b[38;2;96;165;250m');
   });
 
   it('renders phase colors in truecolor, ANSI 16, and monochrome modes', () => {
@@ -252,8 +256,8 @@ describe('SkinEngine terminal color capability', () => {
     const dark = engine.applyColors('phase', 'inspecting');
     engine.setActive('light');
     const light = engine.applyColors('phase', 'inspecting');
-    expect(dark).toContain('\x1b[38;2;96;165;250m');
-    expect(light).toContain('\x1b[38;2;29;78;160m');
+    expect(dark).toContain('\x1b[38;2;91;192;235m');
+    expect(light).toContain('\x1b[38;2;0;102;136m');
     expect(light).not.toBe(dark);
   });
 });

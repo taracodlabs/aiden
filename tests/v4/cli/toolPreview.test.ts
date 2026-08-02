@@ -16,6 +16,25 @@ describe('buildToolPreview', () => {
     expect(buildToolPreview('shell_exec', { command: 'npm test' })).toBe('npm test');
   });
 
+  it('summarizes compound PowerShell without displaying a partial expression', () => {
+    const command = 'where.exe aiden 2>$null; where.exe aiden-runtime 2>$null; Get-Command aiden';
+    expect(buildToolPreview('shell_exec', { command })).toBe('where.exe aiden · +2 steps');
+    expect(buildToolPreview('shell_exec', { command }, { mode: 'full' })).toBe(command);
+  });
+
+  it('summarizes PowerShell repository inspection without exposing assignment fragments', () => {
+    const command = [
+      "$files = @('cli/v4/aidenTUI.ts', 'cli/v4/display.ts')",
+      "$patterns = @('class Display', 'render')",
+      'Select-String -Path $files -Pattern $patterns',
+    ].join('; ');
+    const preview = buildToolPreview('shell_exec', { command });
+    expect(preview).toBe('search repository source · +2 steps');
+    expect(preview).not.toContain('$files');
+    expect(preview).not.toContain('$patterns');
+    expect(buildToolPreview('shell_exec', { command }, { mode: 'full' })).toContain('$files');
+  });
+
   it('extracts file path', () => {
     expect(buildToolPreview('file_read', { path: 'README.md' })).toBe('README.md');
     expect(buildToolPreview('file_write', { path: '/tmp/x.md', content: 'hi' })).toBe('/tmp/x.md');
@@ -35,9 +54,9 @@ describe('buildToolPreview', () => {
     expect(buildToolPreview('execute_code', { code: 'print(1+1)' })).toBe('print(1+1)');
   });
 
-  it('extracts subagent_fanout mode', () => {
+  it('does not infer Worker details from generic fanout arguments', () => {
     expect(buildToolPreview('subagent_fanout', { mode: 'partition', n: 3 }))
-      .toBe('partition');
+      .toBe('');
   });
 
   it('returns empty string for known no-arg tools', () => {
@@ -58,15 +77,46 @@ describe('buildToolPreview', () => {
     expect(out).toMatch(/…$/);
   });
 
-  it('collapses whitespace so multi-line values stay one-line', () => {
+  it('summarizes multi-line commands without exposing a partial command', () => {
     const out = buildToolPreview('shell_exec', { command: 'echo a\n  echo b\n\techo c' });
-    expect(out).toBe('echo a echo b echo c');
+    expect(out).toBe('echo a · +2 steps');
   });
 
-  it('serialises non-string primary args via JSON.stringify', () => {
-    // Force a primary arg whose value is an object.
+  it('summarizes non-string primary args without raw JSON in compact mode', () => {
     expect(buildToolPreview('skill_manage', { action: { kind: 'install', id: 'x' } }))
-      .toBe('{"kind":"install","id":"x"}');
+      .toBe('install · x');
+    expect(buildToolPreview(
+      'skill_manage',
+      { action: { kind: 'install', id: 'x' } },
+      { mode: 'full' },
+    )).toBe('{"kind":"install","id":"x"}');
+  });
+
+  it('does not invent segments or expose raw character offsets for file reads', () => {
+    const compact = buildToolPreview('file_read', {
+      path: 'C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts',
+      offset: 120,
+      limit: 80,
+    });
+    expect(compact).toBe('C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts');
+    expect(compact).not.toMatch(/segment|chars|120|199/u);
+    expect(buildToolPreview('file_read', {
+      path: 'display.ts', offset: 200, limit: 80,
+    }, { mode: 'full' })).toContain('chars 200–279');
+  });
+
+  it('keeps repeated reads distinguishable by exact ranges in full details', () => {
+    const first = buildToolPreview('file_read', { path: 'display.ts', offset: 0, limit: 80 }, { mode: 'full' });
+    const second = buildToolPreview('file_read', { path: 'display.ts', offset: 80, limit: 80 }, { mode: 'full' });
+    expect(first).toContain('chars 0–79');
+    expect(second).toContain('chars 80–159');
+    expect(first).not.toBe(second);
+  });
+
+  it('never cuts a long Unicode preview by JavaScript code units', () => {
+    const out = buildToolPreview('shell_exec', { command: '界'.repeat(100) });
+    expect(out).not.toContain('\uFFFD');
+    expect(out).toMatch(/…$/u);
   });
 
   it('handles missing primary arg gracefully (known tool, but no value)', () => {

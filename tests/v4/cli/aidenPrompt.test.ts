@@ -235,6 +235,28 @@ describe('aidenPrompt — Bug D fix via footer rendering (v4.10 Slice 10.5)', ()
 });
 
 describe('aidenPrompt — extra render-snapshot coverage', () => {
+  it('fits Unicode command descriptions by visible terminal width', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+    Object.defineProperty(process.stdout, 'columns', { configurable: true, value: 44 });
+    try {
+      const runner = renderPrompt({
+        commands: [{ name: 'inspect', description: '界'.repeat(60) }],
+        history: [],
+      });
+      runner.type('/i');
+      const footer = runner.lastRender().footer ?? '';
+      const lines = footer.split('\n');
+      for (const line of lines) {
+        const plain = line.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '');
+        expect(require('string-width')(plain)).toBeLessThanOrEqual(40);
+      }
+      expect(footer).not.toContain('\uFFFD');
+    } finally {
+      if (descriptor) Object.defineProperty(process.stdout, 'columns', descriptor);
+      else delete (process.stdout as { columns?: number }).columns;
+    }
+  });
+
   it('omits cursorBackward when no ghost is present (unknown command)', () => {
     const runner = renderPrompt({
       commands: [{ name: 'daemon', description: 'Manage the Aiden daemon.' }],
