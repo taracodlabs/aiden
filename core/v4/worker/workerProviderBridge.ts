@@ -171,6 +171,14 @@ export function createDurableWorkerProviderBridge(options: BridgeOptions): Durab
 
   const runCall = async (input: ProviderCallInput, stream: boolean): Promise<ProviderCallOutput | StreamEvent[]> => {
     completeActive();
+    const groupMember = options.engine.worker.getWorkerGroupMemberForAssignment(options.assignment.assignmentId);
+    if (groupMember) {
+      const providerSlot = options.engine.resources.getWorkerProviderConcurrencyForMember(groupMember.memberId);
+      if (!providerSlot || providerSlot.state !== 'reserved'
+        || providerSlot.providerId !== options.binding.providerId) {
+        throw new Error('Parallel Worker provider dispatch requires an active provider concurrency reservation');
+      }
+    }
     const logicalCallId = input.usageContext?.logicalCallId;
     if (!logicalCallId) throw new Error('Worker provider call is missing a logical identity');
     const ordinal = options.engine.workerProviderCalls.listForWorkerRun(options.workerRun.workerRunId).length + 1;

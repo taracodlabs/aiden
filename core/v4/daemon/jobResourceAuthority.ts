@@ -72,6 +72,23 @@ export interface JobBudgetReservationRecord {
   settlementBlockedAt: number | null;
 }
 
+export interface WorkerProviderConcurrencyReservationRecord {
+  providerSlotId: string;
+  idempotencyKey: string;
+  groupId: string;
+  memberId: string;
+  parentJobId: string;
+  parentAttemptId: string;
+  parentGeneration: number;
+  providerId: string;
+  limit: number;
+  state: 'reserved' | 'released' | 'blocked_unknown';
+  createdAt: number;
+  releasedAt: number | null;
+  blockedAt: number | null;
+  settlementReason: string | null;
+}
+
 export interface JobResourceAuthority {
   configure(command: {
     jobId: string;
@@ -153,6 +170,29 @@ export interface JobResourceAuthority {
     idempotencyKey: string;
     now?: number;
   }): JobBudgetReservationRecord;
+  reserveWorkerProviderConcurrency(command: {
+    providerSlotId: string;
+    idempotencyKey: string;
+    groupId: string;
+    memberId: string;
+    parentJobId: string;
+    parentAttemptId: string;
+    parentGeneration: number;
+    parentFenceToken: string;
+    providerId: string;
+    limit: number;
+    now?: number;
+  }): WorkerProviderConcurrencyReservationRecord;
+  settleWorkerProviderConcurrency(command: {
+    providerSlotId: string;
+    unknown: boolean;
+    safeToRelease: boolean;
+    reason: string;
+    now?: number;
+  }): WorkerProviderConcurrencyReservationRecord;
+  getWorkerProviderConcurrency(providerSlotId: string): WorkerProviderConcurrencyReservationRecord | null;
+  getWorkerProviderConcurrencyForMember(memberId: string): WorkerProviderConcurrencyReservationRecord | null;
+  listWorkerProviderConcurrencyForGroup(groupId: string): WorkerProviderConcurrencyReservationRecord[];
   authorize(command: {
     jobId: string;
     kind: 'tool' | 'path' | 'host' | 'application' | 'connection' | 'account' | 'worker' | 'effect';
@@ -210,6 +250,25 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
     kind: JobBudgetKind; reserved_value: number; committed_value: number;
     released_value: number; has_unknown_usage: number;
     state: JobBudgetReservationItemRecord['state'];
+  };
+  type ProviderSlotRow = {
+    provider_slot_id: string; idempotency_key: string; group_id: string; member_id: string;
+    parent_job_id: string; parent_attempt_id: string; parent_generation: number; provider_id: string;
+    limit_value: number; state: WorkerProviderConcurrencyReservationRecord['state']; created_at: number;
+    released_at: number | null; blocked_at: number | null; settlement_reason: string | null;
+  };
+  const mapProviderSlot = (row: ProviderSlotRow): WorkerProviderConcurrencyReservationRecord => ({
+    providerSlotId: row.provider_slot_id, idempotencyKey: row.idempotency_key,
+    groupId: row.group_id, memberId: row.member_id, parentJobId: row.parent_job_id,
+    parentAttemptId: row.parent_attempt_id, parentGeneration: row.parent_generation,
+    providerId: row.provider_id, limit: row.limit_value, state: row.state,
+    createdAt: row.created_at, releasedAt: row.released_at, blockedAt: row.blocked_at,
+    settlementReason: row.settlement_reason,
+  });
+  const getProviderSlot = (providerSlotId: string): WorkerProviderConcurrencyReservationRecord | null => {
+    const row = db.prepare('SELECT * FROM worker_provider_concurrency_reservations WHERE provider_slot_id=?')
+      .get(providerSlotId) as ProviderSlotRow | undefined;
+    return row ? mapProviderSlot(row) : null;
   };
   const getReservation = (reservationId: string): JobBudgetReservationRecord | null => {
     const row = db.prepare('SELECT * FROM job_budget_reservations WHERE reservation_id=?')
@@ -687,6 +746,93 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
     return getReservation(reservation.reservationId)!;
   }).immediate;
 
+  const reserveWorkerProviderConcurrency = db.transaction((
+    command: Parameters<JobResourceAuthority['reserveWorkerProviderConcurrency']>[0],
+  ): WorkerProviderConcurrencyReservationRecord => {
+    requireActiveAttempt(
+      command.parentJobId, command.parentAttemptId, command.parentGeneration, command.parentFenceToken,
+    );
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(command.providerSlotId)
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(command.idempotencyKey)
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(command.providerId)
+      || !Number.isSafeInteger(command.limit) || command.limit < 1 || command.limit > 1_024) {
+      throw new Error('Worker provider concurrency reservation contract is invalid');
+    }
+    const lineage = db.prepare(
+      `SELECT g.parent_job_id,g.parent_attempt_id,g.parent_generation,m.requested_provider_id
+         FROM worker_groups g JOIN worker_group_members m ON m.group_id=g.group_id
+        WHERE g.group_id=? AND m.member_id=?`,
+    ).get(command.groupId, command.memberId) as {
+      parent_job_id: string; parent_attempt_id: string; parent_generation: number; requested_provider_id: string;
+    } | undefined;
+    if (!lineage || lineage.parent_job_id !== command.parentJobId
+      || lineage.parent_attempt_id !== command.parentAttemptId
+      || lineage.parent_generation !== command.parentGeneration
+      || lineage.requested_provider_id !== command.providerId) {
+      throw new Error('Worker provider concurrency lineage is invalid');
+    }
+    const existingByKey = db.prepare(
+      'SELECT * FROM worker_provider_concurrency_reservations WHERE parent_job_id=? AND idempotency_key=?',
+    ).get(command.parentJobId, command.idempotencyKey) as ProviderSlotRow | undefined;
+    const existingById = getProviderSlot(command.providerSlotId);
+    const existing = existingByKey ? mapProviderSlot(existingByKey) : existingById;
+    if (existing) {
+      const same = existing.providerSlotId === command.providerSlotId && existing.groupId === command.groupId
+        && existing.memberId === command.memberId && existing.providerId === command.providerId
+        && existing.limit === command.limit && existing.parentAttemptId === command.parentAttemptId
+        && existing.parentGeneration === command.parentGeneration;
+      if (!same) throw new Error('Worker provider concurrency idempotency conflict');
+      return existing;
+    }
+    const capacity = db.prepare(
+      `SELECT COUNT(*) AS count,MIN(limit_value) AS active_limit
+         FROM worker_provider_concurrency_reservations
+        WHERE provider_id=? AND state IN ('reserved','blocked_unknown')`,
+    ).get(command.providerId) as { count: number; active_limit: number | null };
+    const effectiveLimit = Math.min(command.limit, capacity.active_limit ?? command.limit);
+    if (capacity.count >= effectiveLimit) {
+      throw new Error(`Worker provider concurrency limit exceeded for ${command.providerId}`);
+    }
+    const now = command.now ?? Date.now();
+    db.prepare(
+      `INSERT INTO worker_provider_concurrency_reservations
+         (provider_slot_id,idempotency_key,group_id,member_id,parent_job_id,parent_attempt_id,
+          parent_generation,provider_id,limit_value,state,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,'reserved',?)`,
+    ).run(
+      command.providerSlotId, command.idempotencyKey, command.groupId, command.memberId,
+      command.parentJobId, command.parentAttemptId, command.parentGeneration,
+      command.providerId, command.limit, now,
+    );
+    return getProviderSlot(command.providerSlotId)!;
+  }).immediate;
+
+  const settleWorkerProviderConcurrency = db.transaction((
+    command: Parameters<JobResourceAuthority['settleWorkerProviderConcurrency']>[0],
+  ): WorkerProviderConcurrencyReservationRecord => {
+    const slot = getProviderSlot(command.providerSlotId);
+    if (!slot) throw new Error('Worker provider concurrency reservation was not found');
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u.test(command.reason)) {
+      throw new Error('Worker provider concurrency settlement reason is invalid');
+    }
+    const target = command.unknown ? 'blocked_unknown' : command.safeToRelease ? 'released' : 'reserved';
+    if (slot.state !== 'reserved') {
+      if (slot.state !== target || slot.settlementReason !== command.reason) {
+        throw new Error('Worker provider concurrency settlement conflict');
+      }
+      return slot;
+    }
+    const now = command.now ?? Date.now();
+    db.prepare(
+      `UPDATE worker_provider_concurrency_reservations
+          SET state=?,released_at=?,blocked_at=?,settlement_reason=? WHERE provider_slot_id=?`,
+    ).run(
+      target, target === 'released' ? now : null, target === 'blocked_unknown' ? now : null,
+      command.reason, command.providerSlotId,
+    );
+    return getProviderSlot(command.providerSlotId)!;
+  }).immediate;
+
   return {
     reserveWorker,
     getWorkerReservation: getReservation,
@@ -706,6 +852,19 @@ export function createJobResourceAuthority(db: Db): JobResourceAuthority {
     releaseWorker,
     reconcileWorkerUsage,
     reconcileWorkerReservation,
+    reserveWorkerProviderConcurrency,
+    settleWorkerProviderConcurrency,
+    getWorkerProviderConcurrency: getProviderSlot,
+    getWorkerProviderConcurrencyForMember(memberId) {
+      const row = db.prepare('SELECT * FROM worker_provider_concurrency_reservations WHERE member_id=?')
+        .get(memberId) as ProviderSlotRow | undefined;
+      return row ? mapProviderSlot(row) : null;
+    },
+    listWorkerProviderConcurrencyForGroup(groupId) {
+      return (db.prepare(
+        'SELECT * FROM worker_provider_concurrency_reservations WHERE group_id=? ORDER BY member_id',
+      ).all(groupId) as ProviderSlotRow[]).map(mapProviderSlot);
+    },
     configure(command) {
       const now = command.now ?? Date.now();
       db.transaction(() => {

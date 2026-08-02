@@ -102,6 +102,19 @@ export function reconcileWorkerProviderCall(input: {
     physicalAttempts: facts,
     now,
   });
+  const groupMember = input.engine.worker.getWorkerGroupMemberForAssignment(call.assignmentId);
+  if (groupMember && (result.retrySafety === 'blocked_unknown' || result.outcomeKnowledge === 'outcome_unknown')) {
+    const providerSlot = input.engine.resources.getWorkerProviderConcurrencyForMember(groupMember.memberId);
+    if (providerSlot?.state === 'reserved') {
+      input.engine.resources.settleWorkerProviderConcurrency({
+        providerSlotId: providerSlot.providerSlotId,
+        unknown: true,
+        safeToRelease: false,
+        reason: 'provider_outcome_unknown',
+        now,
+      });
+    }
+  }
   const reservation = input.engine.resources.getWorkerReservationForChild(call.childJobId);
   let usageFacts = 0;
   if (reservation && reservation.workerRunId === call.workerRunId) {

@@ -970,13 +970,13 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
         db,
         ownerId:       tracker.instanceId,
         instanceId:    tracker.instanceId,
-        workerCount:   1,                   // Q-P5-1(a)
+        workerCount:   4,
         runnerFactory,
         initialRunnerKind: opts.agentBuilder ? 'real' : 'placeholder',
         log,
       });
       dispatcher.start();
-      log('info', `[dispatcher] active workerCount=1 runner=${opts.agentBuilder ? 'real' : 'placeholder'}`);
+      log('info', `[dispatcher] active workerCount=4 runner=${opts.agentBuilder ? 'real' : 'placeholder'}`);
       const runDurableRecoverySweep = (): void => {
         if (dispatcher?.runnerKind() !== 'real') return;
         try {

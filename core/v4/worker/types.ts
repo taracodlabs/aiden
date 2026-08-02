@@ -179,6 +179,103 @@ export interface WorkerProviderCallReconciliationResult {
   readonly reconciledAt: number | null;
 }
 
+export type WorkerGroupPolicy = 'require_all' | 'allow_partial';
+
+export type WorkerGroupState =
+  | 'admitting'
+  | 'active'
+  | 'cancelling'
+  | 'timed_out'
+  | 'settling'
+  | 'settled'
+  | 'blocked_unknown';
+
+export type WorkerGroupMemberOutcome =
+  | 'pending'
+  | 'admitted'
+  | 'verified'
+  | 'rejected'
+  | 'failed'
+  | 'unknown'
+  | 'blocked'
+  | 'cancelled'
+  | 'timed_out';
+
+export interface WorkerGroupRecord {
+  readonly groupId: WorkerId;
+  readonly schemaVersion: 1;
+  readonly idempotencyKey: string;
+  readonly parentJobId: string;
+  readonly parentAttemptId: string;
+  readonly parentGeneration: number;
+  readonly parentFenceDigest: string;
+  readonly policy: WorkerGroupPolicy;
+  readonly state: WorkerGroupState;
+  readonly requestedMemberCount: number;
+  readonly admittedMemberCount: number;
+  readonly settledMemberCount: number;
+  readonly successfulMemberCount: number;
+  readonly failedMemberCount: number;
+  readonly unknownMemberCount: number;
+  readonly cancelledMemberCount: number;
+  readonly inputHash: string;
+  readonly aggregateHash: string | null;
+  readonly createdAt: number;
+  readonly cancellationRequestedAt: number | null;
+  readonly timeoutRequestedAt: number | null;
+  readonly settledAt: number | null;
+  readonly settlementVersion: number;
+  readonly settlementReason: string | null;
+}
+
+export interface WorkerGroupMemberRecord {
+  readonly groupId: WorkerId;
+  readonly memberId: WorkerId;
+  readonly ordinal: number;
+  readonly requestedProviderId: string;
+  readonly assignmentId: string | null;
+  readonly childJobId: string | null;
+  readonly childAttemptId: string | null;
+  readonly childGeneration: number | null;
+  readonly providerBindingId: string | null;
+  readonly outcome: WorkerGroupMemberOutcome;
+  readonly workerResultId: string | null;
+  readonly resultHash: string | null;
+  readonly joinedAt: number | null;
+  readonly settlementReason: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface WorkerGroupAggregateMember {
+  readonly ordinal: number;
+  readonly memberId: string;
+  readonly assignmentId: string | null;
+  readonly childJobId: string | null;
+  readonly outcome: WorkerGroupMemberOutcome;
+  readonly workerResultId?: string | null;
+  readonly resultHash?: string | null;
+}
+
+export interface WorkerGroupAggregate {
+  readonly groupId: string;
+  readonly policy: WorkerGroupPolicy;
+  readonly outcome: 'verified' | 'partial' | 'failed' | 'unknown';
+  readonly counts: {
+    readonly total: number;
+    readonly verified: number;
+    readonly rejected: number;
+    readonly failed: number;
+    readonly unknown: number;
+    readonly blocked: number;
+    readonly cancelled: number;
+    readonly timedOut: number;
+    readonly pending: number;
+  };
+  readonly members: readonly WorkerGroupAggregateMember[];
+  readonly aggregateHash: string;
+}
+
 export interface WorkerContextEnvelopeRecord {
   readonly contextEnvelopeId: WorkerId;
   readonly schemaVersion: 1;
@@ -289,7 +386,13 @@ export type WorkerEventKind =
   | 'worker.run_bound'
   | 'worker.result_received'
   | 'worker.result_accepted'
-  | 'worker.result_rejected';
+  | 'worker.result_rejected'
+  | 'worker.group_created'
+  | 'worker.group_member_bound'
+  | 'worker.group_admission_completed'
+  | 'worker.group_member_settled'
+  | 'worker.group_interruption_requested'
+  | 'worker.group_settled';
 
 export type WorkerReferenceKind = 'worker_assignment' | 'worker_run' | 'child_attempt' | 'worker_result';
 

@@ -83,11 +83,14 @@ describe('Worker persistence migration', () => {
     ).run('a'.repeat(64), 'b'.repeat(64));
     db.pragma('foreign_keys = ON');
     const before = new Set(tables());
-    expect(runMigrations(db)).toEqual({ from: 38, to: 39 });
-    expect(LATEST_SCHEMA_VERSION).toBe(39);
+    expect(runMigrations(db)).toEqual({ from: 38, to: 40 });
+    expect(LATEST_SCHEMA_VERSION).toBe(40);
     expect(tables().filter((table) => !before.has(table))).toEqual([
       'job_budget_reservation_reconciliations',
+      'worker_group_members',
+      'worker_groups',
       'worker_provider_call_reconciliations',
+      'worker_provider_concurrency_reservations',
       'worker_provider_late_responses',
     ]);
     expect(columns('worker_logical_provider_calls')).toEqual(expect.arrayContaining([
@@ -144,14 +147,45 @@ describe('Worker persistence migration', () => {
       idempotencyNamespace: 'fixture', idempotencyKey: 'job', goal: 'legacy job',
     });
 
-    expect(runMigrations(db)).toEqual({ from: 36, to: 39 });
+    expect(runMigrations(db)).toEqual({ from: 36, to: 40 });
     const engine = createJobEngine({ db });
     expect(engine.getJob(before.jobId)?.goal).toBe('legacy job');
     expect(engine.worker.listWorkerRunsForParent(before.jobId)).toEqual([]);
   });
 
-  it('is idempotent when v39 is already installed', () => {
-    expect(runMigrations(db)).toEqual({ from: 0, to: 39 });
-    expect(runMigrations(db)).toEqual({ from: 39, to: 39 });
+  it('is idempotent when v40 is already installed', () => {
+    expect(runMigrations(db)).toEqual({ from: 0, to: 40 });
+    expect(runMigrations(db)).toEqual({ from: 40, to: 40 });
+    expect(LATEST_SCHEMA_VERSION).toBe(40);
+    expect(tables()).toEqual(expect.arrayContaining([
+      'worker_groups', 'worker_group_members', 'worker_provider_concurrency_reservations',
+    ]));
+  });
+
+  it('upgrades v39 additively and preserves reconciliation rows on reopen', () => {
+    for (const migration of MIGRATIONS_FOR_TESTS.filter((entry) => entry.version <= 39)) {
+      db.transaction(() => {
+        if (migration.apply) migration.apply(db);
+        else db.exec(migration.sql ?? '');
+        db.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,?,?)')
+          .run(migration.version, 1);
+      })();
+    }
+    db.pragma('foreign_keys = OFF');
+    db.prepare(
+      `INSERT INTO worker_provider_call_reconciliations
+         (reconciliation_id,logical_call_id,idempotency_key,worker_run_id,child_job_id,child_attempt_id,
+          child_generation,reason,outcome_knowledge,retry_safety,physical_attempt_ids_json,
+          unknown_spend,unsettled_downstream,state,created_at)
+       VALUES ('reconciliation_existing','call_existing','existing','run_existing','job_existing','attempt_existing',
+               1,'restart','outcome_unknown','blocked_unknown','[]',1,0,'blocked_unknown',1)`,
+    ).run();
+    db.pragma('foreign_keys = ON');
+    expect(runMigrations(db)).toEqual({ from: 39, to: 40 });
+    expect(db.prepare(
+      `SELECT outcome_knowledge,retry_safety,unknown_spend
+         FROM worker_provider_call_reconciliations WHERE reconciliation_id='reconciliation_existing'`,
+    ).get()).toEqual({ outcome_knowledge: 'outcome_unknown', retry_safety: 'blocked_unknown', unknown_spend: 1 });
+    expect(runMigrations(db)).toEqual({ from: 40, to: 40 });
   });
 });

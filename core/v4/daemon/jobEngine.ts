@@ -721,6 +721,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     ) return null;
     return attempt;
   };
+  let worker!: WorkerAuthority;
   let workerProviderCalls!: WorkerProviderCallAuthority;
 
   const existingEvent = (jobId: string, key: string): { id: number; job_sequence: number } | undefined => db.prepare(
@@ -1307,6 +1308,17 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     if (!attempt) return { applied: false, conflict: 'not_found' };
     const now = command.now ?? Date.now();
     if (!ATTEMPT_TERMINAL.has(attempt.status) && attempt.fence_token) {
+      worker.requestWorkerGroupInterruptionForParent({
+        parentJobId: job.id,
+        parentAttemptId: attempt.attempt_id,
+        parentGeneration: attempt.generation,
+        parentFenceToken: attempt.fence_token,
+        kind: 'cancellation',
+        reason: command.reason,
+        producer: command.producer,
+        idempotencyKey: `worker-groups:${command.eventIdempotencyKey}`,
+        now,
+      });
       workerProviderCalls.recordInterruptionForAttempt({
         childJobId: job.id,
         childAttemptId: attempt.attempt_id,
@@ -2427,7 +2439,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
     appendJobEvent: appendJobEventTx,
   });
-  const worker = createWorkerAuthority({
+  worker = createWorkerAuthority({
     db,
     graph,
     validateActiveFence(command) {

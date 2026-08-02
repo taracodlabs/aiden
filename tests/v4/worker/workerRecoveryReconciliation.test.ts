@@ -137,6 +137,55 @@ describe('Worker provider recovery reconciliation', () => {
     });
   });
 
+  it('keeps parallel provider capacity blocked when the physical outcome is unknown', () => {
+    const current = fixture = createWorkerFixture();
+    const records = bindRun(current);
+    current.engine.worker.createWorkerGroup({
+      ...current.parentAuthority,
+      producer: 'test', idempotencyKey: 'unknown-capacity-group',
+      groupId: 'worker_group_unknown_capacity', schemaVersion: 1, policy: 'require_all',
+      members: [{ memberId: 'worker_member_unknown_capacity', ordinal: 1, requestedProviderId: 'custom_openai' }],
+      now: 20,
+    });
+    current.engine.worker.bindWorkerGroupMember({
+      ...current.parentAuthority,
+      producer: 'test', idempotencyKey: 'unknown-capacity-member',
+      groupId: 'worker_group_unknown_capacity', memberId: 'worker_member_unknown_capacity',
+      assignmentId: records.assignment.assignmentId, childJobId: current.child.jobId,
+      childAttemptId: current.child.attemptId, childGeneration: current.childAuthority.childGeneration,
+      providerBindingId: records.providerBinding.providerBindingId,
+      now: 21,
+    });
+    current.engine.worker.completeWorkerGroupAdmission({
+      ...current.parentAuthority,
+      producer: 'test', idempotencyKey: 'unknown-capacity-admission', groupId: 'worker_group_unknown_capacity',
+      now: 22,
+    });
+    const slot = current.engine.resources.reserveWorkerProviderConcurrency({
+      providerSlotId: 'worker_provider_slot_unknown_capacity', idempotencyKey: 'unknown-capacity-slot',
+      groupId: 'worker_group_unknown_capacity', memberId: 'worker_member_unknown_capacity',
+      ...current.parentAuthority, providerId: 'custom_openai', limit: 1, now: 29,
+    });
+    const command = {
+      ...current.childAuthority,
+      logicalCallId: 'logical_unknown_capacity', idempotencyKey: 'logical-unknown-capacity',
+      workerRunId: records.run.workerRunId, assignmentId: records.assignment.assignmentId,
+      providerBindingId: records.providerBinding.providerBindingId, callOrdinal: 1,
+      requestHash: 'c'.repeat(64), toolSchemaHash: 'd'.repeat(64), now: 30,
+    };
+    current.engine.workerProviderCalls.prepare(command);
+    current.engine.workerProviderCalls.markAttempting(command);
+    current.db.prepare('UPDATE runs SET lease_expires_at=40 WHERE attempt_id=?').run(current.child.attemptId);
+    expect(sweepDurableJobRecovery({
+      jobEngine: current.engine,
+      triggerBus: createTriggerBus({ db: current.db }),
+      now: 41, instanceId: 'worker-instance', producer: 'test', maxCrashes: 3,
+    })).toMatchObject({ needsUser: 1, retried: 0 });
+    expect(current.engine.resources.getWorkerProviderConcurrency(slot.providerSlotId)).toMatchObject({
+      state: 'blocked_unknown', settlementReason: 'provider_outcome_unknown',
+    });
+  });
+
   it('persists cancellation intent through JobEngine before terminal Attempt settlement', () => {
     const { current, command } = prepare('attempting');
     expect(current.engine.cancelJob({
