@@ -55,6 +55,7 @@ export interface TriggerEventRowSql {
   status:           string;
   attempts:         number;
   claim_owner:      string | null;
+  claim_token:      string | null;
   claim_expires_at: number | null;
   last_error:       string | null;
   created_at:       number;

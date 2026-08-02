@@ -262,6 +262,18 @@ describe('read-only repository Worker runtime', () => {
 
     expect(childExecution.value.workerResult.acceptanceState).toBe('accepted');
     expect(childExecution.value.workerResult.providerAttemptIds).toHaveLength(2);
+    const childRuntime = engine.resources.getBudgets(admitted.child.jobId)
+      .find((item) => item.kind === 'runtime_ms');
+    const parentRuntime = engine.resources.getBudgets(parent.jobId)
+      .find((item) => item.kind === 'runtime_ms');
+    expect(childRuntime?.used).toBeGreaterThanOrEqual(0);
+    expect(parentRuntime?.used).toBe(childRuntime?.used);
+    expect(db.prepare(
+      "SELECT COUNT(*) AS count FROM job_budget_debits WHERE job_id=? AND kind='runtime_ms'",
+    ).get(admitted.child.jobId)).toEqual({ count: 1 });
+    expect(db.prepare(
+      "SELECT COUNT(*) AS count FROM job_budget_debits WHERE job_id=? AND kind='runtime_ms'",
+    ).get(parent.jobId)).toEqual({ count: 1 });
     expect(engine.proof.listEvidence(admitted.child.jobId)).toHaveLength(1);
     expect(engine.getChildContract(admitted.child.jobId)).toMatchObject({
       resultAttemptId: admitted.child.attemptId,

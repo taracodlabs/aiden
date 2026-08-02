@@ -7,7 +7,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine, type JobEngine } from '../../../core/v4/daemon/jobEngine';
@@ -167,6 +167,134 @@ describe('durable read-only repository Worker admission', () => {
     expect(() => admitReadOnlyRepositoryWorker({
       ...input, idempotencyKey: 'second-worker', goal: 'Inspect AGENTS.md.',
     })).toThrow(/one active read-only repository Worker/i);
+  });
+
+  it.each([
+    'after_child_job',
+    'after_assignment',
+    'after_reservation',
+    'after_group_binding',
+    'before_trigger_insert',
+    'after_trigger_insert',
+  ] as const)('reconciles an interrupted %s admission through the same durable identity', async (boundary) => {
+    const { parent, lease, snapshot, claim } = await parentAuthority();
+    const group = boundary === 'after_group_binding'
+      ? {
+          groupId: 'worker_group_crash_recovery',
+          memberId: 'worker_member_crash_recovery',
+          ordinal: 1,
+        }
+      : undefined;
+    if (group) {
+      engine.worker.createWorkerGroup({
+        parentJobId: parent.jobId,
+        parentAttemptId: parent.attemptId,
+        parentGeneration: lease.generation!,
+        parentFenceToken: lease.fenceToken!,
+        producer: 'test',
+        idempotencyKey: 'crash-recovery-group',
+        groupId: group.groupId,
+        schemaVersion: 1,
+        policy: 'require_all',
+        members: [{
+          memberId: group.memberId,
+          ordinal: group.ordinal,
+          requestedProviderId: 'custom_openai',
+        }],
+      });
+    }
+    const makeInput = () => ({
+      engine,
+      triggerBus,
+      parent: {
+        jobId: parent.jobId,
+        attemptId: parent.attemptId,
+        generation: lease.generation!,
+        fenceToken: lease.fenceToken!,
+      },
+      idempotencyKey: 'crash-recovery-admission',
+      goal: 'Inspect source.ts after admission recovery.',
+      repositorySnapshotId: snapshot.id,
+      planStepIds: ['inspect-source'],
+      claimIds: [claim.claimId],
+      provider: {
+        providerId: 'custom_openai',
+        modelId: 'custom-default',
+        providerRuntimeIdentity: 'runtime:custom_openai',
+        credentialReference: null,
+        endpointReference: 'endpoint:configured',
+        supportsToolCalling: true,
+        contextWindow: 32_768,
+        maxOutputTokens: 4_096,
+        selectionReason: 'configured provider',
+      },
+      ...(group ? { group } : {}),
+    } as const);
+
+    const crash = new Error(`simulated process failure ${boundary}`);
+    let restore: () => void;
+    if (boundary === 'after_child_job') {
+      const original = engine.submitJob.bind(engine);
+      const spy = vi.spyOn(engine, 'submitJob').mockImplementation((command) => {
+        original(command);
+        throw crash;
+      });
+      restore = () => spy.mockRestore();
+    } else if (boundary === 'after_assignment') {
+      const original = engine.worker.createWorkerAssignment.bind(engine.worker);
+      const spy = vi.spyOn(engine.worker, 'createWorkerAssignment').mockImplementation((command) => {
+        original(command);
+        throw crash;
+      });
+      restore = () => spy.mockRestore();
+    } else if (boundary === 'after_reservation') {
+      const original = engine.resources.reserveWorker.bind(engine.resources);
+      const spy = vi.spyOn(engine.resources, 'reserveWorker').mockImplementation((command) => {
+        original(command);
+        throw crash;
+      });
+      restore = () => spy.mockRestore();
+    } else if (boundary === 'after_group_binding') {
+      const original = engine.worker.bindWorkerGroupMember.bind(engine.worker);
+      const spy = vi.spyOn(engine.worker, 'bindWorkerGroupMember').mockImplementation((command) => {
+        original(command);
+        throw crash;
+      });
+      restore = () => spy.mockRestore();
+    } else if (boundary === 'before_trigger_insert') {
+      const spy = vi.spyOn(triggerBus, 'insert').mockImplementation(() => { throw crash; });
+      restore = () => spy.mockRestore();
+    } else {
+      const original = triggerBus.insert.bind(triggerBus);
+      const spy = vi.spyOn(triggerBus, 'insert').mockImplementation((event) => {
+        original(event);
+        throw crash;
+      });
+      restore = () => spy.mockRestore();
+    }
+
+    expect(() => admitReadOnlyRepositoryWorker(makeInput())).toThrow(crash);
+    restore();
+
+    engine = createJobEngine({ db });
+    triggerBus = createTriggerBus({ db });
+    const recovered = admitReadOnlyRepositoryWorker(makeInput());
+
+    expect(db.prepare('SELECT COUNT(*) AS count FROM tasks WHERE parent_task_id=?')
+      .get(parent.jobId)).toEqual({ count: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM worker_assignments WHERE parent_job_id=?')
+      .get(parent.jobId)).toEqual({ count: 1 });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM job_budget_reservations WHERE parent_job_id=?')
+      .get(parent.jobId)).toEqual({ count: 1 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM trigger_events WHERE source_key LIKE 'worker:%'")
+      .get()).toEqual({ count: 1 });
+    expect(recovered.triggerEvent.inserted).toBe(boundary !== 'after_trigger_insert');
+    if (group) {
+      expect(engine.worker.getWorkerGroupMember(group.memberId)).toMatchObject({
+        assignmentId: recovered.assignment.assignmentId,
+        childJobId: recovered.child.jobId,
+      });
+    }
   });
 
   it.each([

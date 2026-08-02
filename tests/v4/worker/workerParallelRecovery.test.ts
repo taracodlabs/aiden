@@ -9,7 +9,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { runMigrations } from '../../../core/v4/daemon/db/migrations';
+import { LATEST_SCHEMA_VERSION, runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 import { projectReadOnlyRepositoryWorkerGroups } from '../../../core/v4/worker/workerParallel';
 import {
@@ -35,7 +35,10 @@ describe('parallel read-only Worker restart projection', () => {
 
     const reopened = new Database(databasePath);
     reopened.pragma('foreign_keys = ON');
-    expect(runMigrations(reopened)).toEqual({ from: 40, to: 40 });
+    expect(runMigrations(reopened)).toEqual({
+      from: LATEST_SCHEMA_VERSION,
+      to: LATEST_SCHEMA_VERSION,
+    });
     const engine = createJobEngine({ db: reopened });
     expect(engine.worker.getWorkerGroup(admitted.group.groupId)).toMatchObject({
       state: 'active', requestedMemberCount: 2, admittedMemberCount: 2,
