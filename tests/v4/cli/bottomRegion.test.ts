@@ -232,10 +232,21 @@ describe('settled activity row spacing', () => {
   }
 
   function findSemanticLine(lines: string[], terms: readonly string[]): number {
-    const normalizedTerms = terms.map((term) => term.toLowerCase());
+    const normalizeSemanticText = (value: string): string => value
+      .normalize('NFC')
+      .replace(/\\/gu, '/')
+      .toLowerCase();
+    const normalizedTerms = terms.map(normalizeSemanticText);
     return lines.findIndex((line) => {
-      const normalizedLine = line.toLowerCase();
-      return normalizedTerms.every((term) => normalizedLine.includes(term));
+      const normalizedLine = normalizeSemanticText(line);
+      return normalizedTerms.every((term) => {
+        if (normalizedLine.includes(term)) return true;
+        const basename = term.split('/').at(-1) ?? term;
+        const truncatedFragments = normalizedLine.match(/[\p{L}\p{N}_.-]+(?=…)/gu) ?? [];
+        return truncatedFragments.some((fragment) => (
+          fragment.length >= 6 && basename.startsWith(fragment)
+        ));
+      });
     });
   }
 
@@ -274,6 +285,16 @@ describe('settled activity row spacing', () => {
   it('preserves genuine blank logical rows during normalisation', () => {
     const lines = logicalTerminalLines('┊ ✓ completed first\r\n\r\n┊ ✓ completed second');
     expect(lines).toEqual(['┊ ✓ completed first', '', '┊ ✓ completed second']);
+  });
+
+  it.each([
+    ['Unix', '/home/runner/work/aiden/aiden/src/narrow-transi…\n'],
+    ['Windows', 'C:\\repo\\src\\narrow-transi…\r\n'],
+  ])('finds a semantically matching %s path after legitimate narrow truncation', (_label, target) => {
+    const lines = logicalTerminalLines(
+      `\x1b[90m┊\x1b[0m \x1b[32m✓\x1b[0m completed ${target}`,
+    );
+    expect(findSemanticLine(lines, ['completed', 'narrow-transition'])).toBe(0);
   });
 
   it('keeps consecutive completed tool rows adjacent', () => {
