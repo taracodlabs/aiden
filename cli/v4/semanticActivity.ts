@@ -33,7 +33,100 @@ export interface ActivityFrameProjection {
   label: string;
   text: string;
   color: ColorKind;
+  glyphColor: ColorKind;
   animated: boolean;
+}
+
+/** Compact, typed projections for real skill/reference activity. */
+export interface SkillInvocationInput {
+  invocationId: string;
+  skillName: string;
+  durationMs?: number;
+  referenceName?: string;
+}
+
+export interface StructuredActivityLine {
+  text: string;
+  color: ColorKind;
+  identity: string;
+}
+
+export function projectSkillInvocation(input: SkillInvocationInput): StructuredActivityLine[] {
+  const name = input.skillName.trim();
+  if (!input.invocationId.trim() || !name) return [];
+  const duration = typeof input.durationMs === 'number' && input.durationMs >= 0
+    ? ` ${formatStructuredDuration(input.durationMs)}` : '';
+  const lines: StructuredActivityLine[] = [{
+    text: `skill     ${name}${duration}`,
+    color: 'skill',
+    identity: `skill:${input.invocationId}`,
+  }];
+  const reference = input.referenceName?.trim();
+  if (reference) lines.push({
+    text: `reference ${reference}`,
+    color: 'evidence',
+    identity: `reference:${input.invocationId}:${reference}`,
+  });
+  return lines;
+}
+
+export interface WorkerDelegationInput {
+  groupId: string;
+  workers: readonly { goal: string }[];
+  state: 'running' | 'succeeded' | 'failed' | 'blocked' | 'unknown';
+  elapsedMs?: number;
+}
+
+export function projectWorkerDelegation(input: WorkerDelegationInput): StructuredActivityLine[] {
+  if (!input.groupId.trim() || input.workers.length === 0) return [];
+  const count = input.workers.length;
+  const lines: StructuredActivityLine[] = [{
+    text: `delegate  ${count} Worker${count === 1 ? '' : 's'}`,
+    color: 'worker',
+    identity: `worker-group:${input.groupId}`,
+  }];
+  input.workers.forEach((worker, index) => {
+    const goal = worker.goal.trim();
+    if (goal) lines.push({ text: `${index + 1}. ${goal}`, color: 'muted', identity: `worker:${input.groupId}:${index + 1}` });
+  });
+  const state = input.state === 'running' ? 'running'
+    : input.state === 'succeeded' ? 'complete'
+      : input.state === 'failed' ? 'failed'
+        : input.state;
+  const duration = typeof input.elapsedMs === 'number' && input.elapsedMs >= 0
+    ? ` · ${formatStructuredDuration(input.elapsedMs)}` : '';
+  lines.push({
+    text: `${count} Worker${count === 1 ? '' : 's'} ${state}${duration}`,
+    color: input.state === 'succeeded' ? 'success' : input.state === 'failed' || input.state === 'blocked' ? 'error' : 'worker',
+    identity: `worker-group-status:${input.groupId}`,
+  });
+  return lines;
+}
+
+export function projectContextCompaction(): StructuredActivityLine {
+  return {
+    text: 'context   compacted · preserved task state and tool results',
+    color: 'muted',
+    identity: 'context:compacted',
+  };
+}
+
+/** Keep one visible row per durable invocation identity. */
+export function dedupeStructuredActivity(
+  lines: readonly StructuredActivityLine[],
+): StructuredActivityLine[] {
+  const seen = new Set<string>();
+  return lines.filter((line) => {
+    if (seen.has(line.identity)) return false;
+    seen.add(line.identity);
+    return true;
+  });
+}
+
+function formatStructuredDuration(durationMs: number): string {
+  if (durationMs < 1000) return `${Math.max(0, Math.round(durationMs))}ms`;
+  const seconds = durationMs / 1000;
+  return `${Number.isInteger(seconds) ? seconds : seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
 }
 
 const TERMINAL_PHASES = new Set<SemanticActivityPhase>([
@@ -86,6 +179,19 @@ export function phaseColorKind(phase: SemanticActivityPhase): ColorKind {
     case 'failed': return 'error';
     case 'completing': return 'verifying';
     case 'ready': return 'muted';
+  }
+}
+
+/** Strong colour belongs to the state glyph; labels stay readable and restrained. */
+export function phaseGlyphColorKind(phase: SemanticActivityPhase): ColorKind {
+  switch (phase) {
+    case 'complete':
+    case 'ready': return 'success';
+    case 'failed': return 'error';
+    case 'approval_required': return 'warn';
+    case 'blocked': return 'error';
+    case 'recovering': return 'recovering';
+    default: return phaseColorKind(phase);
   }
 }
 
@@ -157,9 +263,9 @@ function unicodeGlyph(phase: SemanticActivityPhase, frame: number): string {
     }
     case 'working': return ['>   ', ' >  ', '  > ', '   >'][frame % 4]!;
     case 'testing': return ['◐', '◓', '◑', '◒'][frame % 4]!;
-    case 'verifying': return ['⌁', '⌁·', '⌁··'][frame % 3]!;
+    case 'verifying': return ['⌁  ', '⌁· ', '⌁··'][frame % 3]!;
     case 'recovering': return ['↶', '↺'][frame % 2]!;
-    case 'completing': return ['·', '··', '···'][frame % 3]!;
+    case 'completing': return ['·  ', '·· ', '···'][frame % 3]!;
     case 'approval_required':
     case 'blocked': return '!';
     case 'complete': return '✓';
@@ -186,6 +292,7 @@ export function projectActivityFrame(input: ActivityFrameInput): ActivityFramePr
     label,
     text: `${glyph} ${label}${detail}`,
     color: phaseColorKind(input.phase),
+    glyphColor: phaseGlyphColorKind(input.phase),
     animated: !TERMINAL_PHASES.has(input.phase),
   };
 }

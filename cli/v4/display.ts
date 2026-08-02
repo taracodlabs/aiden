@@ -49,6 +49,10 @@ import {
   projectActivityFrame,
   projectCommandPresentation,
   projectEvidenceLines,
+  projectSkillInvocation,
+  projectWorkerDelegation,
+  projectContextCompaction,
+  dedupeStructuredActivity,
   relativizeActivityText,
   semanticPhaseCompactToken,
   semanticPhaseForTool,
@@ -120,6 +124,7 @@ import {
   composerLaneEnabled,
   type BottomComposerMode,
   type BottomComposerSurface,
+  type BottomRegionStyle,
   type LaneSink,
 } from './composerLane';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
@@ -1128,7 +1133,7 @@ export class Display {
     // surface family (▎ Aiden header, status footer, bottom hint).
     // Timestamp variant unchanged — the timestamp gutter already
     // provides its own consistent left edge.
-    const tri = this.skin.applyColors(terminalStateSymbol('user'), 'brand');
+    const tri = this.skin.applyColors(terminalStateSymbol('user'), 'prompt');
     if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
       return `${this.timestampPrefix()}  ${tri} `;
     }
@@ -1621,7 +1626,8 @@ export class Display {
         : width >= 80 ? this.composerSuffix()
         : width >= 36 ? '  Ctrl+C stop'
         : '  Ctrl+C';
-      const activity = this.skin.applyColors(projection.text, projection.color);
+      const activity = `${this.skin.applyColors(projection.glyph, projection.glyphColor)} `
+        + this.skin.applyColors(`${projection.label}${source === 'provider' && this.activityPresentationMode === 'full' ? ' · provider request' : ''}`, projection.color);
       return truncateVisible(`${prefix}${activity}${time}${suffix}`, width);
     };
     const erase = (terminal = false): void => {
@@ -2236,8 +2242,9 @@ export class Display {
   /** Format a user turn (e.g. echoed back from history). */
   userTurn(text: string): string {
     const sk = this.skin;
-    const body = text.split('\n').map((line) => `  ${line}`).join('\n');
-    return `  ${this.rule()}\n${sk.applyColors(`  ${terminalStateSymbol('user')} You`, 'user')}\n${body}\n  ${this.rule()}\n`;
+    const body = text.split('\n').map((line) => sk.applyColors(`  ${line}`, 'prompt_content')).join('\n');
+    const label = sk.applyColors(`  ${terminalStateSymbol('user')} You`, 'prompt');
+    return `  ${this.rule()}\n${label}\n${body}\n  ${this.rule()}\n`;
   }
 
   /**
@@ -2411,8 +2418,10 @@ export class Display {
    * restore an empty ready composer. Empty Enter remains a local no-op. */
   submitIdleComposer(value: string, hint: string): void {
     if (value.length > 0) {
-      const body = value.split('\n').map((line) => `  ${line}`).join('\n');
-      this.write(`${this.promptPrefix()}You\n${body}\n  ${this.rule()}`);
+      const body = value.split('\n')
+        .map((line) => this.skin.applyColors(`  ${line}`, 'prompt_content'))
+        .join('\n');
+      this.write(`${this.promptPrefix()}${this.skin.applyColors('You', 'prompt')}\n${body}\n  ${this.rule()}`);
     }
     this.idleComposerContent = `${this.promptPrefix()} ${hint}`;
     this.idleComposerDraft = '';
@@ -2503,7 +2512,7 @@ export class Display {
     if (this.composerSurfacePauseDepth > 0) return;
     if (composerLaneEnabled() && this.out.isTTY) {
       if (!this.composerLane) {
-        this.composerLane = new ComposerLane(this.laneSink(), this.laneStyle());
+      this.composerLane = new ComposerLane(this.laneSink(), this.laneStyle());
       }
       const content = this.composerContent();
       const hasStatus = typeof this.statusFooterSource === 'function'
@@ -2533,10 +2542,12 @@ export class Display {
     if (this.composerSurfacePauseDepth === 0) this.paintComposerSurface();
   }
 
-  private laneStyle(): { brand(value: string): string; muted(value: string): string } {
+  private laneStyle(): BottomRegionStyle {
     return {
       brand: (value) => this.skin.applyColors(value, 'brand'),
       muted: (value) => this.skin.applyColors(value, 'muted'),
+      prompt: (value) => this.skin.applyColors(value, 'prompt'),
+      promptContent: (value) => this.skin.applyColors(value, 'prompt_content'),
     };
   }
 
@@ -3264,6 +3275,7 @@ export class Display {
   // on done. Map is per-Display-instance; one REPL session.
   private uiTaskRows = new Map<string, { label: string }>();
   private uiTaskTerminalIds = new Set<string>();
+  private structuredActivityIds = new Set<string>();
 
   // v4.8.0 Phase 2.3 fix — set true by renderUiEvent; tryRerenderInPlace
   // early-returns when set so the cursor-up + erase-to-end-of-screen
@@ -3283,6 +3295,7 @@ export class Display {
   resetUiTurnState(): void {
     this.uiEventsFiredThisTurn = false;
     this.compactTerminalActivityKeys.clear();
+    this.structuredActivityIds.clear();
   }
 
   renderUiEvent(name: string, args: Record<string, unknown>): void {
@@ -3302,6 +3315,9 @@ export class Display {
     if (name === 'ui_approval_request') { this.renderUiApprovalRequest(args); return; }
     if (name === 'ui_toast')            { this.renderUiToast(args);           return; }
     if (name === 'ui_artifact_created') { this.renderUiArtifactCreated(args); return; }
+    if (name === 'ui_skill_invocation') { this.renderUiSkillInvocation(args); return; }
+    if (name === 'ui_worker_group') { this.renderUiWorkerGroup(args); return; }
+    if (name === 'ui_context_compacted') { this.renderUiContextCompacted(); return; }
     // Unknown event names silent-ignore (defensive — future registrations).
   }
 
@@ -3314,6 +3330,14 @@ export class Display {
   private uiTrailRow(content: string, kind: ColorKind): string {
     const pipe = this.skin.applyColors(TRAIL_PIPE, 'muted');
     return content.split('\n').map(l => `${pipe} ${this.skin.applyColors(l, kind)}\n`).join('');
+  }
+
+  /** Strongly colour only the structured category; keep goals and metadata muted. */
+  private uiStructuredTrailRow(content: string, kind: ColorKind): string {
+    const pipe = this.skin.applyColors(TRAIL_PIPE, 'muted');
+    const match = /^(\S+)(\s+)(.*)$/u.exec(content);
+    if (!match) return `${pipe} ${this.skin.applyColors(content, kind)}\n`;
+    return `${pipe} ${this.skin.applyColors(match[1], kind)}${match[2]}${this.skin.applyColors(match[3], 'muted')}\n`;
   }
 
   private renderUiTaskUpdate(args: Record<string, unknown>): void {
@@ -3417,6 +3441,49 @@ export class Display {
     if (skipped > 0) parts.push(`${skipped} skipped`);
     const dur = durationMs > 0 ? ` in ${durationMs}ms` : '';
     this.writeOutput(this.uiTrailRow(`${ok ? '✓' : '✗'} ${framework}: ${parts.join(', ')}${dur}`, ok ? 'success' : 'error'));
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiSkillInvocation(args: Record<string, unknown>): void {
+    const invocationId = typeof args.invocation_id === 'string' ? args.invocation_id : '';
+    const skillName = typeof args.skill_name === 'string' ? args.skill_name : '';
+    const durationMs = typeof args.duration_ms === 'number' ? args.duration_ms : undefined;
+    const referenceName = typeof args.reference_name === 'string' ? args.reference_name : undefined;
+    const lines = projectSkillInvocation({ invocationId, skillName, durationMs, referenceName })
+      .filter((line) => !this.structuredActivityIds.has(line.identity));
+    if (lines.length === 0) return;
+    this.commitStreamChunk();
+    lines.forEach((line) => this.structuredActivityIds.add(line.identity));
+    const rendered = lines.map((line) => this.uiStructuredTrailRow(line.text, line.color)).join('');
+    this.writeOutput(rendered);
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiWorkerGroup(args: Record<string, unknown>): void {
+    const groupId = typeof args.group_id === 'string' ? args.group_id : '';
+    const workers = Array.isArray(args.workers)
+      ? args.workers.filter((worker): worker is { goal: string } => (
+        !!worker && typeof worker === 'object' && typeof (worker as { goal?: unknown }).goal === 'string'
+      ))
+      : [];
+    const state = args.state === 'succeeded' || args.state === 'failed' || args.state === 'blocked' || args.state === 'unknown'
+      ? args.state : 'running';
+    const elapsedMs = typeof args.elapsed_ms === 'number' ? args.elapsed_ms : undefined;
+    const lines = dedupeStructuredActivity(projectWorkerDelegation({ groupId, workers, state, elapsedMs }))
+      .filter((line) => !this.structuredActivityIds.has(line.identity));
+    if (lines.length === 0) return;
+    this.commitStreamChunk();
+    lines.forEach((line) => this.structuredActivityIds.add(line.identity));
+    this.writeOutput(lines.map((line) => this.uiStructuredTrailRow(line.text, line.color)).join(''));
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiContextCompacted(): void {
+    const line = projectContextCompaction();
+    if (this.structuredActivityIds.has(line.identity)) return;
+    this.structuredActivityIds.add(line.identity);
+    this.commitStreamChunk();
+    this.writeOutput(this.uiStructuredTrailRow(line.text, line.color));
     this.streamLastEndedNewline = true;
   }
 

@@ -119,6 +119,18 @@ describe('Display', () => {
   let display: Display;
   let skin: SkinEngine;
 
+  it('separates prompt identity/content from assistant prose and resets each span', () => {
+    const themed = new SkinEngine({ colorDepth: 'truecolor' });
+    const d = new Display({ skin: themed });
+    const submitted = d.userTurn('hello\nwrapped prompt');
+    const answer = d.agentTurn('assistant prose', { markdown: false });
+    expect(submitted).toContain('\x1b[38;2;91;192;235m');
+    expect(submitted).toContain('\x1b[38;2;156;220;254m');
+    expect(submitted).not.toContain('\x1b[38;2;255;107;53m  ▲ You');
+    expect(answer).toContain('assistant prose');
+    expect(submitted.match(/\x1b\[[0-9;]*m/g)?.at(-1)).toBe('\x1b[39m');
+  });
+
   beforeEach(() => {
     skin = new SkinEngine({ forceMono: true }); // deterministic output
     display = new Display({ skin });

@@ -541,6 +541,21 @@ export class CliCallbacks {
     if (!settled) return;
 
     try { this.renderBlockerCardIfPresent(result); } catch { /* defensive */ }
+    if (call.name === 'skill_view') {
+      const args = call.arguments && typeof call.arguments === 'object'
+        ? call.arguments as Record<string, unknown> : {};
+      const payload = result?.result && typeof result.result === 'object'
+        ? result.result as Record<string, unknown> : {};
+      try {
+        this.display.renderUiEvent('ui_skill_invocation', {
+          invocation_id: call.id,
+          skill_name: typeof args.name === 'string' ? args.name : 'skill',
+          duration_ms: timing?.executionDurationMs,
+          reference_name: typeof payload.referenceName === 'string' ? payload.referenceName
+            : typeof payload.reference_name === 'string' ? payload.reference_name : undefined,
+        });
+      } catch { /* structured activity must never affect execution */ }
+    }
     try {
       const payload = result?.result && typeof result.result === 'object'
         ? { ...(result.result as Record<string, unknown>), ...(result.error ? { error: result.error } : {}) }

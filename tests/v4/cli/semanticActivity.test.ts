@@ -7,6 +7,10 @@ import {
   projectActivityFrame,
   projectCommandPresentation,
   projectEvidenceLines,
+  projectSkillInvocation,
+  projectWorkerDelegation,
+  projectContextCompaction,
+  dedupeStructuredActivity,
   relativizeActivityText,
   shouldDeferActivityTransition,
   type SemanticActivityPhase,
@@ -78,6 +82,14 @@ describe('semantic activity projection', () => {
     expect(phaseColorKind('verifying')).toBe('verifying');
     expect(phaseColorKind('complete')).toBe('success');
     expect(phaseColorKind('failed')).toBe('error');
+    expect(projectActivityFrame({ phase: 'complete', frame: 0, elapsedMs: 0, unicode: true, mode: 'summary' }).glyphColor).toBe('success');
+    expect(projectActivityFrame({ phase: 'failed', frame: 0, elapsedMs: 0, unicode: true, mode: 'summary' }).glyphColor).toBe('error');
+    expect(projectActivityFrame({ phase: 'approval_required', frame: 0, elapsedMs: 0, unicode: true, mode: 'summary' }).glyphColor).toBe('warn');
+  });
+
+  it.each(['thinking', 'planning', 'inspecting', 'working', 'testing', 'verifying', 'recovering', 'completing'] as SemanticActivityPhase[])('keeps %s animation frames display-width stable', (phase) => {
+    const widths = [0, 1, 2, 3].map((frame) => projectActivityFrame({ phase, frame, elapsedMs: 1_000, unicode: true, mode: 'summary' }).glyph.length);
+    expect(new Set(widths).size).toBe(1);
   });
 
   it('defers fast transient phase churn but never delays terminal/user phases', () => {
@@ -85,6 +97,32 @@ describe('semantic activity projection', () => {
     expect(shouldDeferActivityTransition('thinking', 'planning', 200)).toBe(false);
     expect(shouldDeferActivityTransition('working', 'approval_required', 10)).toBe(false);
     expect(shouldDeferActivityTransition('working', 'blocked', 10)).toBe(false);
+  });
+});
+
+describe('structured skill and Worker projections', () => {
+  it('exposes one typed row per real skill and optional reference', () => {
+    const lines = projectSkillInvocation({ invocationId: 'inv-1', skillName: 'repository-audit', durationMs: 1250, referenceName: 'repo-layout' });
+    expect(lines.map((line) => line.text)).toEqual(['skill     repository-audit 1.3s', 'reference repo-layout']);
+    expect(lines[0]?.color).toBe('skill');
+    expect(lines[1]?.color).toBe('evidence');
+  });
+
+  it('projects actual Worker count and goals without raw payloads', () => {
+    const lines = projectWorkerDelegation({
+      groupId: 'group-1', workers: [{ goal: 'Runtime ownership' }, { goal: 'TUI inspection' }], state: 'running', elapsedMs: 2000,
+    });
+    expect(lines.map((line) => line.text)).toEqual([
+      'delegate  2 Workers', '1. Runtime ownership', '2. TUI inspection', '2 Workers running · 2s',
+    ]);
+    expect(lines.join('\n')).not.toContain('{');
+    expect(lines[0]?.color).toBe('worker');
+  });
+
+  it('deduplicates repeated durable identities and keeps context compaction informational', () => {
+    const line = projectContextCompaction();
+    expect(line.text).toContain('preserved task state and tool results');
+    expect(dedupeStructuredActivity([line, line])).toHaveLength(1);
   });
 });
 

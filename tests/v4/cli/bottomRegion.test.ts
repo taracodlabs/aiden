@@ -42,6 +42,22 @@ class ScreenStream extends Writable {
   }
 }
 
+describe('responsive composer semantic colour projection', () => {
+  it('keeps prompt label and draft on separate cyan tokens without colouring the footer', () => {
+    const styled = renderBottomSurface(18, 60, { draft: 'draft text', mode: 'idle' }, '◆ provider/model │ ◉ 0% │ T │ 0s', {
+      brand: (value) => `BRAND(${value})`,
+      muted: (value) => `MUTED(${value})`,
+      prompt: (value) => `PROMPT(${value})`,
+      promptContent: (value) => `CONTENT(${value})`,
+      unicode: true,
+    });
+    expect(styled.lines.some((line) => line.includes('PROMPT(▲ You)'))).toBe(true);
+    expect(styled.lines.some((line) => line.includes('CONTENT(draft text)'))).toBe(true);
+    expect(styled.lines.at(-1)).toContain('provider/model');
+    expect(styled.lines.at(-1)).not.toContain('CONTENT(');
+  });
+});
+
 const previousLaneSetting = process.env.AIDEN_COMPOSER_LANE;
 
 it('applies the active theme to the borderless composer hierarchy without changing geometry', () => {
