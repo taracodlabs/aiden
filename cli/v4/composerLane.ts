@@ -807,8 +807,14 @@ export class BottomRegion {
     // When a wrapped draft grows upward, scroll transcript rows before claiming
     // the additional cells. This preserves the newest transcript content above
     // the composer instead of erasing it during the geometry change.
-    const makeRoom = growth > 0
-      ? `${ESC}[${previousTranscriptBottom};1H${'\n'.repeat(growth)}`
+    // A settled activity projection leaves the transcript cursor on one empty
+    // row. Reuse that row for the next activity instead of advancing it into
+    // scrollback and leaving a permanent blank between adjacent terminal rows.
+    const previousProjection = this.projection.transcript[this.projection.transcript.length - 1];
+    const reusableCursorRow = previousProjection?.id.startsWith('activity-terminal:') ? 1 : 0;
+    const rowsToCreate = Math.max(0, growth - reusableCursorRow);
+    const makeRoom = rowsToCreate > 0
+      ? `${ESC}[${previousTranscriptBottom};1H${'\n'.repeat(rowsToCreate)}`
       : '';
     const clear = dimensionsChanged
       ? this.clearDamagedUnion(previousGeometry, nextGeometry)

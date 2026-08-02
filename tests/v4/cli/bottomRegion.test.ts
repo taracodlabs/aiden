@@ -207,6 +207,101 @@ function composerText(content: string[]): string {
   return content.join('');
 }
 
+function compactTranscriptLines(screen: TerminalScreen): string[] {
+  return screen.bufferSnapshot()
+    .split('\n')
+    .map((line) => line.replace(/\s+$/u, ''));
+}
+
+describe('settled activity row spacing', () => {
+  function prepare(columns = 100): ReturnType<typeof createDisplay> {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const harness = createDisplay(columns, 24);
+    harness.display.setStatusFooter('◆ provider · model │ ◉ context 0/32k │ ⧖ 0ms');
+    harness.display.setIdleComposer('', 'Type your message · /help');
+    return harness;
+  }
+
+  function expectAdjacent(lines: string[], firstPattern: RegExp, secondPattern: RegExp): void {
+    const first = lines.findIndex((line) => firstPattern.test(line));
+    const second = lines.findIndex((line) => secondPattern.test(line));
+    expect(first, lines.join('\n')).toBeGreaterThanOrEqual(0);
+    expect(second, lines.join('\n')).toBe(first + 1);
+  }
+
+  it('keeps consecutive completed tool rows adjacent', () => {
+    const { display, screen } = prepare();
+
+    display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
+    display.toolRow('file_read', { path: 'src/second.ts' }).ok(14);
+
+    expectAdjacent(
+      compactTranscriptLines(screen),
+      /completed\s+first\.ts/iu,
+      /completed\s+second\.ts/iu,
+    );
+  });
+
+  it('keeps mixed completed and failed rows adjacent', () => {
+    const { display, screen } = prepare();
+    display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
+    display.toolRow('shell_exec', { command: 'echo failed-row' }).fail(18);
+
+    expectAdjacent(
+      compactTranscriptLines(screen),
+      /completed\s+first\.ts/iu,
+      /failed\s+echo failed-row/iu,
+    );
+  });
+
+  it('keeps an exact skill row adjacent to the following file row', () => {
+    const { display, screen } = prepare();
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/after-skill.ts' }).ok(7);
+
+    expectAdjacent(
+      compactTranscriptLines(screen),
+      /skill\s+systematic-debugging/iu,
+      /completed\s+after-skill\.ts/iu,
+    );
+  });
+
+  it('keeps settled rows compact at narrow width without overlap', () => {
+    const { display, screen } = prepare(44);
+    display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
+    display.toolRow('file_read', { path: 'src/second.ts' }).ok(14);
+
+    const lines = compactTranscriptLines(screen);
+    const activity = lines
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => /┊\s+✓\s+completed/iu.test(line));
+    expect(activity).toHaveLength(2);
+    expect(activity[1]?.index, lines.join('\n')).toBe((activity[0]?.index ?? -2) + 1);
+    expect(activity.every(({ line }) => line.length <= 43)).toBe(true);
+  });
+
+  it('keeps the assistant header between activity and prose without extra padding', () => {
+    const { display, screen } = prepare();
+    display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
+    display.toolRow('file_read', { path: 'src/second.ts' }).ok(14);
+    display.write('\n│ Aiden\nFinal answer remains separate.\n');
+
+    const lines = compactTranscriptLines(screen);
+    const activity = lines.findIndex((line) => /completed\s+second\.ts/iu.test(line));
+    const answer = lines.findIndex((line) => /Final answer remains separate\./u.test(line));
+    expect(activity).toBeGreaterThanOrEqual(0);
+    expect(answer).toBeGreaterThan(activity);
+    const separation = lines.slice(activity + 1, answer);
+    expect(separation.some((line) => /Aiden/u.test(line)), lines.join('\n')).toBe(true);
+    expect(separation.filter((line) => line.length === '')).toHaveLength(0);
+  });
+});
+
 describe.each([100, 80, 44])('borderless fixed bottom region at %i columns', (columns) => {
   it('owns empty, normal, and Unicode drafts with the hardware cursor at insertion', () => {
     delete process.env.AIDEN_COMPOSER_LANE;
