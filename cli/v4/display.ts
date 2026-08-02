@@ -91,6 +91,22 @@ function truncateTerminalVisible(value: string, maxVisible: number): string {
   }
   return sawAnsi ? output + '\x1b[0m' : output;
 }
+
+function fitQualifiedActivityDetail(value: string, maxVisible: number): string {
+  if (visibleLength(value) <= maxVisible) return value;
+  const separator = ' · ';
+  const splitAt = value.lastIndexOf(separator);
+  if (splitAt < 0) return truncateVisible(value, maxVisible);
+  const target = value.slice(0, splitAt);
+  const qualifier = value.slice(splitAt + separator.length);
+  const reserved = visibleLength(separator) + visibleLength(qualifier);
+  if (reserved >= maxVisible) return qualifier;
+  const targetWidth = maxVisible - reserved;
+  const fittedTarget = visibleLength(target) <= targetWidth
+    ? target
+    : `${truncateVisible(target, Math.max(0, targetWidth - 1))}…`;
+  return `${fittedTarget}${separator}${qualifier}`;
+}
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
 // replaces marked-terminal's defaults with structured headers, lists,
 // code blocks, blockquotes, and links.
@@ -452,6 +468,7 @@ export class Display {
   private composerSurfacePauseDepth = 0;
   private nextLiveRowIdentity = 0;
   private activityPresentationMode: ActivityPresentationMode = 'summary';
+  private compactTerminalActivityKeys = new Set<string>();
 
   constructor(opts: { skin?: SkinEngine; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}) {
     this.skin = opts.skin ?? getSkinEngine();
@@ -1726,7 +1743,9 @@ export class Display {
     // onToolCall 'before' branch), so `turnHadTools` flips even for
     // hidden tools. The separator logic stays correct regardless of
     // whether ONLY hidden tools fired this turn.
-    if (TRAIL_HIDE_TOOLS.has(name)) {
+    if (TRAIL_HIDE_TOOLS.has(name) || (
+      this.activityPresentationMode === 'summary' && name === 'ui_command_result'
+    )) {
       return makeNoOpToolRowHandle();
     }
 
@@ -1803,10 +1822,8 @@ export class Display {
           0,
           width - visibleLength(compactPrefix) - visibleLength(compactSuffix),
         );
-        return `${compactPrefix}${truncateVisible(
-          sk.applyColors(detailForDisplay(), 'muted'),
-          availableDetail,
-        )}${compactSuffix}\n`;
+        const fittedDetail = fitQualifiedActivityDetail(detailForDisplay(), availableDetail);
+        return `${compactPrefix}${sk.applyColors(fittedDetail, 'muted')}${compactSuffix}\n`;
       }
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph}  ` +
         `${sk.applyColors(padVerb(verb), 'tool')} `;
@@ -1840,10 +1857,8 @@ export class Display {
         const width = terminalRowWidth() ?? screenOwner.volatileRowWidth();
         const compactPrefix = `${TRAIL_PIPE} ${outcomeGlyph} ${terminalVerb} `;
         const availableDetail = Math.max(0, width - visibleLength(compactPrefix));
-        return `${sk.applyColors(
-          `${compactPrefix}${truncateVisible(detailForDisplay(), availableDetail)}`,
-          kind,
-        )}\n`;
+        const fittedDetail = fitQualifiedActivityDetail(detailForDisplay(), availableDetail);
+        return `${sk.applyColors(`${compactPrefix}${fittedDetail}`, kind)}\n`;
       }
       const prefix = `${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(terminalVerb)} `;
       const suffixText = suffix ? `  ${suffix}` : '';
@@ -1949,7 +1964,20 @@ export class Display {
         : /^unknown\b/u.test(suffix) ? 'unknown'
         : /^(?:fail|failed|blocked|partial|empty (?:fail|retry))\b/u.test(suffix) ? 'failed'
         : 'succeeded';
-      replaceLast(outcomeRow(suffix, kind), true, terminalState);
+      const terminalRow = outcomeRow(suffix, kind);
+      const compactKey = terminalRow.replace(DISPLAY_ANSI_PATTERN, '').trim();
+      if (
+        screenOwner &&
+        this.activityPresentationMode === 'summary' &&
+        this.compactTerminalActivityKeys.has(compactKey)
+      ) {
+        eraseLast(true);
+        return;
+      }
+      if (screenOwner && this.activityPresentationMode === 'summary') {
+        this.compactTerminalActivityKeys.add(compactKey);
+      }
+      replaceLast(terminalRow, true, terminalState);
     };
 
     const startRunningTick = (): void => {
@@ -3254,10 +3282,12 @@ export class Display {
    */
   resetUiTurnState(): void {
     this.uiEventsFiredThisTurn = false;
+    this.compactTerminalActivityKeys.clear();
   }
 
   renderUiEvent(name: string, args: Record<string, unknown>): void {
     if (!this.out.isTTY) return;
+    if (name === 'ui_command_result' && this.activityPresentationMode === 'summary') return;
     // v4.8.0 Phase 2.3 fix — Option C. The post-stream markdown rerender
     // (`tryRerenderInPlace`) does `cursor-up-N + erase-to-end-of-screen`,
     // which wipes anything painted between stream start and stream end —

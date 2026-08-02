@@ -22,6 +22,19 @@ describe('buildToolPreview', () => {
     expect(buildToolPreview('shell_exec', { command }, { mode: 'full' })).toBe(command);
   });
 
+  it('summarizes PowerShell repository inspection without exposing assignment fragments', () => {
+    const command = [
+      "$files = @('cli/v4/aidenTUI.ts', 'cli/v4/display.ts')",
+      "$patterns = @('class Display', 'render')",
+      'Select-String -Path $files -Pattern $patterns',
+    ].join('; ');
+    const preview = buildToolPreview('shell_exec', { command });
+    expect(preview).toBe('search repository source · +2 steps');
+    expect(preview).not.toContain('$files');
+    expect(preview).not.toContain('$patterns');
+    expect(buildToolPreview('shell_exec', { command }, { mode: 'full' })).toContain('$files');
+  });
+
   it('extracts file path', () => {
     expect(buildToolPreview('file_read', { path: 'README.md' })).toBe('README.md');
     expect(buildToolPreview('file_write', { path: '/tmp/x.md', content: 'hi' })).toBe('/tmp/x.md');

@@ -35,6 +35,13 @@ describe('formatStatusState (Phase 22 Task 4)', () => {
     });
   });
 
+  it('keeps response settlement distinct from input-ready state', () => {
+    expect(formatStatusState({ kind: 'settling' })).toEqual({
+      text: 'settling',
+      colour: 'brand',
+    });
+  });
+
   it('generating shows ⏵ + duration in brand', () => {
     const out = formatStatusState({ kind: 'generating', sinceMs: 0 }, 12_400);
     expect(out.colour).toBe('brand');

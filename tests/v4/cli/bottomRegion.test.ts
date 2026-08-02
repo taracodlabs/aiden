@@ -110,6 +110,78 @@ function createDisplay(columns: number, rows = 18): {
   return { display, screen, stream };
 }
 
+it.each([44, 80, 100, 120, 160])(
+  'preserves complete bounded read ranges at %i columns',
+  (columns) => {
+    const { display, screen } = createDisplay(columns, 30);
+    display.setStatusFooter('◆ provider/model │ context │ phase │ timer');
+    display.setIdleComposer('', 'Type your message');
+    const row = display.toolRow('file_read', {
+      path: 'C:\\workspace\\cli\\v4\\display.ts', offset: 7_000, limit: 80,
+    }, undefined, { activityId: `read-range-${columns}` });
+    row.ok(12);
+    const output = screen.lines().join('\n');
+    expect(output).toContain('chars 7000–7079');
+    expect(output).not.toMatch(/chars 7000–(?:\s|$)/u);
+  },
+);
+
+it('aggregates equivalent compact read rows while preserving distinct ranges', () => {
+  const { display, screen } = createDisplay(100, 35);
+  display.setStatusFooter('◆ provider/model │ context │ phase │ timer');
+  display.setIdleComposer('', 'Type your message');
+  const args = { path: 'C:\\workspace\\cli\\v4\\display.ts', offset: 120, limit: 80 };
+  display.toolRow('file_read', args, undefined, { activityId: 'read-a' }).ok(10);
+  display.toolRow('file_read', args, undefined, { activityId: 'read-b' }).ok(11);
+  display.toolRow('file_read', { ...args, offset: 200 }, undefined, { activityId: 'read-c' }).ok(12);
+
+  const output = screen.lines().join('\n');
+  expect(output.match(/chars 120–199/gu)).toHaveLength(1);
+  expect(output.match(/chars 200–279/gu)).toHaveLength(1);
+});
+
+it('projects one compact shell activity when the semantic command-result event also arrives', () => {
+  const { display, screen } = createDisplay(100, 35);
+  display.setStatusFooter('◆ provider/model │ context │ phase │ timer');
+  display.setIdleComposer('', 'Type your message');
+  display.toolRow('shell_exec', { command: 'Get-Location' }, undefined, {
+    activityId: 'shell-one',
+  }).ok(14);
+  display.toolRow('ui_command_result', { command: 'Get-Location' }, undefined, {
+    activityId: 'ui-result-one',
+  }).ok(14);
+  display.renderUiEvent('ui_command_result', {
+    command: 'Get-Location', stdout: 'C:\\workspace', exit_code: 0,
+  });
+
+  const output = screen.lines().join('\n');
+  expect(output.match(/completed Get-Location/gu)).toHaveLength(1);
+  expect(output).not.toContain('✓ Get-Location — completed');
+});
+
+it('keeps settled assistant transcript immutable after a late activity repaint', () => {
+  const { display, screen } = createDisplay(100, 35);
+  display.setStatusFooter('◆ provider/model │ context │ completing │ 1s');
+  display.setIdleComposer('', 'Type your message');
+  const activity = display.toolRow('file_read', { path: 'package.json' }, undefined, {
+    activityId: 'late-read',
+  });
+  activity.ok(10);
+  display.streamPartial('FINAL STABLE RESPONSE');
+  display.streamComplete();
+  activity.refresh();
+  display.setStatusFooter('◆ provider/model │ context │ ready │ 1s');
+  display.setIdleComposer('', 'Type your message');
+
+  const lines = screen.lines();
+  const output = lines.join('\n');
+  expect(output.match(/FINAL STABLE RESPONSE/gu)).toHaveLength(1);
+  expect(output.match(/▲ You/gu)).toHaveLength(1);
+  const activityRow = lines.findLastIndex((line) => line.includes('package.json'));
+  const responseRow = lines.findLastIndex((line) => line.includes('FINAL STABLE RESPONSE'));
+  expect(lines.slice(activityRow + 1, responseRow).filter((line) => line.trim() === '')).toHaveLength(1);
+});
+
 function composerGeometry(screen: TerminalScreen): {
   topSeparator: number;
   top: number;

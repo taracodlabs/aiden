@@ -603,7 +603,9 @@ export class CliCallbacks {
     // Yellow distinguishes the awaiting-attention state from the
     // brand-orange (informational) frames used by setup-complete and
     // /doctor.
-    this.display.writeTransient(renderApprovalBox(req, this.display) + '\n');
+    if (this.verboseMode === 'verbose' || this.display.getActivityPresentationMode() === 'full') {
+      this.display.writeTransient(renderApprovalBox(req, this.display) + '\n');
+    }
 
     const prompts = await this.promptsPromise;
     let choice: string;

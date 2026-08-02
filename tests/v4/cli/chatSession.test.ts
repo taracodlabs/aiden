@@ -217,6 +217,31 @@ function buildOpts(over: Partial<ChatSessionOptions> = {}): ChatSessionOptions {
 }
 
 describe('ChatSession.run', () => {
+  it('settles all activity before projecting the turn as ready', async () => {
+    const events: string[] = [];
+    const callbacks = {
+      completeActivityTurn: vi.fn(() => events.push('activities-settled')),
+      settleActivitiesBeforeOutput: vi.fn(),
+    };
+    const session = new ChatSession(buildOpts({
+      callbacks: callbacks as never,
+      promptApi: mkPromptApi({ inputs: ['hello', '/quit'] }),
+    }));
+    const setStatusState = session.setStatusState.bind(session);
+    vi.spyOn(session, 'setStatusState').mockImplementation((state) => {
+      events.push(`status:${state.kind}`);
+      setStatusState(state);
+    });
+
+    await session.run();
+
+    const finalReady = events.lastIndexOf('status:ready');
+    const finalSettlement = events.lastIndexOf('activities-settled');
+    expect(events).toContain('status:settling');
+    expect(finalSettlement).toBeGreaterThanOrEqual(0);
+    expect(finalSettlement).toBeLessThan(finalReady);
+  });
+
   it('hands a queued submission to the agent exactly once without downstream mutation', async () => {
     const { agent, calls } = mkAgent();
     const session = new ChatSession(buildOpts({

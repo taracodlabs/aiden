@@ -2199,6 +2199,12 @@ export class ChatSession implements ChatSessionLike {
     // = exactly one blank row between user input and Aiden header,
     // matching the rhythm Shiva flagged in smoke.
     const turnStartedAt = Date.now();
+    let activitiesCompleted = false;
+    const completeActivityTurnOnce = (): void => {
+      if (activitiesCompleted) return;
+      activitiesCompleted = true;
+      try { this.opts.callbacks.completeActivityTurn(); } catch { /* defensive */ }
+    };
     const userMsg: Message = { role: 'user', content: userInput };
 
     // Apply any queued system prompts (from skill slash commands) by
@@ -2778,6 +2784,7 @@ export class ChatSession implements ChatSessionLike {
           : undefined,
       }));
       const result = await runAgent();
+      this.setStatusState({ kind: 'settling' });
       if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && replRunId !== null) {
         currentProviderAttemptLedger()?.reconcileJobLinkage({
           taskId: replTaskId,
@@ -3202,6 +3209,7 @@ export class ChatSession implements ChatSessionLike {
         );
       }
 
+      completeActivityTurnOnce();
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
       // v4.8.0 Slice 7 — record per-turn outcome for the status dot.
@@ -3241,6 +3249,7 @@ export class ChatSession implements ChatSessionLike {
         }
       } catch { /* defensive */ }
     } catch (err) {
+      this.setStatusState({ kind: 'settling' });
       stopIndicatorOnce();
       // v4.1.4 Part 1.6: error path must also hide the progress bar
       // so it doesn't leak across the boundary into the error chrome
@@ -3295,6 +3304,7 @@ export class ChatSession implements ChatSessionLike {
           try { replTaskStore.setStatus(replTaskId, 'cancelled'); }
           catch { /* persistence faults must not crash REPL */ }
         }
+        completeActivityTurnOnce();
         this.setStatusState({ kind: 'ready' });
         this.lastTurnElapsedMs = Date.now() - turnStartedAt;
         this.turnCount += 1;
@@ -3381,6 +3391,7 @@ export class ChatSession implements ChatSessionLike {
             ?? 'Run `/model` to switch providers or `aiden doctor` to diagnose.',
         );
       }
+      completeActivityTurnOnce();
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
       // v4.8.0 Slice 7 — error path also bumps the turn counter and
@@ -3405,7 +3416,7 @@ export class ChatSession implements ChatSessionLike {
       });
       // Tool/activity rows are turn-scoped. Terminal callbacks normally settle
       // them earlier; this sweep catches cancellation and missing callbacks.
-      try { this.opts.callbacks.completeActivityTurn(); } catch { /* defensive */ }
+      completeActivityTurnOnce();
       turnIdleDiagnostic('turn.activities.finalized', {
         turnId,
         activityCount: this.opts.callbacks.activeActivityCount?.() ?? 0,
@@ -3889,6 +3900,7 @@ export class ChatSession implements ChatSessionLike {
         state:     this.lastTurnOutcome,
         phase:     this.statusState.kind === 'approve' ? 'approval_required'
           : this.statusState.kind === 'retry' ? 'recovering'
+            : this.statusState.kind === 'settling' ? 'completing'
             : this.statusState.kind === 'ready' ? 'ready'
               : registryPhase === 'ready'
                 ? this.statusState.kind === 'exec' ? 'working' : 'thinking'
@@ -4143,6 +4155,7 @@ export function detectShell(): string {
  */
 export type StatusState =
   | { kind: 'ready' }
+  | { kind: 'settling' }
   | { kind: 'generating'; sinceMs: number }
   | { kind: 'exec' }
   | { kind: 'approve' }
@@ -4157,6 +4170,8 @@ export function formatStatusState(
   now: number = Date.now(),
 ): { text: string; colour: 'brand' | 'muted' | 'warn' } {
   switch (state.kind) {
+    case 'settling':
+      return { text: 'settling', colour: 'brand' };
     case 'generating': {
       const ms = Math.max(0, now - state.sinceMs);
       return { text: `⏵ ${formatDuration(ms)}`, colour: 'brand' };

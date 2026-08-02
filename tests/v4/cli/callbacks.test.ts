@@ -115,7 +115,7 @@ describe('CliCallbacks.promptApproval', () => {
     })).resolves.toBe('allow');
   });
 
-  it('renders the approval card with risk tier and reason', async () => {
+  it('does not archive the approval diagnostic card in normal compact output', async () => {
     const { display, output } = makeDisplay();
     const cb = new CliCallbacks({
       display,
@@ -131,18 +131,25 @@ describe('CliCallbacks.promptApproval', () => {
     });
     expect(decision).toBe('allow');
     const out = output();
-    // Slice 6 (commit 5a90c0e8) + Slice 6 hotfix (d251382f): rendered
-    // as the orange-bar framed panel — key/value rows, no rounded box,
-    // no "Approval needed" title (Phase 2.5 event row owns the headline).
-    // v4.8.0 Slice 11c — panel bar swapped ▎ → │ (universal-font glyph).
-    expect(out).toMatch(/│/);
+    expect(out).toBe('');
+  });
+
+  it('retains the approval diagnostic card in verbose output', async () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({
+      display,
+      verboseMode: 'verbose',
+      promptModule: mockPrompts([{ kind: 'select', value: 'allow' }]),
+    });
+    await cb.promptApproval({
+      toolName: 'shell_exec', category: 'execute', args: { command: 'rm -rf /' },
+      riskTier: 'dangerous', reason: 'destructive command', effects: {},
+    });
+    const out = output();
     expect(out).toMatch(/action\s+shell_exec/);
     expect(out).toMatch(/reason\s+destructive command/);
     expect(out).toMatch(/risk\s+dangerous/);
-    expect(out).toMatch(/reversible\s+yes/i);
-    expect(out).not.toMatch(/args\s+\{/);
     expect(out).not.toContain('rm -rf /');
-    expect(out).not.toMatch(/┌── Approval required /);
   });
 
   it('returns the chosen decision verbatim', async () => {
@@ -163,6 +170,7 @@ describe('CliCallbacks.promptApproval', () => {
     const { display, output } = makeDisplay();
     const cb = new CliCallbacks({
       display,
+      verboseMode: 'verbose',
       promptModule: mockPrompts([{ kind: 'select', value: 'deny' }]),
     });
     await cb.promptApproval({

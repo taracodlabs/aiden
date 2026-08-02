@@ -214,7 +214,16 @@ function summarizeShellCommand(command: string): string {
     .replace(/\s+(?:\d?>|\d?>>)\s*\$null\s*$/iu, '')
     .trim();
   const remaining = statements.length > 1 ? ` · +${statements.length - 1} steps` : '';
-  return truncatePreview(`${withoutQuietRedirection || command}${remaining}`);
+  const semantic = /\bSelect-String\b/iu.test(command)
+    ? 'search repository source'
+    : /\bGet-Content\b/iu.test(command)
+      ? 'read repository source'
+      : /\b(?:Get-ChildItem|rg(?:\.exe)?)\b/iu.test(command)
+        ? 'inspect repository files'
+        : /^\s*\$[A-Za-z_][\w]*\s*=|@\(/u.test(withoutQuietRedirection)
+          ? 'run PowerShell inspection'
+          : withoutQuietRedirection || command;
+  return truncatePreview(`${semantic}${remaining}`);
 }
 
 /** Human compact fallback for unmapped or structured tool arguments. */

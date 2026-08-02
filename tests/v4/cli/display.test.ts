@@ -1574,8 +1574,9 @@ describe('Display v4.8.0 ui_* event renderers', () => {
 
   // ── ui_command_result ─────────────────────────────────────────────────
 
-  it('ui_command_result paints header + stdout + exit row on failure', () => {
+  it('ui_command_result paints header + stdout + exit row on failure in full mode', () => {
     const { d, chunks } = captureDisplay({ tty: true });
+    d.setActivityPresentationMode('full');
     d.renderUiEvent('ui_command_result', {
       command: 'npm test', stdout: 'one\ntwo', stderr: 'boom', exit_code: 2,
     });
@@ -1591,13 +1592,12 @@ describe('Display v4.8.0 ui_* event renderers', () => {
     }
   });
 
-  it('ui_command_result collapses successful output in summary mode', () => {
+  it('ui_command_result stays silent in summary mode because the canonical tool row owns projection', () => {
     const { d, chunks } = captureDisplay({ tty: true });
     const long = Array.from({ length: 12 }, (_, i) => `line${i}`).join('\n');
     d.renderUiEvent('ui_command_result', { command: 'spam', stdout: long });
     const out = stripAnsi(chunks.join(''));
-    expect(out).toContain('✓ spam — completed');
-    expect(out).not.toContain('line0');
+    expect(out).toBe('');
   });
 
   it('ui_command_result retains successful output in full activity mode', () => {
