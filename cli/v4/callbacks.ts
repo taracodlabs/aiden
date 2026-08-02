@@ -512,7 +512,11 @@ export class CliCallbacks {
     let settled: boolean;
     const timing = result?.activityTiming;
     const terminal = timing?.terminalClassification;
-    if (typeof err === 'string' && err.includes('URL provenance gate')) {
+    const expectedDiscoveryMiss = this.getActivityPresentationMode() === 'summary'
+      && isExpectedDiscoveryMiss(call.name, call.arguments, err);
+    if (expectedDiscoveryMiss) {
+      settled = this.activities.settle(call.id, { state: 'completed', dismiss: true, timing });
+    } else if (typeof err === 'string' && err.includes('URL provenance gate')) {
       settled = this.activities.settle(call.id, { state: 'blocked', timing });
     } else if (terminal === 'cancelled') {
       settled = this.activities.settle(call.id, { state: 'cancelled', timing });
@@ -529,7 +533,7 @@ export class CliCallbacks {
       const status = payload && typeof payload === 'object'
         ? (payload as { status?: unknown }).status
         : undefined;
-      const dismiss = isExclusiveToolInteraction(
+      const dismiss = call.name === 'skill_view' || isExclusiveToolInteraction(
         this.resolveToolInteraction?.(call.name),
       );
       settled = status === 'cancelled'
@@ -541,18 +545,30 @@ export class CliCallbacks {
     if (!settled) return;
 
     try { this.renderBlockerCardIfPresent(result); } catch { /* defensive */ }
-    if (call.name === 'skill_view') {
+    if (expectedDiscoveryMiss) {
+      try {
+        this.display.renderUiEvent('ui_expected_discovery_miss', {
+          target: discoveryTarget(call.arguments),
+        });
+      } catch { /* structured activity must never affect execution */ }
+    }
+    if (call.name === 'skill_view' && !err) {
       const args = call.arguments && typeof call.arguments === 'object'
         ? call.arguments as Record<string, unknown> : {};
       const payload = result?.result && typeof result.result === 'object'
         ? result.result as Record<string, unknown> : {};
+      const requestedReference = typeof args.path === 'string' ? args.path.trim() : '';
+      const loadedFile = typeof payload.filePath === 'string' ? payload.filePath.trim() : '';
+      const loadedSegments = loadedFile.split(/[\\/]/u);
+      const loadedReference = requestedReference || loadedSegments[loadedSegments.length - 1] || '';
       try {
         this.display.renderUiEvent('ui_skill_invocation', {
           invocation_id: call.id,
           skill_name: typeof args.name === 'string' ? args.name : 'skill',
           duration_ms: timing?.executionDurationMs,
           reference_name: typeof payload.referenceName === 'string' ? payload.referenceName
-            : typeof payload.reference_name === 'string' ? payload.reference_name : undefined,
+            : typeof payload.reference_name === 'string' ? payload.reference_name
+              : loadedReference || undefined,
         });
       } catch { /* structured activity must never affect execution */ }
     }
@@ -1059,4 +1075,28 @@ function truncateApproval(value: string, width: number): string {
   if (visibleLength(value) <= width) return value;
   if (width <= 1) return truncateVisible(value, width);
   return `${truncateVisible(value, width - 1)}…`;
+}
+
+const EXPECTED_DISCOVERY_TOOLS = new Set([
+  'file_list', 'list_directory', 'list_directory_with_sizes', 'directory_tree',
+]);
+const EXPECTED_DISCOVERY_ROOTS = new Set([
+  'app', 'apps', 'lib', 'libs', 'package', 'packages', 'src', 'test', 'tests',
+]);
+
+function discoveryTarget(args: unknown): string {
+  if (!args || typeof args !== 'object') return 'path';
+  const input = args as Record<string, unknown>;
+  const value = typeof input.path === 'string' ? input.path
+    : typeof input.directory === 'string' ? input.directory : 'path';
+  return value.trim() || 'path';
+}
+
+function isExpectedDiscoveryMiss(name: string, args: unknown, error: unknown): boolean {
+  if (!EXPECTED_DISCOVERY_TOOLS.has(name) || typeof error !== 'string') return false;
+  if (!/(?:\bENOENT\b|not found|no such file or directory)/iu.test(error)) return false;
+  const target = discoveryTarget(args);
+  if (target === 'path' || /[\r\n\u0000]/u.test(target)) return false;
+  const normalized = target.replace(/^[.][\\/]/u, '').replace(/[\\/]+$/u, '').toLowerCase();
+  return EXPECTED_DISCOVERY_ROOTS.has(normalized);
 }

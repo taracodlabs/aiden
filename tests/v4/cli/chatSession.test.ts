@@ -217,6 +217,42 @@ function buildOpts(over: Partial<ChatSessionOptions> = {}): ChatSessionOptions {
 }
 
 describe('ChatSession.run', () => {
+  it('keeps context and elapsed footer metrics monotonic within one active turn', () => {
+    const projected: Array<Record<string, unknown>> = [];
+    const display = {
+      fixedBottomRegionEnabled: () => true,
+      setStatusFooter: (value: ((cols: number) => string) | string) => {
+        if (typeof value === 'function') value(100);
+      },
+      statusFooter: (args: Record<string, unknown>) => {
+        projected.push(args);
+        return 'footer';
+      },
+      providerSwitchLine: () => '',
+      write: () => undefined,
+    } as unknown as Display;
+    const session = new ChatSession(buildOpts({ display }));
+    let estimate = 1_200;
+    (session as unknown as { modelMetadata: {
+      getLimits: () => { contextLength: number };
+      getDefaults: () => { contextLength: number };
+      estimateMessageTokens: () => number;
+    } }).modelMetadata = {
+      getLimits: () => ({ contextLength: 16_000 }),
+      getDefaults: () => ({ contextLength: 16_000 }),
+      estimateMessageTokens: () => estimate,
+    };
+    session.setStatusState({ kind: 'generating', sinceMs: Date.now() - 2_000 });
+    session.renderStatusLine();
+    estimate = 400;
+    (session as unknown as { turnCount: number }).turnCount = 1;
+    (session as unknown as { footerMaxElapsedMs: number }).footerMaxElapsedMs = 5_000;
+    session.renderStatusLine();
+
+    expect(projected.map((entry) => entry.ctxUsed)).toEqual([1_200, 1_200]);
+    expect(Number(projected[1]?.elapsedMs)).toBeGreaterThanOrEqual(5_000);
+  });
+
   it('settles all activity before projecting the turn as ready', async () => {
     const events: string[] = [];
     const callbacks = {

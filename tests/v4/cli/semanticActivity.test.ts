@@ -103,9 +103,9 @@ describe('semantic activity projection', () => {
 describe('structured skill and Worker projections', () => {
   it('exposes one typed row per real skill and optional reference', () => {
     const lines = projectSkillInvocation({ invocationId: 'inv-1', skillName: 'repository-audit', durationMs: 1250, referenceName: 'repo-layout' });
-    expect(lines.map((line) => line.text)).toEqual(['skill     repository-audit 1.3s', 'reference repo-layout']);
+    expect(lines.map((line) => line.text)).toEqual(['✓ skill  repository-audit · repo-layout 1.3s']);
+    expect(lines).toHaveLength(1);
     expect(lines[0]?.color).toBe('skill');
-    expect(lines[1]?.color).toBe('evidence');
   });
 
   it('projects actual Worker count and goals without raw payloads', () => {

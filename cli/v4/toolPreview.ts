@@ -62,9 +62,9 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
     const hasLimit = typeof input.limit === 'number' && Number.isFinite(input.limit);
     if (!hasOffset && !hasLimit) return target;
     const offset = hasOffset ? Math.max(0, Math.floor(input.offset as number)) : 0;
-    if (!hasLimit) return `${target} · from char ${offset}`;
+    if (!hasLimit) return target;
     const limit = Math.max(1, Math.floor(input.limit as number));
-    return `${target} · chars ${offset}–${offset + limit - 1}`;
+    return `${target} · segment ${Math.floor(offset / limit) + 1}`;
   },
   read_file:          'path',
   read_text_file:     'path',
@@ -127,7 +127,19 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
   process_log_read:  'pid',
 
   // ── subagent ─────────────────────────────────────────────────────────
-  subagent_fanout:   'mode',
+  subagent_fanout: (args: unknown): string => {
+    if (!args || typeof args !== 'object') return '';
+    const input = args as Record<string, unknown>;
+    const tasks = Array.isArray(input.tasks) ? input.tasks : [];
+    const requested = typeof input.n === 'number' && Number.isInteger(input.n)
+      ? Math.max(1, input.n)
+      : tasks.length > 0 ? tasks.length : 3;
+    const firstGoal = tasks.length > 0 && tasks[0] && typeof tasks[0] === 'object'
+      && typeof (tasks[0] as Record<string, unknown>).goal === 'string'
+      ? String((tasks[0] as Record<string, unknown>).goal).trim()
+      : typeof input.query === 'string' ? input.query.trim() : '';
+    return `${requested} Worker${requested === 1 ? '' : 's'}${firstGoal ? ` · ${firstGoal}` : ''}`;
+  },
 
   // ── system / misc ────────────────────────────────────────────────────
   system_info:       '',
@@ -298,6 +310,21 @@ export function buildToolPreview(
       try { str = JSON.stringify(raw); } catch { str = String(raw); }
     } else {
       str = summarizeStructuredValue(raw as object);
+    }
+  }
+
+  if (toolName === 'file_read' && opts.mode === 'full' && args && typeof args === 'object') {
+    const input = args as Record<string, unknown>;
+    const target = typeof input.path === 'string' ? input.path
+      : typeof input.file === 'string' ? input.file : '';
+    const offset = typeof input.offset === 'number' && Number.isFinite(input.offset)
+      ? Math.max(0, Math.floor(input.offset)) : null;
+    const limit = typeof input.limit === 'number' && Number.isFinite(input.limit)
+      ? Math.max(1, Math.floor(input.limit)) : null;
+    if (target && offset !== null) {
+      str = limit === null
+        ? `${target} · from char ${offset}`
+        : `${target} · chars ${offset}–${offset + limit - 1}`;
     }
   }
 

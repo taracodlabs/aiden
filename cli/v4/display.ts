@@ -25,7 +25,7 @@ const TerminalRenderer: new (opts?: unknown) => unknown = require('marked-termin
 const stringWidth: (value: string) => number = require('string-width');
 
 import { SkinEngine, getSkinEngine, type ColorKind } from './skinEngine';
-import { visibleLength, truncateVisible } from './box';
+import { visibleLength, truncateVisible, truncateVisibleAtWord } from './box';
 import { glyphs } from './design/tokens';
 import { clearLinesUpSeq } from './display/cursorSeq';
 import {
@@ -97,10 +97,11 @@ function truncateTerminalVisible(value: string, maxVisible: number): string {
 }
 
 function fitQualifiedActivityDetail(value: string, maxVisible: number): string {
+  if (maxVisible <= 0) return '';
   if (visibleLength(value) <= maxVisible) return value;
   const separator = ' · ';
   const splitAt = value.lastIndexOf(separator);
-  if (splitAt < 0) return truncateVisible(value, maxVisible);
+  if (splitAt < 0) return truncateVisibleAtWord(value, maxVisible);
   const target = value.slice(0, splitAt);
   const qualifier = value.slice(splitAt + separator.length);
   const reserved = visibleLength(separator) + visibleLength(qualifier);
@@ -108,7 +109,7 @@ function fitQualifiedActivityDetail(value: string, maxVisible: number): string {
   const targetWidth = maxVisible - reserved;
   const fittedTarget = visibleLength(target) <= targetWidth
     ? target
-    : `${truncateVisible(target, Math.max(0, targetWidth - 1))}…`;
+    : truncateVisibleAtWord(target, targetWidth);
   return `${fittedTarget}${separator}${qualifier}`;
 }
 // Phase v4.1-reply-formatting: skin-aware markdown renderer that
@@ -1628,7 +1629,7 @@ export class Display {
         : '  Ctrl+C';
       const activity = `${this.skin.applyColors(projection.glyph, projection.glyphColor)} `
         + this.skin.applyColors(`${projection.label}${source === 'provider' && this.activityPresentationMode === 'full' ? ' · provider request' : ''}`, projection.color);
-      return truncateVisible(`${prefix}${activity}${time}${suffix}`, width);
+      return truncateVisibleAtWord(`${prefix}${activity}${time}${suffix}`, width);
     };
     const erase = (terminal = false): void => {
       if (!printed || !isTty) return;
@@ -1765,6 +1766,12 @@ export class Display {
     const useIcons = process.env.AIDEN_UI_ICONS !== '0' && terminalSupportsUnicode();
     const { icon, verb } = trailIconForTool(name);
     const glyph = useIcons ? icon : sk.applyColors('·', 'muted');
+    const operationKind: ColorKind = /(?:subagent|worker)/iu.test(name) ? 'worker'
+      : name === 'skill_view' || /(?:^|_)skill(?:_|$)/iu.test(name) ? 'skill'
+        : /(?:read|list|inspect|search|fetch|snapshot)/iu.test(name) ? 'inspecting'
+          : /(?:verify|evidence|proof|test)/iu.test(name) ? 'evidence'
+            : 'tool';
+    const operationLabel = operationKind === 'worker' ? 'Worker' : verb.trim();
 
     // Detail field: v4.1.4-media — consult `buildToolPreview` first so
     // tools registered in `TOOL_PRIMARY_ARG` (media_transport → 'target',
@@ -1777,6 +1784,9 @@ export class Display {
     const detailForDisplay = (): string => {
       const relative = relativizeActivityText(rawDetail, process.cwd(), this.activityPresentationMode);
       if (this.activityPresentationMode === 'full') return relative;
+      if (operationKind === 'worker') {
+        return relative.replace(/^(\d+)\s+Workers?\b/u, '$1');
+      }
       if (screenOwner?.usesReflowSafeRows() && /(?:^|_)(?:file|read|write|edit|patch|list|copy|move|delete)(?:_|$)/iu.test(name)) {
         const [target, ...qualifiers] = relative.split(' · ');
         const segments = target.split(/[\\/]/u);
@@ -1814,11 +1824,14 @@ export class Display {
       });
       const duration = elapsed >= 1000 ? ` ${formatToolDuration(elapsed)}` : '';
       const liveSuffix = `  ${sk.applyColors(`${semanticPhaseStatusLabel(semanticPhase)}${duration}…`, phaseColorKind(semanticPhase))}`;
-      const runningGlyph = sk.applyColors(projection.glyph, projection.color);
+      const runningGlyph = sk.applyColors(
+        projection.glyph,
+        operationKind === 'worker' ? 'worker' : projection.glyphColor,
+      );
       if (screenOwner?.usesReflowSafeRows()) {
         const width = terminalRowWidth() ?? screenOwner.volatileRowWidth();
         const compactPrefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph} ` +
-          `${sk.applyColors(verb.trim(), 'tool')} `;
+          `${sk.applyColors(operationLabel, operationKind)} `;
         const compactPhase = sk.applyColors(
           `${semanticPhaseCompactToken(semanticPhase, useIcons)}${duration}`,
           phaseColorKind(semanticPhase),
@@ -1832,7 +1845,7 @@ export class Display {
         return `${compactPrefix}${sk.applyColors(fittedDetail, 'muted')}${compactSuffix}\n`;
       }
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph}  ` +
-        `${sk.applyColors(padVerb(verb), 'tool')} `;
+        `${sk.applyColors(padVerb(operationLabel), operationKind)} `;
       const suffix = `${liveSuffix}${screenOwner ? '' : this.composerSuffix()}`;
       const detailText = sk.applyColors(detailForDisplay(), 'muted');
       const width = terminalRowWidth();
@@ -1850,7 +1863,8 @@ export class Display {
       const outcomeGlyph = terminalSupportsUnicode()
         ? (failed ? '!' : '✓')
         : terminalStateSymbol(failed ? 'failed' : 'completed');
-      const terminalVerb = /^denied\b/u.test(suffix) ? 'denied'
+      const terminalVerb = operationKind === 'worker' ? 'Worker'
+        : /^denied\b/u.test(suffix) ? 'denied'
         : /^cancelled\b/u.test(suffix) ? 'cancelled'
         : /^timed out\b/u.test(suffix) ? 'timed out'
         : /^unknown\b/u.test(suffix) ? 'unknown'
@@ -1864,19 +1878,23 @@ export class Display {
         const compactPrefix = `${TRAIL_PIPE} ${outcomeGlyph} ${terminalVerb} `;
         const availableDetail = Math.max(0, width - visibleLength(compactPrefix));
         const fittedDetail = fitQualifiedActivityDetail(detailForDisplay(), availableDetail);
-        return `${sk.applyColors(`${compactPrefix}${fittedDetail}`, kind)}\n`;
+        return `${sk.applyColors(TRAIL_PIPE, 'muted')} ` +
+          `${sk.applyColors(outcomeGlyph, failed ? 'error' : 'success')} ` +
+          `${sk.applyColors(terminalVerb, operationKind)}${fittedDetail ? ` ${sk.applyColors(fittedDetail, 'muted')}` : ''}\n`;
       }
-      const prefix = `${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(terminalVerb)} `;
       const suffixText = suffix ? `  ${suffix}` : '';
       const width = terminalRowWidth();
       const availableDetail = width === null
         ? Number.POSITIVE_INFINITY
-        : Math.max(0, width - visibleLength(prefix) - visibleLength(suffixText));
+        : Math.max(0, width - visibleLength(`${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(terminalVerb)} `) - visibleLength(suffixText));
       const displayDetail = detailForDisplay();
-      const content = `${prefix}${availableDetail === Number.POSITIVE_INFINITY
+      const fittedDetail = availableDetail === Number.POSITIVE_INFINITY
         ? displayDetail
-        : truncateVisible(displayDetail, availableDetail)}${suffixText}`;
-      return `${sk.applyColors(content, kind)}\n`;
+        : truncateVisibleAtWord(displayDetail, availableDetail);
+      return `${sk.applyColors(TRAIL_PIPE, 'muted')} ` +
+        `${sk.applyColors(outcomeGlyph, failed ? 'error' : 'success')}  ` +
+        `${sk.applyColors(padVerb(terminalVerb), operationKind)} ` +
+        `${sk.applyColors(fittedDetail, 'muted')}${sk.applyColors(suffixText, kind)}\n`;
     };
 
     // Capture stream reference so closures don't need `this`.
@@ -2812,6 +2830,7 @@ export class Display {
   private streamProjectionSequence = 0;
   private streamProjectionId = '';
   private streamProjectionHeaderPending = false;
+  private streamSettledThisTurn = false;
 
   private projectedStreamOwner(): ComposerLane | null {
     return this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()
@@ -2909,7 +2928,7 @@ export class Display {
    * the full body is in hand.
    */
   streamPartial(text: string): void {
-    if (!text) return;
+    if (!text || this.streamSettledThisTurn) return;
     const projectedOwner = this.projectedStreamOwner();
     if (!this.streamHeaderShown) {
       // Phase 26.2.3 — share the `▎ Aiden` header with non-streaming
@@ -3209,6 +3228,7 @@ export class Display {
    */
   streamComplete(): void {
     if (!this.streamHeaderShown) return;
+    this.streamSettledThisTurn = true;
     const projectedOwner = this.projectedStreamOwner();
     if (projectedOwner) {
       this.settleProjectedStream(projectedOwner);
@@ -3294,6 +3314,7 @@ export class Display {
    */
   resetUiTurnState(): void {
     this.uiEventsFiredThisTurn = false;
+    this.streamSettledThisTurn = false;
     this.compactTerminalActivityKeys.clear();
     this.structuredActivityIds.clear();
   }
@@ -3318,6 +3339,7 @@ export class Display {
     if (name === 'ui_skill_invocation') { this.renderUiSkillInvocation(args); return; }
     if (name === 'ui_worker_group') { this.renderUiWorkerGroup(args); return; }
     if (name === 'ui_context_compacted') { this.renderUiContextCompacted(); return; }
+    if (name === 'ui_expected_discovery_miss') { this.renderUiExpectedDiscoveryMiss(args); return; }
     // Unknown event names silent-ignore (defensive — future registrations).
   }
 
@@ -3345,6 +3367,18 @@ export class Display {
     return `${pipe} ${this.skin.applyColors(match[1], kind)}${match[2]}${this.skin.applyColors(match[3], 'muted')}\n`;
   }
 
+  /** Colour the terminal glyph and semantic category independently. */
+  private uiSemanticTrailRow(content: string, kind: ColorKind): string {
+    const pipe = this.skin.applyColors(TRAIL_PIPE, 'muted');
+    const match = /^([✓✕×!◐◈◇◆↻■])\s+(\S+)([\s\S]*)$/u.exec(content);
+    if (!match) return this.uiStructuredTrailRow(content, kind);
+    const glyphKind: ColorKind = match[1] === '✓' ? 'success'
+      : match[1] === '✕' || match[1] === '×' || match[1] === '!' || match[1] === '■'
+        ? 'error' : kind;
+    return `${pipe} ${this.skin.applyColors(match[1], glyphKind)} ` +
+      `${this.skin.applyColors(match[2], kind)}${this.skin.applyColors(match[3], 'muted')}\n`;
+  }
+
   private renderUiTaskUpdate(args: Record<string, unknown>): void {
     const taskId  = typeof args.task_id === 'string' ? args.task_id : '';
     const label   = typeof args.label   === 'string' ? args.label   : '';
@@ -3359,7 +3393,7 @@ export class Display {
       : terminalStateSymbol(status === 'blocked' ? 'warning' : 'running');
     const colorKind: ColorKind = status === 'running' ? 'warn' : 'error';
     this.uiTaskRows.set(taskId, { label });
-    const short  = label.length > 80 ? label.slice(0, 79) + '…' : label;
+    const short = label;
     // v4.8.0 Phase 2.4 — subagent kind: indent by depth inside the
     // gutter so nested rows tier below their parent.
     const indent = kindArg === 'subagent' ? '  '.repeat(depth) : '';
@@ -3393,8 +3427,8 @@ export class Display {
     const kind: ColorKind =
       status === 'success' ? 'success' :
       status === 'failure' ? 'error'   : 'warn';
-    const shortLabel = label.length > 80 ? label.slice(0, 79) + '…' : label;
-    const shortSum   = summary.length > 120 ? summary.slice(0, 119) + '…' : summary;
+    const shortLabel = label;
+    const shortSum = summary;
     const terminalLabel = shortSum || (status === 'success' ? 'Completed' : status === 'failure' ? 'Failed' : 'Blocked');
     const rendered = this.uiTrailRow(`┌ ${shortLabel}\n└ ${glyph} ${terminalLabel}`, kind).replace(/\n$/u, '');
     if (this.composerLane?.isActive()) {
@@ -3459,7 +3493,7 @@ export class Display {
     if (lines.length === 0) return;
     this.commitStreamChunk();
     lines.forEach((line) => this.structuredActivityIds.add(line.identity));
-    const rendered = lines.map((line) => this.uiStructuredTrailRow(line.text, line.color)).join('');
+    const rendered = lines.map((line) => this.uiSemanticTrailRow(line.text, line.color)).join('');
     this.writeOutput(rendered);
     this.streamLastEndedNewline = true;
   }
@@ -3489,6 +3523,14 @@ export class Display {
     this.structuredActivityIds.add(line.identity);
     this.commitStreamChunk();
     this.writeOutput(this.uiStructuredTrailRow(line.text, line.color));
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiExpectedDiscoveryMiss(args: Record<string, unknown>): void {
+    const target = typeof args.target === 'string' ? args.target.trim() : '';
+    if (!target) return;
+    this.commitStreamChunk();
+    this.writeOutput(this.uiSemanticTrailRow(`◇ inspect ${target} · not found`, 'inspecting'));
     this.streamLastEndedNewline = true;
   }
 

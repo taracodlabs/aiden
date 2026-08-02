@@ -616,6 +616,8 @@ export class ChatSession implements ChatSessionLike {
   private turnCount = 0;
   private lastTurnOutcome: 'ok' | 'warn' | 'error' | 'muted' = 'ok';
   private lastFooterProvider: string | null = null;
+  private footerMaxContextUsed = 0;
+  private footerMaxElapsedMs = 0;
 
   /**
    * Phase v4.1.2-memory-AB:
@@ -3850,6 +3852,10 @@ export class ChatSession implements ChatSessionLike {
 
   /** Phase 22 Task 4: state transitions for the right-most segment. */
   setStatusState(state: StatusState): void {
+    if (state.kind === 'generating' && this.statusState.kind !== 'generating') {
+      this.footerMaxContextUsed = 0;
+      this.footerMaxElapsedMs = 0;
+    }
     this.statusState = state;
   }
 
@@ -3877,8 +3883,10 @@ export class ChatSession implements ChatSessionLike {
     } catch {
       limits = this.modelMetadata.getDefaults();
     }
-    const usedTokens = this.modelMetadata.estimateMessageTokens(this.history);
+    const estimatedTokens = this.modelMetadata.estimateMessageTokens(this.history);
     const maxTokens = limits.contextLength;
+    this.footerMaxContextUsed = Math.max(this.footerMaxContextUsed, estimatedTokens);
+    const usedTokens = this.footerMaxContextUsed;
 
     // v4.8.0 Slice 7 hotfix — predictable 1-blank-line rhythm: one
     // blank above the footer (visual breath after the reply), one
@@ -3911,9 +3919,9 @@ export class ChatSession implements ChatSessionLike {
       display.setStatusFooter((cols) => display.statusFooter({
         ...statusArgs,
         cols,
-        elapsedMs: this.statusState.kind === 'generating'
+        elapsedMs: this.footerMaxElapsedMs = Math.max(this.footerMaxElapsedMs, this.statusState.kind === 'generating'
           ? Date.now() - this.statusState.sinceMs
-          : this.lastTurnElapsedMs,
+          : this.lastTurnElapsedMs),
         sessionMs: Date.now() - this.startedAt,
       }));
       return;

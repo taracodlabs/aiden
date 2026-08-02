@@ -7,6 +7,7 @@ import {
   boxTopTitled,
   visibleLength,
   truncateVisible,
+  truncateVisibleAtWord,
 } from '../../../cli/v4/box';
 
 const ORANGE = '\x1b[38;2;255;107;53m';
@@ -102,6 +103,17 @@ describe('cli/v4/box helpers', () => {
     expect(out.startsWith(ORANGE)).toBe(true);
     expect(out.endsWith('\x1b[0m')).toBe(true);
   });
+
+  it.each([44, 80, 100, 120, 160])(
+    'keeps a complete activity phrase at a %i-column boundary',
+    (width) => {
+      const phrase = `${ORANGE}Still working — checking the result before reporting repository validation details${RESET}`;
+      const out = truncateVisibleAtWord(phrase, width);
+      expect(visibleLength(out)).toBeLessThanOrEqual(width);
+      expect(out).not.toMatch(/\b(?:work|check|resul|repo|validat)…(?:\x1b\[[0-9;]*m)?$/u);
+      expect(out.endsWith('…') || /\x1b\[(?:0|39)m$/u.test(out)).toBe(true);
+    },
+  );
 
   it('boxTopTitled uses visible length so coloured titles dont skew the dashes', () => {
     const plain = boxTopTitled('Health Check', 50);

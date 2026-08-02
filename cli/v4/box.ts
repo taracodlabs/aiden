@@ -103,6 +103,20 @@ export function truncateVisible(s: string, maxVisible: number): string {
   return sawAnsi ? out + '\x1b[0m' : out;
 }
 
+/** ANSI-aware activity truncation that prefers a complete word. */
+export function truncateVisibleAtWord(s: string, maxVisible: number): string {
+  const width = Math.max(1, Math.floor(maxVisible));
+  if (visibleLength(s) <= width) return s;
+  if (width === 1) return '…';
+  const candidate = truncateVisible(s, width - 1);
+  const plain = candidate.replace(ANSI_REGEX, '').replace(/\x1b\[0m$/u, '');
+  const boundary = Math.max(plain.lastIndexOf(' '), plain.lastIndexOf('—'));
+  if (boundary > 0) {
+    return `${truncateVisible(candidate, visibleLength(plain.slice(0, boundary).trimEnd()))}…`;
+  }
+  return `${candidate}…`;
+}
+
 // ── Generic primitives ───────────────────────────────────────────
 
 function renderTop(g: GlyphSet, width: number): string {

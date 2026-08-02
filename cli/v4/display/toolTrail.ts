@@ -52,6 +52,9 @@ type TrailEntry = { readonly keys: readonly string[]; icon: string; verb: string
  * Keep entries grouped by semantic category to make auditing easy.
  */
 const TRAIL_MAP: readonly TrailEntry[] = [
+  // Delegation / Worker execution
+  { keys: ['subagent_fanout', 'spawn_sub_agent', 'worker'], icon: '◆', verb: 'delegate' },
+
   // ── Observe / read / list ────────────────────────────────────────────
   { keys: ['file_read', 'read_file', 'read_text_file', 'read_multiple_files',
            'file_list', 'list_directory', 'list_directory_with_sizes',

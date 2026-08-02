@@ -392,9 +392,23 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     d.toolRow('file_read', { path: 'cli/v4/display.ts', offset: 0, limit: 80 }).ok(5);
     d.toolRow('file_read', { path: 'cli/v4/display.ts', offset: 80, limit: 80 }).ok(6);
     const output = stripAnsi(chunks.join(''));
-    expect(output).toContain('display.ts · chars 0–79');
-    expect(output).toContain('display.ts · chars 80–159');
+    expect(output).toContain('display.ts · segment 1');
+    expect(output).toContain('display.ts · segment 2');
+    expect(output).not.toContain('chars 0');
     expect(output.match(/display\.ts/gu)).toHaveLength(2);
+  });
+
+  it('projects Worker admission without generic argument metadata', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('subagent_fanout', {
+      mode: 'partition',
+      n: 3,
+      tasks: [{ goal: 'Runtime ownership' }, { goal: 'TUI inspection' }, { goal: 'Product readiness' }],
+    }).ok(1_200);
+    const output = stripAnsi(chunks.join(''));
+    expect(output).toContain('Worker');
+    expect(output).toContain('3 · Runtime ownership');
+    expect(output).not.toMatch(/arguments|partition|\{.*\}/u);
   });
 
   // ── Success is SILENT ───────────────────────────────────────────────

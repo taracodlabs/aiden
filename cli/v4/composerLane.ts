@@ -26,6 +26,7 @@ import {
   type OperatorProjectionState,
 } from './operatorProjection';
 import { wrap as wrapAnsiText } from './display/frame';
+import { truncateVisibleAtWord } from './box';
 import { terminalSupportsUnicode } from './terminalSymbols';
 import { resizeReadyMarkerForTests } from './composerReadiness';
 
@@ -106,28 +107,7 @@ const PLAIN_BOTTOM_STYLE: BottomRegionStyle = {
 function fitStatus(text: string, cols: number): string {
   const width = Math.max(4, cols);
   if (terminalWidth(text) <= width) return text;
-  let plain = '';
-  let out = '';
-  let sawAnsi = false;
-  for (let i = 0; i < text.length;) {
-    if (text[i] === ESC && text[i + 1] === '[') {
-      const match = /^\x1b\[[0-9;]*[A-Za-z]/u.exec(text.slice(i));
-      if (match) {
-        out += match[0];
-        i += match[0].length;
-        sawAnsi = true;
-        continue;
-      }
-    }
-    const codePoint = text.codePointAt(i);
-    if (codePoint === undefined) break;
-    const character = String.fromCodePoint(codePoint);
-    if (stringWidth(plain + character) > width) break;
-    out += character;
-    plain += character;
-    i += character.length;
-  }
-  return sawAnsi ? `${out}${ESC}[0m` : out;
+  return truncateVisibleAtWord(text, width);
 }
 
 function fitReflowSafeStatus(text: string, cols: number): string {
@@ -498,8 +478,7 @@ export class BottomRegion {
       this.finishResizeBurstNow();
       return;
     }
-    this.sink.write(`${RESTORE_TRANSCRIPT}${terminal}${SAVE_TRANSCRIPT}`);
-    this.paintAll();
+    this.paintAll(false, terminal);
   }
 
   /** Move the transcript viewport away from or toward the live tail. */
@@ -831,7 +810,7 @@ export class BottomRegion {
       `${reserveSeq(this.sink.rows(), nextRows)}${SAVE_TRANSCRIPT}`;
   }
 
-  private paintAll(rebuildTranscript = false): void {
+  private paintAll(rebuildTranscript = false, transcriptOutput = ''): void {
     if (!this.active || this.resizeBurstActive) return;
     const epoch = this.projection.viewport.epoch;
     this.projection = reduceOperatorProjection(this.projection, {
@@ -840,7 +819,7 @@ export class BottomRegion {
     const surface = this.surface();
     const frame = surface.lines.join('\n');
     const geometry = this.establishGeometry(surface.laneRows);
-    if (!geometry && frame === this.lastFrame && !rebuildTranscript) {
+    if (!geometry && frame === this.lastFrame && !rebuildTranscript && !transcriptOutput) {
       if (epoch === this.projection.viewport.epoch) {
         this.sink.write(`${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`);
       }
@@ -849,7 +828,9 @@ export class BottomRegion {
     this.lastFrame = frame;
     this.rememberSurface(surface);
     const topRow = this.sink.rows() - surface.laneRows + 1;
-    let sequence = geometry;
+    let sequence = transcriptOutput
+      ? `${RESTORE_TRANSCRIPT}${transcriptOutput}${SAVE_TRANSCRIPT}${geometry}`
+      : geometry;
     surface.lines.forEach((line, index) => {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });

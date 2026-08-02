@@ -56,17 +56,13 @@ export function projectSkillInvocation(input: SkillInvocationInput): StructuredA
   if (!input.invocationId.trim() || !name) return [];
   const duration = typeof input.durationMs === 'number' && input.durationMs >= 0
     ? ` ${formatStructuredDuration(input.durationMs)}` : '';
+  const reference = input.referenceName?.trim();
+  const referenceText = reference ? ` · ${reference}` : '';
   const lines: StructuredActivityLine[] = [{
-    text: `skill     ${name}${duration}`,
+    text: `✓ skill  ${name}${referenceText}${duration}`,
     color: 'skill',
     identity: `skill:${input.invocationId}`,
   }];
-  const reference = input.referenceName?.trim();
-  if (reference) lines.push({
-    text: `reference ${reference}`,
-    color: 'evidence',
-    identity: `reference:${input.invocationId}:${reference}`,
-  });
   return lines;
 }
 

@@ -127,7 +127,7 @@ function createDisplay(columns: number, rows = 18): {
 }
 
 it.each([44, 80, 100, 120, 160])(
-  'preserves complete bounded read ranges at %i columns',
+  'preserves a compact read segment at %i columns',
   (columns) => {
     const { display, screen } = createDisplay(columns, 30);
     display.setStatusFooter('◆ provider/model │ context │ phase │ timer');
@@ -137,12 +137,12 @@ it.each([44, 80, 100, 120, 160])(
     }, undefined, { activityId: `read-range-${columns}` });
     row.ok(12);
     const output = screen.lines().join('\n');
-    expect(output).toContain('chars 7000–7079');
-    expect(output).not.toMatch(/chars 7000–(?:\s|$)/u);
+    expect(output).toContain('segment 88');
+    expect(output).not.toContain('chars 7000');
   },
 );
 
-it('aggregates equivalent compact read rows while preserving distinct ranges', () => {
+it('aggregates equivalent compact read rows while preserving distinct segments', () => {
   const { display, screen } = createDisplay(100, 35);
   display.setStatusFooter('◆ provider/model │ context │ phase │ timer');
   display.setIdleComposer('', 'Type your message');
@@ -152,8 +152,8 @@ it('aggregates equivalent compact read rows while preserving distinct ranges', (
   display.toolRow('file_read', { ...args, offset: 200 }, undefined, { activityId: 'read-c' }).ok(12);
 
   const output = screen.lines().join('\n');
-  expect(output.match(/chars 120–199/gu)).toHaveLength(1);
-  expect(output.match(/chars 200–279/gu)).toHaveLength(1);
+  expect(output.match(/segment 2/gu)).toHaveLength(1);
+  expect(output.match(/segment 3/gu)).toHaveLength(1);
 });
 
 it('projects one compact shell activity when the semantic command-result event also arrives', () => {
@@ -196,6 +196,48 @@ it('keeps settled assistant transcript immutable after a late activity repaint',
   const activityRow = lines.findLastIndex((line) => line.includes('package.json'));
   const responseRow = lines.findLastIndex((line) => line.includes('FINAL STABLE RESPONSE'));
   expect(lines.slice(activityRow + 1, responseRow).filter((line) => line.trim() === '')).toHaveLength(1);
+});
+
+it('rejects a late stream delta after final response settlement', () => {
+  const { display, screen } = createDisplay(100, 35);
+  display.setStatusFooter('◆ provider/model │ context │ completing │ 1s');
+  display.setIdleComposer('', 'Type your message');
+  display.resetUiTurnState();
+  display.streamPartial('FINAL RESPONSE ONCE');
+  display.streamComplete();
+  display.streamPartial('LATE STALE DELTA');
+  const output = screen.lines().join('\n');
+  expect(output.match(/FINAL RESPONSE ONCE/gu)).toHaveLength(1);
+  expect(output).not.toContain('LATE STALE DELTA');
+  expect(screen.snapshot().match(/▲ You/gu)).toHaveLength(1);
+});
+
+it('uses one live response identity for every delta in a turn', () => {
+  const { display } = createDisplay(100, 35);
+  display.setStatusFooter('◆ provider/model │ context │ thinking │ 1s');
+  display.setIdleComposer('', 'Type your message');
+  display.resetUiTurnState();
+  display.streamPartial('first ');
+  const firstIdentity = (display as unknown as { streamProjectionId: string }).streamProjectionId;
+  display.streamPartial('second');
+  const secondIdentity = (display as unknown as { streamProjectionId: string }).streamProjectionId;
+  expect(firstIdentity).toMatch(/^assistant-stream:/u);
+  expect(secondIdentity).toBe(firstIdentity);
+});
+
+it('commits final response and restores the bottom surface in one terminal transaction', () => {
+  const { display, stream } = createDisplay(100, 35);
+  display.setStatusFooter('◆ provider/model │ context │ completing │ 1s');
+  display.setIdleComposer('', 'Type your message');
+  display.resetUiTurnState();
+  display.streamPartial('ATOMIC FINAL RESPONSE');
+  const before = stream.writes.length;
+  display.streamComplete();
+  const settlementWrites = stream.writes.slice(before);
+  expect(settlementWrites).toHaveLength(1);
+  expect(settlementWrites[0]).toContain('ATOMIC FINAL RESPONSE');
+  expect(settlementWrites[0]).toContain('▲ You');
+  expect(settlementWrites[0]).toContain('provider/model');
 });
 
 function composerGeometry(screen: TerminalScreen): {

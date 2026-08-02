@@ -54,9 +54,9 @@ describe('buildToolPreview', () => {
     expect(buildToolPreview('execute_code', { code: 'print(1+1)' })).toBe('print(1+1)');
   });
 
-  it('extracts subagent_fanout mode', () => {
+  it('projects subagent_fanout as a Worker count instead of raw mode metadata', () => {
     expect(buildToolPreview('subagent_fanout', { mode: 'partition', n: 3 }))
-      .toBe('partition');
+      .toBe('3 Workers');
   });
 
   it('returns empty string for known no-arg tools', () => {
@@ -93,17 +93,29 @@ describe('buildToolPreview', () => {
     )).toBe('{"kind":"install","id":"x"}');
   });
 
-  it('keeps repeated file-read ranges distinct', () => {
+  it('keeps repeated file-read segments distinct without raw offsets in compact mode', () => {
     expect(buildToolPreview('file_read', {
       path: 'C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts',
       offset: 120,
       limit: 80,
-    })).toBe('C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts · chars 120–199');
+    })).toBe('C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts · segment 2');
     expect(buildToolPreview('file_read', {
       path: 'C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts',
       offset: 200,
       limit: 80,
-    })).toContain('chars 200–279');
+    })).toContain('segment 3');
+    expect(buildToolPreview('file_read', {
+      path: 'display.ts', offset: 200, limit: 80,
+    }, { mode: 'full' })).toContain('chars 200–279');
+  });
+
+  it('projects Worker count and goal instead of a generic argument count', () => {
+    const preview = buildToolPreview('subagent_fanout', {
+      mode: 'partition', n: 2,
+      tasks: [{ goal: 'renderer ownership audit' }, { goal: 'runtime lifecycle audit' }],
+    });
+    expect(preview).toBe('2 Workers · renderer ownership audit');
+    expect(preview).not.toMatch(/arguments/u);
   });
 
   it('never cuts a long Unicode preview by JavaScript code units', () => {

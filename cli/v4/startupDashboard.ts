@@ -12,6 +12,7 @@ const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const SAFE_MARGIN = 2;
 
 export type StartupDashboardTier = 'wide' | 'medium' | 'narrow' | 'minimal';
+export type StartupLogoTier = 'full' | 'compact' | 'plain';
 
 export interface StartupEnvironmentData {
   os?: string;
@@ -337,6 +338,18 @@ function renderProject(
   ];
 }
 
+export function resolveStartupLogoTier(columns: number, banner?: string): StartupLogoTier {
+  const tier = resolveStartupDashboardTier(columns);
+  if (tier === 'narrow' || tier === 'minimal') return 'plain';
+  if (tier === 'medium') return 'compact';
+  if (!banner) return 'plain';
+  const width = safeWidth(columns);
+  const lines = banner.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  return lines.length > 0 && lines.every((line) => startupVisibleWidth(line) <= width)
+    ? 'full'
+    : 'compact';
+}
+
 function normalizeBanner(banner: string | undefined, width: number): string[] {
   if (!banner) return [];
   const lines = banner.split(/\r?\n/).filter((line) => line.trim().length > 0);
@@ -350,12 +363,16 @@ export function renderStartupDashboard(options: RenderStartupDashboardOptions): 
   const tier = resolveStartupDashboardTier(options.columns);
   const data = options.data;
   const lines: string[] = [];
-  const bannerLines = normalizeBanner(options.banner, width);
+  const logoTier = resolveStartupLogoTier(options.columns, options.banner);
+  const bannerLines = logoTier === 'full' ? normalizeBanner(options.banner, width) : [];
 
   if (bannerLines.length > 0) {
     lines.push(...bannerLines, style.muted('Autonomous AI Engine'), '');
+  } else if (logoTier === 'compact') {
+    lines.push(style.brand('A I D E N'));
+    lines.push(style.muted('Autonomous AI Engine'));
   } else {
-    lines.push(style.brand('Aiden'));
+    lines.push(style.brand('AIDEN'));
     lines.push(style.muted('Autonomous AI Engine'));
   }
 
