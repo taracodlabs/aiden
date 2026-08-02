@@ -420,7 +420,14 @@ export class BottomRegion {
   /** Project one identity-backed live row above the composer. */
   setLiveRow(id: string, text: string): void {
     if (this.terminalLiveRows.has(id)) return;
-    const normalized = text.replace(/\r?\n$/u, '');
+    const lines = text.replace(/\r/g, '').split('\n');
+    while (lines.length > 0 && lines[0].trim().length === 0) lines.shift();
+    while (lines.length > 0 && lines[lines.length - 1]?.trim().length === 0) lines.pop();
+    const normalized = lines.join('\n');
+    if (normalized.length === 0) {
+      this.removeLiveRow(id);
+      return;
+    }
     const current = this.projection.activities[id];
     const next = reduceOperatorProjection(this.projection, current
       ? { type: 'activity.progress', id, generation: current.generation, summary: normalized }
@@ -819,6 +826,7 @@ export class BottomRegion {
     });
     const surface = this.surface();
     const frame = surface.lines.join('\n');
+    const previousLaneRows = this.laneRows;
     const geometry = this.establishGeometry(surface.laneRows);
     if (!geometry && frame === this.lastFrame && !rebuildTranscript) {
       if (epoch === this.projection.viewport.epoch) {
@@ -830,7 +838,9 @@ export class BottomRegion {
     this.rememberSurface(surface);
     const topRow = this.sink.rows() - surface.laneRows + 1;
     let sequence = geometry;
-    if (rebuildTranscript) sequence += this.transcriptFrame(surface);
+    if (rebuildTranscript || (previousLaneRows > 0 && surface.laneRows < previousLaneRows)) {
+      sequence += this.transcriptFrame(surface);
+    }
     surface.lines.forEach((line, index) => {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });
@@ -914,6 +924,8 @@ export class BottomRegion {
       laneRows: surface.laneRows,
       topRow: Math.max(1, this.sink.rows() - surface.laneRows + 1),
     };
+    const releasedRows = previousGeometry !== null
+      && surface.laneRows < previousGeometry.laneRows;
     this.geometry = nextGeometry;
     this.lastFrame = surface.lines.join('\n');
     this.rememberSurface(surface);
@@ -928,6 +940,7 @@ export class BottomRegion {
       sequence += `${this.pendingTranscriptOutput}${SAVE_TRANSCRIPT}`;
     }
     this.pendingTranscriptOutput = '';
+    if (releasedRows) sequence += this.transcriptFrame(surface);
     surface.lines.forEach((line, index) => {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });
