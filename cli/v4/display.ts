@@ -3329,7 +3329,12 @@ export class Display {
    */
   private uiTrailRow(content: string, kind: ColorKind): string {
     const pipe = this.skin.applyColors(TRAIL_PIPE, 'muted');
-    return content.split('\n').map(l => `${pipe} ${this.skin.applyColors(l, kind)}\n`).join('');
+    return content.split('\n').map((line) => {
+      const match = /^(?:(?:└|├)\s+)?([✓✕×!◐◈◇◆↻■ℹ⚠])([\s\S]*)$/u.exec(line);
+      if (!match) return `${pipe} ${this.skin.applyColors(line, kind)}\n`;
+      const prefix = line.slice(0, line.indexOf(match[1]));
+      return `${pipe} ${this.skin.applyColors(prefix, 'muted')}${this.skin.applyColors(match[1], kind)}${this.skin.applyColors(match[2], 'muted')}\n`;
+    }).join('');
   }
 
   /** Strongly colour only the structured category; keep goals and metadata muted. */
@@ -3352,7 +3357,7 @@ export class Display {
     const glyph = terminalSupportsUnicode()
       ? (status === 'paused' ? '⏸' : status === 'blocked' ? '!' : '◐')
       : terminalStateSymbol(status === 'blocked' ? 'warning' : 'running');
-    const colorKind: ColorKind = status === 'running' ? 'tool' : 'warn';
+    const colorKind: ColorKind = status === 'running' ? 'warn' : 'error';
     this.uiTaskRows.set(taskId, { label });
     const short  = label.length > 80 ? label.slice(0, 79) + '…' : label;
     // v4.8.0 Phase 2.4 — subagent kind: indent by depth inside the
