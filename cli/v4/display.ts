@@ -97,7 +97,7 @@ function truncateTerminalVisible(value: string, maxVisible: number): string {
 import { getReplyRenderer } from './replyRenderer';
 // Optional "Sources" footer when AIDEN_CITATIONS=1 (default off).
 import { renderCitationFooter } from './citationFooter';
-import { buildToolPreview } from './toolPreview';
+import { buildToolPreview, summarizeToolArguments } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
 import {
   ComposerLane,
@@ -1747,16 +1747,18 @@ export class Display {
     // meaningful primary-arg preview instead of a JSON blob. Fall back
     // to the generic `previewToolArgs` scan for tools the map doesn't
     // know about so unregistered MCP tools etc. still render readably.
-    const mapped = buildToolPreview(name, args);
-    const rawDetail = mapped ?? previewToolArgs(args);
+    const mapped = buildToolPreview(name, args, { mode: this.activityPresentationMode });
+    const rawDetail = mapped ?? previewToolArgs(args, this.activityPresentationMode);
     const detailForDisplay = (): string => {
-      if (screenOwner?.usesReflowSafeRows()) {
-        const segments = rawDetail.split(/[\\/]/u);
-        return segments[segments.length - 1] ?? rawDetail;
+      const relative = relativizeActivityText(rawDetail, process.cwd(), this.activityPresentationMode);
+      if (this.activityPresentationMode === 'full') return relative;
+      if (screenOwner?.usesReflowSafeRows() && /(?:^|_)(?:file|read|write|edit|patch|list|copy|move|delete)(?:_|$)/iu.test(name)) {
+        const [target, ...qualifiers] = relative.split(' · ');
+        const segments = target.split(/[\\/]/u);
+        const base = segments[segments.length - 1] ?? target;
+        return [base, ...qualifiers].filter(Boolean).join(' · ');
       }
-      return this.activityPresentationMode === 'full'
-        ? rawDetail
-        : truncDetail(relativizeActivityText(rawDetail, process.cwd(), 'summary'));
+      return truncDetail(relative);
     };
 
     // Semantic elapsed time comes from ActivityRegistry. A compatibility row
@@ -2178,15 +2180,10 @@ export class Display {
       return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')} ${sk.applyColors(preview, 'muted')}`;
     }
 
-    // Unknown tool — original behaviour (full JSON, 200-char cap).
-    let serialized: string;
-    try {
-      serialized = JSON.stringify(args);
-    } catch {
-      serialized = String(args);
-    }
-    if (serialized.length > 200) serialized = `${serialized.slice(0, 197)}...`;
-    return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')} ${sk.applyColors(serialized, 'muted')}`;
+    // Unknown tools stay human-readable in normal output. Raw structured
+    // arguments remain available to the execution trace and full details.
+    const summary = summarizeToolArguments(args);
+    return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')}${summary ? ` ${sk.applyColors(summary, 'muted')}` : ''}`;
   }
 
   /**
@@ -3691,7 +3688,7 @@ export interface ToolRowHandle {
  * truncates with an ellipsis at TOOL_ROW_ARG_CAP. Pure — no side
  * effects, deterministic for a given input.
  */
-export function previewToolArgs(args: unknown): string {
+export function previewToolArgs(args: unknown, mode: ActivityPresentationMode = 'summary'): string {
   if (args == null) return '';
   if (typeof args === 'string') return truncToolArg(args);
   if (typeof args !== 'object') return truncToolArg(String(args));
@@ -3710,12 +3707,9 @@ export function previewToolArgs(args: unknown): string {
         : `"${v}"`);
     }
   }
+  if (mode !== 'full') return summarizeToolArguments(obj);
   let serialized: string;
-  try {
-    serialized = JSON.stringify(obj);
-  } catch {
-    serialized = String(obj);
-  }
+  try { serialized = JSON.stringify(obj); } catch { serialized = String(obj); }
   // v4.1.4-media: an empty object serializes to '{}'. Rendering that
   // literal in the trail row is honest but ugly and reads as "buggy
   // empty args". When the model legitimately passes an empty args
@@ -3724,13 +3718,13 @@ export function previewToolArgs(args: unknown): string {
   // tools mapped in `TOOL_PRIMARY_ARG`; here we extend the same UX to
   // any unmapped-tool fallback that bottoms out at `{}`.
   if (serialized === '{}') return '';
-  return truncToolArg(serialized);
+  return mode === 'full' ? serialized : truncToolArg(serialized);
 }
 
 function truncToolArg(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim();
-  if (flat.length <= TOOL_ROW_ARG_CAP) return flat;
-  return flat.slice(0, TOOL_ROW_ARG_CAP - 1) + '…';
+  if (visibleLength(flat) <= TOOL_ROW_ARG_CAP) return flat;
+  return `${truncateVisible(flat, TOOL_ROW_ARG_CAP - 1)}…`;
 }
 
 /**

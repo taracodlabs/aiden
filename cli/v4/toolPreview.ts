@@ -13,9 +13,8 @@
  * actually useful at a glance — `command` for terminal, `path` for
  * file ops, `query` for search, etc.).
  *
- * Falls back to the original full-JSON stringification when the tool
- * isn't in the map or the primary arg is absent. This keeps unknown
- * tools rendering exactly as before — additive only.
+ * Unknown tools use a bounded human argument count in compact mode.
+ * Structured details remain available through full/debug projections.
  *
  * Adding a new tool with a non-obvious primary arg? Add it here.
  * Tools whose `args` shape is "the arg is meaningful at-a-glance"
@@ -39,6 +38,8 @@
  * Functions must return a string. Return `''` to show no preview
  * (matches the empty-key convention). Pure — no side effects.
  */
+import { truncateVisible, visibleLength } from './box';
+
 export type ToolPreviewExtractor = string | ((args: unknown) => string);
 
 /**
@@ -51,7 +52,22 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
   execute_code:      'code',
 
   // ── file ops ─────────────────────────────────────────────────────────
-  file_read:         'path',
+  file_read: (args: unknown): string => {
+    if (!args || typeof args !== 'object') return '';
+    const input = args as Record<string, unknown>;
+    const target = typeof input.path === 'string' ? input.path
+      : typeof input.file === 'string' ? input.file : '';
+    if (!target) return '';
+    const hasOffset = typeof input.offset === 'number' && Number.isFinite(input.offset);
+    const hasLimit = typeof input.limit === 'number' && Number.isFinite(input.limit);
+    if (!hasOffset && !hasLimit) return target;
+    const offset = hasOffset ? Math.max(0, Math.floor(input.offset as number)) : 0;
+    if (!hasLimit) return `${target} · from char ${offset}`;
+    const limit = Math.max(1, Math.floor(input.limit as number));
+    return `${target} · chars ${offset}–${offset + limit - 1}`;
+  },
+  read_file:          'path',
+  read_text_file:     'path',
   file_write:        'path',
   file_patch:        'path',
   file_list:         'path',
@@ -166,11 +182,63 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
 };
 
 /**
- * Maximum visible characters for the preview value. Long commands /
+ * Maximum visible terminal columns for the preview value. Long commands /
  * full file contents get truncated with an ellipsis so a single tool
  * row stays on one line at typical terminal widths.
  */
 const PREVIEW_MAX_CHARS = 120;
+
+const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/gu;
+
+function cleanPreviewText(value: string): string {
+  return value
+    .replace(ANSI_PATTERN, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function truncatePreview(value: string, columns = PREVIEW_MAX_CHARS): string {
+  const clean = cleanPreviewText(value);
+  if (visibleLength(clean) <= columns) return clean;
+  return `${truncateVisible(clean, Math.max(0, columns - 1))}…`;
+}
+
+function summarizeShellCommand(command: string): string {
+  const statements = command
+    .split(/(?:\r?\n|\s*;\s*|\s*&&\s*|\s*\|\|\s*)/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const firstStatement = statements[0] ?? command;
+  const withoutQuietRedirection = firstStatement
+    .replace(/\s+(?:\d?>|\d?>>)\s*\$null\s*$/iu, '')
+    .trim();
+  const remaining = statements.length > 1 ? ` · +${statements.length - 1} steps` : '';
+  return truncatePreview(`${withoutQuietRedirection || command}${remaining}`);
+}
+
+/** Human compact fallback for unmapped or structured tool arguments. */
+export function summarizeToolArguments(args: unknown): string {
+  if (args == null) return '';
+  if (typeof args === 'string') return truncatePreview(args);
+  if (typeof args !== 'object') return String(args);
+  if (Array.isArray(args)) return `${args.length} ${args.length === 1 ? 'item' : 'items'}`;
+  const entries = Object.entries(args as Record<string, unknown>);
+  if (entries.length === 0) return '';
+  return `${entries.length} ${entries.length === 1 ? 'argument' : 'arguments'}`;
+}
+
+function summarizeStructuredValue(value: object): string {
+  if (Array.isArray(value)) return `${value.length} ${value.length === 1 ? 'item' : 'items'}`;
+  const entries = Object.entries(value as Record<string, unknown>);
+  const safeValues = entries
+    .filter(([, value]) => ['string', 'number', 'boolean'].includes(typeof value))
+    .slice(0, 2)
+    .map(([, value]) => cleanPreviewText(String(value)))
+    .filter(Boolean);
+  if (safeValues.length > 0) return truncatePreview(safeValues.join(' · '));
+  return `${entries.length} ${entries.length === 1 ? 'argument' : 'arguments'}`;
+}
 
 /**
  * Build the per-tool preview string for `args`. Returns:
@@ -185,6 +253,7 @@ const PREVIEW_MAX_CHARS = 120;
 export function buildToolPreview(
   toolName: string,
   args: unknown,
+  opts: { mode?: 'summary' | 'full' } = {},
 ): string | null {
   if (!Object.prototype.hasOwnProperty.call(TOOL_PRIMARY_ARG, toolName)) {
     return null;
@@ -216,19 +285,15 @@ export function buildToolPreview(
       str = raw;
     } else if (typeof raw === 'number' || typeof raw === 'boolean') {
       str = String(raw);
+    } else if (opts.mode === 'full') {
+      try { str = JSON.stringify(raw); } catch { str = String(raw); }
     } else {
-      try {
-        str = JSON.stringify(raw);
-      } catch {
-        str = String(raw);
-      }
+      str = summarizeStructuredValue(raw as object);
     }
   }
 
-  // Collapse whitespace so multi-line commands stay on one preview row.
-  str = str.replace(/\s+/g, ' ').trim();
-  if (str.length > PREVIEW_MAX_CHARS) {
-    str = `${str.slice(0, PREVIEW_MAX_CHARS - 1)}…`;
+  if (opts.mode !== 'full' && toolName === 'shell_exec') {
+    return summarizeShellCommand(str);
   }
-  return str;
+  return truncatePreview(str);
 }

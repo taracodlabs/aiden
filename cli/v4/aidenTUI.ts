@@ -23,6 +23,7 @@
 import { ChatSession } from './chatSession';
 import type { ChatSessionOptions, ChatPromptApi } from './chatSession';
 import type { CommandRegistry } from './commandRegistry';
+import { buildToolPreview, summarizeToolArguments } from './toolPreview';
 
 export interface TuiOptions {
   /** Pre-built ChatSessionOptions (same shape Phase 14c hands ChatSession). */
@@ -294,8 +295,8 @@ export class AidenTUI {
       userTurn: (text: string) => `{#ff6b35-fg}you{/} ${text}`,
       agentTurn: (text: string) => `{cyan-fg}Aiden{/cyan-fg}\n${text}`,
       toolPreview: (name: string, args: unknown) => {
-        const argStr = safeJson(args).slice(0, 200);
-        return `{gray-fg}→ ${name} ${argStr}{/gray-fg}`;
+        const summary = buildToolPreview(name, args) ?? summarizeToolArguments(args);
+        return `{gray-fg}→ ${name}${summary ? ` ${summary}` : ''}{/gray-fg}`;
       },
 
       startSpinner: (text: string) => this.startTuiSpinner(text),
@@ -452,12 +453,4 @@ export class AidenTUI {
 function stripAnsi(s: string): string {
   // eslint-disable-next-line no-control-regex
   return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '');
-}
-
-function safeJson(v: unknown): string {
-  try {
-    return JSON.stringify(v);
-  } catch {
-    return String(v);
-  }
 }

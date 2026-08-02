@@ -270,6 +270,20 @@ describe('AidenTUI', () => {
     expect(out).toMatch(/try again/);
   });
 
+  it('renders a human compact tool summary without serialized arguments', () => {
+    const tui = new AidenTUI(makeOpts());
+    const display = (tui as any).session.opts.display;
+    const out = display.toolPreview('mystery_tool', {
+      include_full: true,
+      limit: 5,
+      secret: 'must-not-render',
+    });
+    expect(out).toContain('mystery_tool');
+    expect(out).not.toContain('{"');
+    expect(out).not.toContain('include_full');
+    expect(out).not.toContain('must-not-render');
+  });
+
   it('isTuiInitFailure returns true for terminfo / smartCSR errors', () => {
     expect(isTuiInitFailure(new Error('Error opening terminal: xterm-256color'))).toBe(true);
     expect(isTuiInitFailure(new Error('terminfo not found'))).toBe(true);

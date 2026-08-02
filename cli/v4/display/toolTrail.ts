@@ -22,6 +22,8 @@
  *     in full isolation.
  */
 
+import { truncateVisible, visibleLength } from '../box';
+
 /** Returned by iconForTool. */
 export interface ToolIconVerb {
   /** Single glyph rendered outside SGR so emoji native colours show. */
@@ -188,6 +190,12 @@ export function padVerb(verb: string): string {
  */
 export function truncDetail(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim();
-  if (flat.length <= TRAIL_DETAIL_CAP) return flat;
-  return flat.slice(0, TRAIL_DETAIL_CAP - 1) + '…';
+  if (visibleLength(flat) <= TRAIL_DETAIL_CAP) return flat;
+  const hard = truncateVisible(flat, TRAIL_DETAIL_CAP - 1);
+  const plain = hard.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '');
+  const boundary = plain.lastIndexOf(' ');
+  if (boundary > Math.floor(TRAIL_DETAIL_CAP / 2)) {
+    return `${truncateVisible(hard, visibleLength(plain.slice(0, boundary)))}…`;
+  }
+  return `${hard}…`;
 }

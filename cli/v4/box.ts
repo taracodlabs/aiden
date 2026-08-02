@@ -28,6 +28,9 @@
  */
 
 // ── Sharp (default) ──────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
+
 const SHARP = {
   TL: '┌',
   TR: '┐',
@@ -57,18 +60,13 @@ interface GlyphSet {
 }
 
 /**
- * Strip ANSI CSI escape sequences and return the visible length in
- * Unicode code units (`String.length`). Sufficient for all colour
- * codes we emit (`\x1b[38;2;r;g;bm`, `\x1b[39m`, `\x1b[0m`, etc.).
- *
- * Doesn't try to handle East Asian wide chars / emoji-with-VS16 — we
- * use only single-cell glyphs in box content (✓ ⚠ ✗ ⏵ ▶ ⊕). Wide-
- * char-aware width is available in `cli/v4/table.ts` via
- * `string-width`, used only by the table renderer.
+ * Strip ANSI CSI escape sequences and return physical terminal columns.
+ * Wide glyphs, combining characters, and emoji sequences are measured by
+ * `string-width`; ANSI colour bytes remain zero-width.
  */
 const ANSI_REGEX = /\x1b\[[0-9;]*[A-Za-z]/g;
 export function visibleLength(s: string): number {
-  return s.replace(ANSI_REGEX, '').length;
+  return stringWidth(s.replace(ANSI_REGEX, ''));
 }
 
 /**
@@ -80,10 +78,10 @@ export function visibleLength(s: string): number {
 export function truncateVisible(s: string, maxVisible: number): string {
   if (visibleLength(s) <= maxVisible) return s;
   let out = '';
-  let visible = 0;
+  let plain = '';
   let i = 0;
   let sawAnsi = false;
-  while (i < s.length && visible < maxVisible) {
+  while (i < s.length) {
     const ch = s.charCodeAt(i);
     if (ch === 0x1b && s[i + 1] === '[') {
       const m = s.slice(i).match(/^\x1b\[[0-9;]*[A-Za-z]/);
@@ -94,9 +92,13 @@ export function truncateVisible(s: string, maxVisible: number): string {
         continue;
       }
     }
-    out += s[i];
-    visible += 1;
-    i += 1;
+    const codePoint = s.codePointAt(i);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (stringWidth(plain + character) > maxVisible) break;
+    out += character;
+    plain += character;
+    i += character.length;
   }
   return sawAnsi ? out + '\x1b[0m' : out;
 }

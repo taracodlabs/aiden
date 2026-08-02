@@ -16,6 +16,12 @@ describe('buildToolPreview', () => {
     expect(buildToolPreview('shell_exec', { command: 'npm test' })).toBe('npm test');
   });
 
+  it('summarizes compound PowerShell without displaying a partial expression', () => {
+    const command = 'where.exe aiden 2>$null; where.exe aiden-runtime 2>$null; Get-Command aiden';
+    expect(buildToolPreview('shell_exec', { command })).toBe('where.exe aiden · +2 steps');
+    expect(buildToolPreview('shell_exec', { command }, { mode: 'full' })).toBe(command);
+  });
+
   it('extracts file path', () => {
     expect(buildToolPreview('file_read', { path: 'README.md' })).toBe('README.md');
     expect(buildToolPreview('file_write', { path: '/tmp/x.md', content: 'hi' })).toBe('/tmp/x.md');
@@ -58,15 +64,39 @@ describe('buildToolPreview', () => {
     expect(out).toMatch(/…$/);
   });
 
-  it('collapses whitespace so multi-line values stay one-line', () => {
+  it('summarizes multi-line commands without exposing a partial command', () => {
     const out = buildToolPreview('shell_exec', { command: 'echo a\n  echo b\n\techo c' });
-    expect(out).toBe('echo a echo b echo c');
+    expect(out).toBe('echo a · +2 steps');
   });
 
   it('serialises non-string primary args via JSON.stringify', () => {
-    // Force a primary arg whose value is an object.
+    // Structured values stay human-readable in the compact activity surface.
     expect(buildToolPreview('skill_manage', { action: { kind: 'install', id: 'x' } }))
-      .toBe('{"kind":"install","id":"x"}');
+      .toBe('install · x');
+    expect(buildToolPreview(
+      'skill_manage',
+      { action: { kind: 'install', id: 'x' } },
+      { mode: 'full' },
+    )).toBe('{"kind":"install","id":"x"}');
+  });
+
+  it('keeps repeated file-read ranges distinct', () => {
+    expect(buildToolPreview('file_read', {
+      path: 'C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts',
+      offset: 120,
+      limit: 80,
+    })).toBe('C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts · chars 120–199');
+    expect(buildToolPreview('file_read', {
+      path: 'C:\\Users\\shiva\\DevOS\\cli\\v4\\display.ts',
+      offset: 200,
+      limit: 80,
+    })).toContain('chars 200–279');
+  });
+
+  it('never cuts a long Unicode preview by JavaScript code units', () => {
+    const out = buildToolPreview('shell_exec', { command: '界'.repeat(100) });
+    expect(out).not.toContain('\uFFFD');
+    expect(out).toMatch(/…$/u);
   });
 
   it('handles missing primary arg gracefully (known tool, but no value)', () => {

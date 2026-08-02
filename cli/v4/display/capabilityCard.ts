@@ -24,7 +24,7 @@
 
 import type { CapabilityCardData } from '../../../providers/v4/types';
 import type { ColorKind } from '../skinEngine';
-import { boxSharp, visibleLength } from '../box';
+import { boxSharp, truncateVisible, visibleLength } from '../box';
 
 type Colorize = (text: string, kind: ColorKind) => string;
 
@@ -159,7 +159,7 @@ export function truncToContent(s: string): string {
   // Reserve 6 chars for "  ✓ " prefix + 2 for border padding margin.
   const cap = CONTENT_WIDTH - 6;
   if (visibleLength(s) <= cap) return s;
-  return s.slice(0, cap - 1) + '…';
+  return `${truncateVisible(s, cap - 1)}…`;
 }
 
 /**

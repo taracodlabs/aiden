@@ -7,6 +7,7 @@ import {
   TRAIL_DETAIL_CAP,
   TRAIL_PIPE,
 } from '../../../cli/v4/display/toolTrail';
+import { visibleLength } from '../../../cli/v4/box';
 
 /**
  * Pure-function unit tests for the action-trail lookup.
@@ -157,5 +158,26 @@ describe('truncDetail', () => {
   });
   it('trims leading/trailing whitespace before measuring', () => {
     expect(truncDetail('   hello   ')).toBe('hello');
+  });
+
+  it('caps ANSI-coloured text by visible terminal width without splitting escapes', () => {
+    const orange = '\x1b[38;2;255;107;53m';
+    const reset = '\x1b[0m';
+    const out = truncDetail(`${orange}${'segment '.repeat(12)}${reset}`);
+    expect(visibleLength(out)).toBeLessThanOrEqual(TRAIL_DETAIL_CAP);
+    expect(out).not.toMatch(/\x1b\[[0-9;]*$/u);
+  });
+
+  it('measures wide Unicode by terminal columns and keeps whole glyphs', () => {
+    const out = truncDetail('界'.repeat(TRAIL_DETAIL_CAP));
+    expect(visibleLength(out)).toBeLessThanOrEqual(TRAIL_DETAIL_CAP);
+    expect(out.endsWith('…')).toBe(true);
+    expect(out).not.toContain('\uFFFD');
+  });
+
+  it('prefers a word boundary over a mid-word cut', () => {
+    const out = truncDetail('inspect repository configuration and dependency metadata completely');
+    expect(out.endsWith('…')).toBe(true);
+    expect(out).not.toMatch(/configur…$/u);
   });
 });

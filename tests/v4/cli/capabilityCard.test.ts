@@ -159,4 +159,12 @@ describe('truncToContent', () => {
     expect(out.endsWith('…')).toBe(true);
     expect(out.length).toBeLessThan(long.length);
   });
+
+  it('uses terminal width for ANSI and wide Unicode content', () => {
+    const out = truncToContent(`\x1b[38;2;255;107;53m${'界'.repeat(80)}\x1b[0m`);
+    expect(require('string-width')(out.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')))
+      .toBeLessThanOrEqual(58);
+    expect(out).not.toContain('\uFFFD');
+    expect(out).toMatch(/…$/u);
+  });
 });

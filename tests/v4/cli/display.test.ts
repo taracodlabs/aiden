@@ -10,6 +10,7 @@ import {
   isPreFramedLine,
   TRAIL_HIDE_TOOLS,
   makeNoOpToolRowHandle,
+  previewToolArgs,
 } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 import type { ActivitySnapshot } from '../../../cli/v4/activityRegistry';
@@ -24,6 +25,26 @@ function stripAnsi(s: string): string {
     '',
   );
 }
+
+describe('compact activity argument summaries', () => {
+  it('does not expose raw JSON for an unmapped structured argument object', () => {
+    const summary = previewToolArgs({ include_full: true, limit: 5, private_value: 'hidden' });
+    expect(summary).not.toContain('{');
+    expect(summary).not.toContain('private_value');
+    expect(summary).not.toContain('hidden');
+    expect(summary).toMatch(/3 (?:arguments|options)/u);
+    expect(previewToolArgs(
+      { include_full: true, limit: 5, private_value: 'hidden' },
+      'full',
+    )).toContain('"private_value":"hidden"');
+  });
+
+  it('keeps a recognizable scalar target without serializing sibling fields', () => {
+    const summary = previewToolArgs({ name: 'repository scan', include_full: true, limit: 5 });
+    expect(summary).toContain('repository scan');
+    expect(summary).not.toContain('include_full');
+  });
+});
 
 describe('SkinEngine', () => {
   let engine: SkinEngine;
@@ -152,11 +173,13 @@ describe('Display', () => {
     expect(out).toContain('/tmp/x');
   });
 
-  it('toolPreview truncates very long args', () => {
+  it('toolPreview summarizes unknown structured args without raw JSON', () => {
     const big = { blob: 'x'.repeat(2000) };
     const out = stripAnsi(display.toolPreview('huge', big));
     expect(out.length).toBeLessThan(260);
-    expect(out).toContain('...');
+    expect(out).toContain('1 argument');
+    expect(out).not.toContain('{');
+    expect(out).not.toContain('blob');
   });
 
   it('error includes suggestion when provided', () => {
@@ -350,6 +373,16 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
   });
   afterEach(() => {
     delete process.env.AIDEN_UI_ICONS;
+  });
+
+  it('keeps repeated reads of one file distinct by inspected range', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.toolRow('file_read', { path: 'cli/v4/display.ts', offset: 0, limit: 80 }).ok(5);
+    d.toolRow('file_read', { path: 'cli/v4/display.ts', offset: 80, limit: 80 }).ok(6);
+    const output = stripAnsi(chunks.join(''));
+    expect(output).toContain('display.ts · chars 0–79');
+    expect(output).toContain('display.ts · chars 80–159');
+    expect(output.match(/display\.ts/gu)).toHaveLength(2);
   });
 
   // ── Success is SILENT ───────────────────────────────────────────────

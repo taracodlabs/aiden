@@ -89,6 +89,20 @@ describe('cli/v4/box helpers', () => {
     expect(out).toBe('thiswi');
   });
 
+  it('measures wide Unicode glyphs by terminal columns', () => {
+    expect(visibleLength('A界B')).toBe(4);
+    expect(visibleLength(`${ORANGE}A界B${RESET}`)).toBe(4);
+  });
+
+  it('never splits a wide Unicode glyph or an ANSI sequence', () => {
+    const out = truncateVisible(`${ORANGE}A界B${RESET}`, 3);
+    expect(visibleLength(out)).toBe(3);
+    expect(out).toContain('A界');
+    expect(out).not.toContain('B');
+    expect(out.startsWith(ORANGE)).toBe(true);
+    expect(out.endsWith('\x1b[0m')).toBe(true);
+  });
+
   it('boxTopTitled uses visible length so coloured titles dont skew the dashes', () => {
     const plain = boxTopTitled('Health Check', 50);
     const coloured = boxTopTitled(`${ORANGE}Health Check${RESET}`, 50);
