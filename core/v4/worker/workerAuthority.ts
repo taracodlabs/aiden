@@ -14,6 +14,11 @@ import {
   type WorkerContextEnvelopeRecord,
   type WorkerEventKind,
   type WorkerEventRecord,
+  type WorkerGroupMemberOutcome,
+  type WorkerGroupMemberRecord,
+  type WorkerGroupPolicy,
+  type WorkerGroupRecord,
+  type WorkerGroupState,
   type WorkerProjection,
   type WorkerProviderBindingRecord,
   type WorkerResultPayloadV1,
@@ -116,6 +121,39 @@ interface RecordResultFromRunCommand extends ChildAuthorityCommand {
   now?: number;
 }
 
+interface CreateWorkerGroupCommand extends ParentAuthorityCommand {
+  groupId: string;
+  schemaVersion: 1;
+  policy: WorkerGroupPolicy;
+  members: ReadonlyArray<{ memberId: string; ordinal: number; requestedProviderId: string }>;
+}
+
+interface BindWorkerGroupMemberCommand extends ParentAuthorityCommand {
+  groupId: string;
+  memberId: string;
+  assignmentId: string;
+  childJobId: string;
+  childAttemptId: string;
+  childGeneration: number;
+  providerBindingId: string;
+}
+
+interface SettleWorkerGroupMemberCommand extends ParentAuthorityCommand {
+  groupId: string;
+  memberId: string;
+  outcome: Exclude<WorkerGroupMemberOutcome, 'pending' | 'admitted'>;
+  workerResultId?: string | null;
+  resultHash?: string | null;
+  reason: string;
+}
+
+interface SettleWorkerGroupCommand extends ParentAuthorityCommand {
+  groupId: string;
+  state: 'settled' | 'blocked_unknown';
+  aggregateHash: string;
+  reason: string;
+}
+
 export interface WorkerAuthority {
   createWorkerProviderBinding(command: ProviderBindingCommand): WorkerProviderBindingRecord;
   createWorkerContextEnvelope(command: ContextEnvelopeCommand): WorkerContextEnvelopeRecord;
@@ -124,6 +162,45 @@ export interface WorkerAuthority {
   bindWorkerRunFromAssignment(command: BindRunFromAssignmentCommand): WorkerRunRecord;
   recordWorkerResult(command: RecordResultCommand): WorkerResultRecord;
   recordWorkerResultFromRun(command: RecordResultFromRunCommand): WorkerResultRecord;
+  createWorkerGroup(command: CreateWorkerGroupCommand): WorkerGroupRecord;
+  bindWorkerGroupMember(command: BindWorkerGroupMemberCommand): WorkerGroupMemberRecord;
+  completeWorkerGroupAdmission(command: ParentAuthorityCommand & { groupId: string }): WorkerGroupRecord;
+  settleWorkerGroupMember(command: SettleWorkerGroupMemberCommand): WorkerGroupMemberRecord;
+  reconcileWorkerGroupMember(command: {
+    groupId: string;
+    memberId: string;
+    outcome: Exclude<WorkerGroupMemberOutcome, 'pending' | 'admitted' | 'verified'>;
+    reason: string;
+    producer: string;
+    idempotencyKey: string;
+    now?: number;
+  }): WorkerGroupMemberRecord;
+  requestWorkerGroupInterruption(command: ParentAuthorityCommand & {
+    groupId: string;
+    kind: 'cancellation' | 'timeout';
+    reason: string;
+  }): WorkerGroupRecord;
+  requestWorkerGroupInterruptionForParent(command: ParentAuthorityCommand & {
+    kind: 'cancellation' | 'timeout';
+    reason: string;
+  }): number;
+  settleWorkerGroup(command: SettleWorkerGroupCommand): WorkerGroupRecord;
+  reconcileWorkerGroup(command: {
+    groupId: string;
+    state: 'settled' | 'blocked_unknown';
+    aggregateHash: string;
+    reason: string;
+    producer: string;
+    idempotencyKey: string;
+    now?: number;
+  }): WorkerGroupRecord;
+  getWorkerGroup(groupId: string): WorkerGroupRecord | null;
+  getWorkerGroupMember(memberId: string): WorkerGroupMemberRecord | null;
+  getWorkerGroupMemberForAssignment(assignmentId: string): WorkerGroupMemberRecord | null;
+  getWorkerGroupForAssignment(assignmentId: string): WorkerGroupRecord | null;
+  listWorkerGroupMembers(groupId: string): WorkerGroupMemberRecord[];
+  listWorkerGroupsForParent(parentJobId: string): WorkerGroupRecord[];
+  listWorkerGroupsPendingSettlement(input?: { limit?: number; afterGroupId?: string }): WorkerGroupRecord[];
   getWorkerAssignment(id: string): WorkerAssignmentRecord | null;
   getWorkerRun(id: string): WorkerRunRecord | null;
   getWorkerProviderBinding(id: string): WorkerProviderBindingRecord | null;
@@ -152,6 +229,25 @@ type RunRow = {
   child_job_id: string; child_attempt_id: string; child_generation: number;
   execution_graph_node_id: string | null; provider_binding_id: string; context_envelope_id: string;
   accepted_result_id: string | null; created_at: number;
+};
+
+type GroupRow = {
+  group_id: string; schema_version: number; idempotency_key: string;
+  parent_job_id: string; parent_attempt_id: string; parent_generation: number; parent_fence_digest: string;
+  policy: WorkerGroupPolicy; state: WorkerGroupState; requested_member_count: number;
+  admitted_member_count: number; settled_member_count: number; successful_member_count: number;
+  failed_member_count: number; unknown_member_count: number; cancelled_member_count: number;
+  input_hash: string; aggregate_hash: string | null; created_at: number;
+  cancellation_requested_at: number | null; timeout_requested_at: number | null;
+  settled_at: number | null; settlement_version: number; settlement_reason: string | null;
+};
+
+type GroupMemberRow = {
+  group_id: string; member_id: string; ordinal: number; requested_provider_id: string;
+  assignment_id: string | null; child_job_id: string | null; child_attempt_id: string | null;
+  child_generation: number | null; provider_binding_id: string | null; outcome: WorkerGroupMemberOutcome;
+  worker_result_id: string | null; result_hash: string | null; joined_at: number | null;
+  settlement_reason: string | null; created_at: number; updated_at: number;
 };
 
 type BindingRow = {
@@ -252,6 +348,34 @@ function mapResult(row: ResultRow): WorkerResultRecord {
     acceptanceState: row.acceptance_state, rejectionCode: row.rejection_code,
     rejectionReason: row.rejection_reason, createdAt: row.created_at,
     acceptedAt: row.accepted_at, rejectedAt: row.rejected_at,
+  };
+}
+
+function mapGroup(row: GroupRow): WorkerGroupRecord {
+  return {
+    groupId: row.group_id, schemaVersion: 1, idempotencyKey: row.idempotency_key,
+    parentJobId: row.parent_job_id, parentAttemptId: row.parent_attempt_id,
+    parentGeneration: row.parent_generation, parentFenceDigest: row.parent_fence_digest,
+    policy: row.policy, state: row.state, requestedMemberCount: row.requested_member_count,
+    admittedMemberCount: row.admitted_member_count, settledMemberCount: row.settled_member_count,
+    successfulMemberCount: row.successful_member_count, failedMemberCount: row.failed_member_count,
+    unknownMemberCount: row.unknown_member_count, cancelledMemberCount: row.cancelled_member_count,
+    inputHash: row.input_hash, aggregateHash: row.aggregate_hash, createdAt: row.created_at,
+    cancellationRequestedAt: row.cancellation_requested_at, timeoutRequestedAt: row.timeout_requested_at,
+    settledAt: row.settled_at, settlementVersion: row.settlement_version,
+    settlementReason: row.settlement_reason,
+  };
+}
+
+function mapGroupMember(row: GroupMemberRow): WorkerGroupMemberRecord {
+  return {
+    groupId: row.group_id, memberId: row.member_id, ordinal: row.ordinal,
+    requestedProviderId: row.requested_provider_id, assignmentId: row.assignment_id,
+    childJobId: row.child_job_id, childAttemptId: row.child_attempt_id,
+    childGeneration: row.child_generation, providerBindingId: row.provider_binding_id,
+    outcome: row.outcome, workerResultId: row.worker_result_id, resultHash: row.result_hash,
+    joinedAt: row.joined_at, settlementReason: row.settlement_reason,
+    createdAt: row.created_at, updatedAt: row.updated_at,
   };
 }
 
@@ -449,6 +573,14 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
   const getResult = (id: string): WorkerResultRecord | null => {
     const row = db.prepare('SELECT * FROM worker_results WHERE worker_result_id=?').get(id) as ResultRow | undefined;
     return row ? mapResult(row) : null;
+  };
+  const getGroup = (id: string): WorkerGroupRecord | null => {
+    const row = db.prepare('SELECT * FROM worker_groups WHERE group_id=?').get(id) as GroupRow | undefined;
+    return row ? mapGroup(row) : null;
+  };
+  const getGroupMember = (id: string): WorkerGroupMemberRecord | null => {
+    const row = db.prepare('SELECT * FROM worker_group_members WHERE member_id=?').get(id) as GroupMemberRow | undefined;
+    return row ? mapGroupMember(row) : null;
   };
 
   const parentFence = (command: ParentAuthorityCommand): { runId: number } => {
@@ -917,6 +1049,368 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
     return getResult(command.workerResultId)!;
   }).immediate;
 
+  const refreshGroupCounts = (groupId: string, now: number): WorkerGroupRecord => {
+    const counts = db.prepare(
+      `SELECT COUNT(*) AS total,
+              SUM(CASE WHEN assignment_id IS NOT NULL THEN 1 ELSE 0 END) AS admitted,
+              SUM(CASE WHEN outcome NOT IN ('pending','admitted') THEN 1 ELSE 0 END) AS settled,
+              SUM(CASE WHEN outcome='verified' THEN 1 ELSE 0 END) AS successful,
+              SUM(CASE WHEN outcome IN ('rejected','failed','blocked','timed_out') THEN 1 ELSE 0 END) AS failed,
+              SUM(CASE WHEN outcome='unknown' THEN 1 ELSE 0 END) AS unknown_count,
+              SUM(CASE WHEN outcome='cancelled' THEN 1 ELSE 0 END) AS cancelled
+         FROM worker_group_members WHERE group_id=?`,
+    ).get(groupId) as {
+      total: number; admitted: number | null; settled: number | null; successful: number | null;
+      failed: number | null; unknown_count: number | null; cancelled: number | null;
+    };
+    db.prepare(
+      `UPDATE worker_groups
+          SET admitted_member_count=?,settled_member_count=?,successful_member_count=?,
+              failed_member_count=?,unknown_member_count=?,cancelled_member_count=?,
+              state=CASE WHEN state='admitting' AND ?=requested_member_count THEN 'active' ELSE state END
+        WHERE group_id=?`,
+    ).run(
+      counts.admitted ?? 0, counts.settled ?? 0, counts.successful ?? 0,
+      counts.failed ?? 0, counts.unknown_count ?? 0, counts.cancelled ?? 0,
+      counts.admitted ?? 0, groupId,
+    );
+    const group = getGroup(groupId);
+    if (!group) throw new WorkerAuthorityError('not_found', 'Worker group was not found');
+    void now;
+    return group;
+  };
+
+  const createGroup = db.transaction((command: CreateWorkerGroupCommand): WorkerGroupRecord => {
+    assertId(command.groupId, 'Worker group identity');
+    assertId(command.idempotencyKey, 'Worker group idempotency key');
+    if (command.schemaVersion !== 1 || !['require_all', 'allow_partial'].includes(command.policy)) {
+      throw new WorkerAuthorityError('invalid_contract', 'Worker group contract is invalid');
+    }
+    if (command.members.length < 1 || command.members.length > 4) {
+      throw new WorkerAuthorityError('limit_exceeded', 'Worker group size exceeds the maximum of 4');
+    }
+    const memberIds = new Set<string>();
+    const ordinals = new Set<number>();
+    for (const member of command.members) {
+      assertId(member.memberId, 'Worker group member identity');
+      assertString(member.requestedProviderId, 'Worker group provider identity', 192);
+      if (!Number.isSafeInteger(member.ordinal) || member.ordinal < 1 || member.ordinal > 4
+        || memberIds.has(member.memberId) || ordinals.has(member.ordinal)) {
+        throw new WorkerAuthorityError('invalid_contract', 'Worker group member identity or ordinal is invalid');
+      }
+      memberIds.add(member.memberId);
+      ordinals.add(member.ordinal);
+    }
+    const inputHash = computeWorkerDigest({
+      groupId: command.groupId, parentJobId: command.parentJobId,
+      parentAttemptId: command.parentAttemptId, parentGeneration: command.parentGeneration,
+      policy: command.policy,
+      members: [...command.members].sort((a, b) => a.ordinal - b.ordinal || a.memberId.localeCompare(b.memberId)),
+    });
+    const existing = db.prepare(
+      `SELECT * FROM worker_groups
+        WHERE parent_job_id=? AND parent_attempt_id=? AND parent_generation=? AND idempotency_key=?`,
+    ).get(
+      command.parentJobId, command.parentAttemptId, command.parentGeneration, command.idempotencyKey,
+    ) as GroupRow | undefined;
+    if (existing) {
+      if (existing.group_id !== command.groupId || existing.input_hash !== inputHash) {
+        throw new WorkerAuthorityError('idempotency_conflict', 'Worker group idempotency key has different input');
+      }
+      return mapGroup(existing);
+    }
+    if (getGroup(command.groupId)) throw new WorkerAuthorityError('immutable_conflict', 'Worker group identity already exists');
+    const { runId } = parentFence(command);
+    const now = command.now ?? Date.now();
+    const parentFenceDigest = createHash('sha256').update(command.parentFenceToken).digest('hex');
+    db.prepare(
+      `INSERT INTO worker_groups
+         (group_id,schema_version,idempotency_key,parent_job_id,parent_attempt_id,parent_generation,
+          parent_fence_digest,policy,state,requested_member_count,input_hash,created_at)
+       VALUES (?,?,?,?,?,?,?,?,'admitting',?,?,?)`,
+    ).run(
+      command.groupId, 1, command.idempotencyKey, command.parentJobId, command.parentAttemptId,
+      command.parentGeneration, parentFenceDigest, command.policy, command.members.length, inputHash, now,
+    );
+    const insert = db.prepare(
+      `INSERT INTO worker_group_members
+         (group_id,member_id,ordinal,requested_provider_id,outcome,created_at,updated_at)
+       VALUES (?,?,?,?,'pending',?,?)`,
+    );
+    for (const member of command.members) {
+      insert.run(command.groupId, member.memberId, member.ordinal, member.requestedProviderId, now, now);
+    }
+    append(command, runId, 'worker.group_created', {
+      groupId: command.groupId, policy: command.policy, memberCount: command.members.length,
+    }, `group-created:${command.groupId}`);
+    return getGroup(command.groupId)!;
+  }).immediate;
+
+  const bindGroupMember = db.transaction((command: BindWorkerGroupMemberCommand): WorkerGroupMemberRecord => {
+    const { runId } = parentFence(command);
+    const group = getGroup(command.groupId);
+    const member = getGroupMember(command.memberId);
+    const assignment = getAssignment(command.assignmentId);
+    const binding = getBinding(command.providerBindingId);
+    if (!group || !member || member.groupId !== group.groupId
+      || group.parentJobId !== command.parentJobId || group.parentAttemptId !== command.parentAttemptId
+      || group.parentGeneration !== command.parentGeneration || !assignment
+      || assignment.parentJobId !== command.parentJobId || assignment.parentAttemptId !== command.parentAttemptId
+      || assignment.parentGeneration !== command.parentGeneration || assignment.childJobId !== command.childJobId
+      || assignment.providerBindingId !== command.providerBindingId || !binding
+      || binding.providerId !== member.requestedProviderId) {
+      throw new WorkerAuthorityError('lineage_mismatch', 'Worker group member lineage is invalid');
+    }
+    const same = member.assignmentId === command.assignmentId && member.childJobId === command.childJobId
+      && member.childAttemptId === command.childAttemptId && member.childGeneration === command.childGeneration
+      && member.providerBindingId === command.providerBindingId;
+    if (member.assignmentId !== null) {
+      if (!same) throw new WorkerAuthorityError('immutable_conflict', 'Worker group member binding is immutable');
+      return member;
+    }
+    const now = command.now ?? Date.now();
+    db.prepare(
+      `UPDATE worker_group_members
+          SET assignment_id=?,child_job_id=?,child_attempt_id=?,child_generation=?,provider_binding_id=?,
+              outcome='admitted',updated_at=? WHERE member_id=? AND group_id=? AND assignment_id IS NULL`,
+    ).run(
+      command.assignmentId, command.childJobId, command.childAttemptId, command.childGeneration,
+      command.providerBindingId, now, command.memberId, command.groupId,
+    );
+    refreshGroupCounts(command.groupId, now);
+    append(command, runId, 'worker.group_member_bound', {
+      groupId: command.groupId, memberId: command.memberId, ordinal: member.ordinal,
+      assignmentId: command.assignmentId, childJobId: command.childJobId,
+    }, `group-member-bound:${command.memberId}`);
+    return getGroupMember(command.memberId)!;
+  }).immediate;
+
+  const settleGroupMember = db.transaction((command: SettleWorkerGroupMemberCommand): WorkerGroupMemberRecord => {
+    const { runId } = parentFence(command);
+    assertString(command.reason, 'Worker group settlement reason', 192);
+    const group = getGroup(command.groupId);
+    const member = getGroupMember(command.memberId);
+    if (!group || !member || member.groupId !== group.groupId
+      || group.parentJobId !== command.parentJobId || group.parentAttemptId !== command.parentAttemptId
+      || group.parentGeneration !== command.parentGeneration) {
+      throw new WorkerAuthorityError('lineage_mismatch', 'Worker group settlement lineage is invalid');
+    }
+    const resultId = command.workerResultId ?? null;
+    const resultHash = command.resultHash ?? null;
+    if (command.outcome === 'verified') {
+      const result = resultId ? getResult(resultId) : null;
+      const verification = result ? db.prepare(
+        `SELECT 1 FROM run_events
+          WHERE job_id=? AND attempt_id=? AND generation=?
+            AND kind='worker.parent_verification_completed'
+            AND json_extract(payload,'$.workerResultId')=? LIMIT 1`,
+      ).get(
+        command.parentJobId, command.parentAttemptId, command.parentGeneration, result.workerResultId,
+      ) : undefined;
+      if (!result || result.acceptanceState !== 'accepted' || result.assignmentId !== member.assignmentId
+        || result.resultHash !== resultHash || !verification) {
+        throw new WorkerAuthorityError(
+          'verification_required',
+          'Verified group member requires an independently verified exact Worker result',
+        );
+      }
+    }
+    if (!['pending', 'admitted'].includes(member.outcome)) {
+      const same = member.outcome === command.outcome && member.workerResultId === resultId
+        && member.resultHash === resultHash && member.settlementReason === command.reason;
+      if (!same) throw new WorkerAuthorityError('final_result_conflict', 'Worker group member result cannot be replaced');
+      return member;
+    }
+    const now = command.now ?? Date.now();
+    db.prepare(
+      `UPDATE worker_group_members SET outcome=?,worker_result_id=?,result_hash=?,joined_at=?,
+              settlement_reason=?,updated_at=? WHERE member_id=? AND group_id=?`,
+    ).run(command.outcome, resultId, resultHash, now, command.reason, now, command.memberId, command.groupId);
+    refreshGroupCounts(command.groupId, now);
+    append(command, runId, 'worker.group_member_settled', {
+      groupId: command.groupId, memberId: command.memberId, outcome: command.outcome,
+      workerResultId: resultId, resultHash,
+    }, `group-member-settled:${command.memberId}`);
+    return getGroupMember(command.memberId)!;
+  }).immediate;
+
+  const completeGroupAdmission = db.transaction((
+    command: ParentAuthorityCommand & { groupId: string },
+  ): WorkerGroupRecord => {
+    const { runId } = parentFence(command);
+    const group = refreshGroupCounts(command.groupId, command.now ?? Date.now());
+    if (group.parentJobId !== command.parentJobId || group.parentAttemptId !== command.parentAttemptId
+      || group.parentGeneration !== command.parentGeneration) {
+      throw new WorkerAuthorityError('lineage_mismatch', 'Worker group admission lineage is invalid');
+    }
+    if (group.state !== 'admitting') return group;
+    const unresolved = db.prepare(
+      `SELECT COUNT(*) AS count FROM worker_group_members
+        WHERE group_id=? AND assignment_id IS NULL AND outcome='pending'`,
+    ).get(command.groupId) as { count: number };
+    if (unresolved.count !== 0) {
+      throw new WorkerAuthorityError('incomplete_group', 'Worker group admission has unresolved members');
+    }
+    db.prepare("UPDATE worker_groups SET state='active',settlement_version=settlement_version+1 WHERE group_id=?")
+      .run(command.groupId);
+    append(command, runId, 'worker.group_admission_completed', {
+      groupId: command.groupId,
+      admittedMemberCount: group.admittedMemberCount,
+      rejectedMemberCount: group.requestedMemberCount - group.admittedMemberCount,
+    }, `group-admission-completed:${command.groupId}`);
+    return getGroup(command.groupId)!;
+  }).immediate;
+
+  const groupProjectionRun = (group: WorkerGroupRecord): number => {
+    const row = db.prepare(
+      'SELECT id FROM runs WHERE task_id=? AND attempt_id=? AND generation=?',
+    ).get(group.parentJobId, group.parentAttemptId, group.parentGeneration) as { id: number } | undefined;
+    if (!row) throw new WorkerAuthorityError('lineage_mismatch', 'Worker group parent Attempt is unavailable');
+    return row.id;
+  };
+
+  const appendGroupProjection = (
+    group: WorkerGroupRecord,
+    runId: number,
+    producer: string,
+    idempotencyKey: string,
+    kind: WorkerEventKind,
+    payload: Record<string, unknown>,
+  ): void => {
+    deps.appendOrderedEvent({
+      jobId: group.parentJobId,
+      runId,
+      attemptId: group.parentAttemptId,
+      generation: group.parentGeneration,
+      kind,
+      payload,
+      producer,
+      idempotencyKey,
+    });
+  };
+
+  const reconcileGroupMember = db.transaction((command: Parameters<WorkerAuthority['reconcileWorkerGroupMember']>[0]) => {
+    assertString(command.reason, 'Worker group reconciliation reason', 192);
+    const group = getGroup(command.groupId);
+    const member = getGroupMember(command.memberId);
+    if (!group || !member || member.groupId !== group.groupId) {
+      throw new WorkerAuthorityError('lineage_mismatch', 'Worker group reconciliation lineage is invalid');
+    }
+    if (!['pending', 'admitted'].includes(member.outcome)) {
+      if (member.outcome !== command.outcome || member.settlementReason !== command.reason) {
+        throw new WorkerAuthorityError('final_result_conflict', 'Worker group member result cannot be replaced');
+      }
+      return member;
+    }
+    const child = member.childJobId ? db.prepare('SELECT status FROM tasks WHERE id=?')
+      .get(member.childJobId) as { status: string } | undefined : undefined;
+    const canonical = command.outcome === 'rejected'
+      ? member.childJobId === null && member.assignmentId === null
+      : command.outcome === 'timed_out'
+        ? group.timeoutRequestedAt !== null && child?.status === 'cancelled'
+        : command.outcome === 'cancelled'
+          ? child?.status === 'cancelled'
+          : command.outcome === 'failed'
+            ? ['failed', 'crashed', 'dead_letter'].includes(child?.status ?? '')
+            : command.outcome === 'blocked'
+              ? child?.status === 'blocked'
+              : command.outcome === 'unknown' && child?.status === 'unknown';
+    if (!canonical) {
+      throw new WorkerAuthorityError('verification_required', 'Worker group projection does not match canonical child state');
+    }
+    const now = command.now ?? Date.now();
+    db.prepare(
+      `UPDATE worker_group_members SET outcome=?,joined_at=?,settlement_reason=?,updated_at=?
+        WHERE group_id=? AND member_id=? AND outcome IN ('pending','admitted')`,
+    ).run(command.outcome, now, command.reason, now, group.groupId, member.memberId);
+    refreshGroupCounts(group.groupId, now);
+    appendGroupProjection(
+      group, groupProjectionRun(group), command.producer, command.idempotencyKey,
+      'worker.group_member_settled',
+      { groupId: group.groupId, memberId: member.memberId, outcome: command.outcome },
+    );
+    return getGroupMember(member.memberId)!;
+  }).immediate;
+
+  const requestGroupInterruption = db.transaction((command: ParentAuthorityCommand & {
+    groupId: string; kind: 'cancellation' | 'timeout'; reason: string;
+  }): WorkerGroupRecord => {
+    const { runId } = parentFence(command);
+    const group = getGroup(command.groupId);
+    if (!group || group.parentJobId !== command.parentJobId || group.parentAttemptId !== command.parentAttemptId
+      || group.parentGeneration !== command.parentGeneration) {
+      throw new WorkerAuthorityError('lineage_mismatch', 'Worker group interruption lineage is invalid');
+    }
+    const timestamp = command.kind === 'cancellation' ? group.cancellationRequestedAt : group.timeoutRequestedAt;
+    if (timestamp !== null) return group;
+    const now = command.now ?? Date.now();
+    const column = command.kind === 'cancellation' ? 'cancellation_requested_at' : 'timeout_requested_at';
+    const state = command.kind === 'cancellation' ? 'cancelling' : 'timed_out';
+    db.prepare(
+      `UPDATE worker_groups SET ${column}=?,state=?,settlement_reason=?,settlement_version=settlement_version+1
+        WHERE group_id=?`,
+    ).run(now, state, command.reason, command.groupId);
+    append(command, runId, 'worker.group_interruption_requested', {
+      groupId: command.groupId, kind: command.kind, reason: command.reason,
+    }, `group-${command.kind}-requested:${command.groupId}`);
+    return getGroup(command.groupId)!;
+  }).immediate;
+
+  const settleGroup = db.transaction((command: SettleWorkerGroupCommand): WorkerGroupRecord => {
+    const { runId } = parentFence(command);
+    assertHash(command.aggregateHash, 'Worker group aggregate hash');
+    assertString(command.reason, 'Worker group settlement reason', 192);
+    const group = refreshGroupCounts(command.groupId, command.now ?? Date.now());
+    if (group.parentJobId !== command.parentJobId || group.parentAttemptId !== command.parentAttemptId
+      || group.parentGeneration !== command.parentGeneration) {
+      throw new WorkerAuthorityError('lineage_mismatch', 'Worker group settlement lineage is invalid');
+    }
+    if (group.state === 'settled' || group.state === 'blocked_unknown') {
+      if (group.state !== command.state || group.aggregateHash !== command.aggregateHash) {
+        throw new WorkerAuthorityError('final_result_conflict', 'Worker group aggregate cannot be replaced');
+      }
+      return group;
+    }
+    if (group.settledMemberCount !== group.requestedMemberCount) {
+      throw new WorkerAuthorityError('incomplete_group', 'Worker group cannot settle before every member is represented');
+    }
+    const now = command.now ?? Date.now();
+    db.prepare(
+      `UPDATE worker_groups SET state=?,aggregate_hash=?,settled_at=?,settlement_reason=?,
+              settlement_version=settlement_version+1 WHERE group_id=?`,
+    ).run(command.state, command.aggregateHash, now, command.reason, command.groupId);
+    append(command, runId, 'worker.group_settled', {
+      groupId: command.groupId, state: command.state, aggregateHash: command.aggregateHash,
+    }, `group-settled:${command.groupId}`);
+    return getGroup(command.groupId)!;
+  }).immediate;
+
+  const reconcileGroup = db.transaction((command: Parameters<WorkerAuthority['reconcileWorkerGroup']>[0]) => {
+    assertHash(command.aggregateHash, 'Worker group aggregate hash');
+    assertString(command.reason, 'Worker group reconciliation reason', 192);
+    const group = refreshGroupCounts(command.groupId, command.now ?? Date.now());
+    if (group.state === 'settled' || group.state === 'blocked_unknown') {
+      if (group.state !== command.state || group.aggregateHash !== command.aggregateHash) {
+        throw new WorkerAuthorityError('final_result_conflict', 'Worker group aggregate cannot be replaced');
+      }
+      return group;
+    }
+    if (group.settledMemberCount !== group.requestedMemberCount) {
+      throw new WorkerAuthorityError('incomplete_group', 'Worker group cannot settle before every member is represented');
+    }
+    const now = command.now ?? Date.now();
+    db.prepare(
+      `UPDATE worker_groups SET state=?,aggregate_hash=?,settled_at=?,settlement_reason=?,
+              settlement_version=settlement_version+1 WHERE group_id=?`,
+    ).run(command.state, command.aggregateHash, now, command.reason, group.groupId);
+    appendGroupProjection(
+      group, groupProjectionRun(group), command.producer, command.idempotencyKey,
+      'worker.group_settled',
+      { groupId: group.groupId, state: command.state, aggregateHash: command.aggregateHash },
+    );
+    return getGroup(group.groupId)!;
+  }).immediate;
+
   const listEvents = (parentJobId: string): WorkerEventRecord[] => (
     db.prepare(
       `SELECT job_sequence,kind,payload,ts FROM run_events
@@ -963,6 +1457,64 @@ export function createWorkerAuthority(deps: WorkerAuthorityDeps): WorkerAuthorit
         assignmentId: command.assignmentId,
         payload: command.payload,
       });
+    },
+    createWorkerGroup: createGroup,
+    bindWorkerGroupMember: bindGroupMember,
+    completeWorkerGroupAdmission: completeGroupAdmission,
+    settleWorkerGroupMember: settleGroupMember,
+    reconcileWorkerGroupMember: reconcileGroupMember,
+    requestWorkerGroupInterruption: requestGroupInterruption,
+    requestWorkerGroupInterruptionForParent(command) {
+      return db.transaction(() => {
+        const groups = (db.prepare(
+          `SELECT * FROM worker_groups
+            WHERE parent_job_id=? AND parent_attempt_id=? AND parent_generation=?
+              AND state NOT IN ('settled','blocked_unknown')
+            ORDER BY created_at,group_id`,
+        ).all(command.parentJobId, command.parentAttemptId, command.parentGeneration) as GroupRow[]).map(mapGroup);
+        for (const group of groups) {
+          requestGroupInterruption({
+            ...command,
+            groupId: group.groupId,
+            idempotencyKey: `${command.idempotencyKey}:${group.groupId}`,
+          });
+        }
+        return groups.length;
+      }).immediate();
+    },
+    settleWorkerGroup: settleGroup,
+    reconcileWorkerGroup: reconcileGroup,
+    getWorkerGroup: getGroup,
+    getWorkerGroupMember: getGroupMember,
+    getWorkerGroupMemberForAssignment(assignmentId) {
+      const row = db.prepare('SELECT * FROM worker_group_members WHERE assignment_id=?')
+        .get(assignmentId) as GroupMemberRow | undefined;
+      return row ? mapGroupMember(row) : null;
+    },
+    getWorkerGroupForAssignment(assignmentId) {
+      const row = db.prepare(
+        `SELECT g.* FROM worker_groups g JOIN worker_group_members m ON m.group_id=g.group_id
+          WHERE m.assignment_id=?`,
+      ).get(assignmentId) as GroupRow | undefined;
+      return row ? mapGroup(row) : null;
+    },
+    listWorkerGroupMembers(groupId) {
+      return (db.prepare(
+        'SELECT * FROM worker_group_members WHERE group_id=? ORDER BY ordinal,member_id',
+      ).all(groupId) as GroupMemberRow[]).map(mapGroupMember);
+    },
+    listWorkerGroupsForParent(parentJobId) {
+      return (db.prepare(
+        'SELECT * FROM worker_groups WHERE parent_job_id=? ORDER BY created_at,group_id',
+      ).all(parentJobId) as GroupRow[]).map(mapGroup);
+    },
+    listWorkerGroupsPendingSettlement(input = {}) {
+      const limit = Math.max(1, Math.min(input.limit ?? 100, 1_000));
+      return (db.prepare(
+        `SELECT * FROM worker_groups
+          WHERE group_id>? AND state NOT IN ('settled','blocked_unknown')
+          ORDER BY group_id LIMIT ?`,
+      ).all(input.afterGroupId ?? '', limit) as GroupRow[]).map(mapGroup);
     },
     getWorkerAssignment: getAssignment,
     getWorkerRun: getRun,

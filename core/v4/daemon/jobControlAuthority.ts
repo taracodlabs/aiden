@@ -8,6 +8,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import type { Db } from './db/connection';
 import type { JobEngine } from './jobEngine';
 import { createJobWaitAuthority, type JobWaitAuthority } from './jobWaitAuthority';
+import { reconcileInterruptedReadOnlyRepositoryWorkerGroups } from '../worker/workerParallel';
 
 export type DurableInputKind =
   | 'message' | 'steering' | 'control' | 'approval_decision' | 'credential'
@@ -833,6 +834,11 @@ export function createJobControlAuthority(options: CreateJobControlAuthorityOpti
                 });
                 if (cancelled.applied || cancelled.duplicate) attemptIds.push(childAttemptId);
               }
+              reconcileInterruptedReadOnlyRepositoryWorkerGroups({
+                engine: jobEngine,
+                parentJobId: command.jobId,
+                producer: command.source,
+              });
             }
           }
           const now = command.now ?? Date.now();

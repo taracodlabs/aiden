@@ -86,6 +86,11 @@ export interface AdmitReadOnlyRepositoryWorkerInput {
   maxToolCalls?: number;
   maxRuntimeMs?: number;
   maxExternalCost?: number;
+  group?: {
+    groupId: string;
+    memberId: string;
+    ordinal: number;
+  };
 }
 
 export interface ReadOnlyRepositoryWorkerAdmission {
@@ -202,7 +207,9 @@ export function admitReadOnlyRepositoryWorker(
       && candidate.parentAttemptId === input.parent.attemptId
       && candidate.parentGeneration === input.parent.generation
       && !TERMINAL_JOB.has(input.engine.getJob(candidate.childJobId)?.status ?? 'unknown'));
-  if (activeOther) throw new Error('Only one active read-only repository Worker is permitted for a parent Attempt');
+  if (activeOther && input.group === undefined) {
+    throw new Error('Only one active read-only repository Worker is permitted for a parent Attempt');
+  }
 
   const providerBindingId = identity('worker_provider', requestIdentity);
   const contextEnvelopeId = identity('worker_context', requestIdentity);
@@ -360,6 +367,19 @@ export function admitReadOnlyRepositoryWorker(
     assignmentId: assignment.assignmentId,
     amounts: reservationAmounts,
   });
+  if (input.group) {
+    input.engine.worker.bindWorkerGroupMember({
+      ...authority,
+      groupId: input.group.groupId,
+      memberId: input.group.memberId,
+      assignmentId: assignment.assignmentId,
+      childJobId: child.jobId,
+      childAttemptId: child.attemptId,
+      childGeneration: 1,
+      providerBindingId: providerBinding.providerBindingId,
+      idempotencyKey: `${input.idempotencyKey}:group-member`,
+    });
+  }
   input.engine.appendJobEvent({
     jobId: input.parent.jobId,
     attemptId: input.parent.attemptId,

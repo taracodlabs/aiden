@@ -2188,6 +2188,99 @@ function applyV39(db: Database.Database): void {
   `);
 }
 
+/** Bounded parallel read-only Worker group projections and provider slots. */
+function applyV40(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS worker_groups (
+      group_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      idempotency_key TEXT NOT NULL,
+      parent_job_id TEXT NOT NULL,
+      parent_attempt_id TEXT NOT NULL,
+      parent_generation INTEGER NOT NULL,
+      parent_fence_digest TEXT NOT NULL,
+      policy TEXT NOT NULL CHECK(policy IN ('require_all','allow_partial')),
+      state TEXT NOT NULL CHECK(state IN ('admitting','active','cancelling','timed_out','settling','settled','blocked_unknown')),
+      requested_member_count INTEGER NOT NULL CHECK(requested_member_count BETWEEN 1 AND 4),
+      admitted_member_count INTEGER NOT NULL DEFAULT 0,
+      settled_member_count INTEGER NOT NULL DEFAULT 0,
+      successful_member_count INTEGER NOT NULL DEFAULT 0,
+      failed_member_count INTEGER NOT NULL DEFAULT 0,
+      unknown_member_count INTEGER NOT NULL DEFAULT 0,
+      cancelled_member_count INTEGER NOT NULL DEFAULT 0,
+      input_hash TEXT NOT NULL,
+      aggregate_hash TEXT,
+      created_at INTEGER NOT NULL,
+      cancellation_requested_at INTEGER,
+      timeout_requested_at INTEGER,
+      settled_at INTEGER,
+      settlement_version INTEGER NOT NULL DEFAULT 0,
+      settlement_reason TEXT,
+      FOREIGN KEY (parent_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      UNIQUE (parent_job_id, parent_attempt_id, parent_generation, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_groups_pending
+      ON worker_groups(state, created_at, group_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_groups_parent
+      ON worker_groups(parent_job_id, parent_attempt_id, parent_generation, state, group_id);
+
+    CREATE TABLE IF NOT EXISTS worker_group_members (
+      group_id TEXT NOT NULL,
+      member_id TEXT PRIMARY KEY,
+      ordinal INTEGER NOT NULL CHECK(ordinal BETWEEN 1 AND 4),
+      requested_provider_id TEXT NOT NULL,
+      assignment_id TEXT,
+      child_job_id TEXT,
+      child_attempt_id TEXT,
+      child_generation INTEGER,
+      provider_binding_id TEXT,
+      outcome TEXT NOT NULL DEFAULT 'pending' CHECK(outcome IN ('pending','admitted','verified','rejected','failed','unknown','blocked','cancelled','timed_out')),
+      worker_result_id TEXT,
+      result_hash TEXT,
+      joined_at INTEGER,
+      settlement_reason TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (group_id) REFERENCES worker_groups(group_id) ON DELETE CASCADE,
+      FOREIGN KEY (assignment_id) REFERENCES worker_assignments(assignment_id) ON DELETE RESTRICT,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (worker_result_id) REFERENCES worker_results(worker_result_id) ON DELETE RESTRICT,
+      UNIQUE (group_id, ordinal),
+      UNIQUE (group_id, assignment_id),
+      UNIQUE (child_job_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_group_members_group
+      ON worker_group_members(group_id, ordinal, member_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_group_members_unsettled
+      ON worker_group_members(outcome, updated_at, member_id);
+
+    CREATE TABLE IF NOT EXISTS worker_provider_concurrency_reservations (
+      provider_slot_id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL,
+      group_id TEXT NOT NULL,
+      member_id TEXT NOT NULL,
+      parent_job_id TEXT NOT NULL,
+      parent_attempt_id TEXT NOT NULL,
+      parent_generation INTEGER NOT NULL,
+      provider_id TEXT NOT NULL,
+      limit_value INTEGER NOT NULL CHECK(limit_value BETWEEN 1 AND 1024),
+      state TEXT NOT NULL CHECK(state IN ('reserved','released','blocked_unknown')),
+      created_at INTEGER NOT NULL,
+      released_at INTEGER,
+      blocked_at INTEGER,
+      settlement_reason TEXT,
+      FOREIGN KEY (group_id) REFERENCES worker_groups(group_id) ON DELETE CASCADE,
+      FOREIGN KEY (member_id) REFERENCES worker_group_members(member_id) ON DELETE CASCADE,
+      UNIQUE (parent_job_id, idempotency_key),
+      UNIQUE (member_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_worker_provider_slots_capacity
+      ON worker_provider_concurrency_reservations(provider_id, state, created_at, provider_slot_id);
+    CREATE INDEX IF NOT EXISTS idx_worker_provider_slots_group
+      ON worker_provider_concurrency_reservations(group_id, state, member_id);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2228,6 +2321,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 37, name: 'durable Worker contracts and authority boundaries', apply: applyV37 },
   { version: 38, name: 'durable Worker provider calls and budget reservations', apply: applyV38 },
   { version: 39, name: 'Worker provider restart and reconciliation', apply: applyV39 },
+  { version: 40, name: 'bounded parallel read-only Worker groups', apply: applyV40 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2272,7 +2366,8 @@ function validateLatestSchema(db: Database.Database): void {
     'worker_logical_provider_calls', 'worker_provider_tool_links', 'job_budget_reservations',
     'job_budget_reservation_items', 'job_budget_reservation_commits',
     'worker_provider_call_reconciliations', 'worker_provider_late_responses',
-    'job_budget_reservation_reconciliations'];
+    'job_budget_reservation_reconciliations', 'worker_groups', 'worker_group_members',
+    'worker_provider_concurrency_reservations'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

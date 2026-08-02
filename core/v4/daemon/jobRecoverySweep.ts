@@ -11,6 +11,10 @@ import {
   reconcileWorkerProviderAttempt,
   sweepWorkerProviderReconciliation,
 } from '../worker/workerProviderReconciliation';
+import {
+  projectReadOnlyRepositoryWorkerGroups,
+  reconcileInterruptedReadOnlyRepositoryWorkerGroups,
+} from '../worker/workerParallel';
 
 export interface DurableRecoverySweepResult {
   expired: number;
@@ -70,6 +74,19 @@ export function sweepDurableJobRecovery(input: {
     now: input.now,
   });
   result.reconciled += workerSweep.reconciled;
+  const interruptedParents = new Set(
+    input.jobEngine.worker.listWorkerGroupsPendingSettlement({ limit: 1_000 })
+      .filter((group) => group.state === 'cancelling' || group.state === 'timed_out')
+      .map((group) => group.parentJobId),
+  );
+  for (const parentJobId of interruptedParents) {
+    result.reconciled += reconcileInterruptedReadOnlyRepositoryWorkerGroups({
+      engine: input.jobEngine,
+      parentJobId,
+      producer: input.producer,
+    }).settled;
+  }
+  projectReadOnlyRepositoryWorkerGroups({ engine: input.jobEngine, limit: 100 });
 
   for (const decision of decisions.filter((item) => item.decision === 'ask_user')) {
     const job = input.jobEngine.getJob(decision.jobId);
