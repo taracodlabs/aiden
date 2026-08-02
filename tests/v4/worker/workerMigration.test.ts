@@ -83,8 +83,8 @@ describe('Worker persistence migration', () => {
     ).run('a'.repeat(64), 'b'.repeat(64));
     db.pragma('foreign_keys = ON');
     const before = new Set(tables());
-    expect(runMigrations(db)).toEqual({ from: 38, to: 40 });
-    expect(LATEST_SCHEMA_VERSION).toBe(40);
+    expect(runMigrations(db)).toEqual({ from: 38, to: LATEST_SCHEMA_VERSION });
+    expect(LATEST_SCHEMA_VERSION).toBe(41);
     expect(tables().filter((table) => !before.has(table))).toEqual([
       'job_budget_reservation_reconciliations',
       'worker_group_members',
@@ -147,16 +147,16 @@ describe('Worker persistence migration', () => {
       idempotencyNamespace: 'fixture', idempotencyKey: 'job', goal: 'legacy job',
     });
 
-    expect(runMigrations(db)).toEqual({ from: 36, to: 40 });
+    expect(runMigrations(db)).toEqual({ from: 36, to: LATEST_SCHEMA_VERSION });
     const engine = createJobEngine({ db });
     expect(engine.getJob(before.jobId)?.goal).toBe('legacy job');
     expect(engine.worker.listWorkerRunsForParent(before.jobId)).toEqual([]);
   });
 
-  it('is idempotent when v40 is already installed', () => {
-    expect(runMigrations(db)).toEqual({ from: 0, to: 40 });
-    expect(runMigrations(db)).toEqual({ from: 40, to: 40 });
-    expect(LATEST_SCHEMA_VERSION).toBe(40);
+  it('is idempotent when the latest schema is already installed', () => {
+    expect(runMigrations(db)).toEqual({ from: 0, to: LATEST_SCHEMA_VERSION });
+    expect(runMigrations(db)).toEqual({ from: LATEST_SCHEMA_VERSION, to: LATEST_SCHEMA_VERSION });
+    expect(LATEST_SCHEMA_VERSION).toBe(41);
     expect(tables()).toEqual(expect.arrayContaining([
       'worker_groups', 'worker_group_members', 'worker_provider_concurrency_reservations',
     ]));
@@ -181,11 +181,11 @@ describe('Worker persistence migration', () => {
                1,'restart','outcome_unknown','blocked_unknown','[]',1,0,'blocked_unknown',1)`,
     ).run();
     db.pragma('foreign_keys = ON');
-    expect(runMigrations(db)).toEqual({ from: 39, to: 40 });
+    expect(runMigrations(db)).toEqual({ from: 39, to: LATEST_SCHEMA_VERSION });
     expect(db.prepare(
       `SELECT outcome_knowledge,retry_safety,unknown_spend
          FROM worker_provider_call_reconciliations WHERE reconciliation_id='reconciliation_existing'`,
     ).get()).toEqual({ outcome_knowledge: 'outcome_unknown', retry_safety: 'blocked_unknown', unknown_spend: 1 });
-    expect(runMigrations(db)).toEqual({ from: 40, to: 40 });
+    expect(runMigrations(db)).toEqual({ from: LATEST_SCHEMA_VERSION, to: LATEST_SCHEMA_VERSION });
   });
 });

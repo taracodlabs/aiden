@@ -2281,6 +2281,13 @@ function applyV40(db: Database.Database): void {
   `);
 }
 
+/** Durable claim identity for cross-process TriggerBus lease fencing. */
+function applyV41(db: Database.Database): void {
+  addMissingColumns(db, 'trigger_events', [
+    ['claim_token', 'TEXT'],
+  ]);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2322,6 +2329,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 38, name: 'durable Worker provider calls and budget reservations', apply: applyV38 },
   { version: 39, name: 'Worker provider restart and reconciliation', apply: applyV39 },
   { version: 40, name: 'bounded parallel read-only Worker groups', apply: applyV40 },
+  { version: 41, name: 'durable TriggerBus claim fencing', apply: applyV41 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

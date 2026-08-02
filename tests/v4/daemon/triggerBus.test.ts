@@ -3,6 +3,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createTriggerBus } from '../../../core/v4/daemon/triggerBus';
 import type { TriggerBus } from '../../../core/v4/daemon/triggerBus';
@@ -156,6 +159,66 @@ describe('triggerBus.reclaimExpired', () => {
     bus.insert({ source: 'manual', sourceKey: 'a', payload: {} });
     bus.claim({ ownerId: 'inst-1', leaseMs: 60_000 })!;
     expect(bus.reclaimExpired(Date.now()).reclaimed).toBe(0);
+  });
+
+  it.each(['markDone', 'markFailed', 'release', 'renewClaim'] as const)(
+    'fences a stale claimant from %s after another bus reclaims the lease',
+    (operation) => {
+      const busA = createTriggerBus({ db });
+      const busB = createTriggerBus({ db });
+      const inserted = busA.insert({ source: 'manual', sourceKey: operation, payload: {} });
+      const claimA = busA.claim({ ownerId: 'instance-a', leaseMs: 1 })!;
+
+      expect(busB.reclaimExpired(Date.now() + 60_000)).toEqual({ reclaimed: 1 });
+      const claimB = busB.claim({ ownerId: 'instance-b', leaseMs: 60_000 })!;
+      expect(claimB.id).toBe(inserted.id);
+      expect(claimB.claimToken).not.toBe(claimA.claimToken);
+
+      if (operation === 'markDone') busA.markDone(claimA.id, claimA.claimToken);
+      if (operation === 'markFailed') busA.markFailed(claimA.id, claimA.claimToken, 'stale failure');
+      if (operation === 'release') busA.release(claimA.id, claimA.claimToken);
+      if (operation === 'renewClaim') {
+        expect(busA.renewClaim(claimA.id, claimA.claimToken, 60_000)).toBe(false);
+      }
+
+      expect(busB.get(claimB.id)).toMatchObject({
+        status: 'claimed',
+        claimOwner: 'instance-b',
+        attempts: 2,
+      });
+      busB.markDone(claimB.id, claimB.claimToken);
+      expect(busB.get(claimB.id)?.status).toBe('done');
+      busB.markDone(claimB.id, claimB.claimToken);
+      expect(busB.get(claimB.id)?.status).toBe('done');
+    },
+  );
+
+  it('persists the claim fence across independent SQLite connections', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'aiden-trigger-fence-'));
+    const databasePath = path.join(root, 'daemon.db');
+    const dbA = new Database(databasePath);
+    const dbB = new Database(databasePath);
+    try {
+      runMigrations(dbA);
+      const busA = createTriggerBus({ db: dbA });
+      const busB = createTriggerBus({ db: dbB });
+      busA.insert({ source: 'manual', sourceKey: 'cross-connection', payload: {} });
+      const claimA = busA.claim({ ownerId: 'process-a', leaseMs: 1 })!;
+      expect(busB.reclaimExpired(Date.now() + 60_000)).toEqual({ reclaimed: 1 });
+      const claimB = busB.claim({ ownerId: 'process-b', leaseMs: 60_000 })!;
+
+      busA.markDone(claimA.id, claimA.claimToken);
+      expect(busB.get(claimB.id)).toMatchObject({
+        status: 'claimed',
+        claimOwner: 'process-b',
+      });
+      busB.markDone(claimB.id, claimB.claimToken);
+      expect(busB.get(claimB.id)?.status).toBe('done');
+    } finally {
+      dbB.close();
+      dbA.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

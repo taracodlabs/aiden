@@ -65,11 +65,6 @@ export interface TriggerBus {
   get(eventId: number): TriggerEventRow | null;
 }
 
-interface InternalClaim {
-  eventId:    number;
-  claimToken: string;
-}
-
 function rowToTs(r: TriggerEventRowSql): TriggerEventRow {
   return {
     id:              r.id,
@@ -111,10 +106,6 @@ export interface CreateTriggerBusOptions {
 
 export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
   const db = opts.db;
-  // In-memory map of valid claim tokens. Stored separately from
-  // SQLite so cross-daemon claim attempts can't forge a token by
-  // reading the row. Token is wiped on markDone/release/markFailed.
-  const activeClaims: Map<number, string> = new Map();
 
   return {
     insert(ev: TriggerEventInput): { id: number; inserted: boolean } {
@@ -214,12 +205,13 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
             `UPDATE trigger_events
                 SET status           = 'claimed',
                     claim_owner      = ?,
+                    claim_token      = ?,
                     claim_expires_at = ?,
                     updated_at       = ?,
                     attempts         = attempts + 1
               WHERE id = ? AND status = 'pending'`,
           )
-          .run(opts2.ownerId, expires, now, candidate.id);
+          .run(opts2.ownerId, claimToken, expires, now, candidate.id);
         if (upd.changes === 0) return null;     // race lost
         const row = db
           .prepare('SELECT * FROM trigger_events WHERE id = ?')
@@ -228,52 +220,48 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
       });
       const row = tx();
       if (!row) return null;
-      activeClaims.set(row.id, claimToken);
       return { ...row, claimToken };
     },
 
     renewClaim(eventId: number, claimToken: string, extendMs: number): boolean {
-      if (activeClaims.get(eventId) !== claimToken) return false;
       const now = Date.now();
       const upd = db
         .prepare(
           `UPDATE trigger_events
               SET claim_expires_at = ?,
                   updated_at       = ?
-            WHERE id = ? AND status = 'claimed'`,
+            WHERE id = ? AND status = 'claimed' AND claim_token = ?`,
         )
-        .run(now + extendMs, now, eventId);
+        .run(now + extendMs, now, eventId, claimToken);
       return upd.changes > 0;
     },
 
     release(eventId: number, claimToken: string): void {
-      if (activeClaims.get(eventId) !== claimToken) return;
       const now = Date.now();
       db.prepare(
         `UPDATE trigger_events
             SET status           = 'pending',
                 claim_owner      = NULL,
+                claim_token      = NULL,
                 claim_expires_at = NULL,
                 updated_at       = ?
-          WHERE id = ? AND status = 'claimed'`,
-      ).run(now, eventId);
-      activeClaims.delete(eventId);
+          WHERE id = ? AND status = 'claimed' AND claim_token = ?`,
+      ).run(now, eventId, claimToken);
     },
 
     markDone(eventId: number, claimToken: string, runId?: number): void {
-      if (activeClaims.get(eventId) !== claimToken) return;
       const now = Date.now();
       db.prepare(
         `UPDATE trigger_events
             SET status           = 'done',
                 claim_owner      = NULL,
+                claim_token      = NULL,
                 claim_expires_at = NULL,
                 updated_at       = ?,
                 completed_at     = ?,
                 run_id           = COALESCE(?, run_id)
-          WHERE id = ? AND status = 'claimed'`,
-      ).run(now, now, runId ?? null, eventId);
-      activeClaims.delete(eventId);
+          WHERE id = ? AND status = 'claimed' AND claim_token = ?`,
+      ).run(now, now, runId ?? null, eventId, claimToken);
     },
 
     markFailed(
@@ -282,7 +270,6 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
       error:      string,
       opts2: { maxAttempts?: number; cooldownMs?: number } = {},
     ): void {
-      if (activeClaims.get(eventId) !== claimToken) return;
       const max = opts2.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
       const now = Date.now();
       const truncated = error.length > 1024 ? error.slice(0, 1024) + '…' : error;
@@ -297,8 +284,8 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
         : null;
       const tx = db.transaction((): void => {
         const row = db
-          .prepare('SELECT attempts FROM trigger_events WHERE id = ?')
-          .get(eventId) as { attempts: number } | undefined;
+          .prepare("SELECT attempts FROM trigger_events WHERE id = ? AND status = 'claimed' AND claim_token = ?")
+          .get(eventId, claimToken) as { attempts: number } | undefined;
         if (!row) return;
         // attempts was already incremented at claim time. Move to
         // dead_letter when the count hits max, else return to pending.
@@ -307,26 +294,27 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
             `UPDATE trigger_events
                 SET status           = 'dead_letter',
                     claim_owner      = NULL,
+                    claim_token      = NULL,
                     claim_expires_at = NULL,
                     last_error       = ?,
                     updated_at       = ?,
                     completed_at     = ?
-              WHERE id = ?`,
-          ).run(truncated, now, now, eventId);
+              WHERE id = ? AND status = 'claimed' AND claim_token = ?`,
+          ).run(truncated, now, now, eventId, claimToken);
         } else {
           db.prepare(
             `UPDATE trigger_events
                 SET status           = 'pending',
                     claim_owner      = NULL,
+                    claim_token      = NULL,
                     claim_expires_at = ?,
                     last_error       = ?,
                     updated_at       = ?
-              WHERE id = ?`,
-          ).run(cooldownUntil, truncated, now, eventId);
+              WHERE id = ? AND status = 'claimed' AND claim_token = ?`,
+          ).run(cooldownUntil, truncated, now, eventId, claimToken);
         }
       });
       tx();
-      activeClaims.delete(eventId);
     },
 
     reclaimExpired(now?: number): { reclaimed: number } {
@@ -336,6 +324,7 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
           `UPDATE trigger_events
               SET status           = 'pending',
                   claim_owner      = NULL,
+                  claim_token      = NULL,
                   claim_expires_at = NULL,
                   last_error       = COALESCE(last_error, 'claim lease expired'),
                   updated_at       = ?
@@ -353,13 +342,13 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
         `UPDATE trigger_events
             SET status           = 'dead_letter',
                 claim_owner      = NULL,
+                claim_token      = NULL,
                 claim_expires_at = NULL,
                 last_error       = ?,
                 updated_at       = ?,
                 completed_at     = ?
           WHERE id = ?`,
       ).run(reason.length > 1024 ? reason.slice(0, 1024) + '…' : reason, now, now, eventId);
-      activeClaims.delete(eventId);
     },
 
     stats(): {

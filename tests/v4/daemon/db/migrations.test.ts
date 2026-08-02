@@ -3,7 +3,11 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import Database from 'better-sqlite3';
-import { runMigrations, LATEST_SCHEMA_VERSION } from '../../../../core/v4/daemon/db/migrations';
+import {
+  runMigrations,
+  LATEST_SCHEMA_VERSION,
+  MIGRATIONS_FOR_TESTS,
+} from '../../../../core/v4/daemon/db/migrations';
 
 let db: Database.Database;
 
@@ -93,5 +97,32 @@ describe('runMigrations', () => {
     const row = db.prepare('SELECT * FROM schema_version').get() as { version: number; applied_at: number };
     expect(row.version).toBe(LATEST_SCHEMA_VERSION);
     expect(row.applied_at).toBeGreaterThan(0);
+  });
+
+  it('adds durable TriggerBus claim fencing without changing existing events', () => {
+    for (const migration of MIGRATIONS_FOR_TESTS.filter((item) => item.version <= 40)) {
+      if (migration.apply) migration.apply(db);
+      else db.exec(migration.sql ?? '');
+      db.prepare(
+        'INSERT OR REPLACE INTO schema_version (id, version, applied_at) VALUES (1, ?, ?)',
+      ).run(migration.version, Date.now());
+    }
+    const now = Date.now();
+    db.prepare(
+      `INSERT INTO trigger_events
+         (source,source_key,payload_json,status,attempts,claim_owner,claim_expires_at,created_at,updated_at)
+       VALUES ('manual','preserved','{"value":1}','claimed',1,'legacy-owner',?,?,?)`,
+    ).run(now + 60_000, now, now);
+
+    expect(runMigrations(db)).toEqual({ from: 40, to: 41 });
+    expect(db.prepare(
+      'SELECT source_key,payload_json,status,claim_owner,claim_token FROM trigger_events WHERE source_key=?',
+    ).get('preserved')).toEqual({
+      source_key: 'preserved',
+      payload_json: '{"value":1}',
+      status: 'claimed',
+      claim_owner: 'legacy-owner',
+      claim_token: null,
+    });
   });
 });
