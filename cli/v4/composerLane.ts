@@ -799,11 +799,12 @@ export class BottomRegion {
     }
     const growth = Math.max(0, nextRows - previousRows);
     const previousTranscriptBottom = Math.max(1, this.sink.rows() - previousRows);
-    // When a wrapped draft grows upward, scroll transcript rows before claiming
-    // the additional cells. This preserves the newest transcript content above
-    // the composer instead of erasing it during the geometry change.
+    // Grow the reserved surface by scrolling only the transcript region. A
+    // newline here would commit the old volatile composer rows to native
+    // scrollback on Windows main-buffer hosts.
     const makeRoom = growth > 0
-      ? `${ESC}[${previousTranscriptBottom};1H${'\n'.repeat(growth)}`
+      ? `${RESTORE_TRANSCRIPT}${ESC}[1;${previousTranscriptBottom}r` +
+        `${ESC}[${growth}S`
       : '';
     const clear = dimensionsChanged
       ? this.clearDamagedUnion(previousGeometry, nextGeometry)
@@ -813,7 +814,7 @@ export class BottomRegion {
       return `${RESTORE_TRANSCRIPT}${SAVE}${ESC}[r${clear}` +
         `${ESC}[1;${transcriptBottom}r${RESTORE}${SAVE_TRANSCRIPT}`;
     }
-    return `${RESTORE_TRANSCRIPT}${makeRoom}${ESC}[r` +
+    return `${makeRoom}${ESC}[r` +
       `${clear}` +
       `${reserveSeq(this.sink.rows(), nextRows)}${SAVE_TRANSCRIPT}`;
   }
@@ -826,7 +827,6 @@ export class BottomRegion {
     });
     const surface = this.surface();
     const frame = surface.lines.join('\n');
-    const previousLaneRows = this.laneRows;
     const geometry = this.establishGeometry(surface.laneRows);
     if (!geometry && frame === this.lastFrame && !rebuildTranscript) {
       if (epoch === this.projection.viewport.epoch) {
@@ -838,9 +838,6 @@ export class BottomRegion {
     this.rememberSurface(surface);
     const topRow = this.sink.rows() - surface.laneRows + 1;
     let sequence = geometry;
-    if (rebuildTranscript || (previousLaneRows > 0 && surface.laneRows < previousLaneRows)) {
-      sequence += this.transcriptFrame(surface);
-    }
     surface.lines.forEach((line, index) => {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });
@@ -924,8 +921,6 @@ export class BottomRegion {
       laneRows: surface.laneRows,
       topRow: Math.max(1, this.sink.rows() - surface.laneRows + 1),
     };
-    const releasedRows = previousGeometry !== null
-      && surface.laneRows < previousGeometry.laneRows;
     this.geometry = nextGeometry;
     this.lastFrame = surface.lines.join('\n');
     this.rememberSurface(surface);
@@ -940,7 +935,6 @@ export class BottomRegion {
       sequence += `${this.pendingTranscriptOutput}${SAVE_TRANSCRIPT}`;
     }
     this.pendingTranscriptOutput = '';
-    if (releasedRows) sequence += this.transcriptFrame(surface);
     surface.lines.forEach((line, index) => {
       sequence += `${ESC}[${topRow + index};1H${ESC}[2K${line}`;
     });

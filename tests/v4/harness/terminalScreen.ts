@@ -341,6 +341,23 @@ export class TerminalScreen {
         this.row = 0;
         this.col = 0;
         break;
+      case 'S':
+        for (let count = 0; count < amount; count += 1) {
+          const removed = this.cells.splice(this.scrollTop, 1)[0];
+          const removedWrapped = this.wrappedRows.splice(this.scrollTop, 1)[0] ?? false;
+          if (!this.alternateBuffer && this.scrollTop === 0
+            && !this.hostSnapshotRedraw && this.scrollBottom === this.height - 1 && removed) {
+            this.scrollback.push([...removed]);
+            this.scrollbackWrappedRows.push(removedWrapped);
+          }
+          this.cells.splice(
+            this.scrollBottom,
+            0,
+            Array.from({ length: this.width }, () => ' '),
+          );
+          this.wrappedRows.splice(this.scrollBottom, 0, false);
+        }
+        break;
       case 's':
         this.savedRow = this.row;
         this.savedCol = this.col;

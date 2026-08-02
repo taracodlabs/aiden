@@ -91,4 +91,15 @@ describe('TerminalScreen Windows resize semantics', () => {
     expect(screen.scrollbackSnapshot()).toBe(before);
     expect(screen.reviewableSnapshot()).toContain('DURABLE HISTORY');
   });
+
+  it('scrolls only the transcript region when the volatile surface grows', () => {
+    const screen = new TerminalScreen(40, 10, { retainResizeHistory: true });
+    screen.write('line one\r\nline two\r\nline three');
+    screen.write('\x1b[1;7r\x1b[2S');
+    screen.write('\x1b[1;1Htranscript\r\n');
+
+    expect(screen.snapshot()).not.toContain('line one');
+    expect(screen.snapshot()).toContain('transcript');
+    expect(screen.scrollbackSnapshot()).not.toContain('line one');
+  });
 });

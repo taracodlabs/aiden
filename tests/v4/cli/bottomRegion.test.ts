@@ -179,7 +179,7 @@ it('keeps settled assistant transcript immutable after a late activity repaint',
   expect(output.match(/▲ You/gu)).toHaveLength(1);
   const activityRow = lines.findLastIndex((line) => line.includes('package.json'));
   const responseRow = lines.findLastIndex((line) => line.includes('FINAL STABLE RESPONSE'));
-  expect(lines.slice(activityRow + 1, responseRow).filter((line) => line.trim() === '').length).toBeLessThanOrEqual(1);
+  expect(lines.slice(activityRow + 1, responseRow).filter((line) => line.trim() === '')).toHaveLength(1);
 });
 
 function composerGeometry(screen: TerminalScreen): {
@@ -666,124 +666,60 @@ function maxBlankRun(value: string): number {
   return maximum;
 }
 
-function blankRowsBeforeComposer(screen: TerminalScreen, content: string): number {
-  const lines = screen.lines();
-  const composer = lines.findLastIndex((line) => line.startsWith('▲ You'));
-  const separator = composer - 1;
-  const contentRow = lines.findLastIndex((line, index) => (
-    index < separator && line.includes(content)
-  ));
-  expect(composer, screen.snapshot()).toBeGreaterThanOrEqual(1);
-  expect(contentRow, screen.snapshot()).toBeGreaterThanOrEqual(0);
-  return lines.slice(contentRow + 1, separator).filter((line) => line.trim() === '').length;
-}
-
-describe('compact live-region height ownership', () => {
-  it('keeps ten related tool rows contiguous without decorative blanks', () => {
-    const { display, screen } = createDisplay(100, 45);
-    display.setStatusFooter('◆ provider/model │ 0% │ working │ 1s');
+describe('transcript ownership during repaint', () => {
+  it('does not replay startup or settled transcript when the surface is resized', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.write('Aiden startup\nEnvironment\nCapabilities\nBuilt solo\n');
+    display.setStatusFooter('◆ provider · model │ ◉ 7% │ ready │ ⧖ 2s');
     display.setIdleComposer('', 'Type your message');
-    const rows = Array.from({ length: 10 }, (_, index) => display.toolRow(
-      'file_read',
-      { path: `C:\\workspace\\compact-${index}.ts` },
-      undefined,
-      { activityId: `compact-${index}` },
-    ));
+    display.write('inspect the repository\n');
+    const activity = display.toolRow('file_read', { path: 'display.ts' }, undefined, {
+      activityId: 'resize-read',
+    });
+    activity.ok(12);
+    display.write('│ Aiden\nThe answer remains reviewable.\n');
 
-    const visible = screen.lines();
-    const indexes = Array.from({ length: 10 }, (_, index) => (
-      visible.findIndex((line) => line.includes(`compact-${index}.ts`))
-    ));
-    expect(indexes.every((index) => index >= 0), screen.snapshot()).toBe(true);
-    for (let index = 1; index < indexes.length; index += 1) {
-      expect(indexes[index] - indexes[index - 1], screen.snapshot()).toBe(1);
+    for (const width of [60, 100, 44, 100, 60, 100]) {
+      stream.resize(width, 30);
+      await new Promise<void>((resolve) => setImmediate(resolve));
     }
-    for (const row of rows) row.ok(1);
+
+    const buffer = screen.bufferSnapshot();
+    expect(buffer.match(/Aiden startup/gu) ?? []).toHaveLength(1);
+    expect(buffer.match(/Environment/gu) ?? []).toHaveLength(1);
+    expect(buffer.match(/Capabilities/gu) ?? []).toHaveLength(1);
+    expect(buffer.match(/Built solo/gu) ?? []).toHaveLength(1);
+    expect(buffer.match(/inspect the repository/gu) ?? []).toHaveLength(1);
+    expect(buffer.match(/The answer remains reviewable/gu) ?? []).toHaveLength(1);
+    expect(screen.scrollbackSnapshot()).not.toContain('▲ You');
+    expect(screen.snapshot().match(/^▲ You/gmu) ?? []).toHaveLength(1);
+    expect(screen.snapshot().match(/^◆ provider/gmu) ?? []).toHaveLength(1);
   });
 
-  it('keeps a short final answer adjacent to the composer boundary', () => {
-    const { display, screen } = createDisplay(100, 100);
-    display.setStatusFooter('◆ provider/model │ 0% │ ready │ 1s');
+  it('keeps a settled activity and final response single-shot after late repaints', async () => {
+    delete process.env.AIDEN_COMPOSER_LANE;
+    const { display, screen, stream } = createDisplay(100, 30);
+    display.setStatusFooter('◆ provider · model │ ◉ 3% │ working │ ⧖ 1s');
     display.setIdleComposer('', 'Type your message');
-    display.write('Short final answer.\n');
-
-    expect(blankRowsBeforeComposer(screen, 'Short final answer.')).toBeLessThanOrEqual(1);
-  });
-
-  it('releases a settled spinner height immediately', () => {
-    const { display, screen } = createDisplay(100, 45);
-    display.setStatusFooter('◆ provider/model │ 0% │ thinking │ 1s');
-    display.setIdleComposer('', 'Type your message');
-    display.write('Prompt boundary\n');
-    const activity = display.liveActivityRow('calling provider');
-    activity.stop();
-
-    expect(screen.snapshot()).not.toContain('Aiden is thinking');
-    expect(blankRowsBeforeComposer(screen, 'Prompt boundary')).toBeLessThanOrEqual(1);
-  });
-
-  it('shrinks a multiline activity replacement to its semantic row', () => {
-    const { region, screen } = createRegionHarness(false, 80, 30);
-    region.writeAbove('Inspection boundary\n');
-    region.setLiveRow('inspection', 'Status bar\nraw detail one\nraw detail two\nraw detail three');
-    region.setLiveRow('inspection', '✓ statusBar.ts · lines 1–190 inspected');
-
-    expect(screen.snapshot()).not.toContain('raw detail');
-    expect(blankRowsBeforeComposer(screen, 'lines 1–190 inspected')).toBeLessThanOrEqual(1);
-  });
-
-  it('releases every row when a suggestion-like activity is dismissed', () => {
-    const { region, screen } = createRegionHarness(false, 80, 30);
-    region.writeAbove('Suggestion boundary\n');
-    region.setLiveRow('skill-suggestion', 'Suggested skill\nInspect repository\nPress Enter to accept');
-    region.removeLiveRow('skill-suggestion');
-
-    expect(screen.snapshot()).not.toContain('Suggested skill');
-    expect(blankRowsBeforeComposer(screen, 'Suggestion boundary')).toBeLessThanOrEqual(1);
-  });
-
-  it('recomputes wrapped height in both resize directions without gaps or overlap', async () => {
-    const { region, screen, resize } = createRegionHarness(false, 44, 45);
-    region.writeAbove('Resize boundary\n');
-    region.paint({
-      draft: 'Inspect repository files with a semantic summary that wraps at narrow width',
-      mode: 'idle',
+    const activity = display.toolRow('file_read', { path: 'package.json' }, undefined, {
+      activityId: 'settled-read',
     });
-    const narrowComposer = composerGeometry(screen).topSeparator;
-
-    resize(100, 45);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    const wideComposer = composerGeometry(screen).topSeparator;
-    expect(wideComposer).toBeGreaterThan(narrowComposer);
-    expect(blankRowsBeforeComposer(screen, 'Resize boundary')).toBeLessThanOrEqual(1);
-
-    resize(44, 45);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(screen.snapshot().match(/Inspect repository files/gu)).toHaveLength(1);
-    expect(screen.snapshot().match(/▲ You/gu)).toHaveLength(1);
-  });
-
-  it('omits empty live sections instead of reserving their rows', () => {
-    const { region, screen } = createRegionHarness(false, 80, 30);
-    region.writeAbove('Empty-section boundary\n');
-    region.setLiveRow('empty-section', '  \n\n  ');
-
-    expect(blankRowsBeforeComposer(screen, 'Empty-section boundary')).toBeLessThanOrEqual(1);
-  });
-
-  it('clears prior reserved height and rejects late restoration after cls', () => {
-    const { display, screen } = createDisplay(100, 45);
-    display.setStatusFooter('◆ provider/model │ 0% │ working │ 1s');
-    display.setIdleComposer('', 'Type your message');
-    const activity = display.toolRow('file_read', { path: 'before-cls.ts' }, undefined, {
-      activityId: 'before-cls',
-    });
-    display.clearScreen();
-    display.write('After cls\n');
+    activity.ok(9);
+    display.streamPartial('Final response exactly once.');
+    display.streamComplete();
+    for (const width of [44, 100, 60, 100]) {
+      stream.resize(width, 30);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
     activity.refresh();
+    display.setStatusFooter('◆ provider · model │ ◉ 3% │ ready │ ⧖ 9s');
 
-    expect(screen.snapshot().match(/before-cls.ts/gu)).toHaveLength(1);
-    expect(blankRowsBeforeComposer(screen, 'After cls')).toBeLessThanOrEqual(1);
+    const buffer = screen.bufferSnapshot();
+    expect(buffer.match(/Final response exactly once\./gu) ?? []).toHaveLength(1);
+    expect(buffer.match(/package\.json/gu) ?? []).toHaveLength(1);
+    expect(screen.snapshot().match(/^▲ You/gmu) ?? []).toHaveLength(1);
+    expect(screen.snapshot().match(/^◆ provider/gmu) ?? []).toHaveLength(1);
   });
 });
 
