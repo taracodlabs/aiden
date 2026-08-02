@@ -410,20 +410,84 @@ describe('settled activity row spacing', () => {
     }
   });
 
-  it('keeps the assistant header between activity and prose without extra padding', () => {
+  function expectActivityAnswerBoundary(
+    screen: TerminalScreen,
+    activityTerms: readonly string[],
+    answerText: string,
+    blankAfterHeader = true,
+  ): void {
+    const lines = compactTranscriptLines(screen);
+    const activity = findSemanticLine(lines, activityTerms);
+    const divider = lines.findIndex((line, index) => index > activity && /^\s*─{10,}\s*$/u.test(line));
+    const header = findSemanticLine(lines, ['Aiden']);
+    const answer = findSemanticLine(lines, [answerText]);
+    expect(activity).toBeGreaterThanOrEqual(0);
+    expect(divider, lines.join('\n')).toBe(activity + 1);
+    expect(header, lines.join('\n')).toBe(divider + 1);
+    if (blankAfterHeader) expect(lines[header + 1], lines.join('\n')).toBe('');
+    expect(answer, lines.join('\n')).toBe(header + (blankAfterHeader ? 2 : 1));
+  }
+
+  it('keeps a completed activity directly beside the assistant boundary', () => {
+    const { display, screen } = prepare();
+    display.toolRow('file_read', { path: 'src/completed.ts' }).ok(12);
+    display.write(display.agentTurn('Completed activity answer.', { activityDivider: true }));
+
+    expectActivityAnswerBoundary(screen, ['completed', 'completed.ts'], 'Completed activity answer.');
+  });
+
+  it('keeps a failed activity directly beside the assistant boundary', () => {
+    const { display, screen } = prepare();
+    display.toolRow('shell_exec', { command: 'echo failed-transition' }).fail(18);
+    display.write(display.agentTurn('Failed activity answer.', { activityDivider: true }));
+
+    expectActivityAnswerBoundary(screen, ['failed', 'failed-transition'], 'Failed activity answer.');
+  });
+
+  it('keeps a skill activity directly beside the assistant boundary', () => {
+    const { display, screen } = prepare();
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-answer-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.write(display.agentTurn('Skill activity answer.', { activityDivider: true }));
+
+    expectActivityAnswerBoundary(screen, ['skill', 'systematic-debugging'], 'Skill activity answer.');
+  });
+
+  it('preserves activity adjacency and assistant paragraph spacing', () => {
     const { display, screen } = prepare();
     display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
     display.toolRow('file_read', { path: 'src/second.ts' }).ok(14);
-    display.write('\n│ Aiden\nFinal answer remains separate.\n');
+    display.write(display.agentTurn('First paragraph.\n\nSecond paragraph.', { activityDivider: true }));
 
     const lines = compactTranscriptLines(screen);
-    const activity = findSemanticLine(lines, ['completed', 'second.ts']);
-    const answer = findSemanticLine(lines, ['Final answer remains separate.']);
-    expect(activity).toBeGreaterThanOrEqual(0);
-    expect(answer).toBeGreaterThan(activity);
-    const separation = lines.slice(activity + 1, answer);
-    expect(separation.filter((line) => /Aiden/u.test(line)), lines.join('\n')).toHaveLength(1);
-    expect(separation.filter((line) => line.length === '')).toHaveLength(0);
+    expectAdjacent(lines, ['completed', 'first.ts'], ['completed', 'second.ts']);
+    expectActivityAnswerBoundary(screen, ['completed', 'second.ts'], 'First paragraph.');
+    const first = findSemanticLine(lines, ['First paragraph.']);
+    const second = findSemanticLine(lines, ['Second paragraph.']);
+    expect(lines.slice(first + 1, second)).toEqual(['']);
+  });
+
+  it('keeps the streamed assistant boundary compact after activity', () => {
+    const { display, screen } = prepare();
+    display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
+    display.toolRow('file_read', { path: 'src/second.ts' }).ok(14);
+    display.streamPartial('Streamed activity answer.', true);
+    display.streamComplete();
+
+    expectActivityAnswerBoundary(screen, ['completed', 'second.ts'], 'Streamed activity answer.', false);
+  });
+
+  it('keeps the activity-to-answer transition bounded at narrow width', () => {
+    const { display, screen } = prepare(44);
+    display.toolRow('file_read', { path: 'src/narrow-transition.ts' }).ok(12);
+    display.write(display.agentTurn('Narrow answer remains readable.', { activityDivider: true }));
+
+    expectActivityAnswerBoundary(screen, ['completed', 'narrow-transition'], 'Narrow answer remains');
+    expect(compactTranscriptLines(screen).every((line) => line.length <= 43)).toBe(true);
   });
 });
 
