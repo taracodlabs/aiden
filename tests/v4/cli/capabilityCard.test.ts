@@ -153,6 +153,14 @@ describe('truncToContent', () => {
     expect(truncToContent('short action')).toBe('short action');
   });
 
+  it('uses terminal width for ANSI and wide Unicode content', () => {
+    const out = truncToContent(`\x1b[38;2;255;107;53m${'界'.repeat(80)}\x1b[0m`);
+    expect(require('string-width')(out.replace(/\x1b\[[0-9;]*[A-Za-z]/gu, '')))
+      .toBeLessThanOrEqual(58);
+    expect(out).not.toContain('\uFFFD');
+    expect(out).toMatch(/…$/u);
+  });
+
   it('truncates with "…" when exceeding the bullet column cap', () => {
     const long = 'x'.repeat(200);
     const out = truncToContent(long);

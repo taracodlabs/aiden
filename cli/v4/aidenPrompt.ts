@@ -44,6 +44,9 @@ import { findGhost } from './ghostMatch';
 import { getSkinEngine } from './skinEngine';
 import { emitComposerReadyForTests } from './composerReadiness';
 import { nextComposerGeneration, turnIdleDiagnostic } from './turnIdleDiagnostics';
+import { truncateVisible } from './box';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
 
 /** Lightweight slash command shape — minimum the dropdown needs. */
 export interface SlashCommandLite {
@@ -100,7 +103,7 @@ function stripAnsi(s: string): string {
 
 /** Visible width — ignore ANSI escape sequences. */
 function vWidth(s: string): number {
-  return stripAnsi(s).length;
+  return stringWidth(stripAnsi(s));
 }
 
 /** Build an SGR span using the active skin. */
@@ -122,11 +125,11 @@ function renderDropdownRow(
   // The desc column is right-aligned and dim-coloured.
   const lhs = `${marker}${nameCell}`;
   const lhsWidth = vWidth(lhs);
-  const padBetween = Math.max(2, width - lhsWidth - vWidth(desc));
-  const truncatedDesc =
-    vWidth(desc) > width - lhsWidth - 2
-      ? desc.slice(0, Math.max(0, width - lhsWidth - 3)) + '…'
-      : desc;
+  const descWidth = Math.max(0, width - lhsWidth - 2);
+  const truncatedDesc = vWidth(desc) > descWidth
+    ? `${truncateVisible(desc, Math.max(0, descWidth - 1))}…`
+    : desc;
+  const padBetween = Math.max(2, width - lhsWidth - vWidth(truncatedDesc));
   const dimDesc = sk.applyColors(truncatedDesc, 'muted');
   const painted = selected
     ? sk.applyColors(lhs, 'brand')

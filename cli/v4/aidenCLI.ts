@@ -35,6 +35,7 @@ import { ChatSession } from './chatSession';
 import { runTuiMode } from './aidenTUI';
 import { Display } from './display';
 import { SkinEngine } from './skinEngine';
+import { isVerbose } from './design/tokens';
 import { initializeEffectiveTheme } from './themeCompatibility';
 import { CommandRegistry } from './commandRegistry';
 import { CliCallbacks } from './callbacks';
@@ -1350,7 +1351,7 @@ export async function buildAgentRuntime(
   // to config.yaml. Core modules (sandboxConfig, turnState,
   // browserState) consult this singleton; precedence is
   // env > config.yaml > default per Q-P8a-1(a).
-  {
+  if (isVerbose()) {
     const { initRuntimeToggles } = await import('../../core/v4/runtimeToggles');
     initRuntimeToggles({
       configRead: (key) => config.getValue(key),
@@ -1773,9 +1774,11 @@ export async function buildAgentRuntime(
     skillCounts.skipped > 0
       ? ` (see ${skillsLogger.filePath})`
       : '';
-  display.dim(
-    `[skills] ${skillCounts.loaded} loaded, ${skillCounts.skipped} skipped${skipNote}`,
-  );
+  if (skillCounts.skipped > 0) {
+    display.warn(`[skills] ${skillCounts.loaded} loaded, ${skillCounts.skipped} skipped${skipNote}`);
+  } else if (isVerbose()) {
+    display.dim(`[skills] ${skillCounts.loaded} loaded, 0 skipped`);
+  }
   // Phase 17 Task 5: plugin loader boot.
   //
   // Bundled plugins (e.g. aiden-plugin-cdp-browser) are discovered

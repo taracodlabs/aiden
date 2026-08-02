@@ -33,7 +33,42 @@ export interface ActivityFrameProjection {
   label: string;
   text: string;
   color: ColorKind;
+  glyphColor: ColorKind;
   animated: boolean;
+}
+
+/** Compact typed projection for an actual skill invocation. */
+export interface SkillInvocationInput {
+  invocationId: string;
+  skillName: string;
+  durationMs?: number;
+  referenceName?: string;
+}
+
+export interface StructuredActivityLine {
+  text: string;
+  color: ColorKind;
+  identity: string;
+}
+
+export function projectSkillInvocation(input: SkillInvocationInput): StructuredActivityLine[] {
+  const name = input.skillName.trim();
+  if (!input.invocationId.trim() || !name) return [];
+  const duration = typeof input.durationMs === 'number' && input.durationMs >= 0
+    ? ` ${formatStructuredDuration(input.durationMs)}` : '';
+  const reference = input.referenceName?.trim();
+  const referenceText = reference ? ` · ${reference}` : '';
+  return [{
+    text: `✓ skill  ${name}${referenceText}${duration}`,
+    color: 'skill',
+    identity: `skill:${input.invocationId}`,
+  }];
+}
+
+function formatStructuredDuration(durationMs: number): string {
+  if (durationMs < 1000) return `${Math.max(0, Math.round(durationMs))}ms`;
+  const seconds = durationMs / 1000;
+  return `${Number.isInteger(seconds) ? seconds : seconds < 10 ? seconds.toFixed(1) : Math.round(seconds)}s`;
 }
 
 const TERMINAL_PHASES = new Set<SemanticActivityPhase>([
@@ -86,6 +121,19 @@ export function phaseColorKind(phase: SemanticActivityPhase): ColorKind {
     case 'failed': return 'error';
     case 'completing': return 'verifying';
     case 'ready': return 'muted';
+  }
+}
+
+/** Strong colour belongs to the state glyph; labels stay readable and restrained. */
+export function phaseGlyphColorKind(phase: SemanticActivityPhase): ColorKind {
+  switch (phase) {
+    case 'complete':
+    case 'ready': return 'success';
+    case 'failed': return 'error';
+    case 'approval_required': return 'warn';
+    case 'blocked': return 'error';
+    case 'recovering': return 'recovering';
+    default: return phaseColorKind(phase);
   }
 }
 
@@ -157,9 +205,9 @@ function unicodeGlyph(phase: SemanticActivityPhase, frame: number): string {
     }
     case 'working': return ['>   ', ' >  ', '  > ', '   >'][frame % 4]!;
     case 'testing': return ['◐', '◓', '◑', '◒'][frame % 4]!;
-    case 'verifying': return ['⌁', '⌁·', '⌁··'][frame % 3]!;
+    case 'verifying': return ['⌁  ', '⌁· ', '⌁··'][frame % 3]!;
     case 'recovering': return ['↶', '↺'][frame % 2]!;
-    case 'completing': return ['·', '··', '···'][frame % 3]!;
+    case 'completing': return ['·  ', '·· ', '···'][frame % 3]!;
     case 'approval_required':
     case 'blocked': return '!';
     case 'complete': return '✓';
@@ -186,6 +234,7 @@ export function projectActivityFrame(input: ActivityFrameInput): ActivityFramePr
     label,
     text: `${glyph} ${label}${detail}`,
     color: phaseColorKind(input.phase),
+    glyphColor: phaseGlyphColorKind(input.phase),
     animated: !TERMINAL_PHASES.has(input.phase),
   };
 }

@@ -7,10 +7,12 @@ import {
   projectActivityFrame,
   projectCommandPresentation,
   projectEvidenceLines,
+  projectSkillInvocation,
   relativizeActivityText,
   shouldDeferActivityTransition,
   type SemanticActivityPhase,
 } from '../../../cli/v4/semanticActivity';
+import { visibleLength } from '../../../cli/v4/box';
 
 const animated: SemanticActivityPhase[] = [
   'thinking', 'planning', 'inspecting', 'working', 'testing',
@@ -78,6 +80,14 @@ describe('semantic activity projection', () => {
     expect(phaseColorKind('verifying')).toBe('verifying');
     expect(phaseColorKind('complete')).toBe('success');
     expect(phaseColorKind('failed')).toBe('error');
+    expect(projectActivityFrame({ phase: 'complete', frame: 0, elapsedMs: 0, unicode: true, mode: 'summary' }).glyphColor).toBe('success');
+    expect(projectActivityFrame({ phase: 'failed', frame: 0, elapsedMs: 0, unicode: true, mode: 'summary' }).glyphColor).toBe('error');
+    expect(projectActivityFrame({ phase: 'approval_required', frame: 0, elapsedMs: 0, unicode: true, mode: 'summary' }).glyphColor).toBe('warn');
+  });
+
+  it.each(['thinking', 'planning', 'inspecting', 'working', 'testing', 'verifying', 'recovering', 'completing'] as SemanticActivityPhase[])('keeps %s animation frames display-width stable', (phase) => {
+    const widths = [0, 1, 2, 3].map((frame) => visibleLength(projectActivityFrame({ phase, frame, elapsedMs: 1_000, unicode: true, mode: 'summary' }).glyph));
+    expect(new Set(widths).size).toBe(1);
   });
 
   it('defers fast transient phase churn but never delays terminal/user phases', () => {
@@ -85,6 +95,15 @@ describe('semantic activity projection', () => {
     expect(shouldDeferActivityTransition('thinking', 'planning', 200)).toBe(false);
     expect(shouldDeferActivityTransition('working', 'approval_required', 10)).toBe(false);
     expect(shouldDeferActivityTransition('working', 'blocked', 10)).toBe(false);
+  });
+});
+
+describe('structured skill projection', () => {
+  it('exposes one typed row per real skill and optional reference', () => {
+    const lines = projectSkillInvocation({ invocationId: 'inv-1', skillName: 'repository-audit', durationMs: 1250, referenceName: 'repo-layout' });
+    expect(lines.map((line) => line.text)).toEqual(['✓ skill  repository-audit · repo-layout 1.3s']);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]?.color).toBe('skill');
   });
 });
 
