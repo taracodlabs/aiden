@@ -207,10 +207,19 @@ function composerText(content: string[]): string {
   return content.join('');
 }
 
-function compactTranscriptLines(screen: TerminalScreen): string[] {
-  return screen.bufferSnapshot()
+const TEST_TERMINAL_CONTROL = /\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[78])/gu;
+
+function logicalTerminalLines(output: string): string[] {
+  return output
+    .replace(TEST_TERMINAL_CONTROL, '')
+    .replace(/\r\n/gu, '\n')
+    .replace(/\r/gu, '\n')
     .split('\n')
     .map((line) => line.replace(/\s+$/u, ''));
+}
+
+function compactTranscriptLines(screen: TerminalScreen): string[] {
+  return logicalTerminalLines(screen.bufferSnapshot());
 }
 
 describe('settled activity row spacing', () => {
@@ -222,12 +231,50 @@ describe('settled activity row spacing', () => {
     return harness;
   }
 
-  function expectAdjacent(lines: string[], firstPattern: RegExp, secondPattern: RegExp): void {
-    const first = lines.findIndex((line) => firstPattern.test(line));
-    const second = lines.findIndex((line) => secondPattern.test(line));
+  function findSemanticLine(lines: string[], terms: readonly string[]): number {
+    const normalizedTerms = terms.map((term) => term.toLowerCase());
+    return lines.findIndex((line) => {
+      const normalizedLine = line.toLowerCase();
+      return normalizedTerms.every((term) => normalizedLine.includes(term));
+    });
+  }
+
+  function expectAdjacent(
+    lines: string[],
+    firstTerms: readonly string[],
+    secondTerms: readonly string[],
+  ): void {
+    const first = findSemanticLine(lines, firstTerms);
+    const second = findSemanticLine(lines, secondTerms);
     expect(first, lines.join('\n')).toBeGreaterThanOrEqual(0);
     expect(second, lines.join('\n')).toBe(first + 1);
+    expect(lines.slice(first + 1, second).filter((line) => line.length === '')).toHaveLength(0);
   }
+
+  it.each([
+    [
+      'LF without colour',
+      '┊ ✓ completed src/first.ts\n┊ ✓ completed src/second.ts',
+    ],
+    [
+      'CRLF with ANSI around glyphs and categories',
+      '\x1b[90m┊\x1b[0m \x1b[32m✓\x1b[0m \x1b[36mcompleted\x1b[0m src/first.ts\r\n' +
+        '\x1b[90m┊\x1b[0m \x1b[32m✓\x1b[0m \x1b[36mcompleted\x1b[0m src/second.ts',
+    ],
+    [
+      'bare CR with OSC metadata and Unicode glyphs',
+      '\x1b]9;activity:first\x07┊ ✓ completed src/first.ts\r' +
+        '\x1b]9;activity:second\x1b\\┊ ✓ completed src/second.ts',
+    ],
+  ])('normalises %s without changing activity order', (_label, output) => {
+    const lines = logicalTerminalLines(output);
+    expectAdjacent(lines, ['completed', 'src/first.ts'], ['completed', 'src/second.ts']);
+  });
+
+  it('preserves genuine blank logical rows during normalisation', () => {
+    const lines = logicalTerminalLines('┊ ✓ completed first\r\n\r\n┊ ✓ completed second');
+    expect(lines).toEqual(['┊ ✓ completed first', '', '┊ ✓ completed second']);
+  });
 
   it('keeps consecutive completed tool rows adjacent', () => {
     const { display, screen } = prepare();
@@ -237,8 +284,8 @@ describe('settled activity row spacing', () => {
 
     expectAdjacent(
       compactTranscriptLines(screen),
-      /completed\s+first\.ts/iu,
-      /completed\s+second\.ts/iu,
+      ['completed', 'first.ts'],
+      ['completed', 'second.ts'],
     );
   });
 
@@ -249,8 +296,8 @@ describe('settled activity row spacing', () => {
 
     expectAdjacent(
       compactTranscriptLines(screen),
-      /completed\s+first\.ts/iu,
-      /failed\s+echo failed-row/iu,
+      ['completed', 'first.ts'],
+      ['failed', 'echo failed-row'],
     );
   });
 
@@ -266,8 +313,64 @@ describe('settled activity row spacing', () => {
 
     expectAdjacent(
       compactTranscriptLines(screen),
-      /skill\s+systematic-debugging/iu,
-      /completed\s+after-skill\.ts/iu,
+      ['skill', 'systematic-debugging'],
+      ['completed', 'after-skill.ts'],
+    );
+  });
+
+  it('keeps consecutive browser navigation rows adjacent', () => {
+    const { display, screen } = prepare();
+    display.toolRow('browser_navigate', { url: 'https://a.test' }).ok(10_000);
+    display.toolRow('browser_navigate', { url: 'https://b.test' }).ok(3_400);
+
+    expectAdjacent(
+      compactTranscriptLines(screen),
+      ['completed', 'a.test'],
+      ['completed', 'b.test'],
+    );
+  });
+
+  it('keeps click and snapshot rows adjacent', () => {
+    const { display, screen } = prepare();
+    display.toolRow('browser_click', { selector: '@e755' }).ok(300);
+    display.toolRow('browser_snapshot', { path: 'snapshot-full' }).ok(700);
+
+    expectAdjacent(
+      compactTranscriptLines(screen),
+      ['completed', '@e755'],
+      ['completed', 'snapshot-full'],
+    );
+  });
+
+  it('keeps a settled Worker update adjacent to verification evidence', () => {
+    const { display, screen } = prepare();
+    display.renderUiEvent('ui_task_update', {
+      task_id: 'worker-spacing', kind: 'subagent', label: 'Runtime ownership', status: 'running',
+    });
+    display.renderUiEvent('ui_task_done', {
+      task_id: 'worker-spacing', status: 'success', summary: 'Worker complete',
+    });
+    display.evidencePanel([{
+      evidenceId: 'evidence-spacing', source: 'fresh_readback',
+      verificationResult: 'verified', payload: { path: 'src/runtime.ts' },
+    }]);
+
+    expectAdjacent(
+      compactTranscriptLines(screen),
+      ['Worker complete'],
+      ['Evidence'],
+    );
+  });
+
+  it('keeps cancelled rows in the same compact activity list', () => {
+    const { display, screen } = prepare();
+    display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
+    display.toolRow('shell_exec', { command: 'echo cancelled-row' }).cancel(18);
+
+    expectAdjacent(
+      compactTranscriptLines(screen),
+      ['completed', 'first.ts'],
+      ['cancelled', 'echo cancelled-row'],
     );
   });
 
@@ -285,6 +388,28 @@ describe('settled activity row spacing', () => {
     expect(activity.every(({ line }) => line.length <= 43)).toBe(true);
   });
 
+  it('keeps semantic adjacency when colour output is disabled', () => {
+    const previousNoColor = process.env.NO_COLOR;
+    const previousForceColor = process.env.FORCE_COLOR;
+    process.env.NO_COLOR = '1';
+    process.env.FORCE_COLOR = '0';
+    try {
+      const { display, screen } = prepare();
+      display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
+      display.toolRow('file_read', { path: 'src/second.ts' }).ok(14);
+      expectAdjacent(
+        compactTranscriptLines(screen),
+        ['completed', 'first.ts'],
+        ['completed', 'second.ts'],
+      );
+    } finally {
+      if (previousNoColor === undefined) delete process.env.NO_COLOR;
+      else process.env.NO_COLOR = previousNoColor;
+      if (previousForceColor === undefined) delete process.env.FORCE_COLOR;
+      else process.env.FORCE_COLOR = previousForceColor;
+    }
+  });
+
   it('keeps the assistant header between activity and prose without extra padding', () => {
     const { display, screen } = prepare();
     display.toolRow('file_read', { path: 'src/first.ts' }).ok(12);
@@ -292,12 +417,12 @@ describe('settled activity row spacing', () => {
     display.write('\n│ Aiden\nFinal answer remains separate.\n');
 
     const lines = compactTranscriptLines(screen);
-    const activity = lines.findIndex((line) => /completed\s+second\.ts/iu.test(line));
-    const answer = lines.findIndex((line) => /Final answer remains separate\./u.test(line));
+    const activity = findSemanticLine(lines, ['completed', 'second.ts']);
+    const answer = findSemanticLine(lines, ['Final answer remains separate.']);
     expect(activity).toBeGreaterThanOrEqual(0);
     expect(answer).toBeGreaterThan(activity);
     const separation = lines.slice(activity + 1, answer);
-    expect(separation.some((line) => /Aiden/u.test(line)), lines.join('\n')).toBe(true);
+    expect(separation.filter((line) => /Aiden/u.test(line)), lines.join('\n')).toHaveLength(1);
     expect(separation.filter((line) => line.length === '')).toHaveLength(0);
   });
 });
