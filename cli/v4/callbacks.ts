@@ -529,7 +529,7 @@ export class CliCallbacks {
       const status = payload && typeof payload === 'object'
         ? (payload as { status?: unknown }).status
         : undefined;
-      const dismiss = isExclusiveToolInteraction(
+      const dismiss = call.name === 'skill_view' || isExclusiveToolInteraction(
         this.resolveToolInteraction?.(call.name),
       );
       settled = status === 'cancelled'
@@ -541,6 +541,26 @@ export class CliCallbacks {
     if (!settled) return;
 
     try { this.renderBlockerCardIfPresent(result); } catch { /* defensive */ }
+    if (call.name === 'skill_view' && !err) {
+      const args = call.arguments && typeof call.arguments === 'object'
+        ? call.arguments as Record<string, unknown> : {};
+      const payload = result?.result && typeof result.result === 'object'
+        ? result.result as Record<string, unknown> : {};
+      const requestedReference = typeof args.path === 'string' ? args.path.trim() : '';
+      const loadedFile = typeof payload.filePath === 'string' ? payload.filePath.trim() : '';
+      const loadedSegments = loadedFile.split(/[\\/]/u);
+      const loadedReference = requestedReference || loadedSegments[loadedSegments.length - 1] || '';
+      try {
+        this.display.renderUiEvent('ui_skill_invocation', {
+          invocation_id: call.id,
+          skill_name: typeof args.name === 'string' ? args.name : 'skill',
+          duration_ms: timing?.executionDurationMs,
+          reference_name: typeof payload.referenceName === 'string' ? payload.referenceName
+            : typeof payload.reference_name === 'string' ? payload.reference_name
+              : loadedReference || undefined,
+        });
+      } catch { /* structured activity must never affect execution */ }
+    }
     try {
       const payload = result?.result && typeof result.result === 'object'
         ? { ...(result.result as Record<string, unknown>), ...(result.error ? { error: result.error } : {}) }
@@ -1039,7 +1059,7 @@ function redactApprovalTarget(value: string): string {
 }
 
 function truncateApproval(value: string, width: number): string {
-  if (value.length <= width) return value;
-  if (width <= 1) return value.slice(0, width);
-  return `${value.slice(0, width - 1)}…`;
+  if (visibleLength(value) <= width) return value;
+  if (width <= 1) return truncateVisible(value, width);
+  return `${truncateVisible(value, width - 1)}…`;
 }

@@ -39,6 +39,8 @@
  * Functions must return a string. Return `''` to show no preview
  * (matches the empty-key convention). Pure — no side effects.
  */
+import { truncateVisible, visibleLength } from './box';
+
 export type ToolPreviewExtractor = string | ((args: unknown) => string);
 
 /**
@@ -52,6 +54,8 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
 
   // ── file ops ─────────────────────────────────────────────────────────
   file_read:         'path',
+  read_file:         'path',
+  read_text_file:    'path',
   file_write:        'path',
   file_patch:        'path',
   file_list:         'path',
@@ -111,7 +115,7 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
   process_log_read:  'pid',
 
   // ── subagent ─────────────────────────────────────────────────────────
-  subagent_fanout:   'mode',
+  subagent_fanout:   '',
 
   // ── system / misc ────────────────────────────────────────────────────
   system_info:       '',
@@ -172,6 +176,67 @@ export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
  */
 const PREVIEW_MAX_CHARS = 120;
 
+const ANSI_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/gu;
+
+function cleanPreviewText(value: string): string {
+  return value
+    .replace(ANSI_PATTERN, '')
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/gu, '')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function truncatePreview(value: string, columns = PREVIEW_MAX_CHARS): string {
+  const clean = cleanPreviewText(value);
+  if (visibleLength(clean) <= columns) return clean;
+  return `${truncateVisible(clean, Math.max(0, columns - 1))}…`;
+}
+
+function summarizeShellCommand(command: string): string {
+  const statements = command
+    .split(/(?:\r?\n|\s*;\s*|\s*&&\s*|\s*\|\|\s*)/u)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const firstStatement = statements[0] ?? command;
+  const withoutQuietRedirection = firstStatement
+    .replace(/\s+(?:\d?>|\d?>>)\s*\$null\s*$/iu, '')
+    .trim();
+  const remaining = statements.length > 1 ? ` · +${statements.length - 1} steps` : '';
+  const semantic = /\bSelect-String\b/iu.test(command)
+    ? 'search repository source'
+    : /\bGet-Content\b/iu.test(command)
+      ? 'read repository source'
+      : /\b(?:Get-ChildItem|rg(?:\.exe)?)\b/iu.test(command)
+        ? 'inspect repository files'
+        : /^\s*\$[A-Za-z_][\w]*\s*=|@\(/u.test(withoutQuietRedirection)
+          ? 'run PowerShell inspection'
+          : withoutQuietRedirection || command;
+  return truncatePreview(`${semantic}${remaining}`);
+}
+
+/** Human compact fallback for unmapped or structured tool arguments. */
+export function summarizeToolArguments(args: unknown): string {
+  if (args == null) return '';
+  if (typeof args === 'string') return truncatePreview(args);
+  if (typeof args !== 'object') return String(args);
+  if (Array.isArray(args)) return `${args.length} ${args.length === 1 ? 'item' : 'items'}`;
+  const entries = Object.entries(args as Record<string, unknown>);
+  if (entries.length === 0) return '';
+  return `${entries.length} ${entries.length === 1 ? 'argument' : 'arguments'}`;
+}
+
+function summarizeStructuredValue(value: object): string {
+  if (Array.isArray(value)) return `${value.length} ${value.length === 1 ? 'item' : 'items'}`;
+  const entries = Object.entries(value as Record<string, unknown>);
+  const safeValues = entries
+    .filter(([, entry]) => ['string', 'number', 'boolean'].includes(typeof entry))
+    .slice(0, 2)
+    .map(([, entry]) => cleanPreviewText(String(entry)))
+    .filter(Boolean);
+  if (safeValues.length > 0) return truncatePreview(safeValues.join(' · '));
+  return `${entries.length} ${entries.length === 1 ? 'argument' : 'arguments'}`;
+}
+
 /**
  * Build the per-tool preview string for `args`. Returns:
  *   - `null` when the tool isn't in the map (caller falls back to the
@@ -185,6 +250,7 @@ const PREVIEW_MAX_CHARS = 120;
 export function buildToolPreview(
   toolName: string,
   args: unknown,
+  opts: { mode?: 'summary' | 'full' } = {},
 ): string | null {
   if (!Object.prototype.hasOwnProperty.call(TOOL_PRIMARY_ARG, toolName)) {
     return null;
@@ -216,19 +282,34 @@ export function buildToolPreview(
       str = raw;
     } else if (typeof raw === 'number' || typeof raw === 'boolean') {
       str = String(raw);
-    } else {
+    } else if (opts.mode === 'full') {
       try {
         str = JSON.stringify(raw);
       } catch {
         str = String(raw);
       }
+    } else {
+      str = summarizeStructuredValue(raw as object);
     }
   }
 
-  // Collapse whitespace so multi-line commands stay on one preview row.
-  str = str.replace(/\s+/g, ' ').trim();
-  if (str.length > PREVIEW_MAX_CHARS) {
-    str = `${str.slice(0, PREVIEW_MAX_CHARS - 1)}…`;
+  if (toolName === 'file_read' && opts.mode === 'full' && args && typeof args === 'object') {
+    const input = args as Record<string, unknown>;
+    const target = typeof input.path === 'string' ? input.path
+      : typeof input.file === 'string' ? input.file : '';
+    const offset = typeof input.offset === 'number' && Number.isFinite(input.offset)
+      ? Math.max(0, Math.floor(input.offset)) : null;
+    const limit = typeof input.limit === 'number' && Number.isFinite(input.limit)
+      ? Math.max(1, Math.floor(input.limit)) : null;
+    if (target && offset !== null) {
+      str = limit === null
+        ? `${target} · from char ${offset}`
+        : `${target} · chars ${offset}–${offset + limit - 1}`;
+    }
   }
-  return str;
+
+  if (opts.mode !== 'full' && toolName === 'shell_exec') {
+    return summarizeShellCommand(str);
+  }
+  return truncatePreview(str);
 }

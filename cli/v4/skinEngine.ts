@@ -118,10 +118,12 @@ function ansiRgb(
       // ANSI 16 has no orange. Dark amber is the closest restrained fallback;
       // it avoids turning the brand into bright red or painting the UI yellow.
       brand: 33, accent: 33, heading: 33, user: 33,
+      prompt: 36, prompt_content: 96,
       success: 92, warn: 93, degraded: 93, error: 31,
-      tool: 96, session: 96, agent: 97, muted: 37,
+      tool: 36, skill: 95, worker: 95,
+      session: 96, agent: 97, muted: 37,
       tertiary: 90, metric_turn: 95,
-      thinking: 96, planning: 95, inspecting: 94, working: 33,
+      thinking: 96, planning: 95, inspecting: 96, evidence: 94, working: 33,
       testing: 93, verifying: 36, recovering: 95,
     };
     return `\x1b[${semanticCode[kind!] ?? rgbTo16(r, g, b)}m${text}\x1b[39m`;
@@ -163,7 +165,12 @@ const COLOR_KIND_TO_TOKEN_PATH: Partial<Record<string, string>> = {
   verifying:   'semantic.verifying',
   recovering:  'semantic.recovering',
   agent:       'content.primary',
-  user:        'brand.primary',
+  user:        'semantic.thinking',
+  prompt:      'semantic.thinking',
+  prompt_content: 'metrics.model',
+  skill:       'semantic.planning',
+  worker:      'semantic.planning',
+  evidence:    'semantic.info',
 };
 
 function hexToRgb(hex: string): [number, number, number] | null {
@@ -187,8 +194,13 @@ export type ColorKind =
   | 'brand'
   | 'accent'
   | 'user'
+  | 'prompt'
+  | 'prompt_content'
   | 'agent'
   | 'tool'
+  | 'skill'
+  | 'worker'
+  | 'evidence'
   | 'error'
   | 'warn'
   | 'success'
@@ -233,9 +245,14 @@ const DEFAULT_SKIN: SkinDefinition = {
   colors: {
     brand: BRAND_ORANGE,
     accent: BRAND_ORANGE,
-    user: BRAND_ORANGE, // user input shares the Aiden brand accent
+    user: [0x5b, 0xc0, 0xeb],
+    prompt: [0x5b, 0xc0, 0xeb],
+    prompt_content: [0x9c, 0xdc, 0xfe],
     agent: [0xe0, 0xe0, 0xe0], // off-white — agent reply
-    tool: [0x9c, 0xdc, 0xfe], // cyan — tool calls
+    tool: [0x5b, 0xc0, 0xeb], // cyan — tool calls
+    skill: [0xa7, 0x8b, 0xfa],
+    worker: [0xa7, 0x8b, 0xfa],
+    evidence: [0x60, 0xa5, 0xfa],
     error: [0xf4, 0x47, 0x47],
     warn: [0xff, 0xc1, 0x07],
     success: [0x4c, 0xaf, 0x50],
@@ -265,7 +282,7 @@ const DEFAULT_SKIN: SkinDefinition = {
     tertiary: [0x6a, 0x6a, 0x6a],
     thinking: [0x5b, 0xc0, 0xeb],
     planning: [0xa7, 0x8b, 0xfa],
-    inspecting: [0x60, 0xa5, 0xfa],
+    inspecting: [0x5b, 0xc0, 0xeb],
     working: [0xfb, 0x92, 0x3c],
     testing: [0xfa, 0xcc, 0x15],
     verifying: [0x2d, 0xd4, 0xbf],
@@ -289,9 +306,14 @@ const LIGHT_SKIN: SkinDefinition = {
   colors: {
     brand: [0xc4, 0x42, 0x10],
     accent: [0xc4, 0x42, 0x10],
-    user: [0xc4, 0x42, 0x10],
+    user: [0x00, 0x66, 0x88],
+    prompt: [0x00, 0x66, 0x88],
+    prompt_content: [0x00, 0x55, 0x88],
     agent: [0x20, 0x20, 0x20],
-    tool: [0x00, 0x55, 0x88],
+    tool: [0x00, 0x66, 0x88],
+    skill: [0x5b, 0x3f, 0xa8],
+    worker: [0x5b, 0x3f, 0xa8],
+    evidence: [0x1d, 0x4e, 0xa0],
     error: [0xb0, 0x10, 0x10],
     warn: [0x80, 0x60, 0x00],
     success: [0x1b, 0x5e, 0x20],
@@ -310,7 +332,7 @@ const LIGHT_SKIN: SkinDefinition = {
     tertiary: [0x9a, 0x9a, 0x9a],
     thinking: [0x00, 0x66, 0x88],
     planning: [0x5b, 0x3f, 0xa8],
-    inspecting: [0x1d, 0x4e, 0xa0],
+    inspecting: [0x00, 0x66, 0x88],
     working: [0xa6, 0x3f, 0x00],
     testing: [0x7a, 0x5a, 0x00],
     verifying: [0x00, 0x66, 0x66],
@@ -326,8 +348,13 @@ const MONOCHROME_SKIN: SkinDefinition = {
     brand: null,
     accent: null,
     user: null,
+    prompt: null,
+    prompt_content: null,
     agent: null,
     tool: null,
+    skill: null,
+    worker: null,
+    evidence: null,
     error: null,
     warn: null,
     success: null,

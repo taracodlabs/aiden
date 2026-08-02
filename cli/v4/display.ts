@@ -25,7 +25,7 @@ const TerminalRenderer: new (opts?: unknown) => unknown = require('marked-termin
 const stringWidth: (value: string) => number = require('string-width');
 
 import { SkinEngine, getSkinEngine, type ColorKind } from './skinEngine';
-import { visibleLength, truncateVisible } from './box';
+import { visibleLength, truncateVisible, truncateVisibleAtWord } from './box';
 import { glyphs } from './design/tokens';
 import { clearLinesUpSeq } from './display/cursorSeq';
 import {
@@ -49,6 +49,7 @@ import {
   projectActivityFrame,
   projectCommandPresentation,
   projectEvidenceLines,
+  projectSkillInvocation,
   relativizeActivityText,
   semanticPhaseCompactToken,
   semanticPhaseForTool,
@@ -97,13 +98,14 @@ function truncateTerminalVisible(value: string, maxVisible: number): string {
 import { getReplyRenderer } from './replyRenderer';
 // Optional "Sources" footer when AIDEN_CITATIONS=1 (default off).
 import { renderCitationFooter } from './citationFooter';
-import { buildToolPreview } from './toolPreview';
+import { buildToolPreview, summarizeToolArguments } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
 import {
   ComposerLane,
   composerLaneEnabled,
   type BottomComposerMode,
   type BottomComposerSurface,
+  type BottomRegionStyle,
   type LaneSink,
 } from './composerLane';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
@@ -1111,7 +1113,7 @@ export class Display {
     // surface family (▎ Aiden header, status footer, bottom hint).
     // Timestamp variant unchanged — the timestamp gutter already
     // provides its own consistent left edge.
-    const tri = this.skin.applyColors(terminalStateSymbol('user'), 'brand');
+    const tri = this.skin.applyColors(terminalStateSymbol('user'), 'prompt');
     if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
       return `${this.timestampPrefix()}  ${tri} `;
     }
@@ -1604,8 +1606,12 @@ export class Display {
         : width >= 80 ? this.composerSuffix()
         : width >= 36 ? '  Ctrl+C stop'
         : '  Ctrl+C';
-      const activity = this.skin.applyColors(projection.text, projection.color);
-      return truncateVisible(`${prefix}${activity}${time}${suffix}`, width);
+      const activity = `${this.skin.applyColors(projection.glyph, projection.glyphColor)} `
+        + this.skin.applyColors(
+          `${projection.label}${source === 'provider' && this.activityPresentationMode === 'full' ? ' · provider request' : ''}`,
+          projection.color,
+        );
+      return truncateVisibleAtWord(`${prefix}${activity}${time}${suffix}`, width);
     };
     const erase = (terminal = false): void => {
       if (!printed || !isTty) return;
@@ -1740,6 +1746,12 @@ export class Display {
     const useIcons = process.env.AIDEN_UI_ICONS !== '0' && terminalSupportsUnicode();
     const { icon, verb } = trailIconForTool(name);
     const glyph = useIcons ? icon : sk.applyColors('·', 'muted');
+    const operationKind: ColorKind = /(?:subagent|worker)/iu.test(name) ? 'worker'
+      : name === 'skill_view' || /(?:^|_)skill(?:_|$)/iu.test(name) ? 'skill'
+        : /(?:read|list|inspect|search|fetch|snapshot)/iu.test(name) ? 'inspecting'
+          : /(?:verify|evidence|proof|test)/iu.test(name) ? 'evidence'
+            : 'tool';
+    const operationLabel = operationKind === 'worker' ? 'Worker' : verb.trim();
 
     // Detail field: v4.1.4-media — consult `buildToolPreview` first so
     // tools registered in `TOOL_PRIMARY_ARG` (media_transport → 'target',
@@ -1747,16 +1759,18 @@ export class Display {
     // meaningful primary-arg preview instead of a JSON blob. Fall back
     // to the generic `previewToolArgs` scan for tools the map doesn't
     // know about so unregistered MCP tools etc. still render readably.
-    const mapped = buildToolPreview(name, args);
-    const rawDetail = mapped ?? previewToolArgs(args);
+    const mapped = buildToolPreview(name, args, { mode: this.activityPresentationMode });
+    const rawDetail = mapped ?? previewToolArgs(args, this.activityPresentationMode);
     const detailForDisplay = (): string => {
-      if (screenOwner?.usesReflowSafeRows()) {
-        const segments = rawDetail.split(/[\\/]/u);
-        return segments[segments.length - 1] ?? rawDetail;
+      const relative = relativizeActivityText(rawDetail, process.cwd(), this.activityPresentationMode);
+      if (this.activityPresentationMode === 'full') return relative;
+      if (screenOwner?.usesReflowSafeRows() && /(?:^|_)(?:file|read|write|edit|patch|list|copy|move|delete)(?:_|$)/iu.test(name)) {
+        const [target, ...qualifiers] = relative.split(' · ');
+        const segments = target.split(/[\\/]/u);
+        const base = segments[segments.length - 1] ?? target;
+        return [base, ...qualifiers].filter(Boolean).join(' · ');
       }
-      return this.activityPresentationMode === 'full'
-        ? rawDetail
-        : truncDetail(relativizeActivityText(rawDetail, process.cwd(), 'summary'));
+      return truncDetail(relative);
     };
 
     // Semantic elapsed time comes from ActivityRegistry. A compatibility row
@@ -1787,11 +1801,14 @@ export class Display {
       });
       const duration = elapsed >= 1000 ? ` ${formatToolDuration(elapsed)}` : '';
       const liveSuffix = `  ${sk.applyColors(`${semanticPhaseStatusLabel(semanticPhase)}${duration}…`, phaseColorKind(semanticPhase))}`;
-      const runningGlyph = sk.applyColors(projection.glyph, projection.color);
+      const runningGlyph = sk.applyColors(
+        projection.glyph,
+        operationKind === 'worker' ? 'worker' : projection.glyphColor,
+      );
       if (screenOwner?.usesReflowSafeRows()) {
         const width = terminalRowWidth() ?? screenOwner.volatileRowWidth();
         const compactPrefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph} ` +
-          `${sk.applyColors(verb.trim(), 'tool')} `;
+          `${sk.applyColors(operationLabel, operationKind)} `;
         const compactPhase = sk.applyColors(
           `${semanticPhaseCompactToken(semanticPhase, useIcons)}${duration}`,
           phaseColorKind(semanticPhase),
@@ -1801,13 +1818,11 @@ export class Display {
           0,
           width - visibleLength(compactPrefix) - visibleLength(compactSuffix),
         );
-        return `${compactPrefix}${truncateVisible(
-          sk.applyColors(detailForDisplay(), 'muted'),
-          availableDetail,
-        )}${compactSuffix}\n`;
+        const fittedDetail = fitQualifiedActivityDetail(detailForDisplay(), availableDetail);
+        return `${compactPrefix}${sk.applyColors(fittedDetail, 'muted')}${compactSuffix}\n`;
       }
       const prefix = `${sk.applyColors(TRAIL_PIPE, 'muted')} ${runningGlyph}  ` +
-        `${sk.applyColors(padVerb(verb), 'tool')} `;
+        `${sk.applyColors(padVerb(operationLabel), operationKind)} `;
       const suffix = `${liveSuffix}${screenOwner ? '' : this.composerSuffix()}`;
       const detailText = sk.applyColors(detailForDisplay(), 'muted');
       const width = terminalRowWidth();
@@ -1816,7 +1831,7 @@ export class Display {
         0,
         width - visibleLength(prefix) - visibleLength(suffix),
       );
-      return `${prefix}${truncateVisible(detailText, availableDetail)}${suffix}\n`;
+      return `${prefix}${truncateVisibleAtWord(detailText, availableDetail)}${suffix}\n`;
     };
 
     // Outcome row — entire line colored by outcome kind.
@@ -1825,7 +1840,8 @@ export class Display {
       const outcomeGlyph = terminalSupportsUnicode()
         ? (failed ? '!' : '✓')
         : terminalStateSymbol(failed ? 'failed' : 'completed');
-      const terminalVerb = /^denied\b/u.test(suffix) ? 'denied'
+      const terminalVerb = operationKind === 'worker' ? 'Worker'
+        : /^denied\b/u.test(suffix) ? 'denied'
         : /^cancelled\b/u.test(suffix) ? 'cancelled'
         : /^timed out\b/u.test(suffix) ? 'timed out'
         : /^unknown\b/u.test(suffix) ? 'unknown'
@@ -1838,22 +1854,25 @@ export class Display {
         const width = terminalRowWidth() ?? screenOwner.volatileRowWidth();
         const compactPrefix = `${TRAIL_PIPE} ${outcomeGlyph} ${terminalVerb} `;
         const availableDetail = Math.max(0, width - visibleLength(compactPrefix));
-        return `${sk.applyColors(
-          `${compactPrefix}${truncateVisible(detailForDisplay(), availableDetail)}`,
-          kind,
-        )}\n`;
+        const fittedDetail = fitQualifiedActivityDetail(detailForDisplay(), availableDetail);
+        return `${sk.applyColors(TRAIL_PIPE, 'muted')} `
+          + `${sk.applyColors(outcomeGlyph, failed ? 'error' : 'success')} `
+          + `${sk.applyColors(terminalVerb, operationKind)} `
+          + `${sk.applyColors(fittedDetail, 'muted')}\n`;
       }
-      const prefix = `${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(terminalVerb)} `;
       const suffixText = suffix ? `  ${suffix}` : '';
       const width = terminalRowWidth();
       const availableDetail = width === null
         ? Number.POSITIVE_INFINITY
-        : Math.max(0, width - visibleLength(prefix) - visibleLength(suffixText));
+        : Math.max(0, width - visibleLength(`${TRAIL_PIPE} ${outcomeGlyph}  ${padVerb(terminalVerb)} `) - visibleLength(suffixText));
       const displayDetail = detailForDisplay();
-      const content = `${prefix}${availableDetail === Number.POSITIVE_INFINITY
+      const fittedDetail = availableDetail === Number.POSITIVE_INFINITY
         ? displayDetail
-        : truncateVisible(displayDetail, availableDetail)}${suffixText}`;
-      return `${sk.applyColors(content, kind)}\n`;
+        : truncateVisibleAtWord(displayDetail, availableDetail);
+      return `${sk.applyColors(TRAIL_PIPE, 'muted')} `
+        + `${sk.applyColors(outcomeGlyph, failed ? 'error' : 'success')}  `
+        + `${sk.applyColors(padVerb(terminalVerb), operationKind)} `
+        + `${sk.applyColors(fittedDetail, 'muted')}${sk.applyColors(suffixText, kind)}\n`;
     };
 
     // Capture stream reference so closures don't need `this`.
@@ -2178,15 +2197,10 @@ export class Display {
       return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')} ${sk.applyColors(preview, 'muted')}`;
     }
 
-    // Unknown tool — original behaviour (full JSON, 200-char cap).
-    let serialized: string;
-    try {
-      serialized = JSON.stringify(args);
-    } catch {
-      serialized = String(args);
-    }
-    if (serialized.length > 200) serialized = `${serialized.slice(0, 197)}...`;
-    return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')} ${sk.applyColors(serialized, 'muted')}`;
+    // Unknown tools stay human-readable in normal output. Raw structured
+    // arguments remain available to the execution trace and full details.
+    const summary = summarizeToolArguments(args);
+    return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')}${summary ? ` ${sk.applyColors(summary, 'muted')}` : ''}`;
   }
 
   /**
@@ -2211,8 +2225,9 @@ export class Display {
   /** Format a user turn (e.g. echoed back from history). */
   userTurn(text: string): string {
     const sk = this.skin;
-    const body = text.split('\n').map((line) => `  ${line}`).join('\n');
-    return `  ${this.rule()}\n${sk.applyColors(`  ${terminalStateSymbol('user')} You`, 'user')}\n${body}\n  ${this.rule()}\n`;
+    const body = text.split('\n').map((line) => sk.applyColors(`  ${line}`, 'prompt_content')).join('\n');
+    const label = sk.applyColors(`  ${terminalStateSymbol('user')} You`, 'prompt');
+    return `  ${this.rule()}\n${label}\n${body}\n  ${this.rule()}\n`;
   }
 
   /**
@@ -2386,8 +2401,10 @@ export class Display {
    * restore an empty ready composer. Empty Enter remains a local no-op. */
   submitIdleComposer(value: string, hint: string): void {
     if (value.length > 0) {
-      const body = value.split('\n').map((line) => `  ${line}`).join('\n');
-      this.write(`${this.promptPrefix()}You\n${body}\n  ${this.rule()}`);
+      const body = value.split('\n')
+        .map((line) => this.skin.applyColors(`  ${line}`, 'prompt_content'))
+        .join('\n');
+      this.write(`${this.promptPrefix()}${this.skin.applyColors('You', 'prompt')}\n${body}\n  ${this.rule()}`);
     }
     this.idleComposerContent = `${this.promptPrefix()} ${hint}`;
     this.idleComposerDraft = '';
@@ -2508,10 +2525,12 @@ export class Display {
     if (this.composerSurfacePauseDepth === 0) this.paintComposerSurface();
   }
 
-  private laneStyle(): { brand(value: string): string; muted(value: string): string } {
+  private laneStyle(): BottomRegionStyle {
     return {
       brand: (value) => this.skin.applyColors(value, 'brand'),
       muted: (value) => this.skin.applyColors(value, 'muted'),
+      prompt: (value) => this.skin.applyColors(value, 'prompt'),
+      promptContent: (value) => this.skin.applyColors(value, 'prompt_content'),
     };
   }
 
@@ -3237,8 +3256,9 @@ export class Display {
   // rows. ui_task_done looks up the label so the completion row can
   // echo it even when the model only sends task_id + status. Cleared
   // on done. Map is per-Display-instance; one REPL session.
-  private uiTaskRows = new Map<string, { label: string }>();
+  private uiTaskRows = new Map<string, { label: string; kind: string }>();
   private uiTaskTerminalIds = new Set<string>();
+  private structuredActivityIds = new Set<string>();
 
   // v4.8.0 Phase 2.3 fix — set true by renderUiEvent; tryRerenderInPlace
   // early-returns when set so the cursor-up + erase-to-end-of-screen
@@ -3257,6 +3277,7 @@ export class Display {
    */
   resetUiTurnState(): void {
     this.uiEventsFiredThisTurn = false;
+    this.structuredActivityIds.clear();
   }
 
   renderUiEvent(name: string, args: Record<string, unknown>): void {
@@ -3275,6 +3296,7 @@ export class Display {
     if (name === 'ui_approval_request') { this.renderUiApprovalRequest(args); return; }
     if (name === 'ui_toast')            { this.renderUiToast(args);           return; }
     if (name === 'ui_artifact_created') { this.renderUiArtifactCreated(args); return; }
+    if (name === 'ui_skill_invocation') { this.renderUiSkillInvocation(args); return; }
     // Unknown event names silent-ignore (defensive — future registrations).
   }
 
@@ -3286,7 +3308,19 @@ export class Display {
    */
   private uiTrailRow(content: string, kind: ColorKind): string {
     const pipe = this.skin.applyColors(TRAIL_PIPE, 'muted');
-    return content.split('\n').map(l => `${pipe} ${this.skin.applyColors(l, kind)}\n`).join('');
+    return content.split('\n').map((line) => {
+      const match = /^(\s*(?:(?:└|├)\s+)?)([✓✕×!◐◈◇◆↻■ℹ⚠])([\s\S]*)$/u.exec(line);
+      if (!match) return `${pipe} ${this.skin.applyColors(line, 'muted')}\n`;
+      return `${pipe} ${this.skin.applyColors(match[1], 'muted')}${this.skin.applyColors(match[2], kind)}${this.skin.applyColors(match[3], 'muted')}\n`;
+    }).join('');
+  }
+
+  /** Strongly colour the state glyph and operation category; keep metadata restrained. */
+  private uiStructuredTrailRow(content: string, kind: ColorKind): string {
+    const pipe = this.skin.applyColors(TRAIL_PIPE, 'muted');
+    const match = /^(\S+\s+\S+)(\s+)(.*)$/u.exec(content);
+    if (!match) return `${pipe} ${this.skin.applyColors(content, kind)}\n`;
+    return `${pipe} ${this.skin.applyColors(match[1], kind)}${match[2]}${this.skin.applyColors(match[3], 'muted')}\n`;
   }
 
   private renderUiTaskUpdate(args: Record<string, unknown>): void {
@@ -3299,15 +3333,17 @@ export class Display {
     if (this.uiTaskTerminalIds.has(taskId)) return;
     this.commitStreamChunk();
     const glyph = terminalSupportsUnicode()
-      ? (status === 'paused' ? '⏸' : status === 'blocked' ? '!' : '◐')
+      ? (kindArg === 'subagent' ? '◆' : status === 'paused' ? '⏸' : status === 'blocked' ? '!' : '◐')
       : terminalStateSymbol(status === 'blocked' ? 'warning' : 'running');
-    const colorKind: ColorKind = status === 'running' ? 'tool' : 'warn';
-    this.uiTaskRows.set(taskId, { label });
+    const colorKind: ColorKind = kindArg === 'subagent' ? 'worker'
+      : status === 'running' ? 'warn' : 'error';
+    this.uiTaskRows.set(taskId, { label, kind: kindArg });
     const short  = label.length > 80 ? label.slice(0, 79) + '…' : label;
     // v4.8.0 Phase 2.4 — subagent kind: indent by depth inside the
     // gutter so nested rows tier below their parent.
     const indent = kindArg === 'subagent' ? '  '.repeat(depth) : '';
-    const stateLabel = status === 'paused' ? 'Paused' : status === 'blocked' ? 'Blocked' : 'Working';
+    const stateLabel = kindArg === 'subagent' ? 'Worker running'
+      : status === 'paused' ? 'Paused' : status === 'blocked' ? 'Blocked' : 'Working';
     const rendered = this.uiTrailRow(
       `${indent}┌ ${short}\n${indent}└ ${glyph} ${stateLabel}`,
       colorKind,
@@ -3390,6 +3426,20 @@ export class Display {
     if (skipped > 0) parts.push(`${skipped} skipped`);
     const dur = durationMs > 0 ? ` in ${durationMs}ms` : '';
     this.writeOutput(this.uiTrailRow(`${ok ? '✓' : '✗'} ${framework}: ${parts.join(', ')}${dur}`, ok ? 'success' : 'error'));
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiSkillInvocation(args: Record<string, unknown>): void {
+    const invocationId = typeof args.invocation_id === 'string' ? args.invocation_id : '';
+    const skillName = typeof args.skill_name === 'string' ? args.skill_name : '';
+    const durationMs = typeof args.duration_ms === 'number' ? args.duration_ms : undefined;
+    const referenceName = typeof args.reference_name === 'string' ? args.reference_name : undefined;
+    const lines = projectSkillInvocation({ invocationId, skillName, durationMs, referenceName })
+      .filter((line) => !this.structuredActivityIds.has(line.identity));
+    if (lines.length === 0) return;
+    this.commitStreamChunk();
+    lines.forEach((line) => this.structuredActivityIds.add(line.identity));
+    this.writeOutput(lines.map((line) => this.uiStructuredTrailRow(line.text, line.color)).join(''));
     this.streamLastEndedNewline = true;
   }
 
@@ -3691,7 +3741,7 @@ export interface ToolRowHandle {
  * truncates with an ellipsis at TOOL_ROW_ARG_CAP. Pure — no side
  * effects, deterministic for a given input.
  */
-export function previewToolArgs(args: unknown): string {
+export function previewToolArgs(args: unknown, mode: ActivityPresentationMode = 'summary'): string {
   if (args == null) return '';
   if (typeof args === 'string') return truncToolArg(args);
   if (typeof args !== 'object') return truncToolArg(String(args));
@@ -3710,6 +3760,7 @@ export function previewToolArgs(args: unknown): string {
         : `"${v}"`);
     }
   }
+  if (mode !== 'full') return summarizeToolArguments(obj);
   let serialized: string;
   try {
     serialized = JSON.stringify(obj);
@@ -3724,13 +3775,30 @@ export function previewToolArgs(args: unknown): string {
   // tools mapped in `TOOL_PRIMARY_ARG`; here we extend the same UX to
   // any unmapped-tool fallback that bottoms out at `{}`.
   if (serialized === '{}') return '';
-  return truncToolArg(serialized);
+  return mode === 'full' ? serialized : truncToolArg(serialized);
+}
+
+function fitQualifiedActivityDetail(value: string, maxVisible: number): string {
+  if (maxVisible <= 0) return '';
+  if (visibleLength(value) <= maxVisible) return value;
+  const separator = ' · ';
+  const splitAt = value.lastIndexOf(separator);
+  if (splitAt < 0) return truncateVisibleAtWord(value, maxVisible);
+  const target = value.slice(0, splitAt);
+  const qualifier = value.slice(splitAt + separator.length);
+  const reserved = visibleLength(separator) + visibleLength(qualifier);
+  if (reserved >= maxVisible) return truncateVisibleAtWord(qualifier, maxVisible);
+  const targetWidth = maxVisible - reserved;
+  const fittedTarget = visibleLength(target) <= targetWidth
+    ? target
+    : truncateVisibleAtWord(target, targetWidth);
+  return `${fittedTarget}${separator}${qualifier}`;
 }
 
 function truncToolArg(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim();
-  if (flat.length <= TOOL_ROW_ARG_CAP) return flat;
-  return flat.slice(0, TOOL_ROW_ARG_CAP - 1) + '…';
+  if (visibleLength(flat) <= TOOL_ROW_ARG_CAP) return flat;
+  return `${truncateVisible(flat, TOOL_ROW_ARG_CAP - 1)}…`;
 }
 
 /**

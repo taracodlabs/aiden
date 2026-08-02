@@ -28,6 +28,9 @@
  */
 
 // ── Sharp (default) ──────────────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const stringWidth: (value: string) => number = require('string-width');
+
 const SHARP = {
   TL: '┌',
   TR: '┐',
@@ -68,7 +71,7 @@ interface GlyphSet {
  */
 const ANSI_REGEX = /\x1b\[[0-9;]*[A-Za-z]/g;
 export function visibleLength(s: string): number {
-  return s.replace(ANSI_REGEX, '').length;
+  return stringWidth(s.replace(ANSI_REGEX, ''));
 }
 
 /**
@@ -80,10 +83,10 @@ export function visibleLength(s: string): number {
 export function truncateVisible(s: string, maxVisible: number): string {
   if (visibleLength(s) <= maxVisible) return s;
   let out = '';
-  let visible = 0;
+  let plain = '';
   let i = 0;
   let sawAnsi = false;
-  while (i < s.length && visible < maxVisible) {
+  while (i < s.length) {
     const ch = s.charCodeAt(i);
     if (ch === 0x1b && s[i + 1] === '[') {
       const m = s.slice(i).match(/^\x1b\[[0-9;]*[A-Za-z]/);
@@ -94,11 +97,29 @@ export function truncateVisible(s: string, maxVisible: number): string {
         continue;
       }
     }
-    out += s[i];
-    visible += 1;
-    i += 1;
+    const codePoint = s.codePointAt(i);
+    if (codePoint === undefined) break;
+    const character = String.fromCodePoint(codePoint);
+    if (stringWidth(plain + character) > maxVisible) break;
+    out += character;
+    plain += character;
+    i += character.length;
   }
   return sawAnsi ? out + '\x1b[0m' : out;
+}
+
+/** ANSI-aware activity truncation that prefers a complete word. */
+export function truncateVisibleAtWord(s: string, maxVisible: number): string {
+  const width = Math.max(1, Math.floor(maxVisible));
+  if (visibleLength(s) <= width) return s;
+  if (width === 1) return '…';
+  const candidate = truncateVisible(s, width - 1);
+  const plain = candidate.replace(ANSI_REGEX, '').replace(/\x1b\[0m$/u, '');
+  const boundary = Math.max(plain.lastIndexOf(' '), plain.lastIndexOf('—'));
+  if (boundary > 0) {
+    return `${truncateVisible(candidate, visibleLength(plain.slice(0, boundary).trimEnd()))}…`;
+  }
+  return `${candidate}…`;
 }
 
 // ── Generic primitives ───────────────────────────────────────────

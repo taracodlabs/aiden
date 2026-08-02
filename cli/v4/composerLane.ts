@@ -89,12 +89,17 @@ type StatusSource = string | ((columns?: number) => string);
 export interface BottomRegionStyle {
   brand(value: string): string;
   muted(value: string): string;
+  /** Prompt identity and draft content use distinct semantic tokens. */
+  prompt?: (value: string) => string;
+  promptContent?: (value: string) => string;
   unicode?: boolean;
 }
 
 const PLAIN_BOTTOM_STYLE: BottomRegionStyle = {
   brand: (value) => value,
   muted: (value) => value,
+  prompt: (value) => value,
+  promptContent: (value) => value,
 };
 
 /** ANSI-aware front truncation used as the final no-wrap status guard. */
@@ -323,7 +328,14 @@ export function renderBottomSurface(
     : fitStatus(status, availableWidth);
   const topRow = rows - laneRows + 1;
   return {
-    lines: [top, style.brand(fittedTitle), divider, ...content, bottom, fittedStatus],
+    lines: [
+      top,
+      (style.prompt ?? style.brand)(fittedTitle),
+      divider,
+      ...content.map((line) => (style.promptContent ?? ((value: string) => value))(line)),
+      bottom,
+      fittedStatus,
+    ],
     laneRows,
     cursorRow: topRow + 3 + wrapped.cursorLine,
     cursorCol: Math.min(availableWidth, 1 + wrapped.cursorCell),
