@@ -12,7 +12,8 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 
-import { spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import express from 'express';
 import {
   bootstrapDaemonFoundation,
@@ -36,6 +37,8 @@ let aidenHome: string;
 let prev: Record<string, string | undefined>;
 let basePort: number;
 let apiServer: http.Server | null = null;
+
+const execFileAsync = promisify(execFile);
 
 interface PostOptions {
   body:    Record<string, unknown>;
@@ -210,20 +213,18 @@ describe('Slice 7 inbound trace adoption + 7 captured smoke scenarios', () => {
       daemonId: dmn, incarnationId: inc, runId: rid, traceId: tid, spanId: sid,
       source: 'cli' as const, attempt: 1,
     };
-    await runWithContext(ctx, () => {
+    await runWithContext(ctx, async () => {
       const ambient = currentContext()!;
       const env = spawnEnvWithContext(ambient, {});
-      const child = spawn(process.execPath, ['-e', 'console.log(process.env.AIDEN_RUN_ID + "|" + process.env.AIDEN_PARENT_SPAN_ID)'], { env });
-      let out = '';
-      child.stdout.on('data', (b: Buffer) => { out += b.toString(); });
-      return new Promise<void>((resolve) => {
-        child.on('exit', () => {
-          console.log(`[smoke 6] child env: ${out.trim()}`);
-          expect(out).toContain(rid);
-          expect(out).toContain(sid);
-          resolve();
-        });
-      });
+      const { stdout, stderr } = await execFileAsync(
+        process.execPath,
+        ['-e', 'console.log(process.env.AIDEN_RUN_ID + "|" + process.env.AIDEN_PARENT_SPAN_ID)'],
+        { env, encoding: 'utf8' },
+      );
+      console.log(`[smoke 6] child env: ${stdout.trim()}`);
+      expect(stderr).toBe('');
+      expect(stdout).toContain(rid);
+      expect(stdout).toContain(sid);
     });
   });
 
