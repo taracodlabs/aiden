@@ -23,9 +23,12 @@
 
 import * as readline from 'node:readline';
 
-import { renderTitleLine } from '../../../core/v4/ui/banner';
+import { renderBanner } from '../../../core/v4/ui/banner';
+import { AIDEN_BOOT_MIN_COLUMNS } from '../../../core/v4/ui/identity';
 import { c, separator, termWidth } from '../../../core/v4/ui/theme';
 import { VERSION } from '../../../core/version';
+import { renderStartupWidthRequirement } from '../startupDashboard';
+import { waitForStartupWidth } from '../startupWidthGate';
 
 export interface DisclaimerResult {
   /** True when the user accepted (or stdin wasn't a TTY). */
@@ -107,9 +110,7 @@ function renderDisclaimerBody(version: string): string {
   const w = termWidth();
   const innerW = Math.min(w - 4, 70);
   const body: string[] = [];
-  // Fresh setup and the normal session run in the same process. Keep setup's
-  // identity compact so the canonical six-row startup wordmark has one owner.
-  body.push(`\n  ${renderTitleLine(version)}\n\n`);
+  body.push(renderBanner({ version, width: w, framed: false }));
 
   // Slice 10c framed-panel chrome. Orange bar at col 2; content + 2
   // inner spaces; muted `─` divider between sections.
@@ -173,6 +174,12 @@ export async function showDisclaimer(
   }
 
   clearScreen(out);
+  await waitForStartupWidth({
+    out,
+    minimum: AIDEN_BOOT_MIN_COLUMNS,
+    currentColumns: () => Number(out.columns) || termWidth(),
+    requirementLines: renderStartupWidthRequirement(Number(out.columns) || termWidth()),
+  });
   out.write(renderDisclaimerBody(version));
 
   const question =

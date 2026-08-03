@@ -1168,6 +1168,8 @@ export async function buildAgentRuntime(
   // clean pipeable answer, and approvals default to auto-DENY (no TUI to
   // prompt). See runQuery / executeOneShotTurn below.
   const headless = !!cliOpts?.headless;
+  const startupDiagnostics: Array<{ severity: 'info' | 'warning'; text: string }> = [];
+  const startupActions: Array<() => Promise<void>> = [];
 
   // Slice 2 — surface (and, interactively, offer to purge) any orphaned
   // credential left by a removed OAuth provider. hasTokens gates the work, so
@@ -1176,19 +1178,20 @@ export async function buildAgentRuntime(
   // a prompt and never a delete — silence is not consent.
   try {
     const orphanInteractive = !headless && !!process.stdin.isTTY;
-    await announceRemovedProviderOrphans({
+    const announceOrphans = () => announceRemovedProviderOrphans({
       paths,
       interactive: orphanInteractive,
-      write: (l) =>
-        (orphanInteractive ? process.stdout : process.stderr).write(l + '\n'),
+      write: (line) => (orphanInteractive ? process.stdout : process.stderr).write(line + '\n'),
       confirm: orphanInteractive
-        ? async (q: string) => {
+        ? async (question: string) => {
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             const { confirm } = require('@inquirer/prompts');
-            return confirm({ message: q, default: false });
+            return confirm({ message: question, default: false });
           }
         : undefined,
-    });
+    }).then(() => undefined);
+    if (orphanInteractive) startupActions.push(announceOrphans);
+    else await announceOrphans();
   } catch {
     // A startup notice must never block boot.
   }
@@ -1233,13 +1236,14 @@ export async function buildAgentRuntime(
   try {
     const swept = replTaskStore.sweepOrphaned(Date.now());
     if (swept > 0) {
-      // eslint-disable-next-line no-console
-      console.warn(`[tasks] swept ${swept} orphaned active task(s) from prior session(s) → interrupted`);
+      const text = `[tasks] swept ${swept} orphaned active task(s) from prior session(s) → interrupted`;
+      if (headless) process.stderr.write(`${text}\n`);
+      else startupDiagnostics.push({ severity: 'warning', text });
     }
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.warn('[tasks] orphan sweep failed:',
-      err instanceof Error ? err.message : String(err));
+    const text = `[tasks] orphan sweep failed: ${err instanceof Error ? err.message : String(err)}`;
+    if (headless) process.stderr.write(`${text}\n`);
+    else startupDiagnostics.push({ severity: 'warning', text });
   }
   // v4.11 — artifact registry. Shares the same daemon.db handle so
   // /artifacts listing + chatSession's per-turn capture see one WAL view.
@@ -1332,12 +1336,10 @@ export async function buildAgentRuntime(
   try {
     const sync = await syncBundledSkillsIfStale(paths);
     if (sync.versionUpdated && sync.refreshed + sync.added > 0) {
-      // Single line on stderr so users see the upgrade happen but
-      // the boot card stays clean. skillsLogger isn't constructed
-      // yet at this point in the boot sequence.
-      process.stderr.write(
-        `[skills] refreshed ${sync.refreshed}, added ${sync.added}, preserved ${sync.preserved} (bundle ${sync.installedVersion || '<fresh>'} → ${sync.bundleVersion})\n`,
-      );
+      const text = `[skills] refreshed ${sync.refreshed}, added ${sync.added}, preserved ${sync.preserved} ` +
+        `(bundle ${sync.installedVersion || '<fresh>'} → ${sync.bundleVersion})`;
+      if (headless) process.stderr.write(`${text}\n`);
+      else startupDiagnostics.push({ severity: 'info', text });
     }
   } catch {
     /* silent — sync is best-effort, restore already populated dirs */
@@ -1399,6 +1401,7 @@ export async function buildAgentRuntime(
   // real provider. Flagged here, set inside the wizard block, and
   // consumed when building the adapter.
   let exploreMode = false;
+  let startupIdentityRendered = false;
 
   if (wizardNeeded) {
     // v4.12.1 — headless one-shot must never prompt (no TTY) nor silently
@@ -1429,25 +1432,17 @@ export async function buildAgentRuntime(
       // Skip the wizard block entirely; fall through to adapter
       // build with exploreMode=true so a NullAdapter is used.
     } else {
-    if (!detection.hasAnyProvider) {
-      // Truly empty: no env, no OAuth, no Ollama, no inline config.
-      process.stdout.write(`\n${summarizeDetection(detection)}\n`);
-    } else if (configuredProviderBroken) {
-      // Config points at a provider we can't credential-resolve.
-      process.stdout.write(
-        `\nConfigured provider '${detection.configProvider}' has no usable credentials ` +
-          `at ${path.join(paths.root, 'auth', `${detection.configProvider}.json`)}.\n`,
-      );
-    } else {
-      // Detected something (env / oauth / ollama) but config.yaml is
-      // missing or empty — DEFAULT_CONFIG would route to anthropic and
-      // the resolver would fail. Surface the detection so the user
-      // sees what we found, then walk them through proper setup.
-      process.stdout.write(`\n${summarizeDetection(detection)}\n`);
-      process.stdout.write(
-        'config.yaml is empty — let\'s pick a provider that matches.\n',
-      );
-    }
+    const setupDetectionLines = !detection.hasAnyProvider
+      ? [summarizeDetection(detection)]
+      : configuredProviderBroken
+        ? [
+            `Configured provider '${detection.configProvider}' has no usable credentials ` +
+              `at ${path.join(paths.root, 'auth', `${detection.configProvider}.json`)}.`,
+          ]
+        : [
+            summarizeDetection(detection),
+            'config.yaml is empty — let\'s pick a provider that matches.',
+          ];
     // ONB1-WIRE — disclaimer + loading screens land BEFORE the wizard.
     // Only inside this TTY-guarded branch (the non-TTY branch at the
     // outer else already bails into explore mode). The detection
@@ -1461,11 +1456,13 @@ export async function buildAgentRuntime(
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { showDisclaimer } = require('./onboarding/disclaimer') as typeof import('./onboarding/disclaimer');
     const disc = await showDisclaimer();
+    startupIdentityRendered = !disc.skipped;
     if (!disc.ok) {
       // User typed 'n' / 'no'. The disclaimer already printed the
       // friendly goodbye line; just exit cleanly.
       process.exit(0);
     }
+    process.stdout.write(`\n${setupDetectionLines.join('\n')}\n`);
 
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { runLoadingSequence, defaultLoadingSteps } =
@@ -1585,7 +1582,16 @@ export async function buildAgentRuntime(
   const display = headless
     ? new Display({ skin, stdout: process.stderr, stderr: process.stderr })
     : new Display({ skin });
-  const warnSink = (msg: string) => display.warn(msg);
+  let startupProjectionReleased = false;
+  const projectStartupDiagnostic = (severity: 'info' | 'warning', text: string): void => {
+    if (headless || startupProjectionReleased) {
+      if (severity === 'warning') display.warn(text);
+      else display.dim(text);
+      return;
+    }
+    startupDiagnostics.push({ severity, text });
+  };
+  const warnSink = (msg: string) => projectStartupDiagnostic('warning', msg);
   const startupNotices: StartupNotice[] = [];
   const recordStartupNotice = (notice: StartupNotice | null | undefined): void => {
     if (!notice) return;
@@ -1659,9 +1665,9 @@ export async function buildAgentRuntime(
     // neither CLI flags nor persisted config specified the choice.
     // Silent on explicit selections so power users don't see noise.
     if (bootSource === 'auto-priority') {
-      display.dim(`[boot] ${providerId} · ${modelId}  (auto · first authed provider)`);
+      projectStartupDiagnostic('info', `[boot] ${providerId} · ${modelId}  (auto · first authed provider)`);
     } else if (bootSource === 'hardcoded-fallback') {
-      display.dim(
+      projectStartupDiagnostic('info',
         `[boot] ${providerId} · ${modelId}  (no authed providers detected — using legacy default)`,
       );
     }
@@ -1748,7 +1754,7 @@ export async function buildAgentRuntime(
     const filterDesc = toolProfile.toolsets === undefined
       ? 'all toolsets'
       : `[${[...toolProfile.toolsets].join(', ')}]`;
-    display.dim(
+    projectStartupDiagnostic('info',
       `[tools] profile=${toolProfile.name} (${toolProfile.source}) → ${filterDesc}`,
     );
   }
@@ -1775,9 +1781,9 @@ export async function buildAgentRuntime(
       ? ` (see ${skillsLogger.filePath})`
       : '';
   if (skillCounts.skipped > 0) {
-    display.warn(`[skills] ${skillCounts.loaded} loaded, ${skillCounts.skipped} skipped${skipNote}`);
+    projectStartupDiagnostic('warning', `[skills] ${skillCounts.loaded} loaded, ${skillCounts.skipped} skipped${skipNote}`);
   } else if (isVerbose()) {
-    display.dim(`[skills] ${skillCounts.loaded} loaded, 0 skipped`);
+    projectStartupDiagnostic('info', `[skills] ${skillCounts.loaded} loaded, 0 skipped`);
   }
   // Phase 17 Task 5: plugin loader boot.
   //
@@ -1837,7 +1843,7 @@ export async function buildAgentRuntime(
   // when set — for users with edited SOUL.md that would have been
   // silently overwritten by the upgrade).
   if (soulNotice) {
-    display.dim(`[soul] ${soulNotice}`);
+    projectStartupDiagnostic('info', `[soul] ${soulNotice}`);
   }
 
   // v4.5 update system — the old setImmediate dim/warn one-liner
@@ -2746,7 +2752,7 @@ export async function buildAgentRuntime(
       // it) AND in the log file, then the exporter stays off for the
       // session instead of writing into a garbage directory.
       (msg) => {
-        display.warn(msg);
+        projectStartupDiagnostic('warning', msg);
         bootLogger.child('vault').warn(msg);
       },
     );
@@ -2840,7 +2846,7 @@ export async function buildAgentRuntime(
     // watcher to keep the process alive only as long as the REPL does.
     process.on('exit', () => { try { soulWatcher.close(); } catch { /* noop */ } });
   } catch (err) {
-    display.warn(
+    projectStartupDiagnostic('warning',
       `SOUL.md watcher could not attach (${(err as Error).message}). ` +
       'Use `/reload-soul` to apply edits mid-session.',
     );
@@ -2892,7 +2898,7 @@ export async function buildAgentRuntime(
   if (spawnPauseBootStatus) {
     const s = spawnPauseBootStatus;
     const reasonSuffix = s.reason ? ` (reason: ${s.reason})` : '';
-    display.warn(
+    projectStartupDiagnostic('warning',
       `spawn_sub_agent / subagent_fanout are PAUSED${reasonSuffix}. ` +
       'Run /spawn-pause off to resume.',
     );
@@ -3611,7 +3617,7 @@ export async function buildAgentRuntime(
       });
     }
   } catch (err) {
-    display.dim(`(skill commands unavailable: ${(err as Error).message})`);
+    projectStartupDiagnostic('info', `(skill commands unavailable: ${(err as Error).message})`);
   }
 
   // ── Phase v4.1-1.1: CLI-side channel manager ──────────────────────
@@ -3672,15 +3678,17 @@ export async function buildAgentRuntime(
     }
 
     if (serverIsHosting) {
-      display.dim(
+      projectStartupDiagnostic('info',
         '[channels] aiden serve is running locally — channel adapters hosted there, /channel commands stay read-only.',
       );
     } else {
       // start() resolves quickly when no token is set (logs "Disabled" and
       // returns). Errors don't crash boot.
-      channelManager.startAll().catch((e: Error) =>
-        display.dim(`[channels] startAll error: ${e.message}`),
-      );
+      startupActions.push(async () => {
+        await channelManager.startAll().catch((error: Error) =>
+          projectStartupDiagnostic('info', `[channels] startAll error: ${error.message}`),
+        );
+      });
     }
   }
 
@@ -3715,6 +3723,11 @@ export async function buildAgentRuntime(
     // non-undefined instance (formerly dormant in Phase 13).
     contextCompressor,
     startupNotices,
+    startupIdentityRendered,
+    startupDiagnostics,
+    startupActions,
+    releaseStartupProjection: () => { startupProjectionReleased = true; },
+    projectStartupDiagnostic,
     commandRegistry,
     mcpClient,
     providerId,
@@ -3786,6 +3799,12 @@ export interface AgentRuntime {
   /** v4.11 preflight compression — production-wired (no longer dormant). */
   contextCompressor: ContextCompressor;
   startupNotices: StartupNotice[];
+  /** First-run setup already projected the canonical six-line identity. */
+  startupIdentityRendered: boolean;
+  startupDiagnostics: Array<{ severity: 'info' | 'warning'; text: string }>;
+  startupActions: Array<() => Promise<void>>;
+  releaseStartupProjection: () => void;
+  projectStartupDiagnostic: (severity: 'info' | 'warning', text: string) => void;
   commandRegistry: CommandRegistry;
   mcpClient: ReturnType<typeof setupMcpFromConfig> extends Promise<infer R>
     ? R extends { client: infer C }
@@ -4136,7 +4155,10 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
           { provider: runtime.providerId, model: runtime.modelId },
         );
         if (!ok) {
-          console.warn('[daemon] real-runner install returned false — placeholder still active');
+          runtime.projectStartupDiagnostic(
+            'warning',
+            '[daemon] real-runner install returned false — placeholder still active',
+          );
         }
       }
     }
@@ -4144,7 +4166,10 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // Fail-loud but non-fatal — install failure leaves the
     // placeholder runner active; the REPL still works and the
     // daemon's rails still serve triggers.
-    console.error('[daemon] install agent builder failed: ' + (e instanceof Error ? e.message : String(e)));
+    runtime.projectStartupDiagnostic(
+      'warning',
+      '[daemon] install agent builder failed: ' + (e instanceof Error ? e.message : String(e)),
+    );
   }
 
   const sessionOpts = {
@@ -4178,6 +4203,10 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     personalityManager: runtime.personalityManager,
     pluginLoader: runtime.pluginLoader,
     startupNotices: runtime.startupNotices,
+    startupIdentityRendered: runtime.startupIdentityRendered,
+    startupDiagnostics: runtime.startupDiagnostics,
+    startupActions: runtime.startupActions,
+    releaseStartupProjection: runtime.releaseStartupProjection,
     // Phase 30.2.1 — boot card renders "model not configured" and
     // chat attempts get the friendly NotConfiguredError message.
     unconfigured: runtime.exploreMode,

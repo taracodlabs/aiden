@@ -27,21 +27,26 @@
  *
  *       Built solo · By Taracod · White Lotus
  *
- * Narrow (<60 cols): collapses to a single-line title.
+ * Below the canonical identity width, callers receive only the startup width
+ * requirement and wait for a resize before continuing.
  *
  * Pure renderer — returns the composed string. Callers own the write.
  * No stateful spinners / inquirer prompts here.
  */
 
 import { c, dim, termWidth, getColorDepth } from './theme';
-import { AIDEN_LOGO_LINES } from './identity';
+import {
+  AIDEN_BOOT_MIN_COLUMNS,
+  AIDEN_LOGO_CELL_WIDTH,
+  AIDEN_LOGO_LINES,
+} from './identity';
 
 /**
- * The canonical block-style AIDEN ASCII. Six rows, widest row = 36 cells.
+ * The canonical block-style AIDEN ASCII. Six rows, widest row = 37 cells.
  */
 const AIDEN_ART = AIDEN_LOGO_LINES;
 
-const ART_WIDTH = 36;
+const ART_WIDTH = AIDEN_LOGO_CELL_WIDTH;
 
 export interface BannerOptions {
   /** Aiden runtime version — rendered as `v{version}`. */
@@ -69,35 +74,22 @@ function rpad(s: string, n: number): string {
   return s + ' '.repeat(n - len);
 }
 
-/** Centre `s` within width `w` (no colour codes in `s`). */
-function centre(s: string, w: number): string {
-  if (s.length >= w) return s;
-  const total = w - s.length;
-  const left = Math.floor(total / 2);
-  return ' '.repeat(left) + s + ' '.repeat(total - left);
-}
-
 /**
  * Build the framed banner block as a single string with trailing
  * newline. Truecolor → 256 → 16 / mono all handled by `theme.c.*`.
  */
 export function renderBanner(opts: BannerOptions): string {
-  const w = Math.max(40, Math.min(opts.width ?? termWidth(), 80));
-  const narrow = w < 60;
+  const w = Math.max(1, Math.min(opts.width ?? termWidth(), 80));
   const tagline = opts.tagline ?? 'Autonomous AI Engine';
   const credits = opts.credits ?? 'Built solo · By Taracod · White Lotus';
   const versionLine = `${tagline} · Local-first · v${opts.version}`;
 
-  // Narrow layout: single-line title + tagline + credits.
-  if (narrow) {
-    const out: string[] = [];
-    out.push('');
-    out.push(centre(c.primary('A I D E N'), w));
-    out.push('');
-    out.push(centre(c.muted(versionLine), w));
-    out.push(centre(c.muted(credits), w));
-    out.push('');
-    return out.join('\n') + '\n';
+  if (w < AIDEN_BOOT_MIN_COLUMNS) {
+    return [
+      `Aiden requires at least ${AIDEN_BOOT_MIN_COLUMNS} columns to display its boot interface.`,
+      'Widen the terminal to continue.',
+      '',
+    ].join('\n');
   }
 
   // v4.8.0 Slice 10b — wide layout flows the AIDEN art without the
