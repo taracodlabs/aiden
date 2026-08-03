@@ -2434,9 +2434,13 @@ export class ChatSession implements ChatSessionLike {
     if (loopTracer.isEnabled()) {
       loopTracer.setHistory(baseHistory);
     }
-    const emitToolReplySeparator = (): void => {
-      if (separatorEmitted || !turnHadTools) return;
+    const takeToolReplySeparator = (): boolean => {
+      if (separatorEmitted || !turnHadTools) return false;
       separatorEmitted = true;
+      return true;
+    };
+    const emitToolReplySeparator = (): void => {
+      if (!takeToolReplySeparator()) return;
       // Same chrome pattern as the existing pre-turn rule (line ~1100)
       // and the post-reply rule (line ~1297): two-space indent + the
       // body-width muted rule + newline. The 2-space indent is the
@@ -2688,12 +2692,13 @@ export class ChatSession implements ChatSessionLike {
               //   ┃ Aiden
               //   {text}
               // Idempotent via `firstStreamByteSeen` + the
-              // `separatorEmitted` flag inside emitToolReplySeparator.
+              // the shared `separatorEmitted` gate.
               // No-op when no tool fired (turnHadTools=false).
+              let activityDivider = false;
               if (!firstStreamByteSeen) {
                 firstStreamByteSeen = true;
                 this.opts.callbacks.settleActivitiesBeforeOutput?.();
-                emitToolReplySeparator();
+                activityDivider = takeToolReplySeparator();
               }
               // v4.11 Slice 1 — first delta of the segment paints
               // immediately (TTFT untouched); subsequent deltas batch
@@ -2705,7 +2710,7 @@ export class ChatSession implements ChatSessionLike {
               if (!streamSegmentPainted) {
                 streamSegmentPainted = true;
                 progressBar?.hide();
-                this.opts.display.streamPartial(text);
+                this.opts.display.streamPartial(text, activityDivider);
               } else {
                 coalesceBuf += text;
                 if (coalesceBuf.length >= STREAM_COALESCE_MAX_CHARS) {
@@ -3139,9 +3144,9 @@ export class ChatSession implements ChatSessionLike {
         // v4.1.5 Issue O — non-streaming reply path. Emit the muted
         // rule between the tool trail and the agent header before
         // the one-shot reply lands. Idempotent + tool-gated by
-        // `emitToolReplySeparator`.
-        emitToolReplySeparator();
-        this.opts.display.write(this.opts.display.agentTurn(result.finalContent));
+        // the shared separator gate.
+        const activityDivider = takeToolReplySeparator();
+        this.opts.display.write(this.opts.display.agentTurn(result.finalContent, { activityDivider }));
       }
 
       if (streamingActive && durableEvidenceForDisplay.length > 0) {

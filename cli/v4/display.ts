@@ -399,6 +399,8 @@ export interface AgentTurnOptions {
   markdown?: boolean;
   /** Optional reasoning preface (rendered muted). */
   reasoning?: string;
+  /** Include the settled-activity divider in the same transcript write. */
+  activityDivider?: boolean;
 }
 
 /**
@@ -2260,7 +2262,8 @@ export class Display {
     const reasoning = opts.reasoning
       ? `${frameGetIndent(0)}${sk.applyColors(opts.reasoning.trim(), 'muted')}\n`
       : '';
-    return `${this.agentHeader()}${reasoning}${indented}\n`;
+    const activityDivider = opts.activityDivider ? `  ${this.rule()}\n` : '';
+    return `${activityDivider}${this.agentHeader()}${reasoning}${indented}\n`;
   }
 
   /**
@@ -2795,6 +2798,7 @@ export class Display {
   private streamProjectionSequence = 0;
   private streamProjectionId = '';
   private streamProjectionHeaderPending = false;
+  private streamProjectionActivityDividerPending = false;
 
   private projectedStreamOwner(): ComposerLane | null {
     return this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()
@@ -2839,13 +2843,17 @@ export class Display {
     } else {
       body = body.split('\n').map((line) => `  ${line}`).join('\n');
     }
-    return `${this.streamProjectionHeaderPending ? this.agentHeader().trimEnd() + '\n' : ''}${body}`;
+    const activityDivider = this.streamProjectionActivityDividerPending
+      ? `  ${this.rule()}\n`
+      : '';
+    return `${activityDivider}${this.streamProjectionHeaderPending ? this.agentHeader().trimEnd() + '\n' : ''}${body}`;
   }
 
   private settleProjectedStream(owner: ComposerLane): void {
     if (this.streamBuffer) {
       owner.settleLiveRow(this.streamProjectionId, this.projectedStreamText(true));
       this.streamProjectionHeaderPending = false;
+      this.streamProjectionActivityDividerPending = false;
     } else {
       owner.removeLiveRow(this.streamProjectionId, true);
     }
@@ -2891,18 +2899,22 @@ export class Display {
    * showing raw streamed text and reformatting on completion only when
    * the full body is in hand.
    */
-  streamPartial(text: string): void {
+  streamPartial(text: string, activityDivider = false): void {
     if (!text) return;
     const projectedOwner = this.projectedStreamOwner();
     if (!this.streamHeaderShown) {
       // Phase 26.2.3 — share the `▎ Aiden` header with non-streaming
       // agentTurn so streamed + non-streamed responses open identically.
-      if (!projectedOwner) this.writeOutput(this.agentHeader());
+      if (!projectedOwner) {
+        const divider = activityDivider ? `  ${this.rule()}\n` : '';
+        this.writeOutput(`${divider}${this.agentHeader()}`);
+      }
       this.streamHeaderShown = true;
       this.streamBuffer = '';
       this.streamLineCount = 0;
       this.streamProjectionId = `assistant-stream:${++this.streamProjectionSequence}`;
       this.streamProjectionHeaderPending = true;
+      this.streamProjectionActivityDividerPending = projectedOwner !== null && activityDivider;
       this.uiEventsFiredThisTurn = false;
       // agentHeader emits trailing `\n\n`; cursor is at col 0 of a fresh
       // line, so the very next chunk needs the leading indent.
