@@ -231,15 +231,15 @@ describe('settled activity row spacing', () => {
     return harness;
   }
 
-  function findSemanticLine(lines: string[], terms: readonly string[]): number {
-    const normalizeSemanticText = (value: string): string => value
-      .normalize('NFC')
-      .replace(/\\/gu, '/')
-      .toLowerCase();
+  function normalizeSemanticText(value: string): string {
+    return value.normalize('NFC').replace(/\\/gu, '/').toLowerCase();
+  }
+
+  function findSemanticLines(lines: string[], terms: readonly string[]): number[] {
     const normalizedTerms = terms.map(normalizeSemanticText);
-    return lines.findIndex((line) => {
+    return lines.flatMap((line, index) => {
       const normalizedLine = normalizeSemanticText(line);
-      return normalizedTerms.every((term) => {
+      const matches = normalizedTerms.every((term) => {
         if (normalizedLine.includes(term)) return true;
         const basename = term.split('/').at(-1) ?? term;
         const truncatedFragments = normalizedLine.match(/[\p{L}\p{N}_.-]+(?=…)/gu) ?? [];
@@ -247,7 +247,12 @@ describe('settled activity row spacing', () => {
           fragment.length >= 6 && basename.startsWith(fragment)
         ));
       });
+      return matches ? [index] : [];
     });
+  }
+
+  function findSemanticLine(lines: string[], terms: readonly string[]): number {
+    return findSemanticLines(lines, terms)[0] ?? -1;
   }
 
   function expectAdjacent(
@@ -267,8 +272,12 @@ describe('settled activity row spacing', () => {
     firstTerms: readonly string[],
     secondTerms: readonly string[],
   ): void {
-    const first = findSemanticLine(lines, firstTerms);
-    const second = findSemanticLine(lines, secondTerms);
+    const firstMatches = findSemanticLines(lines, firstTerms);
+    const secondMatches = findSemanticLines(lines, secondTerms);
+    expect(firstMatches, lines.join('\n')).toHaveLength(1);
+    expect(secondMatches, lines.join('\n')).toHaveLength(1);
+    const first = firstMatches[0] ?? -1;
+    const second = secondMatches[0] ?? -1;
     expect(first, lines.join('\n')).toBeGreaterThanOrEqual(0);
     expect(second, lines.join('\n')).toBeGreaterThan(first);
     expect(lines.slice(first + 1, second).filter((line) => line.length === ''), lines.join('\n'))
@@ -366,7 +375,7 @@ describe('settled activity row spacing', () => {
     if (columns >= 80) {
       expectAdjacent(lines, ['skill', 'systematic-debugging'], ['read', 'after-skill-running.ts']);
     } else {
-      expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['read', 'after-skill-running.ts']);
+      expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['reading']);
     }
   });
 
@@ -398,8 +407,8 @@ describe('settled activity row spacing', () => {
 
     expectCompactTransition(
       compactTranscriptLines(screen),
-      ['skill'],
-      ['read', 'after-skill-wrapped-content.ts'],
+      ['✓', 'skill'],
+      ['reading'],
     );
   });
 
