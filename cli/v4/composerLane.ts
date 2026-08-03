@@ -372,7 +372,7 @@ export class BottomRegion {
   private renderedSurface: RenderedSurfaceSnapshot | null = null;
   private restoreAfterModal = false;
   private readonly terminalLiveRows = new Set<string>();
-  private readonly liveRowsFollowingSkill = new Set<string>();
+  private readonly liveRowsFollowingSkill = new Map<string, number>();
   private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
   private static readonly MAX_TERMINAL_LIVE_ROWS = 2_048;
 
@@ -439,7 +439,7 @@ export class BottomRegion {
     if (!current
       && activeActivityRows(this.projection).length === 0
       && previousProjection?.id.startsWith('activity-skill:')) {
-      this.liveRowsFollowingSkill.add(id);
+      this.liveRowsFollowingSkill.set(id, this.resizeEpoch);
     }
     const next = reduceOperatorProjection(this.projection, current
       ? { type: 'activity.progress', id, generation: current.generation, summary: normalized }
@@ -477,7 +477,10 @@ export class BottomRegion {
       'succeeded' | 'failed' | 'denied' | 'interrupted' | 'cancelled' | 'timed_out' | 'unknown' | 'stale'> = 'succeeded',
   ): void {
     if (this.terminalLiveRows.has(id)) return;
+    const skillBoundaryEpoch = this.liveRowsFollowingSkill.get(id);
     const followsSkill = this.liveRowsFollowingSkill.delete(id);
+    const skillBoundaryReflowed = skillBoundaryEpoch !== undefined
+      && skillBoundaryEpoch !== this.resizeEpoch;
     this.rememberTerminalLiveRow(id);
     const current = this.projection.activities[id];
     if (current) {
@@ -496,13 +499,23 @@ export class BottomRegion {
       return;
     }
     if (this.resizeBurstActive) {
+      if (followsSkill) {
+        this.finishResizeBurstNow();
+        this.paintAll(true);
+        return;
+      }
       this.pendingTranscriptOutput += terminal;
       this.finishResizeBurstNow();
       return;
     }
     if (followsSkill) {
-      // The first activity reuses the cursor row after the skill transcript entry.
-      // Settle that row before restoring the standard blank transcript boundary.
+      if (skillBoundaryReflowed) {
+        // Host reflow can relocate the saved transcript cursor while the
+        // activity is live. Rebuild the visible projection at settlement
+        // instead of using pre-resize cursor geometry.
+        this.paintAll(true);
+        return;
+      }
       this.paintAll();
       const surface = this.surface();
       this.sink.write(

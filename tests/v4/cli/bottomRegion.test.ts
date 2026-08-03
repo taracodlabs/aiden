@@ -426,6 +426,50 @@ describe('settled activity row spacing', () => {
     expect(lines.filter((line) => /after-skill-resize/iu.test(line))).toHaveLength(1);
   });
 
+  it('keeps a settled skill activity compact after normal to narrow resize cycles', async () => {
+    const { display, screen, stream } = prepare(100);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-resize-settlement-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    const activity = display.toolRow('file_read', { path: 'package.json' });
+
+    for (const columns of [44, 100, 44]) {
+      stream.resize(columns, 24);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    activity.ok(7);
+    display.write(display.agentTurn('Resize settlement answer.', { activityDivider: true }));
+
+    const lines = compactTranscriptLines(screen);
+    expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['completed', 'package.json']);
+    expectActivityAnswerBoundary(screen, ['completed', 'package.json'], 'Resize settlement answer.');
+    expect(lines.filter((line) => /skill\s+systematic-debugging/iu.test(line))).toHaveLength(1);
+    expect(lines.filter((line) => /completed\s+package\.json/iu.test(line))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes('Resize settlement answer.'))).toHaveLength(1);
+    expect(composerGeometry(screen).status).not.toBe('');
+  });
+
+  it('keeps a settled skill activity compact when starting at narrow width', () => {
+    const { display, screen } = prepare(44);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-narrow-settlement-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'package.json' }).ok(7);
+    display.write(display.agentTurn('Narrow settlement answer.', { activityDivider: true }));
+
+    const lines = compactTranscriptLines(screen);
+    expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['completed', 'package.json']);
+    expectActivityAnswerBoundary(screen, ['completed', 'package.json'], 'Narrow settlement answer.');
+    expect(composerGeometry(screen).status).not.toBe('');
+  });
+
   it('keeps consecutive browser navigation rows adjacent', () => {
     const { display, screen } = prepare();
     display.toolRow('browser_navigate', { url: 'https://a.test' }).ok(10_000);
