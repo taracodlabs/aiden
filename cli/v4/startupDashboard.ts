@@ -8,11 +8,17 @@
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
 
+import {
+  AIDEN_BOOT_MIN_COLUMNS,
+  AIDEN_LOGO_INDENT,
+  AIDEN_LOGO_LINES,
+} from '../../core/v4/ui/identity';
+
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const SAFE_MARGIN = 2;
 
 export type StartupDashboardTier = 'wide' | 'medium' | 'narrow' | 'minimal';
-export type StartupLogoTier = 'full' | 'compact' | 'plain';
+export type StartupLogoTier = 'full' | 'blocked';
 
 export interface StartupEnvironmentData {
   os?: string;
@@ -64,6 +70,8 @@ export interface RenderStartupDashboardOptions {
   data: StartupDashboardData;
   banner?: string;
   style?: StartupDashboardStyle;
+  /** First-run setup may already own the one canonical identity projection. */
+  includeIdentity?: boolean;
 }
 
 export interface RenderedStartupDashboard {
@@ -339,22 +347,20 @@ function renderProject(
 }
 
 export function resolveStartupLogoTier(columns: number, banner?: string): StartupLogoTier {
-  const tier = resolveStartupDashboardTier(columns);
-  if (tier === 'narrow' || tier === 'minimal') return 'plain';
-  if (tier === 'medium') return 'compact';
-  if (!banner) return 'plain';
-  const width = safeWidth(columns);
-  const lines = banner.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  return lines.length > 0 && lines.every((line) => startupVisibleWidth(line) <= width)
-    ? 'full'
-    : 'compact';
+  void banner;
+  const width = Number.isFinite(columns) ? Math.max(1, Math.floor(columns)) : 80;
+  return width >= AIDEN_BOOT_MIN_COLUMNS ? 'full' : 'blocked';
 }
 
-function normalizeBanner(banner: string | undefined, width: number): string[] {
-  if (!banner) return [];
-  const lines = banner.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  if (lines.some((line) => startupVisibleWidth(line) > width)) return [];
-  return lines;
+export function renderStartupWidthRequirement(columns: number): string[] {
+  const width = safeWidth(columns);
+  return [
+    ...wrapPlain(
+      `Aiden requires at least ${AIDEN_BOOT_MIN_COLUMNS} columns to display its boot interface.`,
+      width,
+    ),
+    ...wrapPlain('Widen the terminal to continue.', width),
+  ];
 }
 
 export function renderStartupDashboard(options: RenderStartupDashboardOptions): RenderedStartupDashboard {
@@ -364,16 +370,18 @@ export function renderStartupDashboard(options: RenderStartupDashboardOptions): 
   const data = options.data;
   const lines: string[] = [];
   const logoTier = resolveStartupLogoTier(options.columns, options.banner);
-  const bannerLines = logoTier === 'full' ? normalizeBanner(options.banner, width) : [];
 
-  if (bannerLines.length > 0) {
-    lines.push(...bannerLines, style.muted('Autonomous AI Engine'), '');
-  } else if (logoTier === 'compact') {
-    lines.push(style.brand('A I D E N'));
-    lines.push(style.muted('Autonomous AI Engine'));
-  } else {
-    lines.push(style.brand('AIDEN'));
-    lines.push(style.muted('Autonomous AI Engine'));
+  const includeIdentity = options.includeIdentity !== false;
+  if (includeIdentity && logoTier === 'blocked') {
+    return { tier, lines: renderStartupWidthRequirement(options.columns) };
+  }
+
+  if (includeIdentity) {
+    lines.push(
+      ...AIDEN_LOGO_LINES.map((line) => style.brand(`${AIDEN_LOGO_INDENT}${line}`)),
+      style.muted('Autonomous AI Engine'),
+      '',
+    );
   }
 
   lines.push(statusLine(data, style, tier, width));

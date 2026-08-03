@@ -153,25 +153,25 @@ describe('markReplActive — defense-in-depth flag', () => {
   });
 });
 
-// ─── Source-contract guard on the user-visible warn migration ─────────
+// ─── Source contract for the owned interactive startup projection ─────
 
-describe('aidenCLI source contract — spawn-pause warn migrated to display.warn', () => {
-  it('uses display.warn (not bootLogger.warn) for the user-visible spawn-pause notice', async () => {
+describe('aidenCLI source contract — spawn-pause warning uses owned startup projection', () => {
+  it('projects the interactive warning without using bootLogger.warn', async () => {
     const src = await fs.readFile(
       path.resolve(__dirname, '../../../../cli/v4/aidenCLI.ts'),
       'utf8',
     );
-    // The 10-line region around the spawn-pause boot block MUST
-    // contain display.warn and MUST NOT contain bootLogger.warn —
-    // because under Slice 10.7a bootLogger no longer routes warn to
-    // the TTY in cli-interactive.
+    // Bound the contract to the exact startup block so unrelated logging or
+    // projection calls elsewhere cannot satisfy these assertions.
     const region = src.match(
-      /v4\.6 Phase 3A — startup probe for the spawn-pause[\s\S]{0,2000}/,
+      /if \(spawnPauseBootStatus\) \{[\s\S]*?\n  \}\r?\n\r?\n  \/\/ ── Phase v4\.1-subagent/,
     );
     expect(region, 'spawn-pause block not found in expected shape').not.toBeNull();
-    expect(region![0]).toMatch(/display\.warn\(/);
-    // Tolerate `bootLogger.info(...)` for the structured-context
-    // record but reject `bootLogger.warn(` which is the regressed call.
-    expect(region![0]).not.toMatch(/bootLogger\.warn\(/);
+    const block = region![0];
+    expect(block).toMatch(/projectStartupDiagnostic\s*\(\s*['"]warning['"]\s*,/);
+    expect(block).toMatch(/bootLogger\.info\s*\(/);
+    expect(block).not.toMatch(/bootLogger\.warn\s*\(/);
+    expect(block).not.toMatch(/process\.(?:stdout|stderr)\.write\s*\(/);
+    expect(block).not.toMatch(/console\.(?:warn|error)\s*\(/);
   });
 });

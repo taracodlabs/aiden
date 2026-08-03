@@ -144,7 +144,9 @@ import { turnIdleDiagnostic } from './turnIdleDiagnostics';
 import { emitComposerReadyForTests } from './composerReadiness';
 import { requestTurnCancel } from './frame/interruptControls';
 import {
+  fitStartupLine,
   renderStartupDashboard,
+  renderStartupWidthRequirement,
   resolveStartupDashboardTier,
 } from './startupDashboard';
 import {
@@ -152,6 +154,7 @@ import {
   renderStartupNoticeLines,
   type StartupNotice,
 } from './startupNotices';
+import { AIDEN_BOOT_MIN_COLUMNS } from '../../core/v4/ui/identity';
 
 interface ChatTurnLifecycleContext {
   handle: DurableJobHandle;
@@ -381,6 +384,15 @@ export interface ChatSessionOptions {
 
   /** One-shot provider/model/plugin/MCP startup notices. */
   startupNotices?: readonly StartupNotice[];
+
+  /** Boot diagnostics held until the identity and structured notices render. */
+  startupDiagnostics?: readonly { severity: 'info' | 'warning'; text: string }[];
+  /** Interactive boot actions that must not take terminal ownership before identity. */
+  startupActions?: readonly (() => Promise<void>)[];
+  releaseStartupProjection?: () => void;
+
+  /** True only when first-run setup already projected the canonical identity. */
+  startupIdentityRendered?: boolean;
 
   /** Optional: resume an existing session id. */
   resumeSessionId?: string;
@@ -647,6 +659,7 @@ export class ChatSession implements ChatSessionLike {
    */
   private streamingDisabledWarned = false;
   private startupRendered = false;
+  private startupRenderPromise: Promise<void> | null = null;
 
   /**
    * Phase v4.1.2-memory-D:
@@ -3511,6 +3524,24 @@ export class ChatSession implements ChatSessionLike {
     // don't get scrollback chatter on stdout.
     if (!process.stdout.isTTY) return;
     if (this.startupRendered) return;
+    if (this.startupRenderPromise) return this.startupRenderPromise;
+    this.startupRenderPromise = this.renderStartupCardOnce();
+    try {
+      await this.startupRenderPromise;
+    } finally {
+      this.startupRenderPromise = null;
+    }
+  }
+
+  private async renderStartupCardOnce(): Promise<void> {
+    const display = this.opts.display;
+    if (!this.opts.startupIdentityRendered) {
+      await display.waitForTerminalColumns(
+        AIDEN_BOOT_MIN_COLUMNS,
+        renderStartupWidthRequirement(display.terminalColumns()),
+      );
+    }
+    if (this.startupRendered) return;
     this.startupRendered = true;
 
     // Channel summary — observable, not banner-essential, but kept so
@@ -3551,7 +3582,7 @@ export class ChatSession implements ChatSessionLike {
     const sourceLabel = bootSourceLabel(this.opts.initialBootSource);
     const dashboard = renderStartupDashboard({
       columns,
-      banner: display.banner(version),
+      includeIdentity: !this.opts.startupIdentityRendered,
       style: {
         brand: (value) => display.brand(value),
         muted: (value) => display.muted(value),
@@ -3597,10 +3628,23 @@ export class ChatSession implements ChatSessionLike {
         command: (value) => display.applyColors(value, 'accent'),
       },
     });
+    display.write(`\n${dashboard.lines.join('\n')}\n`);
     if (noticeLines.length > 0) {
       display.write(`\n${noticeLines.join('\n')}\n`);
     }
-    display.write(`\n${dashboard.lines.join('\n')}\n`);
+    for (const diagnostic of this.opts.startupDiagnostics ?? []) {
+      const text = fitStartupLine(diagnostic.text, Math.max(1, columns - 2));
+      if (diagnostic.severity === 'warning') display.warn(text);
+      else display.dim(text);
+    }
+    this.opts.releaseStartupProjection?.();
+    for (const action of this.opts.startupActions ?? []) {
+      try {
+        await action();
+      } catch {
+        display.warn('A startup action could not complete. Run /doctor for details.');
+      }
+    }
 
     // v4.6 Phase 3A — operator kill-switch indicator. Lands ABOVE
     // the blank-line + provider-source annotation so an operator

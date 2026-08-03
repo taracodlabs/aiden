@@ -9,6 +9,8 @@ import { SkinEngine } from '../../../cli/v4/skinEngine';
 import { resolveConfiguredAutonomyLevel } from '../../../core/v4/config';
 import { ApprovalEngine } from '../../../moat/approvalEngine';
 import { resolveAutonomyPolicy, type AutonomyLevel } from '../../../moat/autonomy';
+import { AIDEN_LOGO_LINES } from '../../../core/v4/ui/identity';
+import type { StartupNotice } from '../../../cli/v4/startupNotices';
 
 const stringWidth: (value: string) => number = require('string-width');
 
@@ -44,8 +46,10 @@ function captureDisplay(columns: number): { display: Display; chunks: string[]; 
 function buildSession(
   level: AutonomyLevel,
   columns = 100,
-): { session: ChatSession; chunks: string[] } {
-  const { display, chunks } = captureDisplay(columns);
+  startupNotices: StartupNotice[] = [],
+  startupIdentityRendered = false,
+): { session: ChatSession; chunks: string[]; out: NodeJS.WriteStream } {
+  const { display, chunks, out } = captureDisplay(columns);
   const approvalEngine = new ApprovalEngine('smart', {});
   approvalEngine.setAutonomyPolicy(resolveAutonomyPolicy(level, {
     workspaceRoots: [process.cwd()],
@@ -67,8 +71,18 @@ function buildSession(
     initialModelId: 'llama-3.3-70b-versatile',
     memoryManager: {} as never,
     installSignalHandler: false,
+    startupNotices,
+    startupIdentityRendered,
   };
-  return { session: new ChatSession(options), chunks };
+  if (startupNotices.some((notice) => notice.source === 'plugin')) {
+    options.commandRegistry.register({
+      name: 'plugins',
+      description: 'plugins',
+      category: 'system',
+      handler: async () => undefined,
+    });
+  }
+  return { session: new ChatSession(options), chunks, out };
 }
 
 let priorStdoutTty: boolean | undefined;
@@ -167,14 +181,15 @@ describe('responsive startup dashboard integration', () => {
     { columns: 120, tier: 'wide', sections: true, frame: true },
     { columns: 80, tier: 'wide', sections: true, frame: true },
     { columns: 48, tier: 'narrow', sections: true, frame: true },
-    { columns: 20, tier: 'minimal', sections: false, frame: true },
+    { columns: 44, tier: 'narrow', sections: true, frame: true },
   ])('renders the $tier transcript once at $columns columns', async ({ columns, sections, frame }) => {
     const { session, chunks } = buildSession('Partner', columns);
     await session.renderStartupCard();
     const output = stripAnsi(chunks.join(''));
 
-    const logo = columns >= 44 ? /Autonomous AI Engine/g : /^AIDEN$/gm;
-    expect(output.match(logo)).toHaveLength(1);
+    expect(output.match(/Autonomous AI Engine/g)).toHaveLength(1);
+    for (const line of AIDEN_LOGO_LINES) expect(output).toContain(line);
+    expect(output).not.toContain('A I D E N');
     expect(output).toContain('Partner');
     expect(output).toContain('llama-3.3-70b-versatile'.slice(0, columns >= 48 ? 8 : 3));
     expect(output).toMatch(/built solo/i);
@@ -189,6 +204,59 @@ describe('responsive startup dashboard integration', () => {
     for (const line of output.split(/\r?\n/)) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(Math.max(1, columns - 2));
     }
+  });
+
+  it('renders startup notices only after the complete identity block', async () => {
+    const notice: StartupNotice = {
+      id: 'plugin:grant:test-plugin',
+      severity: 'action',
+      title: 'test-plugin plugin capability requires a grant',
+      command: '/plugins grant test-plugin',
+      source: 'plugin',
+      blocking: false,
+      dedupeKey: 'plugin:grant:test-plugin',
+    };
+    const { session, chunks } = buildSession('Partner', 100, [notice]);
+    await session.renderStartupCard();
+    const output = stripAnsi(chunks.join(''));
+    const finalLogoRow = output.indexOf(AIDEN_LOGO_LINES.at(-1)!);
+    const noticeRow = output.indexOf(notice.title);
+
+    expect(finalLogoRow).toBeGreaterThanOrEqual(0);
+    expect(noticeRow).toBeGreaterThan(finalLogoRow);
+  });
+
+  it('does not duplicate an identity already rendered by first-run setup', async () => {
+    const { session, chunks } = buildSession('Partner', 100, [], true);
+    chunks.push(`${AIDEN_LOGO_LINES.join('\n')}\n`);
+    await session.renderStartupCard();
+    const output = stripAnsi(chunks.join(''));
+
+    for (const line of AIDEN_LOGO_LINES) {
+      expect(output.match(new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1);
+    }
+    expect(output.match(/Built solo/gi)).toHaveLength(1);
+  });
+
+  it('waits below the minimum width and renders startup exactly once after resize', async () => {
+    const { session, chunks, out } = buildSession('Partner', 40);
+    let settled = false;
+    const first = session.renderStartupCard().then(() => { settled = true; });
+    const second = session.renderStartupCard();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const narrowOutput = stripAnsi(chunks.join(''));
+    expect(settled).toBe(false);
+    expect(narrowOutput).toMatch(/Aiden requires at least \d+ columns/);
+    expect(narrowOutput).not.toContain('Autonomous AI Engine');
+
+    (out as unknown as { columns: number }).columns = 44;
+    out.emit('resize');
+    await Promise.all([first, second]);
+    const output = stripAnsi(chunks.join(''));
+    expect(output.match(/Autonomous AI Engine/g)).toHaveLength(1);
+    expect(output.match(/Built solo/gi)).toHaveLength(1);
+    for (const line of AIDEN_LOGO_LINES) expect(output.match(new RegExp(line.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'))).toHaveLength(1);
   });
 
   it('does not subscribe the completed startup transcript to resize events', async () => {

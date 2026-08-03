@@ -8,6 +8,7 @@ import {
   type StartupDashboardData,
 } from '../../../cli/v4/startupDashboard';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+import { AIDEN_LOGO_LINES } from '../../../core/v4/ui/identity';
 
 const base: StartupDashboardData = {
   trust: 'Partner',
@@ -39,14 +40,7 @@ const base: StartupDashboardData = {
   helper: 'Type your message · /help for commands · /skills to add more',
 };
 
-const banner = [
-  '█████╗  ██╗██████╗ ███████╗███╗   ██╗',
-  '██╔══██╗██║██╔══██╗██╔════╝████╗  ██║',
-  '███████║██║██║  ██║█████╗  ██╔██╗ ██║',
-  '██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║',
-  '██║  ██║██║██████╔╝███████╗██║ ╚████║',
-  '╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝',
-].join('\n');
+const banner = AIDEN_LOGO_LINES.join('\n');
 
 function render(columns: number, data: StartupDashboardData = base): string[] {
   return renderStartupDashboard({ columns, data, banner }).lines;
@@ -59,10 +53,10 @@ function assertBounded(lines: string[], columns: number): void {
 }
 
 describe('responsive startup dashboard', () => {
-  it('selects full, compact, and plain startup identities without wrapping', () => {
+  it('preserves the full canonical startup identity at every supported width', () => {
     expect(resolveStartupLogoTier(100, banner)).toBe('full');
-    expect(resolveStartupLogoTier(60, banner)).toBe('compact');
-    expect(resolveStartupLogoTier(44, banner)).toBe('plain');
+    expect(resolveStartupLogoTier(60, banner)).toBe('full');
+    expect(resolveStartupLogoTier(44, banner)).toBe('full');
   });
 
   it.each([
@@ -108,11 +102,11 @@ describe('responsive startup dashboard', () => {
     assertBounded(lines, 80);
   });
 
-  it('keeps the compact narrow layout, full project details, and bounded card', () => {
+  it('keeps the full identity, narrow layout, project details, and bounded card', () => {
     const lines = render(48);
     const text = lines.join('\n');
-    expect(text).toContain('AIDEN');
-    expect(text).not.toContain(banner.split('\n')[0]);
+    expect(AIDEN_LOGO_LINES.every((line) => text.includes(line))).toBe(true);
+    expect(text).not.toContain('A I D E N');
     expect(text).toContain('Partner');
     expect(text).toContain('gpt-5.6-sol');
     expect(text).toContain('Built solo');
@@ -169,10 +163,9 @@ describe('responsive startup dashboard', () => {
     (columns) => {
       const lines = render(columns);
       const text = lines.join('\n');
-      const logoTier = resolveStartupLogoTier(columns, banner);
-      expect(text).toContain(
-        logoTier === 'full' ? banner.split('\n')[0] : logoTier === 'compact' ? 'A I D E N' : 'AIDEN',
-      );
+      expect(resolveStartupLogoTier(columns, banner)).toBe('full');
+      for (const logoLine of AIDEN_LOGO_LINES) expect(text).toContain(logoLine);
+      expect(text).not.toContain('A I D E N');
       expect(text).toContain('Autonomous AI Engine');
       expect(text).toContain('Built solo');
       expect(text).toContain('GitHub:');
@@ -214,17 +207,19 @@ describe('responsive startup dashboard', () => {
         },
       }).lines;
       const plainLines = lines.map((line) => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/gu, ''));
-      for (const logoLine of banner.split('\n')) expect(plainLines).toContain(logoLine);
+      for (const logoLine of banner.split('\n')) {
+        expect(plainLines.some((line) => line.endsWith(logoLine))).toBe(true);
+      }
       const logo = lines.slice(0, banner.split('\n').length).join('\n');
       expect(logo).toContain('\x1b[38;2;255;107;53m');
     },
   );
 
-  it.each([60, 44])('never wraps the startup identity at %i columns', (columns) => {
+  it.each([60, 44])('never wraps or replaces the startup identity at %i columns', (columns) => {
     const lines = render(columns);
-    expect(lines.join('\n')).not.toContain(banner.split('\n')[0]);
-    const identity = columns === 60 ? 'A I D E N' : 'AIDEN';
-    expect(lines.filter((line) => line.includes(identity))).toHaveLength(1);
+    const text = lines.join('\n');
+    for (const logoLine of AIDEN_LOGO_LINES) expect(text).toContain(logoLine);
+    expect(text).not.toContain('A I D E N');
     assertBounded(lines, columns);
   });
 
@@ -262,11 +257,16 @@ describe('responsive startup dashboard', () => {
     },
   );
 
-  it('is safe at minimal widths and never creates negative padding or broken borders', () => {
+  it('blocks normal startup below the canonical identity width', () => {
     const lines = render(20);
-    expect(lines.join('\n')).toContain('AIDEN');
-    expect(lines.join('\n')).not.toMatch(/undefined|null|NaN/);
-    expect(lines.join('\n')).toContain('╭');
+    const text = lines.join('\n');
+    const logicalText = text.replace(/\s+/g, ' ');
+    expect(logicalText).toMatch(/Aiden requires at least \d+ columns to display its boot interface\./);
+    expect(logicalText).toContain('Widen the terminal to continue.');
+    expect(text).not.toContain('A I D E N');
+    expect(text).not.toContain('Autonomous AI Engine');
+    expect(text).not.toContain('Environment');
+    expect(text).not.toContain('Built solo');
     assertBounded(lines, 20);
   });
 

@@ -8,10 +8,19 @@ import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { Writable } from 'node:stream';
 
-import { AIDEN_LOGO_LINES, AIDEN_LOGO_TEXT } from '../../../core/v4/ui/identity';
+import {
+  AIDEN_BOOT_MIN_COLUMNS,
+  AIDEN_BOOT_SAFE_MARGIN,
+  AIDEN_LOGO_CELL_WIDTH,
+  AIDEN_LOGO_INDENT,
+  AIDEN_LOGO_LINES,
+  AIDEN_LOGO_TEXT,
+} from '../../../core/v4/ui/identity';
 import { renderBanner } from '../../../core/v4/ui/banner';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
+
+const stringWidth: (value: string) => number = require('string-width');
 
 describe('canonical Aiden identity', () => {
   it('keeps the established six-line wordmark byte-for-byte stable', () => {
@@ -58,5 +67,26 @@ describe('canonical Aiden identity', () => {
       if (previous === undefined) delete process.env.NO_COLOR;
       else process.env.NO_COLOR = previous;
     }
+  });
+
+  it('derives the supported width from terminal display cells and intended indentation', () => {
+    expect(AIDEN_LOGO_LINES.map(stringWidth)).toEqual([37, 37, 37, 37, 37, 37]);
+    expect(AIDEN_LOGO_CELL_WIDTH).toBe(Math.max(...AIDEN_LOGO_LINES.map(stringWidth)));
+    expect(AIDEN_BOOT_MIN_COLUMNS).toBe(
+      AIDEN_LOGO_CELL_WIDTH + stringWidth(AIDEN_LOGO_INDENT) + AIDEN_BOOT_SAFE_MARGIN,
+    );
+  });
+
+  it('preserves the same six logical lines through LF and CRLF projection', () => {
+    const lf = AIDEN_LOGO_TEXT.split('\n');
+    const crlf = AIDEN_LOGO_TEXT.replace(/\n/g, '\r\n').split(/\r?\n/);
+    expect(lf).toEqual([...AIDEN_LOGO_LINES]);
+    expect(crlf).toEqual([...AIDEN_LOGO_LINES]);
+  });
+
+  it('never replaces the canonical identity with a spaced text wordmark', () => {
+    const rendered = renderBanner({ version: '4.18.0', width: 44 });
+    expect(rendered).not.toContain('A I D E N');
+    for (const line of AIDEN_LOGO_LINES) expect(rendered).toContain(line);
   });
 });

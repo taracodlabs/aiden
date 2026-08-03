@@ -43,6 +43,7 @@ import type { CapabilityCardData } from '../../providers/v4/types';
 import type { TaskOutcomePresentation } from '../../core/v4/taskOutcomePresentation';
 import type { OperatorActivityState } from './operatorProjection';
 import { AIDEN_LOGO_LINES } from '../../core/v4/ui/identity';
+import { waitForStartupWidth } from './startupWidthGate';
 import {
   normalizeActivityPhase,
   phaseColorKind,
@@ -528,6 +529,16 @@ export class Display {
   /** Raw terminal width for geometry-sensitive, single-row surfaces. */
   terminalColumns(): number {
     return frameGetTerminalCols(this.out);
+  }
+
+  /** Hold interactive startup until the canonical boot identity can fit. */
+  async waitForTerminalColumns(minimum: number, requirementLines: readonly string[]): Promise<boolean> {
+    return waitForStartupWidth({
+      out: this.out,
+      minimum,
+      currentColumns: () => this.terminalColumns(),
+      requirementLines,
+    });
   }
 
   /**

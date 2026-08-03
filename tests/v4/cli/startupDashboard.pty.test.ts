@@ -7,15 +7,7 @@ import * as pty from 'node-pty';
 import { COMPOSER_READY_TOKEN, RESIZE_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
 import { TerminalScreen } from '../harness/terminalScreen';
-
-const CANONICAL_LOGO = [
-  '█████╗  ██╗██████╗ ███████╗███╗   ██╗',
-  '██╔══██╗██║██╔══██╗██╔════╝████╗  ██║',
-  '███████║██║██║  ██║█████╗  ██╔██╗ ██║',
-  '██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║',
-  '██║  ██║██║██████╔╝███████╗██║ ╚████║',
-  '╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝',
-] as const;
+import { AIDEN_LOGO_LINES as CANONICAL_LOGO } from '../../../core/v4/ui/identity';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const stringWidth: (value: string) => number = require('string-width');
@@ -55,7 +47,7 @@ async function waitFor(
   throw new Error(`startup PTY timeout:\n${diagnostic().slice(-8000)}`);
 }
 
-async function launch(columns: number, paused = false): Promise<{
+async function launch(columns: number, paused = false, promoteToColumns?: number): Promise<{
   child: RunningPty;
   raw: () => string;
   plain: () => string;
@@ -64,6 +56,7 @@ async function launch(columns: number, paused = false): Promise<{
   scrollbackHistory: () => string;
   reviewableHistory: () => string;
   activeComposerCount: () => number;
+  blockedProjection: () => string;
   resize: (columns: number, rows?: number) => Promise<void>;
 }> {
   const repoRoot = path.resolve(__dirname, '../../..');
@@ -149,6 +142,22 @@ async function launch(columns: number, paused = false): Promise<{
     dataSubscription,
     exitSubscription,
   });
+  let blockedProjection = '';
+  if (promoteToColumns !== undefined) {
+    await waitFor(
+      () => stripAnsi(output).includes('Widen the terminal to continue.'),
+      () => stripAnsi(output),
+    );
+    blockedProjection = stripAnsi(output);
+    pendingHostResize = { columns: promoteToColumns, rows: 50 };
+    hostResizeCapture = '';
+    child.resize(promoteToColumns, 50);
+    await fs.writeFile(
+      terminalSizeFile,
+      JSON.stringify({ columns: promoteToColumns, rows: 50 }),
+      'utf8',
+    );
+  }
   await waitFor(
     () => output.includes(COMPOSER_READY_TOKEN),
     () => stripAnsi(output),
@@ -170,6 +179,7 @@ async function launch(columns: number, paused = false): Promise<{
     scrollbackHistory: () => screen.scrollbackSnapshot(),
     reviewableHistory: () => screen.reviewableSnapshot(),
     activeComposerCount: () => screen.activeComposerSurfaces().length,
+    blockedProjection: () => blockedProjection,
     resize: async (nextColumns, nextRows = 50) => {
       const outputStart = output.length;
       pendingHostResize = { columns: nextColumns, rows: nextRows };
@@ -237,9 +247,7 @@ function expectCleanMainBuffer(startup: Awaited<ReturnType<typeof launch>>): voi
 
 function dashboardLines(output: string): string[] {
   const lines = output.split(/\r?\n/);
-  const start = lines.findIndex((line) => (
-    line.includes('█████╗') || /^\s*(?:A I D E N|AIDEN)\s*$/u.test(line)
-  ));
+  const start = lines.findIndex((line) => line.includes(CANONICAL_LOGO[0]));
   const end = lines.findIndex((line, index) => index >= start && line.startsWith('▲ You'));
   expect(start).toBeGreaterThanOrEqual(0);
   expect(end).toBeGreaterThan(start);
@@ -290,6 +298,29 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     expect(physical).not.toMatch(/\x1b\[3[13]m/u);
   }, 30_000);
 
+  it('holds a too-narrow boot and renders one complete startup after widening', async () => {
+    provider = await startMockProvider({ modelId: 'custom-default' });
+    const startup = await launch(40, false, 44);
+    const blocked = startup.blockedProjection();
+    const logicalBlocked = blocked.replace(/\s+/gu, ' ');
+
+    expect(logicalBlocked).toContain('Aiden requires at least 41 columns to display its boot interface.');
+    expect(logicalBlocked).toContain('Widen the terminal to continue.');
+    expect(blocked).not.toContain('Autonomous AI Engine');
+    expect(blocked).not.toContain('A I D E N');
+    expect(blocked).not.toContain('Environment');
+
+    const projection = startup.plain();
+    for (const row of CANONICAL_LOGO) expect(projection.split(row)).toHaveLength(2);
+    expect(projection.match(/Autonomous AI Engine/gu) ?? []).toHaveLength(1);
+    expect(projection.match(/Built solo/giu) ?? []).toHaveLength(1);
+    expect(startup.activeComposerCount()).toBe(1);
+    await startup.resize(60);
+    await startup.resize(44);
+    expect(startup.reviewableHistory().match(/Autonomous AI Engine/gu) ?? []).toHaveLength(1);
+    expect(startup.activeComposerCount()).toBe(1);
+  }, 30_000);
+
   it('selects wide, medium, and narrow transcript tiers without resize duplication', async () => {
     provider = await startMockProvider({ modelId: 'custom-default' });
 
@@ -304,7 +335,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     expect(wideBeforeResize).toMatch(/\d+ loaded/);
     expect(wideBeforeResize).toContain('spawn-pause: ON');
     expect(wide.raw().split(COMPOSER_READY_TOKEN)).toHaveLength(2);
-    for (const line of dashboardLines(wideBeforeResize)) {
+    for (const line of dashboardLines(wide.plain())) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(118);
     }
 
@@ -320,27 +351,28 @@ describe.skipIf(process.platform !== 'win32')('built CLI responsive startup dash
     expect(mediumRendered).toContain('Environment');
     expect(mediumRendered).toContain('Capabilities');
     expect(mediumRendered).toContain('github.com/taracodlabs/aiden');
-    expect(dashboardLines(mediumRendered).join('\n')).toContain('╭');
+    expect(dashboardLines(medium.plain()).join('\n')).toContain('╭');
     expect(mediumRendered).toContain('GitHub:');
     expect(mediumRendered).toContain('Web:');
     expect(mediumRendered).toContain('Contact:');
-    for (const line of dashboardLines(mediumRendered)) {
+    for (const line of dashboardLines(medium.plain())) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(78);
     }
 
     const narrow = await launch(48);
     const narrowRendered = narrow.rendered();
-    expect(narrowRendered).toMatch(/^AIDEN$/mu);
-    expect(narrowRendered).not.toContain('█████╗');
+    const narrowProjection = narrow.plain();
+    for (const row of CANONICAL_LOGO) expect(narrowProjection).toContain(row);
+    expect(narrowProjection).not.toContain('A I D E N');
     expect(narrowRendered).toMatch(/◇\s+Assistant\s+·\s+◆\s+custom-default/i);
     expect(narrowRendered).toMatch(/built solo/i);
     expect(narrowRendered).toContain('Environment');
     expect(narrowRendered).toContain('Capabilities');
-    expect(dashboardLines(narrowRendered).join('\n')).toContain('╭');
+    expect(dashboardLines(narrow.plain()).join('\n')).toContain('╭');
     expect(narrowRendered).toContain('GitHub:');
     expect(narrowRendered).toContain('Web:');
     expect(narrowRendered).toContain('Contact:');
-    for (const line of dashboardLines(narrowRendered)) {
+    for (const line of dashboardLines(narrow.plain())) {
       expect(stringWidth(line), line).toBeLessThanOrEqual(46);
     }
     const narrowRows = narrowRendered.split('\n');

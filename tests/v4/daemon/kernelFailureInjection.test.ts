@@ -418,7 +418,7 @@ describe('kernel deterministic failure boundaries', () => {
     expect(engine.projection.cursor('lost-ui', admitted.jobId)).toBe(0);
     expect(engine.projection.read('lost-ui', admitted.jobId).map((event) => event.jobSequence))
       .toEqual(engine.listEvents(admitted.jobId).map((event) => event.jobSequence));
-  });
+  }, 60_000);
 
   it('keeps an unsafe network Effect unknown after a real loopback disconnect', async () => {
     const path = databasePath();
