@@ -262,6 +262,19 @@ describe('settled activity row spacing', () => {
     expect(lines.slice(first + 1, second).filter((line) => line.length === '')).toHaveLength(0);
   }
 
+  function expectCompactTransition(
+    lines: string[],
+    firstTerms: readonly string[],
+    secondTerms: readonly string[],
+  ): void {
+    const first = findSemanticLine(lines, firstTerms);
+    const second = findSemanticLine(lines, secondTerms);
+    expect(first, lines.join('\n')).toBeGreaterThanOrEqual(0);
+    expect(second, lines.join('\n')).toBeGreaterThan(first);
+    expect(lines.slice(first + 1, second).filter((line) => line.length === ''), lines.join('\n'))
+      .toHaveLength(0);
+  }
+
   it.each([
     [
       'LF without colour',
@@ -337,6 +350,80 @@ describe('settled activity row spacing', () => {
       ['skill', 'systematic-debugging'],
       ['completed', 'after-skill.ts'],
     );
+  });
+
+  it.each([100, 80, 44])('keeps an exact skill row adjacent while the following activity is running at %i columns', (columns) => {
+    const { display, screen } = prepare(columns);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: `skill-running-spacing-${columns}`,
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/after-skill-running.ts' });
+
+    const lines = compactTranscriptLines(screen);
+    if (columns >= 80) {
+      expectAdjacent(lines, ['skill', 'systematic-debugging'], ['read', 'after-skill-running.ts']);
+    } else {
+      expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['read', 'after-skill-running.ts']);
+    }
+  });
+
+  it('keeps a skill row and several following activities in one compact sequence', () => {
+    const { display, screen } = prepare();
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-multiple-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/first-after-skill.ts' }).ok(7);
+    display.toolRow('file_read', { path: 'src/second-after-skill.ts' }).ok(8);
+
+    const lines = compactTranscriptLines(screen);
+    expectAdjacent(lines, ['skill', 'systematic-debugging'], ['completed', 'first-after-skill.ts']);
+    expectAdjacent(lines, ['completed', 'first-after-skill.ts'], ['completed', 'second-after-skill.ts']);
+  });
+
+  it('keeps wrapped skill and activity content adjacent', () => {
+    const { display, screen } = prepare(44);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-wrapped-spacing',
+      skill_name: 'systematic-debugging-with-a-long-name',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/after-skill-wrapped-content.ts' });
+
+    expectCompactTransition(
+      compactTranscriptLines(screen),
+      ['skill'],
+      ['read', 'after-skill-wrapped-content.ts'],
+    );
+  });
+
+  it('preserves one skill and activity projection through narrow and wide repaint', async () => {
+    const { display, screen, stream } = prepare(100);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-resize-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/after-skill-resize.ts' });
+    stream.resize(44, 24);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    stream.resize(100, 24);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const lines = compactTranscriptLines(screen);
+    const skill = findSemanticLine(lines, ['skill', 'systematic-debugging']);
+    const activity = findSemanticLine(lines, ['read', 'after-skill-resize.ts']);
+    expect(skill, lines.join('\n')).toBeGreaterThanOrEqual(0);
+    expect(activity, lines.join('\n')).toBeGreaterThan(skill);
+    expect(lines.filter((line) => /skill\s+systematic-debugging/iu.test(line))).toHaveLength(1);
+    expect(lines.filter((line) => /after-skill-resize/iu.test(line))).toHaveLength(1);
   });
 
   it('keeps consecutive browser navigation rows adjacent', () => {

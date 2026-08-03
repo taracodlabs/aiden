@@ -372,6 +372,7 @@ export class BottomRegion {
   private renderedSurface: RenderedSurfaceSnapshot | null = null;
   private restoreAfterModal = false;
   private readonly terminalLiveRows = new Set<string>();
+  private readonly liveRowsFollowingSkill = new Set<string>();
   private static readonly MAX_TRANSCRIPT_CHARS = 250_000;
   private static readonly MAX_TERMINAL_LIVE_ROWS = 2_048;
 
@@ -434,6 +435,12 @@ export class BottomRegion {
     if (this.terminalLiveRows.has(id)) return;
     const normalized = text.replace(/\r?\n$/u, '');
     const current = this.projection.activities[id];
+    const previousProjection = this.projection.transcript[this.projection.transcript.length - 1];
+    if (!current
+      && activeActivityRows(this.projection).length === 0
+      && previousProjection?.id.startsWith('activity-skill:')) {
+      this.liveRowsFollowingSkill.add(id);
+    }
     const next = reduceOperatorProjection(this.projection, current
       ? { type: 'activity.progress', id, generation: current.generation, summary: normalized }
       : {
@@ -452,6 +459,7 @@ export class BottomRegion {
 
   /** Hide a live row without adding it to transcript history. */
   removeLiveRow(id: string, terminal = false): void {
+    this.liveRowsFollowingSkill.delete(id);
     if (terminal) this.rememberTerminalLiveRow(id);
     const next = reduceOperatorProjection(this.projection, { type: 'activity.remove', id });
     if (next === this.projection) return;
@@ -469,6 +477,7 @@ export class BottomRegion {
       'succeeded' | 'failed' | 'denied' | 'interrupted' | 'cancelled' | 'timed_out' | 'unknown' | 'stale'> = 'succeeded',
   ): void {
     if (this.terminalLiveRows.has(id)) return;
+    const followsSkill = this.liveRowsFollowingSkill.delete(id);
     this.rememberTerminalLiveRow(id);
     const current = this.projection.activities[id];
     if (current) {
@@ -489,6 +498,17 @@ export class BottomRegion {
     if (this.resizeBurstActive) {
       this.pendingTranscriptOutput += terminal;
       this.finishResizeBurstNow();
+      return;
+    }
+    if (followsSkill) {
+      // The first activity reuses the cursor row after the skill transcript entry.
+      // Settle that row before restoring the standard blank transcript boundary.
+      this.paintAll();
+      const surface = this.surface();
+      this.sink.write(
+        `${RESTORE_TRANSCRIPT}${ESC}[1B\r${terminal}\n${ESC}[1A\r${SAVE_TRANSCRIPT}` +
+        `${ESC}[${surface.cursorRow};${surface.cursorCol}H${ESC}[?25h`,
+      );
       return;
     }
     this.sink.write(`${RESTORE_TRANSCRIPT}${terminal}${SAVE_TRANSCRIPT}`);
@@ -567,13 +587,13 @@ export class BottomRegion {
    * Write flowing output in the scrollable transcript, then return the hardware
    * cursor to the draft insertion point without repainting or mutating draft.
    */
-  writeAbove(text: string): void {
+  writeAbove(text: string, identity?: string): void {
     const priorSource = transcriptSource(this.projection);
     const ownsTranscriptBoundary = this.active || this.restoreAfterModal;
     const lineBreak = ownsTranscriptBoundary && priorSource.length > 0
       && !priorSource.endsWith('\n') ? '\n' : '';
     const output = `${lineBreak}${text}`;
-    this.recordTranscript(output);
+    this.recordTranscript(output, identity);
     if (!this.active) {
       if (this.restoreAfterModal) this.pendingModalTranscriptOutput += output;
       this.sink.write(output);
@@ -811,7 +831,8 @@ export class BottomRegion {
     // row. Reuse that row for the next activity instead of advancing it into
     // scrollback and leaving a permanent blank between adjacent terminal rows.
     const previousProjection = this.projection.transcript[this.projection.transcript.length - 1];
-    const reusableCursorRow = previousProjection?.id.startsWith('activity-terminal:') ? 1 : 0;
+    const reusableCursorRow = previousProjection?.id.startsWith('activity-terminal:')
+      || previousProjection?.id.startsWith('activity-skill:') ? 1 : 0;
     const rowsToCreate = Math.max(0, growth - reusableCursorRow);
     const makeRoom = rowsToCreate > 0
       ? `${ESC}[${previousTranscriptBottom};1H${'\n'.repeat(rowsToCreate)}`
