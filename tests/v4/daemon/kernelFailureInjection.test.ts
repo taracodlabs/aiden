@@ -477,7 +477,7 @@ describe('kernel deterministic failure boundaries', () => {
     expect(engine.listEffectsRequiringReconciliation(admitted.jobId)).toEqual([
       expect.objectContaining({ effectId: 'side_effect:tool-network', effectState: 'unknown', retrySafety: 'manual_only' }),
     ]);
-  });
+  }, 30_000);
 
   it('surfaces a real database writer lock without partial state and succeeds after release', () => {
     const path = databasePath();

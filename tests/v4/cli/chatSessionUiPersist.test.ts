@@ -22,7 +22,7 @@
  * the persistence branch from the helper, or chatSession stops
  * calling the helper), these tests fail.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -35,25 +35,46 @@ import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 // emission (aidenCLI.ts onToolCall) and the integration test below.
 import { categorizeEvent } from '../../../core/v4/daemon/eventCategories';
 
-let tmp: string;
-let db: Database.Database;
-let runStore: RunStore;
+let tmpRoot = '';
+let templatePath = '';
+let testDatabasePath = '';
+let testDatabaseSequence = 0;
+let db!: Database.Database;
+let runStore!: RunStore;
+
+beforeAll(async () => {
+  tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-ui-persist-'));
+  templatePath = path.join(tmpRoot, 'template.db');
+  const templateDb = new Database(templatePath);
+  try {
+    runMigrations(templateDb);
+    templateDb.prepare(
+      `INSERT OR IGNORE INTO daemon_instances
+         (instance_id, pid, hostname, started_at, last_heartbeat, version)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).run('test-inst', process.pid, 'localhost', Date.now(), Date.now(), '4.10.0-test');
+  } finally {
+    templateDb.close();
+  }
+});
 
 beforeEach(async () => {
-  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-ui-persist-'));
-  db = new Database(path.join(tmp, 'daemon.db'));
-  runMigrations(db);
+  testDatabasePath = path.join(tmpRoot, `test-${testDatabaseSequence++}.db`);
+  await fs.copyFile(templatePath, testDatabasePath);
+  db = new Database(testDatabasePath);
   runStore = createRunStore({ db });
-  db.prepare(
-    `INSERT OR IGNORE INTO daemon_instances
-       (instance_id, pid, hostname, started_at, last_heartbeat, version)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-  ).run('test-inst', process.pid, 'localhost', Date.now(), Date.now(), '4.10.0-test');
 });
 
 afterEach(async () => {
-  db.close();
-  await fs.rm(tmp, { recursive: true, force: true });
+  if (db?.open) db.close();
+  if (testDatabasePath) {
+    await fs.rm(testDatabasePath, { force: true });
+    testDatabasePath = '';
+  }
+});
+
+afterAll(async () => {
+  if (tmpRoot) await fs.rm(tmpRoot, { recursive: true, force: true });
 });
 
 interface DisplaySpy {

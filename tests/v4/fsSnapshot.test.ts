@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +14,19 @@ import { resolveAidenPaths } from '../../core/v4/paths';
 import { decideTaskVerdict } from '../../core/v4/taskVerification';
 import type { SnapshotPair } from '../../core/v4/temporalEvidence';
 import type { ToolCallRequest, ToolSchema } from '../../providers/v4/types';
+
+const TEST_SNAPSHOT_BUDGET_MS = 250;
+
+vi.mock('../../core/v4/fsSnapshot', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../core/v4/fsSnapshot')>();
+  return {
+    ...actual,
+    fileSnapshot: (
+      absPath: string,
+      opts: import('../../core/v4/fsSnapshot').SnapshotOptions = {},
+    ) => actual.fileSnapshot(absPath, { budgetMs: TEST_SNAPSHOT_BUDGET_MS, ...opts }),
+  };
+});
 
 let dir: string;
 beforeEach(() => { dir = mkdtempSync(path.join(os.tmpdir(), 'aiden-snap-')); });

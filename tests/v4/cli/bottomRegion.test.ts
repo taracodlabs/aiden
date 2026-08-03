@@ -231,15 +231,15 @@ describe('settled activity row spacing', () => {
     return harness;
   }
 
-  function findSemanticLine(lines: string[], terms: readonly string[]): number {
-    const normalizeSemanticText = (value: string): string => value
-      .normalize('NFC')
-      .replace(/\\/gu, '/')
-      .toLowerCase();
+  function normalizeSemanticText(value: string): string {
+    return value.normalize('NFC').replace(/\\/gu, '/').toLowerCase();
+  }
+
+  function findSemanticLines(lines: string[], terms: readonly string[]): number[] {
     const normalizedTerms = terms.map(normalizeSemanticText);
-    return lines.findIndex((line) => {
+    return lines.flatMap((line, index) => {
       const normalizedLine = normalizeSemanticText(line);
-      return normalizedTerms.every((term) => {
+      const matches = normalizedTerms.every((term) => {
         if (normalizedLine.includes(term)) return true;
         const basename = term.split('/').at(-1) ?? term;
         const truncatedFragments = normalizedLine.match(/[\p{L}\p{N}_.-]+(?=…)/gu) ?? [];
@@ -247,7 +247,12 @@ describe('settled activity row spacing', () => {
           fragment.length >= 6 && basename.startsWith(fragment)
         ));
       });
+      return matches ? [index] : [];
     });
+  }
+
+  function findSemanticLine(lines: string[], terms: readonly string[]): number {
+    return findSemanticLines(lines, terms)[0] ?? -1;
   }
 
   function expectAdjacent(
@@ -260,6 +265,23 @@ describe('settled activity row spacing', () => {
     expect(first, lines.join('\n')).toBeGreaterThanOrEqual(0);
     expect(second, lines.join('\n')).toBe(first + 1);
     expect(lines.slice(first + 1, second).filter((line) => line.length === '')).toHaveLength(0);
+  }
+
+  function expectCompactTransition(
+    lines: string[],
+    firstTerms: readonly string[],
+    secondTerms: readonly string[],
+  ): void {
+    const firstMatches = findSemanticLines(lines, firstTerms);
+    const secondMatches = findSemanticLines(lines, secondTerms);
+    expect(firstMatches, lines.join('\n')).toHaveLength(1);
+    expect(secondMatches, lines.join('\n')).toHaveLength(1);
+    const first = firstMatches[0] ?? -1;
+    const second = secondMatches[0] ?? -1;
+    expect(first, lines.join('\n')).toBeGreaterThanOrEqual(0);
+    expect(second, lines.join('\n')).toBeGreaterThan(first);
+    expect(lines.slice(first + 1, second).filter((line) => line.length === ''), lines.join('\n'))
+      .toHaveLength(0);
   }
 
   it.each([
@@ -337,6 +359,124 @@ describe('settled activity row spacing', () => {
       ['skill', 'systematic-debugging'],
       ['completed', 'after-skill.ts'],
     );
+  });
+
+  it.each([100, 80, 44])('keeps an exact skill row adjacent while the following activity is running at %i columns', (columns) => {
+    const { display, screen } = prepare(columns);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: `skill-running-spacing-${columns}`,
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/after-skill-running.ts' });
+
+    const lines = compactTranscriptLines(screen);
+    if (columns >= 80) {
+      expectAdjacent(lines, ['skill', 'systematic-debugging'], ['read', 'after-skill-running.ts']);
+    } else {
+      expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['reading']);
+    }
+  });
+
+  it('keeps a skill row and several following activities in one compact sequence', () => {
+    const { display, screen } = prepare();
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-multiple-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/first-after-skill.ts' }).ok(7);
+    display.toolRow('file_read', { path: 'src/second-after-skill.ts' }).ok(8);
+
+    const lines = compactTranscriptLines(screen);
+    expectAdjacent(lines, ['skill', 'systematic-debugging'], ['completed', 'first-after-skill.ts']);
+    expectAdjacent(lines, ['completed', 'first-after-skill.ts'], ['completed', 'second-after-skill.ts']);
+  });
+
+  it('keeps wrapped skill and activity content adjacent', () => {
+    const { display, screen } = prepare(44);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-wrapped-spacing',
+      skill_name: 'systematic-debugging-with-a-long-name',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/after-skill-wrapped-content.ts' });
+
+    expectCompactTransition(
+      compactTranscriptLines(screen),
+      ['✓', 'skill'],
+      ['reading'],
+    );
+  });
+
+  it('preserves one skill and activity projection through narrow and wide repaint', async () => {
+    const { display, screen, stream } = prepare(100);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-resize-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'src/after-skill-resize.ts' });
+    stream.resize(44, 24);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    stream.resize(100, 24);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const lines = compactTranscriptLines(screen);
+    const skill = findSemanticLine(lines, ['skill', 'systematic-debugging']);
+    const activity = findSemanticLine(lines, ['read', 'after-skill-resize.ts']);
+    expect(skill, lines.join('\n')).toBeGreaterThanOrEqual(0);
+    expect(activity, lines.join('\n')).toBeGreaterThan(skill);
+    expect(lines.filter((line) => /skill\s+systematic-debugging/iu.test(line))).toHaveLength(1);
+    expect(lines.filter((line) => /after-skill-resize/iu.test(line))).toHaveLength(1);
+  });
+
+  it('keeps a settled skill activity compact after normal to narrow resize cycles', async () => {
+    const { display, screen, stream } = prepare(100);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-resize-settlement-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    const activity = display.toolRow('file_read', { path: 'package.json' });
+
+    for (const columns of [44, 100, 44]) {
+      stream.resize(columns, 24);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    activity.ok(7);
+    display.write(display.agentTurn('Resize settlement answer.', { activityDivider: true }));
+
+    const lines = compactTranscriptLines(screen);
+    expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['completed', 'package.json']);
+    expectActivityAnswerBoundary(screen, ['completed', 'package.json'], 'Resize settlement answer.');
+    expect(lines.filter((line) => /skill\s+systematic-debugging/iu.test(line))).toHaveLength(1);
+    expect(lines.filter((line) => /completed\s+package\.json/iu.test(line))).toHaveLength(1);
+    expect(lines.filter((line) => line.includes('Resize settlement answer.'))).toHaveLength(1);
+    expect(composerGeometry(screen).status).not.toBe('');
+  });
+
+  it('keeps a settled skill activity compact when starting at narrow width', () => {
+    const { display, screen } = prepare(44);
+    display.renderUiEvent('ui_skill_invocation', {
+      invocation_id: 'skill-narrow-settlement-spacing',
+      skill_name: 'systematic-debugging',
+      reference_name: 'SKILL.md',
+      duration_ms: 2,
+    });
+    display.toolRow('file_read', { path: 'package.json' }).ok(7);
+    display.write(display.agentTurn('Narrow settlement answer.', { activityDivider: true }));
+
+    const lines = compactTranscriptLines(screen);
+    expectCompactTransition(lines, ['skill', 'systematic-debugging'], ['completed', 'package.json']);
+    expectActivityAnswerBoundary(screen, ['completed', 'package.json'], 'Narrow settlement answer.');
+    expect(composerGeometry(screen).status).not.toBe('');
   });
 
   it('keeps consecutive browser navigation rows adjacent', () => {

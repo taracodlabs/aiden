@@ -3462,7 +3462,12 @@ export class Display {
     if (lines.length === 0) return;
     this.commitStreamChunk();
     lines.forEach((line) => this.structuredActivityIds.add(line.identity));
-    this.writeOutput(lines.map((line) => this.uiStructuredTrailRow(line.text, line.color)).join(''));
+    const rendered = lines.map((line) => this.uiStructuredTrailRow(line.text, line.color)).join('');
+    if (this.composerLane?.isActive()) {
+      this.composerLane.writeAbove(rendered, `activity-skill:${invocationId}`);
+    } else {
+      this.writeOutput(rendered);
+    }
     this.streamLastEndedNewline = true;
   }
 
