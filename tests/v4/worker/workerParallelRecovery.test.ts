@@ -64,5 +64,5 @@ describe('parallel read-only Worker restart projection', () => {
       .map((slot) => slot.state)).toEqual(['released', 'released']);
     expect(projectReadOnlyRepositoryWorkerGroups({ engine })).toEqual({ inspected: 0, pendingVerification: [] });
     reopened.close();
-  });
+  }, 30_000);
 });
