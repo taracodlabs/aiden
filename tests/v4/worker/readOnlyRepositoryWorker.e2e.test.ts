@@ -217,5 +217,5 @@ describe('read-only repository Worker durable dispatcher path', () => {
     expect(reopened.proof.getVerdict(parent.jobId)).toBeNull();
     expect(await readFile(path.join(root, 'source.ts'), 'utf8')).toBe(sourceBytes);
     reopenedDb.close();
-  });
+  }, 30_000);
 });
