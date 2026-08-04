@@ -104,7 +104,8 @@ Give Aiden a goal. It can work across your files, terminal, browser, supported a
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.18.0](https://img.shields.io/badge/Latest-v4.18.0-4ADE80?style=flat-square)
+![Stable](https://img.shields.io/badge/Stable-v4.18.0-4ADE80?style=flat-square)
+![Release candidate](https://img.shields.io/badge/Release_candidate-v4.19.0--rc.1-F59E0B?style=flat-square)
 
 </details>
 
@@ -180,6 +181,14 @@ Research this topic, compare the strongest findings, and save a structured Markd
 
 ## Try it in 60 seconds
 
+> [!IMPORTANT]
+> **Release channels**
+>
+> - **Stable:** `v4.18.0` through npm `latest`
+> - **Release candidate:** `v4.19.0-rc.1` through npm `beta`
+
+### Stable — v4.18.0
+
 ```bash
 npm install -g aiden-runtime
 aiden
@@ -187,11 +196,74 @@ aiden
 
 That’s it. The first launch opens Aiden’s current setup flow, checks the selected connection, and then hands control to the Operator TUI.
 
-To try the latest release without permanently installing it:
+Stable channel:
+
+```text
+npm latest → 4.18.0
+```
+
+Without permanent installation:
 
 ```bash
 npx aiden-runtime@latest
 ```
+
+### Release candidate — v4.19.0-rc.1
+
+The release candidate is available through npm’s `beta` channel for testing
+the next Worker and Model Bridge capabilities.
+
+```bash
+npm install -g aiden-runtime@beta
+aiden
+```
+
+Exact-version installation:
+
+```bash
+npm install -g aiden-runtime@4.19.0-rc.1
+aiden
+```
+
+Without permanent installation:
+
+```bash
+npx aiden-runtime@beta
+```
+
+Exact version without permanent installation:
+
+```bash
+npx aiden-runtime@4.19.0-rc.1
+```
+
+Release-candidate channel:
+
+```text
+npm beta → 4.19.0-rc.1
+```
+
+### Verify the installed version
+
+```bash
+aiden --version
+```
+
+Expected output depends on the installed channel:
+
+```text
+Stable:            4.18.0
+Release candidate: 4.19.0-rc.1
+```
+
+Verify the release candidate without a permanent installation:
+
+```bash
+npx aiden-runtime@beta --version
+```
+
+The stable command installs and runs the stable channel; it does not install
+the release candidate.
 
 **Want Aiden to react to files, schedules, email, or webhooks? Enable autonomous triggers:**
 
@@ -208,6 +280,46 @@ Drop a file in `~/Documents/inbox/anything.txt` and Aiden acts on it. The agent 
 https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 
 <br>
+
+## What's new in v4.19.0-rc.1
+
+**Release candidate:** v4.19.0-rc.1 extends Aiden’s durable Worker and Model
+Bridge foundations. It is available through npm `beta` for validation before
+the next stable release.
+
+- **Durable Worker contracts.** Read-only repository Workers use explicit parent and child execution authority.
+- **Immutable model binding.** Each Worker keeps its provider and model binding fixed for the admitted execution.
+- **Accounting and budgets.** Logical provider calls, physical attempts, tokens, usage, reservations, and pre-send budget enforcement remain distinct and durable.
+- **Resilient provider work.** Bounded retries, provider fallback, cancellation during provider work, and rejection of late provider results protect current execution truth.
+- **Restart and evidence.** Workers can restart and reopen; child Evidence is verified by the parent before completion is accepted.
+- **Bounded parallelism.** Parallel Worker admission and reservations use stable joins and deterministic reconciliation.
+
+### Known issue
+
+Aggressive terminal resizing may produce cosmetic activity-row projection
+artifacts. Investigation found no duplicate tool execution, duplicate mutating
+effect, durable-state corruption, approval corruption, lost input, or crash.
+This is tracked as a P2 cosmetic issue.
+
+### RC feedback
+
+Please report release-candidate feedback through [GitHub Issues](https://github.com/taracodlabs/aiden/issues)
+or the [Aiden Discord community](https://discord.gg/CU5wshJW4F). Include:
+
+- operating system;
+- Node version;
+- installation command used;
+- Aiden version from `aiden --version`;
+- provider and model, when relevant;
+- exact reproduction steps;
+- relevant logs or Evidence;
+- whether restart/reopen recovered the Job.
+
+Do not include API keys, tokens, secrets, or private repository content.
+
+This GitHub README update does not change the README captured on the already-
+published npm package page. Updating that page would require publishing a new
+version, which is outside this release-candidate documentation change.
 
 ## What's new in v4.18.0
 
