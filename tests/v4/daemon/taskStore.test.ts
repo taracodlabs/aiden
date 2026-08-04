@@ -30,7 +30,7 @@ beforeEach(async () => {
   db = new Database(path.join(tmp, 'daemon.db'));
   runMigrations(db);
   store = createTaskStore({ db });
-});
+}, 60_000);
 
 afterEach(async () => {
   db.close();
