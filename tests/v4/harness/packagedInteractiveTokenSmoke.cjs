@@ -24,37 +24,23 @@ function plain(value) {
 }
 
 function submit(terminal, value, onComplete) {
-  let index = 0;
   let stopped = false;
-  let immediate;
-  const timers = new Set();
-  const schedule = (callback, delay) => {
-    const timer = setTimeout(() => {
-      timers.delete(timer);
-      if (!stopped) callback();
-    }, delay);
-    timers.add(timer);
-  };
-  const writeNext = () => {
-    if (index < value.length) {
-      terminal.write(value[index++]);
-      schedule(writeNext, 10);
-      return;
-    }
-    schedule(() => {
+  let enterTimer;
+  let immediate = setImmediate(() => {
+    immediate = undefined;
+    if (stopped) return;
+    terminal.write(value);
+    enterTimer = setTimeout(() => {
+      enterTimer = undefined;
+      if (stopped) return;
       terminal.write('\r');
       onComplete();
     }, 100);
-  };
-  immediate = setImmediate(() => {
-    immediate = undefined;
-    if (!stopped) writeNext();
   });
   return () => {
     stopped = true;
     if (immediate) clearImmediate(immediate);
-    for (const timer of timers) clearTimeout(timer);
-    timers.clear();
+    if (enterTimer) clearTimeout(enterTimer);
   };
 }
 
@@ -98,19 +84,18 @@ function runFirstSession() {
     let output = '';
     let state = 'boot';
     let historyTurns = 0;
-    let historyReadyTarget = 0;
-    let compressionReadyTarget = 0;
+    let commandReadyTarget = 0;
     let submitting = false;
     let settled = false;
     let dataSubscription;
     let exitSubscription;
     let cancelSubmission;
-    const send = (value, afterSent) => {
+    const send = (value) => {
+      commandReadyTarget = output.split(readyToken).length;
       submitting = true;
       cancelSubmission = submit(terminal, value, () => {
         cancelSubmission = undefined;
         submitting = false;
-        afterSent?.();
       });
     };
     const finish = (error, value) => {
@@ -134,45 +119,38 @@ function runFirstSession() {
       const readyCount = output.split(readyToken).length - 1;
       if (state === 'boot' && readyCount >= 1) {
         state = 'mode'; send('/mode economy');
-      } else if (state === 'mode' && text.includes('Usage mode: economy')) {
+      } else if (state === 'mode' && text.includes('Usage mode: economy') && readyCount >= commandReadyTarget) {
         state = 'budget-set'; send('/budget 120');
-      } else if (state === 'budget-set' && text.includes('Session token cap set')) {
+      } else if (state === 'budget-set' && text.includes('Session token cap set') && readyCount >= commandReadyTarget) {
         state = 'first-turn'; send('package history turn 1');
-      } else if (state === 'first-turn' && text.includes('PACKAGED SIMPLE PASS') && readyCount >= 4) {
+      } else if (state === 'first-turn' && text.includes('PACKAGED SIMPLE PASS') && readyCount >= commandReadyTarget) {
         state = 'budget-warning'; send('/budget');
-      } else if (state === 'budget-warning' && text.includes('Budget warning.')) {
+      } else if (state === 'budget-warning' && text.includes('Budget warning.') && readyCount >= commandReadyTarget) {
         state = 'budget-expand'; send('/budget 100000');
-      } else if (state === 'budget-expand' && text.includes('Session token cap set to 100,000')) {
+      } else if (state === 'budget-expand' && text.includes('Session token cap set to 100,000') && readyCount >= commandReadyTarget) {
         historyTurns = 1;
         state = 'history';
-        send(`use a tool for package history ${historyTurns}`, () => {
-          historyReadyTarget = output.split(readyToken).length;
-        });
-      } else if (state === 'history' && readyCount >= historyReadyTarget) {
+        send(`use a tool for package history ${historyTurns}`);
+      } else if (state === 'history' && readyCount >= commandReadyTarget) {
         if (historyTurns < 4) {
           historyTurns += 1;
-          send(`use a tool for package history ${historyTurns}`, () => {
-            historyReadyTarget = output.split(readyToken).length;
-          });
+          send(`use a tool for package history ${historyTurns}`);
         } else {
           state = 'usage-json'; send('/usage --json');
         }
-      } else if (state === 'usage-json' && text.includes('"physicalAttempts":9')) {
+      } else if (state === 'usage-json' && text.includes('"physicalAttempts":9') && readyCount >= commandReadyTarget) {
         state = 'usage-human'; send('/usage');
-      } else if (state === 'usage-human' && text.includes('Usage — Current session')) {
+      } else if (state === 'usage-human' && text.includes('Usage — Current session') && readyCount >= commandReadyTarget) {
         if (!text.includes('cumulative exposures')) throw new Error('Human usage summary omitted schema exposure context.');
         state = 'usage-details'; send('/usage details');
-      } else if (state === 'usage-details' && text.includes('Usage details — Current session')) {
+      } else if (state === 'usage-details' && text.includes('Usage details — Current session') && readyCount >= commandReadyTarget) {
         if (!text.includes('Providers and models') || !text.includes('Purposes')) {
           throw new Error('Detailed usage output omitted required sections.');
         }
-        state = 'compress';
-        send('/compress', () => {
-          compressionReadyTarget = output.split(readyToken).length;
-        });
+        state = 'compress'; send('/compress');
       } else if (state === 'compress'
           && /Compressed \d+ .* \d+ messages/.test(text)
-          && readyCount >= compressionReadyTarget) {
+          && readyCount >= commandReadyTarget) {
         state = 'quit'; send('/quit');
       }
     });
@@ -203,12 +181,14 @@ function runRestartSession() {
     });
     let output = '';
     let state = 'boot';
+    let commandReadyTarget = 0;
     let submitting = false;
     let settled = false;
     let dataSubscription;
     let exitSubscription;
     let cancelSubmission;
     const send = (value) => {
+      commandReadyTarget = output.split(readyToken).length;
       submitting = true;
       cancelSubmission = submit(terminal, value, () => {
         cancelSubmission = undefined;
@@ -236,9 +216,11 @@ function runRestartSession() {
       const readyCount = output.split(readyToken).length - 1;
       if (state === 'boot' && readyCount >= 1) {
         state = 'usage'; send('/usage --json');
-      } else if (state === 'usage' && text.includes('"compression":{"physicalAttempts":1')) {
+      } else if (state === 'usage'
+          && text.includes('"compression":{"physicalAttempts":1')
+          && readyCount >= commandReadyTarget) {
         state = 'turn'; send('RESTART');
-      } else if (state === 'turn' && text.includes('PACKAGED RESTART PASS') && readyCount >= 3) {
+      } else if (state === 'turn' && text.includes('PACKAGED RESTART PASS') && readyCount >= commandReadyTarget) {
         state = 'quit'; send('/quit');
       }
     });
