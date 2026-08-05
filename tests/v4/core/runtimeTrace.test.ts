@@ -76,4 +76,17 @@ describe('runtime trace sink', () => {
       'verdict.computed', 'proof.persisted',
     ]) expect(proof).toContain(`'${event}'`);
   });
+
+  it('accepts the final frame before projecting the stable ready state', () => {
+    const root = join(__dirname, '../../..');
+    const session = readFileSync(join(root, 'cli/v4/chatSession.ts'), 'utf8');
+    const barrier = session.indexOf('await this.opts.display.awaitTerminalSettled()');
+    const accepted = session.indexOf("runtimeTrace('turn', 'final_frame.accepted'", barrier);
+    const ready = session.indexOf("this.setStatusState({ kind: 'ready' })", accepted);
+    const readyPrompt = session.indexOf("runtimeTrace('turn', 'ready_prompt.emitted'", ready);
+    expect(barrier).toBeGreaterThan(0);
+    expect(accepted).toBeGreaterThan(barrier);
+    expect(ready).toBeGreaterThan(accepted);
+    expect(readyPrompt).toBeGreaterThan(ready);
+  });
 });

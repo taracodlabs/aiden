@@ -9,7 +9,7 @@
  * setComposer paints the draft + mode label, tool calls do not swallow the
  * input surface, and clearing removes it without stray writes.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
@@ -248,5 +248,43 @@ describe('Display composer — fixed bottom surface compatibility opt-out', () =
     expect(painted).not.toContain('cleanup draft');
     expect(painted).not.toContain('provider \u00b7 model');
     expect(painted).not.toContain('â–² You');
+  });
+
+  it('restores the owned surface exactly once when an exclusive modal lease releases', async () => {
+    const { d, chunks } = makeDisplay();
+    d.setBusyHint('queue');
+    d.setComposer('draft survives', 'queue');
+    chunks.length = 0;
+
+    await d.withModalLease('model-picker', async () => {
+      expect(chunks.join('')).toContain('\x1b[r');
+    });
+
+    const restored = stripAnsi(chunks.join(''));
+    expect(restored.match(/draft survives/g)).toHaveLength(1);
+    d.clearComposer();
+  });
+
+  it('waits for preceding terminal writes before accepting the final frame', async () => {
+    const callbacks: Array<() => void> = [];
+    const out = new Writable({
+      write(_chunk, _enc, cb) { callbacks.push(cb); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY = false;
+    out.columns = 80;
+    const d = new Display({ stdout: out as unknown as NodeJS.WriteStream, skin: new SkinEngine({ forceMono: true }) });
+    const settled = vi.fn();
+
+    d.write('authoritative proof\n');
+    const barrier = d.awaitTerminalSettled().then(settled);
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+
+    callbacks.shift()?.();
+    await Promise.resolve();
+    expect(settled).not.toHaveBeenCalled();
+    callbacks.shift()?.();
+    await barrier;
+    expect(settled).toHaveBeenCalledOnce();
   });
 });

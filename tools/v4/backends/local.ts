@@ -88,6 +88,10 @@ function stripMatchingQuotes(value: string): string {
   return trimmed;
 }
 
+function controlledPowerShellScript(script: string): string {
+  return `$ProgressPreference='SilentlyContinue'; ${script}`;
+}
+
 function buildExplicitPowerShellInvocation(match: RegExpMatchArray): LocalShellInvocation {
   const executable = match[1]!;
   const rest = match[2] ?? '';
@@ -95,7 +99,7 @@ function buildExplicitPowerShellInvocation(match: RegExpMatchArray): LocalShellI
   if (commandToken) {
     const prefix = rest.slice(0, commandToken.index).trim();
     const script = stripMatchingQuotes(rest.slice(commandToken.index + commandToken[0].length));
-    const encoded = Buffer.from(script, 'utf16le').toString('base64');
+    const encoded = Buffer.from(controlledPowerShellScript(script), 'utf16le').toString('base64');
     return {
       executable,
       args: [...splitWindowsArguments(prefix), '-EncodedCommand', encoded],
@@ -125,7 +129,7 @@ export function buildLocalShellInvocation(
   if (explicitPowerShell) return buildExplicitPowerShellInvocation(explicitPowerShell);
   // EncodedCommand preserves quotes, Unicode, backticks, semicolons, and
   // literal dollar signs across the native process boundary.
-  const encoded = Buffer.from(command, 'utf16le').toString('base64');
+  const encoded = Buffer.from(controlledPowerShellScript(command), 'utf16le').toString('base64');
   return {
     executable: 'powershell.exe',
     args: ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded],

@@ -301,7 +301,7 @@ describe('runModelPicker', () => {
     expect(anthropicRow).toMatch(/\(\d+ model[s]?\)/);
   });
 
-  it('stage-1 shows ✓ authed for providers reporting credentials', async () => {
+  it('stage-1 distinguishes authentication and readiness states truthfully', async () => {
     const seen: string[] = [];
     const select = vi.fn(async (opts: any) => {
       if (isStage1(opts.message)) {
@@ -313,12 +313,21 @@ describe('runModelPicker', () => {
     await runModelPicker({
       resolver: realResolver(),
       promptModule: { select },
-      isProviderAuthed: (id) => id === 'anthropic',
+      isProviderAuthed: (id) => id === 'anthropic'
+        ? 'readiness_verified'
+        : id === 'chatgpt-plus'
+          ? 'authentication_expired'
+          : id === 'groq'
+            ? 'readiness_failed'
+            : 'authentication_missing',
     });
     const anthropicRow = seen.find((s) => s.startsWith('Anthropic'))!;
+    const chatgptRow = seen.find((s) => s.startsWith('ChatGPT Plus'))!;
     const groqRow = seen.find((s) => s.startsWith('Groq'))!;
-    expect(anthropicRow).toMatch(/✓ authed/);
-    expect(groqRow).toMatch(/⚠ no API key/);
+    expect(anthropicRow).toMatch(/✓ ready/);
+    expect(chatgptRow).toMatch(/authentication expired/);
+    expect(chatgptRow).not.toMatch(/authed/);
+    expect(groqRow).toMatch(/readiness failed/);
   });
 
   it('stage-1 marks the current provider with ← current and stage-2 the current model', async () => {

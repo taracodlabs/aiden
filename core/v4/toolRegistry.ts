@@ -59,7 +59,7 @@ import type { SnapshotObservation } from './temporalEvidence';
 import type { SSRFProtection } from '../../moat/ssrfProtection';
 import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
-import { classifyCommand, isReadOnlyCommand } from '../../moat/dangerousPatterns';
+import { analyzeCommandIntent, isReadOnlyCommand } from '../../moat/dangerousPatterns';
 import { classifyBrowserAction } from './browserState';
 import { pwBrowserStatus, pwDialogPendingTier } from '../playwrightBridge';
 import type { SkillLoader } from './skillLoader';
@@ -656,6 +656,9 @@ export class ToolRegistry {
         call.name === 'shell_exec' &&
         typeof args.command === 'string' &&
         isReadOnlyCommand(args.command);
+      const shellIntent = call.name === 'shell_exec' && typeof args.command === 'string'
+        ? analyzeCommandIntent(args.command, context.cwd ?? process.cwd())
+        : undefined;
       // Fail closed: a tool must EXPLICITLY declare `mutates: false` to skip the
       // approval gate. An unknown / undeclared `mutates` (e.g. a dynamically
       // registered tool that never set it) is ASSUMED to mutate and is gated —
@@ -813,7 +816,7 @@ export class ToolRegistry {
             toolCallId: call.id,
             toolName: call.name,
             args,
-            riskTier: handler.riskTier ?? 'caution',
+            riskTier: shellIntent?.tier ?? handler.riskTier ?? 'caution',
             mutates: true,
             effect: effectDescriptor,
             approvalState: approvalGated ? 'pending' : 'not_required',
@@ -855,9 +858,8 @@ export class ToolRegistry {
         let riskTier: 'safe' | 'caution' | 'dangerous' | undefined;
         let reason: string | undefined;
         if (call.name === 'shell_exec' && typeof args.command === 'string') {
-          const c = classifyCommand(args.command);
-          riskTier = c.tier;
-          reason = c.reason;
+          riskTier = shellIntent?.tier;
+          reason = shellIntent?.reason;
         } else if (
           call.name === 'browser_click' || call.name === 'browser_type' ||
           call.name === 'browser_fill' || call.name === 'browser_navigate'
@@ -891,8 +893,10 @@ export class ToolRegistry {
         // Effective tier is the handler annotation (Phase 1 floor)
         // OR the classifier escalation above (whichever is higher).
         let preview: unknown;
-        const effectiveTier = (riskTier === 'dangerous' || handler.riskTier === 'dangerous')
-          ? 'dangerous' : (riskTier ?? handler.riskTier);
+        const effectiveTier = call.name === 'shell_exec'
+          ? (riskTier ?? 'dangerous')
+          : (riskTier === 'dangerous' || handler.riskTier === 'dangerous')
+            ? 'dangerous' : (riskTier ?? handler.riskTier);
         if (effectiveTier === 'dangerous' && typeof handler.buildPreview === 'function') {
           try {
             preview = await handler.buildPreview(args, context);

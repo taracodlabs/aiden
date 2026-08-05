@@ -2844,7 +2844,7 @@ export class ChatSession implements ChatSessionLike {
           turnId,
           durationMs: Date.now() - settlementStartedAt,
         });
-        runtimeTrace('turn', 'final_frame.accepted', { turnId, mode: 'streaming' });
+        runtimeTrace('turn', 'final_frame.queued', { turnId, mode: 'streaming' });
       }
 
       this.history = result.messages;
@@ -3195,7 +3195,7 @@ export class ChatSession implements ChatSessionLike {
           turnId,
           durationMs: Date.now() - settlementStartedAt,
         });
-        runtimeTrace('turn', 'final_frame.accepted', { turnId, mode: 'complete' });
+        runtimeTrace('turn', 'final_frame.queued', { turnId, mode: 'complete' });
       }
 
       if (streamingActive && durableEvidenceForDisplay.length > 0) {
@@ -3256,6 +3256,8 @@ export class ChatSession implements ChatSessionLike {
         );
       }
 
+      await this.opts.display.awaitTerminalSettled();
+      runtimeTrace('turn', 'final_frame.accepted', { turnId });
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
       // v4.8.0 Slice 7 — record per-turn outcome for the status dot.
@@ -3283,6 +3285,7 @@ export class ChatSession implements ChatSessionLike {
       // — matches the `\n\n` blank already below `▎ Aiden` header.
       this.opts.display.write(`\n  ${this.opts.display.rule()}\n`);
       this.renderStatusLine();
+      runtimeTrace('turn', 'ready_prompt.emitted', { turnId });
       runtimeTrace('turn', 'stable_ready', {
         turnId,
         durationMs: this.lastTurnElapsedMs,

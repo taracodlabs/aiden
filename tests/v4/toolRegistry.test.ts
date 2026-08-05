@@ -196,6 +196,39 @@ describe('ToolRegistry', () => {
     expect(result.activityTiming?.terminalClassification).toBe('blocked');
   });
 
+  it('passes bounded shell intent tiers to approval without weakening unknown commands', async () => {
+    const execute = vi.fn(async () => ({ ok: true }));
+    registry.register(makeHandler('shell_exec', {
+      category: 'execute',
+      mutates: true,
+      riskTier: 'dangerous',
+      execute,
+    }));
+    const seen: Array<{ command: unknown; riskTier: unknown }> = [];
+    const approvalEngine = new ApprovalEngine('manual', {
+      promptUser: async (request) => {
+        seen.push({ command: request.args.command, riskTier: request.riskTier });
+        return 'deny';
+      },
+    });
+    const exec = registry.buildExecutor({ ...makeContext(), approvalEngine });
+
+    const version = await exec(call('shell_exec', { command: 'node --version' }));
+    const verify = await exec(call('shell_exec', { command: 'node verify.js' }));
+    const publish = await exec(call('shell_exec', { command: 'npm publish' }));
+    const unknown = await exec(call('shell_exec', { command: 'custom-runner task' }));
+
+    expect(version.error).toBeUndefined();
+    expect(seen).toEqual([
+      { command: 'node verify.js', riskTier: 'caution' },
+      { command: 'npm publish', riskTier: 'dangerous' },
+      { command: 'custom-runner task', riskTier: 'dangerous' },
+    ]);
+    expect(verify.approvalDecision?.state).toBe('denied');
+    expect(publish.approvalDecision?.state).toBe('denied');
+    expect(unknown.approvalDecision?.state).toBe('denied');
+  });
+
   it('cancellation during handler retains elapsed execution once', async () => {
     let now = 0;
     const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => now);

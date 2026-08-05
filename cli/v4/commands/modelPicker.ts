@@ -35,6 +35,13 @@ import type { FetchModelsResult } from '../../../core/v4/providers/modelFetch';
 import { termWidth } from '../../../core/v4/ui/theme';
 
 export type ProviderTier = 'pro' | 'free' | 'paid' | 'local' | 'subscription';
+export type ProviderAccessState =
+  | 'not_configured'
+  | 'authentication_missing'
+  | 'authentication_expired'
+  | 'authentication_valid'
+  | 'readiness_verified'
+  | 'readiness_failed';
 
 export interface ModelPickerOptions {
   resolver: RuntimeResolver;
@@ -58,7 +65,7 @@ export interface ModelPickerOptions {
    * "everyone is authed" when omitted, which keeps existing tests
    * and the `aiden model` CLI path working without extra plumbing.
    */
-  isProviderAuthed?: (providerId: string) => boolean;
+  isProviderAuthed?: (providerId: string) => boolean | ProviderAccessState | Promise<boolean | ProviderAccessState>;
   /** Live local-inventory seam. Production uses global fetch. */
   fetchImpl?: typeof fetch;
   ollamaBaseUrl?: string;
@@ -91,27 +98,31 @@ const CANCEL_VALUE = '__cancel__';
 const OLLAMA_UNAVAILABLE_VALUE = '__ollama_unavailable__';
 
 /** Auth badge rendered into stage-1 provider rows. */
-function authBadge(entry: ProviderRegistryEntry, authed: boolean): string {
-  if (authed) {
-    // OAuth providers note that authed-state means a stored token, not
-    // an env-var key — useful for users debugging "where did my creds
-    // come from".
-    return entry.oauth ? '✓ authed (OAuth)' : '✓ authed';
+function authBadge(entry: ProviderRegistryEntry, access: boolean | ProviderAccessState): string {
+  const state: ProviderAccessState = typeof access === 'boolean'
+    ? access ? 'authentication_valid' : 'authentication_missing'
+    : access;
+  switch (state) {
+    case 'readiness_verified': return '✓ ready';
+    case 'readiness_failed': return '⚠ readiness failed';
+    case 'authentication_expired': return '⚠ authentication expired';
+    case 'authentication_valid': return entry.oauth ? '✓ auth valid (OAuth)' : '✓ auth valid';
+    case 'not_configured': return '⚠ not configured';
+    case 'authentication_missing':
+      if (entry.tier === 'local') return '⚠ no daemon';
+      return entry.oauth ? '⚠ authentication missing' : '⚠ no API key';
   }
-  if (entry.tier === 'local') return '⚠ no daemon';
-  if (entry.oauth) return '⚠ not signed in';
-  return '⚠ no API key';
 }
 
 /** Map a provider entry to a stage-1 picker row. */
 function providerChoice(
   entry: ProviderRegistryEntry,
   modelCount: number,
-  authed: boolean,
+  access: boolean | ProviderAccessState,
   isCurrent: boolean,
 ): { name: string; value: string; description?: string } {
   const badge = TIER_BADGE[entry.tier] ?? entry.tier;
-  const ab = authBadge(entry, authed);
+  const ab = authBadge(entry, access);
   const count = `(${modelCount} model${modelCount === 1 ? '' : 's'})`;
   const current = isCurrent ? '  ← current' : '';
   return {
@@ -307,7 +318,7 @@ export async function runModelPicker(
         ? `⚙ Model Picker — Select Provider · ${hintParts.join(' · ')}`
         : '⚙ Model Picker — Select Provider';
 
-    const providerChoices = providerEntries.map((e) => {
+    const providerChoices = await Promise.all(providerEntries.map(async (e) => {
       const localModels = e.id === 'ollama' && ollamaInventory
         ? ollamaInventory.models
         : null;
@@ -319,10 +330,10 @@ export async function runModelPicker(
       return providerChoice(
         e,
         localModels?.length ?? listModelsForProvider(e.id).length,
-        isAuthed(e.id),
+        await isAuthed(e.id),
         e.id === currentProviderId && currentInstalled,
       );
-    });
+    }));
     providerChoices.push({ name: 'Cancel', value: CANCEL_VALUE });
 
     let providerId: string;

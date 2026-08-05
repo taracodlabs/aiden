@@ -4,6 +4,7 @@ import {
   detectDangerousPatterns,
   highestTier,
   classifyCommand,
+  analyzeCommandIntent,
 } from '../../../moat/dangerousPatterns';
 
 describe('dangerousPatterns — individual detections', () => {
@@ -98,6 +99,36 @@ describe('dangerousPatterns — individual detections', () => {
     expect(classifyCommand('Remove-Item -Recurse C:\\Users\\victim').tier).toBe(
       'dangerous',
     );
+  });
+});
+
+describe('bounded command intent analysis', () => {
+  it('classifies proven metadata commands as low-risk reads', () => {
+    expect(analyzeCommandIntent('node --version', 'C:\\work')).toMatchObject({
+      operation: 'inspect_runtime_version', effect: 'read_only', network: false,
+      reversible: true, scope: 'process', confidence: 'high', tier: 'safe',
+    });
+    expect(analyzeCommandIntent('git status --short', 'C:\\work')).toMatchObject({
+      operation: 'inspect_repository', effect: 'read_only', network: false,
+      reversible: true, scope: 'repository', confidence: 'high', tier: 'safe',
+    });
+  });
+
+  it('keeps a local Node script approval-gated without calling it dangerous', () => {
+    expect(analyzeCommandIntent('node verify.js', 'C:\\scratch')).toMatchObject({
+      operation: 'execute_local_script', effect: 'mutating', network: false,
+      scope: 'working_directory', confidence: 'medium', tier: 'caution',
+    });
+  });
+
+  it('keeps publication, deletion and unknown commands conservative', () => {
+    expect(analyzeCommandIntent('npm publish', 'C:\\work')).toMatchObject({
+      effect: 'external', network: true, reversible: false, tier: 'dangerous',
+    });
+    expect(analyzeCommandIntent('Remove-Item -Recurse C:\\Users\\victim', 'C:\\work').tier).toBe('dangerous');
+    expect(analyzeCommandIntent('custom-runner --do-work', 'C:\\work')).toMatchObject({
+      effect: 'unknown', confidence: 'low', tier: 'dangerous',
+    });
   });
 });
 

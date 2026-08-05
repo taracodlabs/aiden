@@ -4,7 +4,7 @@
  *
  * Aiden — local-first agent.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
@@ -655,13 +655,38 @@ describe('settled activity row spacing', () => {
     display.streamPartial('## Final result\n- Run `npm test`\n- Unicode 世界\n');
     display.streamComplete();
 
-    const rendered = screen.snapshot();
+    const rendered = screen.bufferSnapshot();
     expect(rendered.match(/FINAL RESULT/giu)).toHaveLength(1);
     expect(rendered.match(/Evidence recorded/gu)).toHaveLength(1);
     expect(rendered.match(/npm test/gu)).toHaveLength(1);
     expect(rendered).not.toContain('```');
     expect(rendered.match(/▲ You/gu)).toHaveLength(1);
     expect(rendered.match(/provider · runtime/gu)).toHaveLength(1);
+  });
+
+  it('parses one complete assistant document after an activity interrupts a split fence', () => {
+    const { display, screen } = createDisplay(80, 30);
+    display.setStatusFooter('provider runtime ready');
+    display.setIdleComposer('', 'Type your message');
+    const markdown = vi.spyOn(display, 'markdown');
+    const first = '# Verified result\n\n```';
+    const second = 'json\n{"verified":true,"exitCode":0}\n```\n\n- Fresh readback complete\n';
+
+    display.streamPartial(first);
+    display.toolRow('file_read', { path: 'result.json' }).ok(12);
+    display.streamPartial(second);
+    display.streamComplete();
+
+    expect(markdown).toHaveBeenCalledTimes(1);
+    expect(markdown).toHaveBeenCalledWith(first + second);
+    const rendered = screen.snapshot();
+    expect(rendered.match(/result\.json/gu)).toHaveLength(1);
+    expect(rendered).toContain('verified');
+    expect(rendered).toContain('exitCode');
+    expect(rendered).toContain('Fresh readback complete');
+    expect(rendered).not.toContain('```');
+    expect(rendered.match(/You/gu)).toHaveLength(1);
+    expect(rendered.match(/provider runtime/gu)).toHaveLength(1);
   });
 
   it('keeps the activity-to-answer transition bounded at narrow width', () => {
