@@ -70,11 +70,15 @@ export class WhatsAppAdapter implements ChannelAdapter {
     // Attempt dynamic import — graceful degradation if module not available
     let Client: any, LocalAuth: any
     try {
-      const wwebjs = await import('whatsapp-web.js')
+      // Keep the optional integration outside the core runtime dependency graph.
+      // A variable specifier also keeps TypeScript/esbuild from turning this
+      // capability boundary into a startup dependency.
+      const optionalModule = 'whatsapp-web.js'
+      const wwebjs = await import(optionalModule)
       Client    = wwebjs.Client
       LocalAuth = wwebjs.LocalAuth
     } catch (e: any) {
-      this.log.info(`Disabled — whatsapp-web.js not available:${e.message}`)
+      this.log.info(`Disabled — optional WhatsApp capability is not available. Install whatsapp-web.js explicitly to enable it:${e.message}`)
       return
     }
 

@@ -14,6 +14,7 @@ import path   from 'path'
 import fs     from 'fs'
 import crypto from 'crypto'
 import { getUserDataDir } from './paths'
+import { findSystemBrowserExecutable, NO_SYSTEM_BROWSER_ERROR } from './browserExecutable'
 import { runtimeArtifactDirectory } from './v4/runtimeStorage'
 import { getTabRegistry, type TabMeta } from './v4/browser/tabRegistry'
 import { getDialogSupervisor, type DialogRecord, type FileEventRecord } from './v4/browser/dialogState'
@@ -182,10 +183,13 @@ async function ensureContext(): Promise<any> {
   }
   if (!_browserContext) {
     const chromium  = await getChromium()
+    const executablePath = findSystemBrowserExecutable()
+    if (!executablePath) throw new Error(NO_SYSTEM_BROWSER_ERROR)
     const profile   = getBrowserProfileDir()
     console.log(`[Browser] Launching — profile: ${profile}  headless: ${HEADLESS}`)
     _browserContext = await chromium.launchPersistentContext(profile, {
       headless: HEADLESS,
+      executablePath,
       viewport: { width: 1280, height: 720 },
     })
     // B4.1 — owned mode: Aiden owns the browser, so existing + new pages are Aiden's.
@@ -306,7 +310,7 @@ async function refreshTabMeta(): Promise<void> {
  */
 export async function pwAttach(endpoint: string): Promise<{ ok: boolean; endpoint?: string; controlledTabUrl?: string; error?: string }> {
   const available = await checkPwAvailable()
-  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  if (!available) return { ok: false, error: PLAYWRIGHT_MISSING_ERROR }
   try {
     const chromium = await getChromium()
     const browser  = await chromium.connectOverCDP(endpoint)
@@ -435,7 +439,7 @@ export async function pwSwitchControl(
 /** Open a new Aiden-created (controllable + closeable) tab; optionally navigate it. */
 export async function pwOpenTab(url?: string): Promise<{ ok: boolean; tab_id?: string; error?: string }> {
   const available = await checkPwAvailable()
-  if (!available) return { ok: false, error: 'playwright not installed.' }
+  if (!available) return { ok: false, error: PLAYWRIGHT_MISSING_ERROR }
   const release = await pwAcquire()
   try {
     const ctx = await ensureContext()
@@ -496,7 +500,7 @@ export async function pwRespondDialog(
  */
 export async function pwUpload(selector: string, paths: string[]): Promise<{ ok: boolean; error?: string }> {
   const available = await checkPwAvailable()
-  if (!available) return { ok: false, error: 'playwright not installed.' }
+  if (!available) return { ok: false, error: PLAYWRIGHT_MISSING_ERROR }
   const release = await pwAcquire()
   try {
     const page = await ensurePage()
@@ -511,6 +515,24 @@ export async function pwUpload(selector: string, paths: string[]): Promise<{ ok:
 
 // ── Playwright availability check ────────────────────────────────────────────
 let _pwAvailable: boolean | null = null
+const PLAYWRIGHT_MISSING_ERROR =
+  'Browser capability unavailable: Playwright is not installed. Reinstall aiden-runtime or install the optional browser capability.'
+
+export async function pwBrowserAvailability(): Promise<{
+  ok: boolean;
+  playwright: boolean;
+  executablePath?: string;
+  error?: string;
+}> {
+  if (!(await checkPwAvailable())) {
+    return { ok: false, playwright: false, error: PLAYWRIGHT_MISSING_ERROR }
+  }
+  const executablePath = findSystemBrowserExecutable()
+  if (!executablePath) {
+    return { ok: false, playwright: true, error: NO_SYSTEM_BROWSER_ERROR }
+  }
+  return { ok: true, playwright: true, executablePath }
+}
 async function checkPwAvailable(): Promise<boolean> {
   if (_pwAvailable !== null) return _pwAvailable
   try {
@@ -519,7 +541,7 @@ async function checkPwAvailable(): Promise<boolean> {
     console.log('[Browser] playwright available')
   } catch {
     _pwAvailable = false
-    console.warn('[Browser] playwright not installed — browser tools unavailable. Run: npm install playwright')
+    console.warn(`[Browser] ${PLAYWRIGHT_MISSING_ERROR}`)
   }
   return _pwAvailable
 }
@@ -528,7 +550,7 @@ async function checkPwAvailable(): Promise<boolean> {
 export async function pwNavigate(url: string): Promise<{ ok: boolean; url: string; error?: string }> {
   const available = await checkPwAvailable()
   if (!available) {
-    return { ok: false, url, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+    return { ok: false, url, error: PLAYWRIGHT_MISSING_ERROR }
   }
   const release = await pwAcquire() // B3.2b — serialize Aiden's own ops
   getDialogSupervisor().arm() // B4.2a — a dialog this action triggers inherits its consent
@@ -571,7 +593,7 @@ export async function pwScreenshot(): Promise<{ ok: boolean; path?: string; erro
  */
 export async function pwScreenshotBuffer(): Promise<{ ok: boolean; base64?: string; error?: string }> {
   const available = await checkPwAvailable()
-  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  if (!available) return { ok: false, error: PLAYWRIGHT_MISSING_ERROR }
   const release = await pwAcquire()
   try {
     const page = await ensurePage()
@@ -801,7 +823,7 @@ export async function pwSnapshotHash(): Promise<{
  */
 export async function pwAxSnapshot(): Promise<{ ok: boolean; url?: string; elements?: any[]; error?: string }> {
   const available = await checkPwAvailable()
-  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  if (!available) return { ok: false, error: PLAYWRIGHT_MISSING_ERROR }
   const release = await pwAcquire()
   try {
     const page = await ensurePage()
@@ -953,7 +975,7 @@ export async function pwActByLease(
   action: { kind: 'click' } | { kind: 'fill'; text: string },
 ): Promise<{ ok: boolean; error?: string }> {
   const available = await checkPwAvailable()
-  if (!available) return { ok: false, error: 'playwright not installed. Run: npm install playwright && npx playwright install chromium' }
+  if (!available) return { ok: false, error: PLAYWRIGHT_MISSING_ERROR }
   const release = await pwAcquire()
   getDialogSupervisor().arm() // B4.2a — act-by-ref dialogs inherit consent
   try {
