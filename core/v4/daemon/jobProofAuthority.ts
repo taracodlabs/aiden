@@ -6,6 +6,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 
 import type { Db } from './db/connection';
+import { runtimeTrace } from '../runtimeTrace';
 
 export type ClaimCategory = 'contract' | 'observed' | 'courtesy';
 export type ClaimState = 'unverified' | 'verified' | 'partial' | 'failed' | 'unknown';
@@ -297,6 +298,17 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
           `INSERT INTO proof_reviews (job_id, evidence_id, reason, created_at) VALUES (?, ?, 'late evidence', ?)`,
         ).run(command.jobId, evidenceId, now);
       }).immediate();
+      runtimeTrace('proof', 'evidence.recorded', {
+        jobId: command.jobId,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        evidenceId,
+        effectId: command.effectId ?? null,
+        source: command.source,
+        coverage: command.coverage,
+        verificationResult: command.verificationResult,
+        late,
+      });
       return authority.listEvidence(command.jobId).find((evidence) => evidence.evidenceId === evidenceId)!;
     },
     checkClaim(command) {
@@ -305,6 +317,15 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       if (getVerdict(claim.job_id)) throw new Error('Final verdict is immutable');
       assertAttempt(claim.job_id, command.attemptId, command.generation);
       const now = command.now ?? Date.now();
+      const verificationStartedAt = Date.now();
+      runtimeTrace('proof', 'claim_verification.start', {
+        jobId: claim.job_id,
+        claimId: command.claimId,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        evidenceCount: command.evidenceIds.length,
+        requestedState: command.state,
+      });
       db.transaction(() => {
         const linkedEvidence: EvidenceRow[] = [];
         const requiredEffectIds = JSON.parse(claim.effect_ids_json) as string[];
@@ -380,6 +401,14 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
         db.prepare('UPDATE job_claims SET state = ?, attempt_id = ?, generation = ?, checked_at = ? WHERE claim_id = ?')
           .run(command.state, command.attemptId, command.generation, now, command.claimId);
       }).immediate();
+      runtimeTrace('proof', 'claim_verification.end', {
+        jobId: claim.job_id,
+        claimId: command.claimId,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        state: command.state,
+        durationMs: Date.now() - verificationStartedAt,
+      });
       return authority.listClaims(claim.job_id).find((item) => item.claimId === command.claimId)!;
     },
     listClaims,
@@ -408,10 +437,23 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       else verdict = 'unknown';
       const now = command.now ?? Date.now();
       const summary = { requiredClaims: claims.length, verifiedClaims: verifiedCount, failedClaims: failedCount, unknownClaims: unknownCount };
+      runtimeTrace('proof', 'verdict.computed', {
+        jobId: command.jobId,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        verdict,
+        ...summary,
+      });
       db.prepare(
         `INSERT INTO job_verdicts (job_id, attempt_id, generation, verdict, summary_json, finalized_at)
          VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(command.jobId, command.attemptId, command.generation, verdict, JSON.stringify(summary), now);
+      runtimeTrace('proof', 'proof.persisted', {
+        jobId: command.jobId,
+        attemptId: command.attemptId,
+        generation: command.generation,
+        verdict,
+      });
       return getVerdict(command.jobId)!;
     },
     getVerdict,

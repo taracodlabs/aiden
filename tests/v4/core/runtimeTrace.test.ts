@@ -37,4 +37,24 @@ describe('runtime trace sink', () => {
     expect(stdout).not.toHaveBeenCalled();
     expect(stderr).not.toHaveBeenCalled();
   });
+
+  it('covers the complete turn, tool, proof, and render phase boundary', () => {
+    const root = join(__dirname, '../../..');
+    const session = readFileSync(join(root, 'cli/v4/chatSession.ts'), 'utf8');
+    const agent = readFileSync(join(root, 'core/v4/aidenAgent.ts'), 'utf8');
+    const proof = readFileSync(join(root, 'core/v4/daemon/jobProofAuthority.ts'), 'utf8');
+    for (const event of [
+      'input.accepted', 'planning.start', 'planning.end', 'first_token',
+      'final_stream.complete', 'markdown_settlement.start', 'markdown_settlement.end',
+      'final_frame.accepted', 'stable_ready',
+    ]) expect(session).toContain(`'${event}'`);
+    for (const event of [
+      'provider.request', 'provider.complete', 'tool.admitted', 'tool.start',
+      'tool.complete', 'verification.start', 'verification.end',
+    ]) expect(agent).toContain(`'${event}'`);
+    for (const event of [
+      'evidence.recorded', 'claim_verification.start', 'claim_verification.end',
+      'verdict.computed', 'proof.persisted',
+    ]) expect(proof).toContain(`'${event}'`);
+  });
 });

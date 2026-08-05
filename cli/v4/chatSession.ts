@@ -2206,6 +2206,22 @@ export class ChatSession implements ChatSessionLike {
     // = exactly one blank row between user input and Aiden header,
     // matching the rhythm Shiva flagged in smoke.
     const turnStartedAt = Date.now();
+    runtimeTrace('turn', 'input.accepted', {
+      turnId,
+      inputChars: userInput.length,
+      persistedInput: inputAlreadyPersisted,
+    });
+    runtimeTrace('turn', 'planning.start', { turnId });
+    let planningSettled = false;
+    const settlePlanning = (reason: 'first_token' | 'tool' | 'provider_complete'): void => {
+      if (planningSettled) return;
+      planningSettled = true;
+      runtimeTrace('turn', 'planning.end', {
+        turnId,
+        reason,
+        durationMs: Date.now() - turnStartedAt,
+      });
+    };
     const userMsg: Message = { role: 'user', content: userInput };
 
     // Apply any queued system prompts (from skill slash commands) by
@@ -2667,6 +2683,11 @@ export class ChatSession implements ChatSessionLike {
         turnContext,
         onFirstDelta: streamingEnabled
           ? wrapTurnId(() => {
+              settlePlanning('first_token');
+              runtimeTrace('turn', 'first_token', {
+                turnId,
+                durationMs: Date.now() - turnStartedAt,
+              });
               stopIndicatorOnce();
               streamingActive = true;
               // v4.11 Slice 1 — a new stream segment is starting (this
@@ -2726,6 +2747,7 @@ export class ChatSession implements ChatSessionLike {
           : undefined,
         onToolCallStart: streamingEnabled
           ? wrapTurnId((call: import('../../providers/v4/types').ToolCallRequest) => {
+              settlePlanning('tool');
               // v4.11 Slice 1 — segment boundary: flush buffered prose
               // before the tool indicator paints, preserving order.
               flushStreamDeltas();
@@ -2787,6 +2809,12 @@ export class ChatSession implements ChatSessionLike {
           : undefined,
       }));
       const result = await runAgent();
+      settlePlanning('provider_complete');
+      runtimeTrace('turn', 'final_stream.complete', {
+        turnId,
+        finishReason: result.finishReason,
+        durationMs: Date.now() - turnStartedAt,
+      });
       if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && replRunId !== null) {
         currentProviderAttemptLedger()?.reconcileJobLinkage({
           taskId: replTaskId,
@@ -2807,7 +2835,17 @@ export class ChatSession implements ChatSessionLike {
       // Hide the progress bar before any post-stream content
       // (statusFooter, the next prompt) lands on its line.
       progressBar?.hide();
-      if (streamingActive) { flushStreamDeltas(); this.opts.display.streamComplete(); }
+      if (streamingActive) {
+        flushStreamDeltas();
+        const settlementStartedAt = Date.now();
+        runtimeTrace('turn', 'markdown_settlement.start', { turnId });
+        this.opts.display.streamComplete();
+        runtimeTrace('turn', 'markdown_settlement.end', {
+          turnId,
+          durationMs: Date.now() - settlementStartedAt,
+        });
+        runtimeTrace('turn', 'final_frame.accepted', { turnId, mode: 'streaming' });
+      }
 
       this.history = result.messages;
       this.compressionCount = result.compressionEvents;
@@ -3150,7 +3188,14 @@ export class ChatSession implements ChatSessionLike {
         // the one-shot reply lands. Idempotent + tool-gated by
         // the shared separator gate.
         const activityDivider = takeToolReplySeparator();
+        const settlementStartedAt = Date.now();
+        runtimeTrace('turn', 'markdown_settlement.start', { turnId });
         this.opts.display.write(this.opts.display.agentTurn(result.finalContent, { activityDivider }));
+        runtimeTrace('turn', 'markdown_settlement.end', {
+          turnId,
+          durationMs: Date.now() - settlementStartedAt,
+        });
+        runtimeTrace('turn', 'final_frame.accepted', { turnId, mode: 'complete' });
       }
 
       if (streamingActive && durableEvidenceForDisplay.length > 0) {
@@ -3238,6 +3283,10 @@ export class ChatSession implements ChatSessionLike {
       // — matches the `\n\n` blank already below `▎ Aiden` header.
       this.opts.display.write(`\n  ${this.opts.display.rule()}\n`);
       this.renderStatusLine();
+      runtimeTrace('turn', 'stable_ready', {
+        turnId,
+        durationMs: this.lastTurnElapsedMs,
+      });
       // v4.1.5+ Path A — finalize the loop trace. No-op if the env
       // var is unset OR if the turn didn't trip any threshold. When
       // it DOES emit, the snapshot path goes to a dim status line so
