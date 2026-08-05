@@ -206,6 +206,44 @@ describe('ComposerLane — lifecycle', () => {
     });
   });
 
+  it('clamps repeated PageUp at the oldest retained wrapped transcript row', () => {
+    const s = mockSink(12, 80);
+    const lane = new ComposerLane(s);
+    lane.activate({ draft: '', mode: 'idle' }, 'provider · model · ready');
+    lane.writeAbove(Array.from({ length: 20 }, (_, index) => `retained row ${index + 1}`).join('\n') + '\n');
+
+    lane.scrollTranscript(10_000);
+
+    expect(lane.viewportSnapshot()).toMatchObject({
+      retainedTranscriptRows: 20,
+      scrollOffset: 15,
+      stickyTail: false,
+    });
+  });
+
+  it('reclamps a scrolled viewport when wider wrapping increases visible capacity', async () => {
+    const s = mockSink(12, 44);
+    const lane = new ComposerLane(s);
+    lane.activate({ draft: '', mode: 'idle' }, 'provider · model · ready');
+    const transcript = Array.from(
+      { length: 10 },
+      (_, index) => `row ${index + 1} ${'x'.repeat(50)}`,
+    ).join('\n') + '\n';
+    lane.writeAbove(transcript);
+    lane.scrollTranscript(10_000);
+    expect(lane.viewportSnapshot().scrollOffset).toBeGreaterThan(5);
+
+    s.setCols(80);
+    s.fireResize(12);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(lane.viewportSnapshot()).toMatchObject({
+      retainedTranscriptRows: 10,
+      scrollOffset: 5,
+      stickyTail: false,
+    });
+  });
+
   it('discards a trailing resize repaint captured before the viewport epoch changed', async () => {
     const s = mockSink(24, 80);
     const lane = new ComposerLane(s);

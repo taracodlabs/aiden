@@ -530,8 +530,9 @@ export class BottomRegion {
 
   /** Move the transcript viewport away from or toward the live tail. */
   scrollTranscript(deltaRows: number): void {
+    const maximum = this.maxTranscriptScrollOffset(this.surface());
     this.projection = reduceOperatorProjection(this.projection, {
-      type: 'viewport.scroll', delta: deltaRows,
+      type: 'viewport.scroll', delta: deltaRows, maxOffset: maximum,
     });
     if (this.active) this.paintAll(true);
   }
@@ -741,6 +742,23 @@ export class BottomRegion {
     return `${sequence}${ESC}[${cursorRow};${cursorCol}H${SAVE_TRANSCRIPT}`;
   }
 
+  private maxTranscriptScrollOffset(surface: RenderedSurface): number {
+    const bottom = Math.max(0, this.sink.rows() - surface.laneRows);
+    const source = visibleTranscriptSource(this.projection);
+    const width = Math.max(1, this.sink.cols() - 1);
+    const rows = wrapTranscriptText(source, width);
+    const capacity = Math.max(0, bottom - (source.endsWith('\n') ? 1 : 0));
+    return Math.max(0, rows.length - capacity);
+  }
+
+  private clampTranscriptScrollOffset(surface: RenderedSurface): void {
+    this.projection = reduceOperatorProjection(this.projection, {
+      type: 'viewport.scroll',
+      delta: 0,
+      maxOffset: this.maxTranscriptScrollOffset(surface),
+    });
+  }
+
   private clearOwnedRows(count: number): string {
     let sequence = '';
     for (let offset = Math.max(1, count) - 1; offset >= 0; offset -= 1) {
@@ -870,6 +888,7 @@ export class BottomRegion {
       type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
     });
     const surface = this.surface();
+    this.clampTranscriptScrollOffset(surface);
     const frame = surface.lines.join('\n');
     const geometry = this.establishGeometry(surface.laneRows);
     if (!geometry && frame === this.lastFrame && !rebuildTranscript) {
@@ -897,6 +916,7 @@ export class BottomRegion {
       type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
     });
     const surface = this.surface();
+    this.clampTranscriptScrollOffset(surface);
     this.laneRows = surface.laneRows;
     this.geometry = {
       rows: this.sink.rows(),
@@ -959,6 +979,7 @@ export class BottomRegion {
       type: 'viewport.measure', width: this.sink.cols(), height: this.sink.rows(),
     });
     const surface = this.surface();
+    this.clampTranscriptScrollOffset(surface);
     this.laneRows = surface.laneRows;
     const nextGeometry: SurfaceGeometry = {
       rows: this.sink.rows(),
