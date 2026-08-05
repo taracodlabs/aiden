@@ -20,3 +20,29 @@ export function runtimeTrace(
     // Diagnostics cannot affect runtime execution.
   }
 }
+
+/** Preserve opt-in script diagnostics without writing into an owned terminal. */
+export function writeNonInteractiveDiagnostic(
+  message: string,
+  interactive = Boolean(process.stdout.isTTY),
+): void {
+  if (interactive) return;
+  try {
+    process.stderr.write(message.endsWith('\n') ? message : `${message}\n`);
+  } catch {
+    // Diagnostics cannot affect runtime execution.
+  }
+}
+
+/** Preserve warning diagnostics for redirected and non-interactive callers. */
+export function warnNonInteractiveDiagnostic(
+  message: string,
+  interactive = Boolean(process.stdout.isTTY),
+): void {
+  if (interactive) return;
+  try {
+    console.warn(message);
+  } catch {
+    // Diagnostics cannot affect runtime execution.
+  }
+}

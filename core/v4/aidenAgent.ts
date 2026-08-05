@@ -1,4 +1,4 @@
-import { runtimeTrace } from './runtimeTrace';
+import { runtimeTrace, writeNonInteractiveDiagnostic } from './runtimeTrace';
 
 /**
  * Aiden v4 — local-first AI agent
@@ -1627,13 +1627,19 @@ export class AidenAgent {
           finishReason: output.finishReason,
           aborted: runOptions.signal?.aborted === true,
         });
+        const llmMs = Date.now() - _llmStartedAt;
         runtimeTrace('performance', 'provider.complete', {
           iteration: turnCount,
-          durationMs: Date.now() - _llmStartedAt,
+          durationMs: llmMs,
           inputTokens: output.usage?.inputTokens ?? 0,
           outputTokens: output.usage?.outputTokens ?? 0,
           toolCallCount: output.toolCalls?.length ?? 0,
         });
+        if (process.env.AIDEN_PERF_DIAG === '1') {
+          writeNonInteractiveDiagnostic(
+            `[perf:iter=${turnCount + 1} llm=${llmMs}ms tokens_in=${output.usage?.inputTokens ?? 0} tokens_out=${output.usage?.outputTokens ?? 0} toolCalls=${output.toolCalls?.length ?? 0}]`,
+          );
+        }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         // v4.6 prep — external abort takes priority over fallback. An
@@ -1982,15 +1988,22 @@ export class AidenAgent {
             }
             aggregateTiming = mergeActivityTiming(aggregateTiming, result.activityTiming);
             if (aggregateTiming) result.activityTiming = aggregateTiming;
+            const toolMs = Date.now() - _toolStartedAt;
+            const source = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
             runtimeTrace('performance', 'tool.complete', {
               iteration: turnCount,
               toolCallId: call.id,
               tool: call.name,
-              durationMs: Date.now() - _toolStartedAt,
-              source: attemptNo === 1 && _preComputed ? 'parallel' : 'live',
+              durationMs: toolMs,
+              source,
               ok: result.error == null,
               attempt: attemptNo,
             });
+            if (process.env.AIDEN_PERF_DIAG === '1') {
+              writeNonInteractiveDiagnostic(
+                `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${source} ok=${result.error == null} attempt=${attemptNo}]`,
+              );
+            }
             // v4.11 Slice 1 (verifier→honesty bridge) — compute the
             // per-tool verification ALWAYS (pure/synchronous) so the
             // post-loop honesty footer reflects real outcomes independent

@@ -1,4 +1,4 @@
-import { runtimeTrace } from '../../core/v4/runtimeTrace';
+import { runtimeTrace, warnNonInteractiveDiagnostic } from '../../core/v4/runtimeTrace';
 
 /**
  * Aiden v4 — local-first AI agent
@@ -933,6 +933,7 @@ function handleSseEvent(
     default:
       if (debug) {
         runtimeTrace('response-stream', 'event.unknown', { type });
+        warnNonInteractiveDiagnostic(`[responseStreamAdapter] unknown SSE event: ${type}`);
       }
   }
 }

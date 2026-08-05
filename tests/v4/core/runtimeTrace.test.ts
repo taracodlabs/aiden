@@ -2,7 +2,11 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { runtimeTrace } from '../../../core/v4/runtimeTrace';
+import {
+  runtimeTrace,
+  warnNonInteractiveDiagnostic,
+  writeNonInteractiveDiagnostic,
+} from '../../../core/v4/runtimeTrace';
 
 const roots: string[] = [];
 
@@ -36,6 +40,21 @@ describe('runtime trace sink', () => {
 
     expect(stdout).not.toHaveBeenCalled();
     expect(stderr).not.toHaveBeenCalled();
+  });
+
+  it('preserves redirected diagnostics without writing into interactive output', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+
+    writeNonInteractiveDiagnostic('redirected', false);
+    warnNonInteractiveDiagnostic('warning', false);
+    writeNonInteractiveDiagnostic('hidden', true);
+    warnNonInteractiveDiagnostic('hidden warning', true);
+
+    expect(stderr).toHaveBeenCalledOnce();
+    expect(stderr).toHaveBeenCalledWith('redirected\n');
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn).toHaveBeenCalledWith('warning');
   });
 
   it('covers the complete turn, tool, proof, and render phase boundary', () => {
