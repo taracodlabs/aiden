@@ -25,16 +25,9 @@ function plain(value: string): string {
 }
 
 function submit(terminal: RunningPty, text: string): void {
-  let index = 0;
-  const next = (): void => {
-    if (index < text.length) {
-      terminal.write(text[index++]!);
-      setTimeout(next, 5);
-      return;
-    }
-    setTimeout(() => terminal.write('\r'), 100);
-  };
-  next();
+  // This acceptance test owns accounting behavior, while keyboard pacing has
+  // dedicated coverage. One deferred write avoids timer-fragmented input loss.
+  setImmediate(() => terminal.write(`${text}\r`));
 }
 
 afterEach(async () => {
