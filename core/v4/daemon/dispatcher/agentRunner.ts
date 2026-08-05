@@ -114,6 +114,7 @@ export interface DaemonAgentResult {
 /** The function-shaped agent invocation seam. */
 export interface DaemonAgentRunner {
   invoke(input: DaemonAgentInput): Promise<DaemonAgentResult>;
+  dispose?(reason?: string): Promise<void>;
 }
 
 // ── Pure helpers ───────────────────────────────────────────────────────────
