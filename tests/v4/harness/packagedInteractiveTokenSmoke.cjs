@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
 
 const repoRoot = process.env.AIDEN_TEST_REPO_ROOT;
 const installRoot = process.env.AIDEN_TEST_INSTALLED_ROOT;
@@ -24,18 +25,66 @@ function plain(value) {
 
 function submit(terminal, value, onComplete) {
   let index = 0;
+  let stopped = false;
+  let immediate;
+  const timers = new Set();
+  const schedule = (callback, delay) => {
+    const timer = setTimeout(() => {
+      timers.delete(timer);
+      if (!stopped) callback();
+    }, delay);
+    timers.add(timer);
+  };
   const writeNext = () => {
     if (index < value.length) {
       terminal.write(value[index++]);
-      setTimeout(writeNext, 10);
-    } else {
-      setTimeout(() => {
-        terminal.write('\r');
-        onComplete();
-      }, 100);
+      schedule(writeNext, 10);
+      return;
     }
+    schedule(() => {
+      terminal.write('\r');
+      onComplete();
+    }, 100);
   };
-  writeNext();
+  immediate = setImmediate(() => {
+    immediate = undefined;
+    if (!stopped) writeNext();
+  });
+  return () => {
+    stopped = true;
+    if (immediate) clearImmediate(immediate);
+    for (const timer of timers) clearTimeout(timer);
+    timers.clear();
+  };
+}
+
+function terminateForFailure(terminal) {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/PID', String(terminal.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return;
+  }
+  terminal.kill();
+}
+
+async function releaseExitedPty(terminal) {
+  if (process.platform !== 'win32') return;
+  const agent = terminal._agent;
+  agent?.inSocket?.destroy();
+  agent?.outSocket?.destroy();
+  const worker = agent?._conoutSocketWorker?._worker;
+  if (worker && typeof worker.terminate === 'function') {
+    await worker.terminate();
+  }
+}
+
+function activeSmokeHandles() {
+  const standardHandles = new Set([process.stdin, process.stdout, process.stderr]);
+  return process._getActiveHandles()
+    .filter((handle) => !standardHandles.has(handle))
+    .map((handle) => handle?.constructor?.name ?? typeof handle);
 }
 
 function runFirstSession() {
@@ -50,19 +99,35 @@ function runFirstSession() {
     let state = 'boot';
     let historyTurns = 0;
     let historyReadyTarget = 0;
+    let compressionReadyTarget = 0;
     let submitting = false;
+    let settled = false;
+    let dataSubscription;
+    let exitSubscription;
+    let cancelSubmission;
     const send = (value, afterSent) => {
       submitting = true;
-      submit(terminal, value, () => {
+      cancelSubmission = submit(terminal, value, () => {
+        cancelSubmission = undefined;
         submitting = false;
         afterSent?.();
       });
     };
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      cancelSubmission?.();
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      if (error) reject(error);
+      else resolve(value);
+    };
     const timeout = setTimeout(() => {
-      terminal.kill();
-      reject(new Error(`First packaged interactive session timed out (${state}):\n${plain(output).slice(-12_000)}`));
+      terminateForFailure(terminal);
+      finish(new Error(`First packaged interactive session timed out (${state}):\n${plain(output).slice(-12_000)}`));
     }, 90_000);
-    terminal.onData((chunk) => {
+    dataSubscription = terminal.onData((chunk) => {
       output += chunk;
       if (submitting) return;
       const text = plain(output);
@@ -101,18 +166,29 @@ function runFirstSession() {
         if (!text.includes('Providers and models') || !text.includes('Purposes')) {
           throw new Error('Detailed usage output omitted required sections.');
         }
-        state = 'compress'; send('/compress');
-      } else if (state === 'compress' && /Compressed \d+ .* \d+ messages/.test(text)) {
+        state = 'compress';
+        send('/compress', () => {
+          compressionReadyTarget = output.split(readyToken).length;
+        });
+      } else if (state === 'compress'
+          && /Compressed \d+ .* \d+ messages/.test(text)
+          && readyCount >= compressionReadyTarget) {
         state = 'quit'; send('/quit');
       }
     });
-    terminal.onExit(({ exitCode }) => {
-      clearTimeout(timeout);
+    exitSubscription = terminal.onExit(({ exitCode }) => {
       if (state !== 'quit' || exitCode !== 0) {
-        reject(new Error(`First packaged interactive session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
+        finish(new Error(`First packaged interactive session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
         return;
       }
-      resolve(output);
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      dataSubscription = undefined;
+      exitSubscription = undefined;
+      void releaseExitedPty(terminal).then(
+        () => finish(null, output),
+        (error) => finish(error),
+      );
     });
   });
 }
@@ -128,15 +204,32 @@ function runRestartSession() {
     let output = '';
     let state = 'boot';
     let submitting = false;
+    let settled = false;
+    let dataSubscription;
+    let exitSubscription;
+    let cancelSubmission;
     const send = (value) => {
       submitting = true;
-      submit(terminal, value, () => { submitting = false; });
+      cancelSubmission = submit(terminal, value, () => {
+        cancelSubmission = undefined;
+        submitting = false;
+      });
+    };
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      cancelSubmission?.();
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      if (error) reject(error);
+      else resolve(value);
     };
     const timeout = setTimeout(() => {
-      terminal.kill();
-      reject(new Error(`Restarted packaged session timed out (${state}):\n${plain(output).slice(-12_000)}\nRequest trace:\n${requestTrace()}`));
+      terminateForFailure(terminal);
+      finish(new Error(`Restarted packaged session timed out (${state}):\n${plain(output).slice(-12_000)}\nRequest trace:\n${requestTrace()}`));
     }, 60_000);
-    terminal.onData((chunk) => {
+    dataSubscription = terminal.onData((chunk) => {
       output += chunk;
       if (submitting) return;
       const text = plain(output);
@@ -149,13 +242,19 @@ function runRestartSession() {
         state = 'quit'; send('/quit');
       }
     });
-    terminal.onExit(({ exitCode }) => {
-      clearTimeout(timeout);
+    exitSubscription = terminal.onExit(({ exitCode }) => {
       if (state !== 'quit' || exitCode !== 0) {
-        reject(new Error(`Restarted packaged session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
+        finish(new Error(`Restarted packaged session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
         return;
       }
-      resolve(output);
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      dataSubscription = undefined;
+      exitSubscription = undefined;
+      void releaseExitedPty(terminal).then(
+        () => finish(null, output),
+        (error) => finish(error),
+      );
     });
   });
 }
@@ -174,6 +273,11 @@ function runRestartSession() {
     if (!combined.includes(expected)) throw new Error(`Missing packaged interactive evidence: ${expected}`);
   }
   if (combined.includes('controlled-package-value')) throw new Error('Credential sentinel leaked into interactive output.');
+  await new Promise((resolve) => setImmediate(resolve));
+  const activeHandles = activeSmokeHandles();
+  if (activeHandles.length > 0) {
+    throw new Error(`Packaged interactive smoke leaked active handles: ${activeHandles.join(', ')}`);
+  }
   process.stdout.write(JSON.stringify({
     economy: 'PASS',
     budgetWarning: 'PASS',
@@ -183,8 +287,7 @@ function runRestartSession() {
     compression: 'PASS',
     restartResume: 'PASS',
   }) + '\n');
-  process.exit(0);
 })().catch((error) => {
   process.stderr.write(`${error.stack ?? error}\n`);
-  process.exit(1);
+  process.exitCode = 1;
 });
