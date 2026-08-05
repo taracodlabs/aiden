@@ -221,6 +221,11 @@ Expected output:
 4.19.0
 ```
 
+Both public commands, `aiden` and `aiden-runtime`, start the same standalone
+local runtime. The separate desktop/API client is an internal build artifact
+for connecting to an already-running service and is not included as an npm
+command.
+
 Verify the stable release without a permanent installation:
 
 ```bash
