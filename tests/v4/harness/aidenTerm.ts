@@ -36,6 +36,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
+import { killPtyIfRunning } from './ptyProcessLifecycle';
 
 export interface SpawnAidenTermOptions {
   /** Columns. Default 120 — wide enough for full-density status footer. */
@@ -264,7 +265,7 @@ export async function spawnAidenTerm(
       return await waitForExit(waitOpts);
     },
     kill: () => {
-      try { child.kill(); } catch { /* best-effort */ }
+      try { killPtyIfRunning(child); } catch { /* best-effort */ }
     },
     isAlive: () => exitCode === null,
     pid:     () => child.pid,

@@ -8,7 +8,11 @@ import Database from 'better-sqlite3';
 
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine, type JobEngine } from '../../../core/v4/daemon/jobEngine';
-import { executeDurableJob } from '../../../core/v4/daemon/jobLifecycle';
+import {
+  createDurableJobLifecycleScope,
+  DurableJobLifecycleDisposedError,
+  executeDurableJob,
+} from '../../../core/v4/daemon/jobLifecycle';
 import { currentJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
 import { createJobControlAuthority } from '../../../core/v4/daemon/jobControlAuthority';
 
@@ -408,6 +412,103 @@ describe('executeDurableJob', () => {
     expect(sawAbort).toBe(true);
     expect(engine.getJob(active.jobId)?.status).toBe('cancelled');
     expect(controlAuthority.runtime.isAttached(active.attemptId)).toBe(false);
+  });
+
+  it('disposes and drains a running lifecycle before durable storage closes', async () => {
+    const scope = createDurableJobLifecycleScope();
+    let enteredExecution = false;
+    let readsAfterDisposal = 0;
+    const scopedEngine: JobEngine = {
+      ...engine,
+      getJob(jobId) {
+        if (scope.disposed) readsAfterDisposal += 1;
+        return engine.getJob(jobId);
+      },
+    };
+
+    const running = executeDurableJob({
+      engine: scopedEngine,
+      lifecycleScope: scope,
+      ownerId: 'instance_lifecycle',
+      controlPollMs: 25,
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_dispose',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_dispose', requestFingerprint: 'fingerprint_dispose', goal: 'dispose work',
+      },
+      execute: async (handle) => {
+        enteredExecution = true;
+        await new Promise<void>((_resolve, reject) => {
+          handle.signal.addEventListener('abort', () => reject(handle.signal.reason), { once: true });
+        });
+        return 'unreachable';
+      },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {},
+      }),
+    });
+
+    while (!enteredExecution) await new Promise((resolve) => setTimeout(resolve, 0));
+    await scope.dispose('test shutdown');
+    await expect(running).rejects.toBeInstanceOf(DurableJobLifecycleDisposedError);
+
+    expect(scope.activeCount).toBe(0);
+    expect(readsAfterDisposal).toBe(0);
+    expect(engine.listJobs({ sessionId: 'session_dispose' })[0]?.status).toBe('cancelled');
+
+    db.close();
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(readsAfterDisposal).toBe(0);
+    db = new Database(':memory:');
+  });
+
+  it('makes lifecycle disposal idempotent and fences late admission', async () => {
+    const scope = createDurableJobLifecycleScope();
+
+    await scope.dispose('first shutdown');
+    await scope.dispose('second shutdown');
+
+    expect(scope.activeCount).toBe(0);
+    await expect(executeDurableJob({
+      engine,
+      lifecycleScope: scope,
+      ownerId: 'instance_lifecycle',
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_late',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_late', requestFingerprint: 'fingerprint_late', goal: 'late work',
+      },
+      execute: async () => 'unreachable',
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {},
+      }),
+    })).rejects.toBeInstanceOf(DurableJobLifecycleDisposedError);
+    expect(engine.listJobs({ sessionId: 'session_late' })).toEqual([]);
+  });
+
+  it('releases lifecycle ownership after an execution error', async () => {
+    const scope = createDurableJobLifecycleScope();
+
+    await expect(executeDurableJob({
+      engine,
+      lifecycleScope: scope,
+      ownerId: 'instance_lifecycle',
+      controlPollMs: 25,
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_error_cleanup',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_error_cleanup', requestFingerprint: 'fingerprint_error_cleanup', goal: 'fail safely',
+      },
+      execute: async () => { throw new Error('expected execution failure'); },
+      finalize: () => ({
+        status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {},
+      }),
+    })).rejects.toThrow('expected execution failure');
+
+    expect(scope.activeCount).toBe(0);
+    await scope.dispose('post-error shutdown');
+    expect(scope.activeCount).toBe(0);
+    expect(engine.listJobs({ sessionId: 'session_error_cleanup' })[0]?.status).toBe('failed');
   });
 
   it('emits one ordered phase trace and finalizes once', async () => {

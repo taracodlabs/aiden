@@ -10,11 +10,12 @@ import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
-import { createDispatcher } from '../../../core/v4/daemon/dispatcher/dispatcher';
+import { createDispatcher, type Dispatcher } from '../../../core/v4/daemon/dispatcher/dispatcher';
 import { createRealAgentRunner, type AgentBuilder } from '../../../core/v4/daemon/dispatcher/realAgentRunner';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
 import { createTriggerBus } from '../../../core/v4/daemon/triggerBus';
+import { createDurableJobLifecycleScope } from '../../../core/v4/daemon/jobLifecycle';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import { ProviderAttemptLedger } from '../../../core/v4/usageLedger';
 import {
@@ -32,7 +33,13 @@ describe('read-only repository Worker durable dispatcher path', () => {
   const cleanup: string[] = [];
   const databases: Database.Database[] = [];
   let ledger: ProviderAttemptLedger | null = null;
+  let lifecycleScope: ReturnType<typeof createDurableJobLifecycleScope> | null = null;
+  let dispatcher: Dispatcher | null = null;
   afterEach(async () => {
+    await dispatcher?.stop(5_000);
+    dispatcher = null;
+    await lifecycleScope?.dispose('test teardown');
+    lifecycleScope = null;
     setProviderAttemptLedger(null);
     ledger?.close();
     ledger = null;
@@ -43,6 +50,7 @@ describe('read-only repository Worker durable dispatcher path', () => {
   });
 
   it('delivers the child through TriggerBus and the canonical daemon lifecycle exactly once', async () => {
+    lifecycleScope = createDurableJobLifecycleScope();
     const root = await mkdtemp(path.join(os.tmpdir(), 'aiden-worker-e2e-'));
     const home = await mkdtemp(path.join(os.tmpdir(), 'aiden-worker-e2e-home-'));
     cleanup.push(root, home);
@@ -154,15 +162,16 @@ describe('read-only repository Worker durable dispatcher path', () => {
         endpointReference: binding.endpointReference,
       };
     };
-    const runner = createRealAgentRunner({
+    const realRunner = createRealAgentRunner({
       db, runStore, jobEngine: engine, agentBuilder: builder,
+      lifecycleScope,
       persistedDefault: { provider: 'different-provider', model: 'different-model' },
       dailyBudget: null,
     });
-    const dispatcher = createDispatcher({
+    dispatcher = createDispatcher({
       triggerBus: bus, runStore, db, jobEngine: engine,
       ownerId: 'worker-instance', instanceId: 'worker-instance', workerCount: 1,
-      runnerFactory: () => runner, initialRunnerKind: 'real',
+      runnerFactory: () => realRunner, initialRunnerKind: 'real',
     });
 
     expect(await dispatcher._pumpOnce()).toBe(admission.triggerEvent.id);
@@ -190,6 +199,20 @@ describe('read-only repository Worker durable dispatcher path', () => {
     const parentEvidenceId = verification.evidence[0].evidenceId;
     expect(childEvidenceId).not.toBe(parentEvidenceId);
     expect(await readFile(path.join(root, 'source.ts'), 'utf8')).toBe(sourceBytes);
+
+    const jobsBeforeLateDelivery = engine.listJobs({ limit: 1_000 }).length;
+    await dispatcher.stop(5_000);
+    const late = bus.insert({
+      source: 'manual',
+      sourceKey: 'late-delivery',
+      idempotencyKey: 'late-delivery',
+      payload: { request: 'must remain fenced' },
+    });
+    expect(await dispatcher._pumpOnce()).toBeNull();
+    expect(bus.get(late.id)).toMatchObject({ status: 'pending', attempts: 0 });
+    expect(engine.listJobs({ limit: 1_000 })).toHaveLength(jobsBeforeLateDelivery);
+    expect(calls).toBe(2);
+
     db.close();
 
     const reopenedDb = new Database(dbPath);
@@ -217,5 +240,5 @@ describe('read-only repository Worker durable dispatcher path', () => {
     expect(reopened.proof.getVerdict(parent.jobId)).toBeNull();
     expect(await readFile(path.join(root, 'source.ts'), 'utf8')).toBe(sourceBytes);
     reopenedDb.close();
-  }, 30_000);
+  }, 45_000);
 });

@@ -11,13 +11,12 @@
  * provider/model. Empty args opens the interactive picker (also reused by
  * `aiden model`). Spec form is parsed via Phase 5's ModelSwitcher.
  */
-import path from 'node:path';
-import fs from 'node:fs';
-
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import { ModelSwitcher } from '../../../providers/v4/modelSwitch';
 import { runModelPicker } from './modelPicker';
 import { PROVIDER_REGISTRY } from '../../../providers/v4/registry';
+import { loadTokens, isExpired } from '../../../core/v4/auth/tokenStore';
+import type { ProviderAccessState } from './modelPicker';
 
 /**
  * Sync auth-state probe used by the Phase 22 picker. Single source of
@@ -28,24 +27,33 @@ import { PROVIDER_REGISTRY } from '../../../providers/v4/registry';
  *     exist. Token validity is the runtime resolver's concern.
  *   - env-var providers — process.env[apiKeyEnvVar] must be non-empty.
  */
-function makeAuthProbe(rootPath: string | undefined): (id: string) => boolean {
-  return (providerId: string): boolean => {
+export function makeProviderAccessProbe(ctx: SlashCommandContext): (id: string) => Promise<ProviderAccessState> {
+  return async (providerId: string): Promise<ProviderAccessState> => {
     const entry = PROVIDER_REGISTRY[providerId];
-    if (!entry) return false;
-    if (entry.tier === 'local') return true;
-    if (entry.oauth && rootPath) {
-      try {
-        fs.accessSync(path.join(rootPath, 'auth', `${entry.oauth.providerId}.json`));
-        return true;
-      } catch {
-        return false;
+    if (!entry) return 'not_configured';
+    const readiness = ctx.config?.getValue<{ state?: string }>(`providers.${providerId}.readiness`);
+    const readinessState = (): ProviderAccessState | null => {
+      if (readiness?.state === 'complete') return 'readiness_verified';
+      if (readiness?.state === 'failed_retryable' || readiness?.state === 'failed_requires_user_action') {
+        return 'readiness_failed';
       }
+      return null;
+    };
+    if (entry.tier === 'local') return readinessState() ?? (readiness ? 'authentication_valid' : 'not_configured');
+    if (entry.oauth) {
+      if (!ctx.paths) return 'authentication_missing';
+      const tokens = await loadTokens(ctx.paths, entry.oauth.providerId);
+      if (!tokens) return 'authentication_missing';
+      if (isExpired(tokens)) return 'authentication_expired';
+      return readinessState() ?? 'authentication_valid';
     }
     if (entry.apiKeyEnvVar) {
       const v = process.env[entry.apiKeyEnvVar];
-      return typeof v === 'string' && v.length > 0;
+      if (typeof v === 'string' && v.trim().length > 0) return readinessState() ?? 'authentication_valid';
+      const configured = ctx.config?.get(`providers.${providerId}.apiKey`);
+      return configured?.trim() ? readinessState() ?? 'authentication_valid' : 'authentication_missing';
     }
-    return false;
+    return 'not_configured';
   };
 }
 
@@ -81,12 +89,12 @@ export const model: SlashCommand = {
         return {};
       }
     } else {
-      const picked = await runModelPicker({
+      const picked = await ctx.display.withModalLease('model-picker', () => runModelPicker({
         resolver: ctx.resolver,
         currentProviderId: ctx.session?.getCurrentProvider(),
         currentModelId: ctx.session?.getCurrentModel(),
-        isProviderAuthed: makeAuthProbe(ctx.paths?.root),
-      });
+        isProviderAuthed: makeProviderAccessProbe(ctx),
+      }));
       if (!picked) {
         ctx.display.dim('Model unchanged.');
         return {};

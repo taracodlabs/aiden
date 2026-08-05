@@ -61,7 +61,7 @@ export type OperatorProjectionEvent =
       'succeeded' | 'failed' | 'denied' | 'interrupted' | 'cancelled' | 'timed_out' | 'unknown' | 'stale'>;
       summary: string; endedAt: number }
   | { type: 'activity.remove'; id: string }
-  | { type: 'viewport.scroll'; delta: number }
+  | { type: 'viewport.scroll'; delta: number; maxOffset?: number }
   | { type: 'viewport.follow' }
   | { type: 'viewport.measure'; width: number; height: number };
 
@@ -175,7 +175,13 @@ export function reduceOperatorProjection(
       return { ...state, eventSequence: nextSequence, activities };
     }
     case 'viewport.scroll': {
-      const scrollOffset = Math.max(0, state.viewport.scrollOffset + event.delta);
+      const maximum = event.maxOffset === undefined
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, Math.floor(event.maxOffset));
+      const scrollOffset = Math.min(
+        maximum,
+        Math.max(0, state.viewport.scrollOffset + event.delta),
+      );
       return {
         ...state,
         viewport: {

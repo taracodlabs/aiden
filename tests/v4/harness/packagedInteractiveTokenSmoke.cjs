@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
 
 const repoRoot = process.env.AIDEN_TEST_REPO_ROOT;
 const installRoot = process.env.AIDEN_TEST_INSTALLED_ROOT;
@@ -23,19 +24,53 @@ function plain(value) {
 }
 
 function submit(terminal, value, onComplete) {
-  let index = 0;
-  const writeNext = () => {
-    if (index < value.length) {
-      terminal.write(value[index++]);
-      setTimeout(writeNext, 10);
-    } else {
-      setTimeout(() => {
-        terminal.write('\r');
-        onComplete();
-      }, 100);
-    }
+  let stopped = false;
+  let enterTimer;
+  let immediate = setImmediate(() => {
+    immediate = undefined;
+    if (stopped) return;
+    terminal.write(value);
+    enterTimer = setTimeout(() => {
+      enterTimer = undefined;
+      if (stopped) return;
+      terminal.write('\r');
+      onComplete();
+    }, 100);
+  });
+  return () => {
+    stopped = true;
+    if (immediate) clearImmediate(immediate);
+    if (enterTimer) clearTimeout(enterTimer);
   };
-  writeNext();
+}
+
+function terminateForFailure(terminal) {
+  if (process.platform === 'win32') {
+    spawnSync('taskkill.exe', ['/PID', String(terminal.pid), '/T', '/F'], {
+      stdio: 'ignore',
+      windowsHide: true,
+    });
+    return;
+  }
+  terminal.kill();
+}
+
+async function releaseExitedPty(terminal) {
+  if (process.platform !== 'win32') return;
+  const agent = terminal._agent;
+  agent?.inSocket?.destroy();
+  agent?.outSocket?.destroy();
+  const worker = agent?._conoutSocketWorker?._worker;
+  if (worker && typeof worker.terminate === 'function') {
+    await worker.terminate();
+  }
+}
+
+function activeSmokeHandles() {
+  const standardHandles = new Set([process.stdin, process.stdout, process.stderr]);
+  return process._getActiveHandles()
+    .filter((handle) => !standardHandles.has(handle))
+    .map((handle) => handle?.constructor?.name ?? typeof handle);
 }
 
 function runFirstSession() {
@@ -49,70 +84,89 @@ function runFirstSession() {
     let output = '';
     let state = 'boot';
     let historyTurns = 0;
-    let historyReadyTarget = 0;
+    let commandReadyTarget = 0;
     let submitting = false;
-    const send = (value, afterSent) => {
+    let settled = false;
+    let dataSubscription;
+    let exitSubscription;
+    let cancelSubmission;
+    const send = (value) => {
+      commandReadyTarget = output.split(readyToken).length;
       submitting = true;
-      submit(terminal, value, () => {
+      cancelSubmission = submit(terminal, value, () => {
+        cancelSubmission = undefined;
         submitting = false;
-        afterSent?.();
       });
     };
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      cancelSubmission?.();
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      if (error) reject(error);
+      else resolve(value);
+    };
     const timeout = setTimeout(() => {
-      terminal.kill();
-      reject(new Error(`First packaged interactive session timed out (${state}):\n${plain(output).slice(-12_000)}`));
+      terminateForFailure(terminal);
+      finish(new Error(`First packaged interactive session timed out (${state}):\n${plain(output).slice(-12_000)}`));
     }, 90_000);
-    terminal.onData((chunk) => {
+    dataSubscription = terminal.onData((chunk) => {
       output += chunk;
       if (submitting) return;
       const text = plain(output);
       const readyCount = output.split(readyToken).length - 1;
       if (state === 'boot' && readyCount >= 1) {
         state = 'mode'; send('/mode economy');
-      } else if (state === 'mode' && text.includes('Usage mode: economy')) {
+      } else if (state === 'mode' && text.includes('Usage mode: economy') && readyCount >= commandReadyTarget) {
         state = 'budget-set'; send('/budget 120');
-      } else if (state === 'budget-set' && text.includes('Session token cap set')) {
+      } else if (state === 'budget-set' && text.includes('Session token cap set') && readyCount >= commandReadyTarget) {
         state = 'first-turn'; send('package history turn 1');
-      } else if (state === 'first-turn' && text.includes('PACKAGED SIMPLE PASS') && readyCount >= 4) {
+      } else if (state === 'first-turn' && text.includes('PACKAGED SIMPLE PASS') && readyCount >= commandReadyTarget) {
         state = 'budget-warning'; send('/budget');
-      } else if (state === 'budget-warning' && text.includes('Budget warning.')) {
+      } else if (state === 'budget-warning' && text.includes('Budget warning.') && readyCount >= commandReadyTarget) {
         state = 'budget-expand'; send('/budget 100000');
-      } else if (state === 'budget-expand' && text.includes('Session token cap set to 100,000')) {
+      } else if (state === 'budget-expand' && text.includes('Session token cap set to 100,000') && readyCount >= commandReadyTarget) {
         historyTurns = 1;
         state = 'history';
-        send(`use a tool for package history ${historyTurns}`, () => {
-          historyReadyTarget = output.split(readyToken).length;
-        });
-      } else if (state === 'history' && readyCount >= historyReadyTarget) {
+        send(`use a tool for package history ${historyTurns}`);
+      } else if (state === 'history' && readyCount >= commandReadyTarget) {
         if (historyTurns < 4) {
           historyTurns += 1;
-          send(`use a tool for package history ${historyTurns}`, () => {
-            historyReadyTarget = output.split(readyToken).length;
-          });
+          send(`use a tool for package history ${historyTurns}`);
         } else {
           state = 'usage-json'; send('/usage --json');
         }
-      } else if (state === 'usage-json' && text.includes('"physicalAttempts":9')) {
+      } else if (state === 'usage-json' && text.includes('"physicalAttempts":9') && readyCount >= commandReadyTarget) {
         state = 'usage-human'; send('/usage');
-      } else if (state === 'usage-human' && text.includes('Usage — Current session')) {
+      } else if (state === 'usage-human' && text.includes('Usage — Current session') && readyCount >= commandReadyTarget) {
         if (!text.includes('cumulative exposures')) throw new Error('Human usage summary omitted schema exposure context.');
         state = 'usage-details'; send('/usage details');
-      } else if (state === 'usage-details' && text.includes('Usage details — Current session')) {
+      } else if (state === 'usage-details' && text.includes('Usage details — Current session') && readyCount >= commandReadyTarget) {
         if (!text.includes('Providers and models') || !text.includes('Purposes')) {
           throw new Error('Detailed usage output omitted required sections.');
         }
         state = 'compress'; send('/compress');
-      } else if (state === 'compress' && /Compressed \d+ .* \d+ messages/.test(text)) {
+      } else if (state === 'compress'
+          && /Compressed \d+ .* \d+ messages/.test(text)
+          && readyCount >= commandReadyTarget) {
         state = 'quit'; send('/quit');
       }
     });
-    terminal.onExit(({ exitCode }) => {
-      clearTimeout(timeout);
+    exitSubscription = terminal.onExit(({ exitCode }) => {
       if (state !== 'quit' || exitCode !== 0) {
-        reject(new Error(`First packaged interactive session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
+        finish(new Error(`First packaged interactive session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
         return;
       }
-      resolve(output);
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      dataSubscription = undefined;
+      exitSubscription = undefined;
+      void releaseExitedPty(terminal).then(
+        () => finish(null, output),
+        (error) => finish(error),
+      );
     });
   });
 }
@@ -127,35 +181,62 @@ function runRestartSession() {
     });
     let output = '';
     let state = 'boot';
+    let commandReadyTarget = 0;
     let submitting = false;
+    let settled = false;
+    let dataSubscription;
+    let exitSubscription;
+    let cancelSubmission;
     const send = (value) => {
+      commandReadyTarget = output.split(readyToken).length;
       submitting = true;
-      submit(terminal, value, () => { submitting = false; });
+      cancelSubmission = submit(terminal, value, () => {
+        cancelSubmission = undefined;
+        submitting = false;
+      });
+    };
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      cancelSubmission?.();
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      if (error) reject(error);
+      else resolve(value);
     };
     const timeout = setTimeout(() => {
-      terminal.kill();
-      reject(new Error(`Restarted packaged session timed out (${state}):\n${plain(output).slice(-12_000)}\nRequest trace:\n${requestTrace()}`));
+      terminateForFailure(terminal);
+      finish(new Error(`Restarted packaged session timed out (${state}):\n${plain(output).slice(-12_000)}\nRequest trace:\n${requestTrace()}`));
     }, 60_000);
-    terminal.onData((chunk) => {
+    dataSubscription = terminal.onData((chunk) => {
       output += chunk;
       if (submitting) return;
       const text = plain(output);
       const readyCount = output.split(readyToken).length - 1;
       if (state === 'boot' && readyCount >= 1) {
         state = 'usage'; send('/usage --json');
-      } else if (state === 'usage' && text.includes('"compression":{"physicalAttempts":1')) {
+      } else if (state === 'usage'
+          && text.includes('"compression":{"physicalAttempts":1')
+          && readyCount >= commandReadyTarget) {
         state = 'turn'; send('RESTART');
-      } else if (state === 'turn' && text.includes('PACKAGED RESTART PASS') && readyCount >= 3) {
+      } else if (state === 'turn' && text.includes('PACKAGED RESTART PASS') && readyCount >= commandReadyTarget) {
         state = 'quit'; send('/quit');
       }
     });
-    terminal.onExit(({ exitCode }) => {
-      clearTimeout(timeout);
+    exitSubscription = terminal.onExit(({ exitCode }) => {
       if (state !== 'quit' || exitCode !== 0) {
-        reject(new Error(`Restarted packaged session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
+        finish(new Error(`Restarted packaged session exited ${exitCode} (${state}):\n${plain(output).slice(-12_000)}`));
         return;
       }
-      resolve(output);
+      dataSubscription?.dispose();
+      exitSubscription?.dispose();
+      dataSubscription = undefined;
+      exitSubscription = undefined;
+      void releaseExitedPty(terminal).then(
+        () => finish(null, output),
+        (error) => finish(error),
+      );
     });
   });
 }
@@ -174,6 +255,11 @@ function runRestartSession() {
     if (!combined.includes(expected)) throw new Error(`Missing packaged interactive evidence: ${expected}`);
   }
   if (combined.includes('controlled-package-value')) throw new Error('Credential sentinel leaked into interactive output.');
+  await new Promise((resolve) => setImmediate(resolve));
+  const activeHandles = activeSmokeHandles();
+  if (activeHandles.length > 0) {
+    throw new Error(`Packaged interactive smoke leaked active handles: ${activeHandles.join(', ')}`);
+  }
   process.stdout.write(JSON.stringify({
     economy: 'PASS',
     budgetWarning: 'PASS',
@@ -183,8 +269,7 @@ function runRestartSession() {
     compression: 'PASS',
     restartResume: 'PASS',
   }) + '\n');
-  process.exit(0);
 })().catch((error) => {
   process.stderr.write(`${error.stack ?? error}\n`);
-  process.exit(1);
+  process.exitCode = 1;
 });

@@ -43,6 +43,7 @@ afterEach(() => { try { db.close(); } catch { /* noop */ } });
 // Helper: build a dispatcher that records every invocation in `calls`.
 function build(opts: {
   invoke: (input: DaemonAgentInput) => Promise<DaemonAgentResult>;
+  dispose?: (reason?: string) => Promise<void>;
   maxAttempts?: number;
 }): { dispatcher: Dispatcher; calls: DaemonAgentInput[] } {
   const calls: DaemonAgentInput[] = [];
@@ -56,9 +57,12 @@ function build(opts: {
     leaseMs:    60_000,
     renewMs:    30_000,
     maxAttempts: opts.maxAttempts ?? 3,
-    runnerFactory: () => makeRunner(async (input) => {
-      calls.push(input);
-      return opts.invoke(input);
+    runnerFactory: () => ({
+      ...makeRunner(async (input) => {
+        calls.push(input);
+        return opts.invoke(input);
+      }),
+      ...(opts.dispose ? { dispose: opts.dispose } : {}),
     }),
   });
   return { dispatcher, calls };
@@ -194,5 +198,34 @@ describe('dispatcher — workerCount=1 boundedness', () => {
     await dispatcher.stop(2_000);
     // Dispatcher exited cleanly.
     expect(dispatcher.inflight().length).toBe(0);
+  });
+
+  it('stop() awaits runner lifecycle disposal before resolving', async () => {
+    let resolveDisposal!: () => void;
+    const disposal = new Promise<void>((resolve) => { resolveDisposal = resolve; });
+    const { dispatcher } = build({
+      invoke: async () => ({ runId: 0, finishReason: 'stop' }),
+      dispose: async () => disposal,
+    });
+    dispatcher.start();
+
+    let stopped = false;
+    const stopping = dispatcher.stop(2_000).then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stopped).toBe(false);
+
+    resolveDisposal();
+    await stopping;
+    expect(stopped).toBe(true);
+  });
+
+  it('stop() rejects instead of permitting storage teardown when lifecycle disposal misses its deadline', async () => {
+    const { dispatcher } = build({
+      invoke: async () => ({ runId: 0, finishReason: 'stop' }),
+      dispose: async () => new Promise<void>(() => { /* intentionally unresolved */ }),
+    });
+    dispatcher.start();
+
+    await expect(dispatcher.stop(10)).rejects.toThrow(/shutdown timed out/i);
   });
 });

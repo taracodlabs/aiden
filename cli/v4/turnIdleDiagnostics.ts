@@ -27,10 +27,6 @@ export function turnIdleDiagnostic(event: string, data: Record<string, unknown> 
       ...data,
     })}\n`;
     const diagnosticFile = process.env.AIDEN_TEST_TURN_IDLE_DIAG_FILE;
-    if (diagnosticFile) {
-      appendFileSync(diagnosticFile, line, 'utf8');
-    } else {
-      process.stderr.write(line);
-    }
+    if (diagnosticFile) appendFileSync(diagnosticFile, line, 'utf8');
   } catch { /* test diagnostics must not affect the terminal lifecycle */ }
 }

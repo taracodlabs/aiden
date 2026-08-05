@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as pty from 'node-pty';
+import { killPtyIfRunning } from '../harness/ptyProcessLifecycle';
 
 import { ProviderAttemptLedger } from '../../../core/v4/usageLedger';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
@@ -24,21 +25,14 @@ function plain(value: string): string {
 }
 
 function submit(terminal: RunningPty, text: string): void {
-  let index = 0;
-  const next = (): void => {
-    if (index < text.length) {
-      terminal.write(text[index++]!);
-      setTimeout(next, 5);
-      return;
-    }
-    setTimeout(() => terminal.write('\r'), 100);
-  };
-  next();
+  // This acceptance test owns accounting behavior, while keyboard pacing has
+  // dedicated coverage. One deferred write avoids timer-fragmented input loss.
+  setImmediate(() => terminal.write(`${text}\r`));
 }
 
 afterEach(async () => {
   if (child) {
-    try { child.kill(); } catch { /* already exited */ }
+    try { killPtyIfRunning(child); } catch { /* already exited */ }
     child = null;
   }
   if (provider) {

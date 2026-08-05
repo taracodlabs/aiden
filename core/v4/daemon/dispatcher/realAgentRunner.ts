@@ -81,7 +81,12 @@ import { emitArtifactVerified, emitCostUpdated, type PillarEventSink } from '../
 import type { TaskStore } from '../taskStore';
 import type { JobEngine } from '../jobEngine';
 import { createJobControlAuthority, type JobControlAuthority } from '../jobControlAuthority';
-import { executeDurableJob, type DurableJobHandle } from '../jobLifecycle';
+import {
+  createDurableJobLifecycleScope,
+  executeDurableJob,
+  type DurableJobHandle,
+  type DurableJobLifecycleScope,
+} from '../jobLifecycle';
 import {
   resolveDaemonModel,
 } from './resolveModel';
@@ -170,6 +175,8 @@ export interface CreateRealAgentRunnerOptions {
   jobControlAuthority?: JobControlAuthority;
   /** Canonical Attempt cancellation signal supplied to the execution adapter. */
   executionSignal?: AbortSignal;
+  /** Optional owner that drains canonical lifecycle work before durable stores close. */
+  lifecycleScope?: DurableJobLifecycleScope;
 }
 
 // ── Implementation ─────────────────────────────────────────────────────────
@@ -196,9 +203,11 @@ export function createRealAgentRunner(
     : null);
 
   if (opts.jobEngine && jobControls) {
-    const durableOptions = { ...opts, jobEngine: opts.jobEngine };
+    const lifecycleScope = opts.lifecycleScope ?? createDurableJobLifecycleScope();
+    const durableOptions = { ...opts, jobEngine: opts.jobEngine, lifecycleScope };
     return {
       invoke: (input) => invokeDurableDaemon(input, durableOptions, jobControls),
+      dispose: (reason) => lifecycleScope.dispose(reason),
     };
   }
 
@@ -686,6 +695,7 @@ async function invokeDurableDaemon(
   try {
     const execution = await executeDurableJob({
       engine: opts.jobEngine,
+      lifecycleScope: opts.lifecycleScope,
       ownerId: input.instanceId,
       leaseTtlMs: 60_000,
       admission,

@@ -8,6 +8,7 @@ import {
   projectCommandPresentation,
   projectEvidenceLines,
   projectSkillInvocation,
+  filterPowerShellProgressClixml,
   relativizeActivityText,
   shouldDeferActivityTransition,
   type SemanticActivityPhase,
@@ -139,6 +140,23 @@ describe('compact command and evidence projection', () => {
     expect(projected.lines).toContain('! Git line-ending notice available');
     expect(projected.lines.join('\n')).not.toContain('failed');
     expect(projected.details).toContain('LF will be replaced');
+  });
+
+  it('removes only PowerShell progress records and preserves genuine errors', () => {
+    const progress = '<Obj S="progress"><MS><PR N="Record"><AV>Working</AV></PR></MS></Obj>';
+    const error = '<Obj S="Error"><MS><S N="Message">Access denied</S></MS></Obj>';
+    expect(filterPowerShellProgressClixml(`#< CLIXML\n<Objs>${progress}</Objs>`)).toEqual({
+      stderr: '', removedProgress: true,
+    });
+    expect(filterPowerShellProgressClixml(`#< CLIXML\n<Objs>${progress}${error}</Objs>`)).toEqual({
+      stderr: `#< CLIXML\n<Objs>${error}</Objs>`, removedProgress: true,
+    });
+    expect(filterPowerShellProgressClixml('#< CLIXML\nnot xml')).toEqual({
+      stderr: '#< CLIXML\nnot xml', removedProgress: false,
+    });
+    expect(filterPowerShellProgressClixml('native stderr')).toEqual({
+      stderr: 'native stderr', removedProgress: false,
+    });
   });
 
   it('uses repository-relative text in summary mode and exact paths in full mode', () => {

@@ -1,6 +1,8 @@
 import path from 'node:path';
 
 import type { ColorKind } from './skinEngine';
+import { filterPowerShellProgressClixml } from '../../core/v4/powerShellClixml';
+export { filterPowerShellProgressClixml } from '../../core/v4/powerShellClixml';
 
 export type ActivityPresentationMode = 'summary' | 'full';
 
@@ -260,11 +262,6 @@ export function relativizeActivityText(
   return replaced.replace(/\\/gu, '/');
 }
 
-function isPowerShellProgressClixml(value: string): boolean {
-  const text = value.trim();
-  return /^#< CLIXML\s*<Objs\b[\s\S]*<Obj\b[^>]*\bS="progress"[\s\S]*<PR\b[\s\S]*<\/Objs>$/u.test(text);
-}
-
 function isGitLineEndingNotice(value: string): boolean {
   const text = value.trim();
   if (!text) return false;
@@ -289,14 +286,16 @@ export interface CommandPresentation {
 
 export function projectCommandPresentation(input: CommandPresentationInput): CommandPresentation {
   const command = input.command.trim() || 'command';
-  const details = [input.stdout, input.stderr].filter(Boolean).join('\n');
-  const progressNoise = input.exitCode === 0 && isPowerShellProgressClixml(input.stderr);
-  const lineEndingNoise = input.exitCode === 0 && isGitLineEndingNotice(input.stderr);
+  const progress = filterPowerShellProgressClixml(input.stderr);
+  const stderr = progress.stderr;
+  const details = [input.stdout, stderr].filter(Boolean).join('\n');
+  const progressNoise = progress.removedProgress;
+  const lineEndingNoise = input.exitCode === 0 && isGitLineEndingNotice(stderr);
 
   if (input.mode === 'full') {
     const lines = [`${input.exitCode === 0 ? '✓' : '✕'} ${command} — ${input.exitCode === 0 ? 'completed' : 'failed'}`];
     if (input.stdout) lines.push(...input.stdout.split(/\r?\n/u));
-    if (input.stderr) lines.push(...input.stderr.split(/\r?\n/u));
+    if (stderr) lines.push(...stderr.split(/\r?\n/u));
     if (input.exitCode !== 0) lines.push(`exit ${input.exitCode}`);
     return { lines, details, outcome: input.exitCode === 0 ? 'success' : 'failure' };
   }
@@ -305,14 +304,14 @@ export function projectCommandPresentation(input: CommandPresentationInput): Com
     const lines = [`✓ ${command} — completed`];
     if (progressNoise) lines.push('! PowerShell emitted progress metadata; ignored');
     else if (lineEndingNoise) lines.push('! Git line-ending notice available');
-    else if (input.stderr.trim()) lines.push(...input.stderr.split(/\r?\n/u).slice(0, 5));
+    else if (stderr.trim()) lines.push(...stderr.split(/\r?\n/u).slice(0, 5));
     if (/^git\s+diff\b/iu.test(command) && input.stdout.trim()) lines.push(...compactDiffLines(input.stdout));
-    return { lines, details, outcome: progressNoise || lineEndingNoise || input.stderr.trim() ? 'warning' : 'success' };
+    return { lines, details, outcome: progressNoise || lineEndingNoise || stderr.trim() ? 'warning' : 'success' };
   }
 
   const diagnostics = [
     ...input.stdout.split(/\r?\n/u).filter(Boolean).slice(0, 5),
-    ...input.stderr.split(/\r?\n/u).filter(Boolean).slice(0, 5),
+    ...stderr.split(/\r?\n/u).filter(Boolean).slice(0, 5),
   ];
   return {
     lines: [`✕ ${command} — failed`, ...diagnostics, `exit ${input.exitCode}`],

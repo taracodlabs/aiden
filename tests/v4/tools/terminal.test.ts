@@ -40,12 +40,14 @@ describe('shell_exec — schema', () => {
 });
 
 describe('localBackend', () => {
-  it('preserves PowerShell source exactly at the process boundary', () => {
+  it('preserves PowerShell source while suppressing progress at the process boundary', () => {
     const source = `Write-Output '$env:TEMP'; Write-Output \"quoted\"; Write-Output \`tick; Write-Output '₹ $ literal'`;
     const invocation = buildLocalShellInvocation(source, 'win32');
     expect(invocation.executable).toBe('powershell.exe');
     expect(invocation.args.slice(0, 3)).toEqual(['-NoProfile', '-NonInteractive', '-EncodedCommand']);
-    expect(Buffer.from(invocation.args[3], 'base64').toString('utf16le')).toBe(source);
+    const decoded = Buffer.from(invocation.args[3], 'base64').toString('utf16le');
+    expect(decoded).toContain("$ProgressPreference='SilentlyContinue';");
+    expect(decoded.endsWith(source)).toBe(true);
   });
 
   it('keeps an explicit nested PowerShell command out of an outer PowerShell parser', () => {
@@ -57,8 +59,9 @@ describe('localBackend', () => {
         detached: false,
       });
       const invocation = buildLocalShellInvocation(command, 'win32');
-      expect(Buffer.from(invocation.args.at(-1)!, 'base64').toString('utf16le'))
-        .toBe('$env:TEMP; $env:LOCALAPPDATA');
+      const decoded = Buffer.from(invocation.args.at(-1)!, 'base64').toString('utf16le');
+      expect(decoded).toContain("$ProgressPreference='SilentlyContinue';");
+      expect(decoded.endsWith('$env:TEMP; $env:LOCALAPPDATA')).toBe(true);
     }
   });
 
@@ -82,8 +85,9 @@ describe('localBackend', () => {
       'win32',
     );
     expect(invocation.executable).toBe('powershell.exe');
-    expect(Buffer.from(invocation.args[invocation.args.length - 1]!, 'base64').toString('utf16le'))
-      .toBe('$marker = 1; Write-Output $marker');
+    const decoded = Buffer.from(invocation.args[invocation.args.length - 1]!, 'base64').toString('utf16le');
+    expect(decoded).toContain("$ProgressPreference='SilentlyContinue';");
+    expect(decoded.endsWith('$marker = 1; Write-Output $marker')).toBe(true);
   });
 
   it.runIf(isWin)('executes direct environment lookups and special characters on Windows', async () => {

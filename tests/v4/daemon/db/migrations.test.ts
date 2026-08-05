@@ -114,7 +114,7 @@ describe('runMigrations', () => {
        VALUES ('manual','preserved','{"value":1}','claimed',1,'legacy-owner',?,?,?)`,
     ).run(now + 60_000, now, now);
 
-    expect(runMigrations(db)).toEqual({ from: 40, to: 41 });
+    expect(runMigrations(db)).toEqual({ from: 40, to: LATEST_SCHEMA_VERSION });
     expect(db.prepare(
       'SELECT source_key,payload_json,status,claim_owner,claim_token FROM trigger_events WHERE source_key=?',
     ).get('preserved')).toEqual({

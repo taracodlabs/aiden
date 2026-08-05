@@ -12,14 +12,13 @@
  * "Skip — explore Aiden first" branch) where the user has decided
  * they want to actually configure a provider after looking around.
  *
- * After the wizard returns, we tell the user to restart Aiden so
- * the new provider/model is picked up — hot-swapping the provider
- * adapter inside an in-flight session is v4.1 territory and would
- * require rebuilding the AidenAgent's provider field, the fallback
- * chain, and the chatSession's currentProviderId in lockstep.
+ * After the wizard returns, the session rebuilds the selected provider
+ * adapter before swapping it in. A failed rebuild leaves the prior working
+ * provider untouched.
  */
 import type { SlashCommand } from '../commandRegistry';
 import { runSetupWizard } from '../setupWizard';
+import { runtimeTrace } from '../../../core/v4/runtimeTrace';
 
 export const setup: SlashCommand = {
   name: 'setup',
@@ -34,16 +33,42 @@ export const setup: SlashCommand = {
       );
       return;
     }
-    const result = await runSetupWizard({
-      paths: ctx.paths,
+    const result = await ctx.display.withModalLease('setup', () => runSetupWizard({
+      paths: ctx.paths!,
       display: ctx.display,
       force: true,
-    });
+    }));
     if (result.status === 'configured' && result.ran) {
-      ctx.display.write(
-        '\nProvider configured. ' +
-          'Restart Aiden (`/quit` then re-run `aiden`) to pick up the new provider.\n\n',
-      );
+      const providerId = result.config?.model.provider;
+      const modelId = result.config?.model.modelId;
+      runtimeTrace('provider', 'setup.completed', {
+        providerId: providerId ?? null,
+        modelId: modelId ?? null,
+        readiness: result.readiness?.state ?? null,
+      });
+      if (!providerId || !modelId || !ctx.session) {
+        ctx.display.printError(
+          'Provider was saved but could not activate in this session.',
+          'The previous provider remains active; run /model to retry activation.',
+        );
+        return;
+      }
+      try {
+        await ctx.session.setProvider(providerId, modelId);
+        runtimeTrace('provider', 'adapter.rebuilt', { providerId, modelId, activated: true });
+        ctx.display.write(`\nProvider configured and active: ${providerId}:${modelId}.\n\n`);
+      } catch (error) {
+        runtimeTrace('provider', 'adapter.rebuilt', {
+          providerId,
+          modelId,
+          activated: false,
+          errorKind: error instanceof Error ? error.name : 'unknown',
+        });
+        ctx.display.printError(
+          'Provider was configured but could not activate in this session.',
+          'The previous provider remains active; check readiness and run /model to retry.',
+        );
+      }
     } else if (result.status === 'skipped') {
       ctx.display.write(
         '\nStill in explore mode. Run /setup again whenever you\'re ready.\n\n',

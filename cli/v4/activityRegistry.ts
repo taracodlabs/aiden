@@ -1,6 +1,7 @@
 /** Central lifecycle owner for live CLI tool activity rows. */
 import type { LiveActivityRowHandle, ToolRowHandle } from './display';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
+import { runtimeTrace } from '../../core/v4/runtimeTrace';
 import type {
   ToolActivityPhase,
   ToolActivityTiming,
@@ -387,9 +388,5 @@ function cloneUpdate(update: ToolActivityUpdate): ToolActivityUpdate {
 }
 
 function p2aDiag(event: string, data: Record<string, unknown>): void {
-  if (process.env.AIDEN_P2A_DIAG !== '1') return;
-  try {
-    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
-  } catch { /* diagnostics must never affect activity lifecycle */ }
+  runtimeTrace('activity', event, data);
 }

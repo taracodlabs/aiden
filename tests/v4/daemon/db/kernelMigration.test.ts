@@ -44,6 +44,29 @@ function tempDb(): { root: string; path: string } {
 }
 
 describe('kernel migration compatibility', () => {
+  it('adds empty Effect bindings to existing Claims without changing their truth', () => {
+    const db = new Database(':memory:');
+    applyThrough(db, 41);
+    db.pragma('foreign_keys = OFF');
+    db.prepare(
+      `INSERT INTO job_claims
+         (claim_id, job_id, category, statement, required, state, created_at)
+       VALUES ('claim_legacy', 'job_legacy', 'contract', 'legacy claim', 1, 'verified', 1)`,
+    ).run();
+    db.pragma('foreign_keys = ON');
+
+    expect(runMigrations(db)).toEqual({ from: 41, to: LATEST_SCHEMA_VERSION });
+    expect(db.prepare(
+      `SELECT statement, required, state, effect_ids_json FROM job_claims WHERE claim_id='claim_legacy'`,
+    ).get()).toEqual({
+      statement: 'legacy claim',
+      required: 1,
+      state: 'verified',
+      effect_ids_json: '[]',
+    });
+    db.close();
+  });
+
   it('opens a populated v4.16-era database without changing terminal truth or queued input', () => {
     const location = tempDb();
     const legacy = new Database(location.path);

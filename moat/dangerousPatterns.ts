@@ -24,6 +24,17 @@
 
 export type RiskTier = 'safe' | 'caution' | 'dangerous';
 
+export interface CommandIntentAnalysis {
+  operation: string;
+  effect: 'read_only' | 'mutating' | 'external' | 'unknown';
+  network: boolean;
+  reversible: boolean;
+  scope: 'process' | 'repository' | 'working_directory' | 'external' | 'unknown';
+  confidence: 'high' | 'medium' | 'low';
+  tier: RiskTier;
+  reason?: string;
+}
+
 export interface DangerPattern {
   /** Stable identifier (used in logs / approval keys). */
   name: string;
@@ -106,6 +117,37 @@ export function classifyCommand(input: string): {
   const tier = highestTier(matches);
   const reason = matches[0]?.description;
   return { tier, matches, reason };
+}
+
+/** Bounded intent analysis. Recognized operations are precise; unknown input
+ * remains dangerous and approval-gated. */
+export function analyzeCommandIntent(command: string, _cwd = process.cwd()): CommandIntentAnalysis {
+  const raw = command.trim();
+  const pattern = classifyCommand(raw);
+  if (pattern.tier !== 'safe') {
+    return {
+      operation: pattern.matches[0]?.name ?? 'dangerous_command', effect: 'mutating',
+      network: /\b(?:curl|wget|invoke-webrequest|npm\s+publish)\b/iu.test(raw),
+      reversible: false, scope: 'unknown', confidence: 'high', tier: pattern.tier,
+      ...(pattern.reason ? { reason: pattern.reason } : {}),
+    };
+  }
+  if (/^(?:[^\s]*[\\/])?node(?:\.exe)?\s+(?:--version|-v)\s*$/iu.test(raw)) {
+    return { operation: 'inspect_runtime_version', effect: 'read_only', network: false, reversible: true, scope: 'process', confidence: 'high', tier: 'safe' };
+  }
+  if (/^git(?:\.exe)?\s+/iu.test(raw) && isReadOnlyCommand(raw)) {
+    return { operation: 'inspect_repository', effect: 'read_only', network: false, reversible: true, scope: 'repository', confidence: 'high', tier: 'safe' };
+  }
+  if (isReadOnlyCommand(raw)) {
+    return { operation: 'inspect_local_state', effect: 'read_only', network: false, reversible: true, scope: 'working_directory', confidence: 'high', tier: 'safe' };
+  }
+  if (/^node(?:\.exe)?\s+(?!-)[^\s]+(?:\s|$)/iu.test(raw)) {
+    return { operation: 'execute_local_script', effect: 'mutating', network: false, reversible: false, scope: 'working_directory', confidence: 'medium', tier: 'caution', reason: 'Local script execution may change working-directory state.' };
+  }
+  if (/^(?:npm|pnpm|yarn)\s+(?:publish|unpublish|deprecate)\b/iu.test(raw)) {
+    return { operation: 'publish_package', effect: 'external', network: true, reversible: false, scope: 'external', confidence: 'high', tier: 'dangerous', reason: 'Publishes or changes a remote package.' };
+  }
+  return { operation: 'unknown_command', effect: 'unknown', network: false, reversible: false, scope: 'unknown', confidence: 'low', tier: 'dangerous', reason: 'Command intent could not be proven safe.' };
 }
 
 // ── Read-only command allowlist (v4.14.6) ────────────────────────────────────
@@ -228,6 +270,7 @@ function isReadOnlyGit(stage: string): boolean {
 export function isReadOnlyCommand(command: string): boolean {
   const raw = command.trim();
   if (!raw) return false;
+  if (/^(?:[^\s]*[\\/])?node(?:\.exe)?\s+(?:--version|-v)\s*$/iu.test(raw)) return true;
   const bare = stripLiterals(raw);
   if (UNSAFE_META.test(bare)) return false;               // redirect / chain / subst / background
   if (classifyCommand(raw).tier !== 'safe') return false; // any dangerous/caution pattern

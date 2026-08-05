@@ -1,3 +1,5 @@
+import { runtimeTrace, writeNonInteractiveDiagnostic } from './runtimeTrace';
+
 /**
  * Aiden v4 — local-first AI agent
  * Copyright (C) 2026 Shiva Deore (Taracod)
@@ -1418,13 +1420,8 @@ export class AidenAgent {
     const failureClassifier = buildDefaultClassifier();
     let toolLoopCard: AidenAgentResult['toolLoopCard'] = undefined;
 
-    // v4.11 perf — opt-in per-iteration timing. Zero-overhead when the
-    // env var is unset (one `process.env` read per iteration entry).
-    // Stderr bypasses any frame/display guards; format `[perf:...]`
-    // greps cleanly out of the test runner / smoke logs.
-    const _perfDiag = process.env.AIDEN_PERF_DIAG === '1';
+    // Phase timings use the optional file-only runtime trace sink.
     while (true) {
-      const _iterStartedAt = _perfDiag ? Date.now() : 0;
       // v4.6 prep — between-iteration cooperative-cancellation check.
       // When the caller passed an AbortSignal that has aborted, exit
       // immediately with `finishReason: 'interrupted'`. Delta accumulation
@@ -1571,7 +1568,13 @@ export class AidenAgent {
       const providerRunOptions = deferApprovalStream
         ? { ...runOptions, onFirstDelta: undefined, onDelta: undefined }
         : runOptions;
-      const _llmStartedAt = _perfDiag ? Date.now() : 0;
+      const _llmStartedAt = Date.now();
+      runtimeTrace('performance', 'provider.request', {
+        iteration: turnCount,
+        provider: this.providerId ?? 'unknown',
+        model: this.modelId ?? 'unknown',
+        messageCount: messages.length,
+      });
       p2aDiag('provider.continuation.start', {
         iteration: turnCount,
         continuation: turnCount > 1,
@@ -1624,13 +1627,17 @@ export class AidenAgent {
           finishReason: output.finishReason,
           aborted: runOptions.signal?.aborted === true,
         });
-        if (_perfDiag) {
-          const llmMs = Date.now() - _llmStartedAt;
-          const tokIn = output.usage?.inputTokens ?? 0;
-          const tokOut = output.usage?.outputTokens ?? 0;
-          const nTools = output.toolCalls?.length ?? 0;
-          process.stderr.write(
-            `[perf:iter=${turnCount + 1} llm=${llmMs}ms tokens_in=${tokIn} tokens_out=${tokOut} toolCalls=${nTools}]\n`,
+        const llmMs = Date.now() - _llmStartedAt;
+        runtimeTrace('performance', 'provider.complete', {
+          iteration: turnCount,
+          durationMs: llmMs,
+          inputTokens: output.usage?.inputTokens ?? 0,
+          outputTokens: output.usage?.outputTokens ?? 0,
+          toolCallCount: output.toolCalls?.length ?? 0,
+        });
+        if (process.env.AIDEN_PERF_DIAG === '1') {
+          writeNonInteractiveDiagnostic(
+            `[perf:iter=${turnCount + 1} llm=${llmMs}ms tokens_in=${output.usage?.inputTokens ?? 0} tokens_out=${output.usage?.outputTokens ?? 0} toolCalls=${output.toolCalls?.length ?? 0}]`,
           );
         }
       } catch (err) {
@@ -1932,10 +1939,21 @@ export class AidenAgent {
         let attemptNo = 0;
         let aggregateTiming: ToolActivityTiming | undefined;
         let afterFired = false;
+        runtimeTrace('performance', 'tool.admitted', {
+          iteration: turnCount,
+          toolCallId: call.id,
+          tool: call.name,
+        });
         try {
           for (;;) {
             attemptNo += 1;
-            const _toolStartedAt = _perfDiag ? Date.now() : 0;
+            const _toolStartedAt = Date.now();
+            runtimeTrace('performance', 'tool.start', {
+              iteration: turnCount,
+              toolCallId: call.id,
+              tool: call.name,
+              attempt: attemptNo,
+            });
             if (blockedByRequiredClarification) {
               const question = this.pendingRequiredClarification?.question ?? 'required information';
               result = {
@@ -1970,12 +1988,20 @@ export class AidenAgent {
             }
             aggregateTiming = mergeActivityTiming(aggregateTiming, result.activityTiming);
             if (aggregateTiming) result.activityTiming = aggregateTiming;
-            if (_perfDiag) {
-              const toolMs = Date.now() - _toolStartedAt;
-              const ok = result.error == null;
-              const src = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
-              process.stderr.write(
-                `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok} attempt=${attemptNo}]\n`,
+            const toolMs = Date.now() - _toolStartedAt;
+            const source = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
+            runtimeTrace('performance', 'tool.complete', {
+              iteration: turnCount,
+              toolCallId: call.id,
+              tool: call.name,
+              durationMs: toolMs,
+              source,
+              ok: result.error == null,
+              attempt: attemptNo,
+            });
+            if (process.env.AIDEN_PERF_DIAG === '1') {
+              writeNonInteractiveDiagnostic(
+                `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${source} ok=${result.error == null} attempt=${attemptNo}]`,
               );
             }
             // v4.11 Slice 1 (verifier→honesty bridge) — compute the
@@ -1983,6 +2009,12 @@ export class AidenAgent {
             // post-loop honesty footer reflects real outcomes independent
             // of whether TCE/recovery is active.
             const verificationStartedAt = Date.now();
+            runtimeTrace('performance', 'verification.start', {
+              iteration: turnCount,
+              toolCallId: call.id,
+              tool: call.name,
+              attempt: attemptNo,
+            });
             if (aggregateTiming) {
               aggregateTiming.verificationStartedAt = verificationStartedAt;
               try {
@@ -2007,6 +2039,14 @@ export class AidenAgent {
               recordDurableToolVerification(call.id, verification);
             }
             const verificationEndedAt = Date.now();
+            runtimeTrace('performance', 'verification.end', {
+              iteration: turnCount,
+              toolCallId: call.id,
+              tool: call.name,
+              attempt: attemptNo,
+              durationMs: verificationEndedAt - verificationStartedAt,
+              verified: verification?.ok ?? null,
+            });
             if (aggregateTiming) {
               aggregateTiming.verificationEndedAt = verificationEndedAt;
               aggregateTiming.verificationDurationMs =
@@ -2810,11 +2850,7 @@ function lastUserMessageContent(history: Message[]): string {
 }
 
 function p2aDiag(event: string, data: Record<string, unknown>): void {
-  if (process.env.AIDEN_P2A_DIAG !== '1') return;
-  try {
-    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
-  } catch { /* diagnostics must never affect the agent loop */ }
+  runtimeTrace('agent-loop', event, data);
 }
 
 function resolvesPendingClarification(content: string): boolean {

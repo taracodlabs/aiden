@@ -21,6 +21,7 @@ import { COMMANDS, COMMAND_DETAIL, getCatalog }             from './commandCatal
 import type { CmdDetail }                                    from './commandCatalog'
 import * as commandCatalog                                   from './commandCatalog'
 import { TOOL_DESCRIPTIONS }                                 from '../core/toolRegistry'
+import { resolveDesktopApiClientLocalCommand }                from './desktopApiClientArgs'
 
 // ── Constants ────────────────────────────────────────────────────────────────────
 
@@ -6263,6 +6264,11 @@ async function resolveSessionArgs(): Promise<void> {
 // ── Main ──────────────────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
+  const localCommand = resolveDesktopApiClientLocalCommand(process.argv.slice(2), VERSION)
+  if (localCommand !== null) {
+    process.stdout.write(localCommand)
+    return
+  }
   // ── Windows VT / ANSI init ──────────────────────────────────────────────────
   if (process.platform === 'win32') {
     try {

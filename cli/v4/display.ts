@@ -110,6 +110,7 @@ import {
   type LaneSink,
 } from './composerLane';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
+import { runtimeTrace } from '../../core/v4/runtimeTrace';
 import type { ActivitySnapshot } from './activityRegistry';
 import { projectFileEffect, projectRepositoryState } from './effectPresentation';
 import { terminalStateSymbol, terminalSupportsUnicode } from './terminalSymbols';
@@ -455,6 +456,9 @@ export class Display {
   // Modal prompts need the full terminal surface while they own stdin. This
   // depth pauses only composer painting and retains the exact draft/hint.
   private composerSurfacePauseDepth = 0;
+  private nextModalLeaseId = 0;
+  private activeModalLeases = new Set<number>();
+  private semanticDocumentRevision = 0;
   private nextLiveRowIdentity = 0;
   private activityPresentationMode: ActivityPresentationMode = 'summary';
 
@@ -2334,6 +2338,7 @@ export class Display {
 
   /** Write modal-only chrome without adding it to transcript projection. */
   writeTransient(text: string): void {
+    this.traceTerminalWrite('modal', text, 'stdout');
     this.out.write(text);
   }
 
@@ -2346,20 +2351,41 @@ export class Display {
       this.composerLane.writeAfterCursor(text);
       return;
     }
+    this.traceTerminalWrite('after-composer-cursor', text, 'stdout');
     this.out.write(text);
   }
 
   writeError(text: string): void {
+    if (this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()) {
+      this.composerLane.writeAbove(text);
+      return;
+    }
+    this.traceTerminalWrite('error', text, 'stderr');
     this.err.write(text);
   }
 
   /** Route flowing output through the fixed-region owner while it is active. */
   private writeOutput(text: string): void {
+    this.traceTerminalWrite('display', text, 'stdout');
     if (this.composerLane) {
       this.composerLane.writeAbove(text);
       return;
     }
     this.out.write(text);
+  }
+
+  private traceTerminalWrite(writer: string, text: string, target: 'stdout' | 'stderr'): void {
+    this.semanticDocumentRevision += 1;
+    runtimeTrace('display', 'terminal.write', {
+      writer,
+      target,
+      revision: this.semanticDocumentRevision,
+      width: this.out.columns ?? null,
+      height: this.out.rows ?? null,
+      emittedRows: text.length === 0 ? 0 : text.split('\n').length,
+      clearOperations: (text.match(/\x1b\[(?:2K|J|[0-9]+M)/g) ?? []).length,
+      controlSequence: /\x1b\[/.test(text),
+    });
   }
 
   // ── v4.12.1 Pillar 4 Slice 2c — live composer surface ────────────────────
@@ -2555,7 +2581,7 @@ export class Display {
       off?: (e: string, fn: () => void) => unknown;
     };
     return {
-      write: (s) => { this.out.write(s); },
+      write: (s) => { this.traceTerminalWrite('composer-lane', s, 'stdout'); this.out.write(s); },
       rows: () => (typeof this.out.rows === 'number' && this.out.rows >= 1 ? this.out.rows : 24),
       cols: () => (typeof this.out.columns === 'number' && this.out.columns >= 1 ? this.out.columns : 80),
       onResize: (fn) => { stream.on?.('resize', fn); return () => { stream.off?.('resize', fn); }; },
@@ -2805,6 +2831,8 @@ export class Display {
   // — the post-stream pass clears it via cursor-up + erase-line and
   // reprints the formatted output.
   private streamBuffer = '';
+  /** Complete raw assistant source for the current projected turn. */
+  private streamDocumentBuffer = '';
   private streamLineCount = 0;
   private streamProjectionSequence = 0;
   private streamProjectionId = '';
@@ -2836,17 +2864,101 @@ export class Display {
     this.composerLane?.removeLiveRow(`durable:${id}`);
   }
 
+  /** Acquire exclusive ownership for an interactive modal prompt. */
+  acquireModalLease(owner: string): { release: () => void } {
+    const id = ++this.nextModalLeaseId;
+    this.activeModalLeases.add(id);
+    runtimeTrace('display', 'modal.acquire', {
+      owner,
+      leaseId: id,
+      width: this.out.columns ?? null,
+      height: this.out.rows ?? null,
+    });
+    this.pauseComposerSurface();
+    let released = false;
+    return {
+      release: () => {
+        if (released) return;
+        released = true;
+        this.activeModalLeases.delete(id);
+        runtimeTrace('display', 'modal.release', {
+          owner,
+          leaseId: id,
+          width: this.out.columns ?? null,
+          height: this.out.rows ?? null,
+        });
+        this.resumeComposerSurface();
+      },
+    };
+  }
+
+  /** Run a modal while preserving and restoring the single owned surface. */
+  async withModalLease<T>(owner: string, run: () => Promise<T>): Promise<T> {
+    const lease = this.acquireModalLease(owner);
+    try {
+      return await run();
+    } finally {
+      lease.release();
+    }
+  }
+
+  /** Resolve only after all preceding terminal writes have been accepted. */
+  async awaitTerminalSettled(): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      if (this.out.destroyed) {
+        resolve();
+        return;
+      }
+      this.out.write('', (error?: Error | null) => {
+        if (error) reject(error);
+        else resolve();
+      });
+    });
+  }
+
+  progressProjection(id: string): {
+    update(line: string): boolean;
+    clear(): boolean;
+    settle(line: string): boolean;
+  } {
+    const rowId = `progress:${id}`;
+    return {
+      update: (line) => {
+        const owner = this.projectedStreamOwner();
+        if (!owner) return false;
+        owner.setLiveRow(rowId, line);
+        return true;
+      },
+      clear: () => {
+        const owner = this.projectedStreamOwner();
+        if (!owner) return false;
+        owner.removeLiveRow(rowId);
+        return true;
+      },
+      settle: (line) => {
+        const owner = this.projectedStreamOwner();
+        if (!owner) return false;
+        owner.settleLiveRow(rowId, line);
+        return true;
+      },
+    };
+  }
+
   /** Clear the visual transcript while retaining composer and status state. */
   clearScreen(): void {
     if (this.composerLane) {
       this.composerLane.clearViewport();
       return;
     }
-    if (this.out.isTTY) this.out.write('\x1b[3J\x1b[2J\x1b[H');
+    if (this.out.isTTY) {
+      const clear = '\x1b[3J\x1b[2J\x1b[H';
+      this.traceTerminalWrite('display-clear', clear, 'stdout');
+      this.out.write(clear);
+    }
   }
 
   private projectedStreamText(formatted: boolean): string {
-    let body = this.streamBuffer;
+    let body = this.streamDocumentBuffer;
     if (formatted && body) {
       try {
         body = this.applyFrameToRendered(this.markdown(body).trimEnd());
@@ -2861,14 +2973,17 @@ export class Display {
   }
 
   private settleProjectedStream(owner: ComposerLane): void {
-    if (this.streamBuffer) {
-      owner.settleLiveRow(this.streamProjectionId, this.projectedStreamText(true));
+    if (this.streamDocumentBuffer) {
+      const projectionId = this.streamProjectionId;
+      owner.removeLiveRow(projectionId, true);
+      owner.writeAbove(`${this.projectedStreamText(true)}\n`, `assistant-terminal:${projectionId}`);
       this.streamProjectionHeaderPending = false;
       this.streamProjectionActivityDividerPending = false;
     } else {
       owner.removeLiveRow(this.streamProjectionId, true);
     }
     this.streamBuffer = '';
+    this.streamDocumentBuffer = '';
     this.streamLineCount = 0;
     this.streamProjectionId = `assistant-stream:${++this.streamProjectionSequence}`;
   }
@@ -2922,17 +3037,18 @@ export class Display {
       }
       this.streamHeaderShown = true;
       this.streamBuffer = '';
+      this.streamDocumentBuffer = '';
       this.streamLineCount = 0;
       this.streamProjectionId = `assistant-stream:${++this.streamProjectionSequence}`;
       this.streamProjectionHeaderPending = true;
       this.streamProjectionActivityDividerPending = projectedOwner !== null && activityDivider;
-      this.uiEventsFiredThisTurn = false;
       // agentHeader emits trailing `\n\n`; cursor is at col 0 of a fresh
       // line, so the very next chunk needs the leading indent.
       this.streamLastEndedNewline = true;
     }
     if (projectedOwner) {
       this.streamBuffer += text;
+      this.streamDocumentBuffer += text;
       this.streamLastEndedNewline = text.endsWith('\n');
       projectedOwner.setLiveRow(this.streamProjectionId, this.projectedStreamText(false));
       return;
@@ -2954,6 +3070,7 @@ export class Display {
     // Phase v4.1-reply-formatting: track buffer + line count for the
     // post-stream re-render.
     this.streamBuffer += text;
+    this.streamDocumentBuffer += text;
     // v4.1.4 reply-quality polish — F-B1 wrap-aware row count.
     //
     // Prior counter just `streamLineCount += text.match(/\n/g)?.length`
@@ -3050,14 +3167,6 @@ export class Display {
     if (!this.out.isTTY) return;
     if (process.env.AIDEN_NO_REFORMAT === '1') return;
     if (lines === 0) return;
-    // v4.8.0 Phase 2.3 fix — when ui_* events painted this turn, skip the
-    // cursor-up + erase-to-end-of-screen rerender. The eraser wipes
-    // anything below where the stream started, including our event rows.
-    // Tradeoff: assistant text on a ui-event turn stays raw (no in-place
-    // markdown beautification). Acceptable — when the model is using
-    // structured ui events, it's signalling state, not relying on prose
-    // formatting.
-    if (this.uiEventsFiredThisTurn) return;
     // Cheap structural heuristic — only re-render when formatting
     // actually helps. Plain prose chunks stay raw (no flicker).
     //
@@ -3134,7 +3243,8 @@ export class Display {
     if (!this.streamHeaderShown) return;
     const projectedOwner = this.projectedStreamOwner();
     if (projectedOwner) {
-      this.settleProjectedStream(projectedOwner);
+      projectedOwner.removeLiveRow(this.streamProjectionId);
+      this.streamProjectionId = `assistant-stream:${++this.streamProjectionSequence}`;
       this.streamLastEndedNewline = true;
       return;
     }
@@ -3221,7 +3331,6 @@ export class Display {
       this.streamHeaderShown = false;
       this.streamLastEndedNewline = false;
       this.streamProjectionHeaderPending = false;
-      this.uiEventsFiredThisTurn = false;
       return;
     }
     if (!this.streamLastEndedNewline) {
@@ -3235,11 +3344,10 @@ export class Display {
     // user-visible body in well-behaved turns.
     this.tryRerenderInPlace(this.streamBuffer, this.streamLineCount);
     this.streamBuffer = '';
+    this.streamDocumentBuffer = '';
     this.streamLineCount = 0;
     this.streamHeaderShown = false;
     this.streamLastEndedNewline = false;
-    // v4.8.0 Phase 2.3 fix — turn ends; clear the ui-fired flag.
-    this.uiEventsFiredThisTurn = false;
   }
 
   /**
@@ -3283,12 +3391,6 @@ export class Display {
   private uiTaskTerminalIds = new Set<string>();
   private structuredActivityIds = new Set<string>();
 
-  // v4.8.0 Phase 2.3 fix — set true by renderUiEvent; tryRerenderInPlace
-  // early-returns when set so the cursor-up + erase-to-end-of-screen
-  // sequence can't wipe our ui_* rows. Reset at stream lifecycle
-  // boundaries (streamPartial first-delta init + streamComplete).
-  private uiEventsFiredThisTurn = false;
-
   /** Render semantic ui_* events. Stable task IDs replace active cards in place. */
   /**
    * v4.8.0 Phase 2.3 fix-2 — reset the per-turn ui-event flag. Called
@@ -3299,19 +3401,11 @@ export class Display {
    * authoritative reset for turn-start.
    */
   resetUiTurnState(): void {
-    this.uiEventsFiredThisTurn = false;
     this.structuredActivityIds.clear();
   }
 
   renderUiEvent(name: string, args: Record<string, unknown>): void {
     if (!this.out.isTTY) return;
-    // v4.8.0 Phase 2.3 fix — Option C. The post-stream markdown rerender
-    // (`tryRerenderInPlace`) does `cursor-up-N + erase-to-end-of-screen`,
-    // which wipes anything painted between stream start and stream end —
-    // including our ui_* rows. Mark the turn so the rerender skips this
-    // turn entirely. Resets when the next streaming turn begins (see
-    // streamPartial header init) and on streamComplete cleanup.
-    this.uiEventsFiredThisTurn = true;
     if (name === 'ui_task_update')      { this.renderUiTaskUpdate(args);      return; }
     if (name === 'ui_task_done')        { this.renderUiTaskDone(args);        return; }
     if (name === 'ui_command_result')   { this.renderUiCommandResult(args);   return; }

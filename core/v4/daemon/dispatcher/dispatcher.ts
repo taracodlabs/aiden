@@ -489,13 +489,22 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         clearTimeout(_pollTimer);
         _pollTimer = null;
       }
-      // Race in-flight drain against the timeout.
+      // The runner owns canonical lifecycle timers and cancellation. Dispose it
+      // before durable stores close, then wait for every claimed event to drain.
       const drain = Promise.allSettled([..._workerPromises]);
-      const deadline = new Promise<void>((resolve) => {
-        const t = setTimeout(() => resolve(), timeoutMs);
-        if (typeof t.unref === 'function') t.unref();
+      const runnerDisposal = runner?.dispose?.('dispatcher shutdown') ?? Promise.resolve();
+      let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+      const deadline = new Promise<never>((_resolve, reject) => {
+        deadlineTimer = setTimeout(() => reject(new Error(
+          `Dispatcher shutdown timed out with ${_workerPromises.size} lifecycle task(s) still active`,
+        )), timeoutMs);
+        deadlineTimer.unref?.();
       });
-      await Promise.race([drain, deadline]);
+      try {
+        await Promise.race([Promise.all([drain, runnerDisposal]), deadline]);
+      } finally {
+        if (deadlineTimer) clearTimeout(deadlineTimer);
+      }
       log('info', `[dispatcher] stopped — inflight=${_inflight.size} processed=${_stats.claimed}`);
     },
     inflight() {
@@ -505,6 +514,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       return { ..._stats };
     },
     async _pumpOnce() {
+      if (_stopping) return null;
       if (!runner) runner = opts.runnerFactory();
       const event = opts.triggerBus.claim({ ownerId: opts.ownerId, leaseMs });
       if (!event) return null;

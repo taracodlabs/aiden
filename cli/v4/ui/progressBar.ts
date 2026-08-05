@@ -12,6 +12,7 @@
  */
 
 import { Writable } from 'node:stream';
+import type { ProgressProjection } from '../display/progressBar';
 
 export interface ProgressBarOptions {
   /** Top-line label, e.g. "Installing aiden-runtime v4.9.1...". */
@@ -28,6 +29,7 @@ export interface ProgressBarOptions {
   env?:     NodeJS.ProcessEnv;
   /** Render-tick interval (ms). Default 100. */
   tickMs?:  number;
+  projection?: ProgressProjection;
 }
 
 export interface ProgressBar {
@@ -126,28 +128,39 @@ export function startProgressBar(opts: ProgressBarOptions): ProgressBar {
   let phase   = opts.phases[0] ?? '';
   let percent = 0;
   let painted = false;
+  let projected = false;
   let closed  = false;
 
   const write = (s: string): void => {
     try { out.write(s); } catch { /* swallow — never break caller */ }
   };
+  const update = (s: string): boolean => opts.projection?.update(s) ?? false;
+  const settle = (s: string): boolean => opts.projection?.settle(s) ?? false;
 
   // SIGINT: restore cursor + clear the partial line before bubbling.
   const onSigint = (): void => {
-    try { write(ANSI_CLEAR_LINE + ANSI_SHOW_CURSOR); } catch { /* noop */ }
+    if (!projected) {
+      try { write(ANSI_CLEAR_LINE + ANSI_SHOW_CURSOR); } catch { /* noop */ }
+    }
   };
   if (mode.animated) {
     try { process.once('SIGINT', onSigint); } catch { /* noop */ }
   }
 
   // Label line paints once, immediately.
-  write(`${mode.color ? ANSI_MUTED : ''}${opts.label}${mode.color ? ANSI_RESET : ''}\n`);
+  const label = `${mode.color ? ANSI_MUTED : ''}${opts.label}${mode.color ? ANSI_RESET : ''}`;
+  if (!update(label)) write(`${label}\n`);
 
   const paint = (): void => {
     if (closed) return;
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs < PAINT_AFTER_MS) return;
     const line = renderLine({ width, percent, phase, elapsedMs, mode });
+    if (update(line)) {
+      painted = true;
+      projected = true;
+      return;
+    }
     if (mode.animated) {
       if (!painted) { write(ANSI_HIDE_CURSOR); painted = true; }
       write(ANSI_CLEAR_LINE + line);
@@ -169,9 +182,10 @@ export function startProgressBar(opts: ProgressBarOptions): ProgressBar {
     const finalLine = mode.color
       ? `${color}${icon}${ANSI_RESET} ${message}`
       : `${icon} ${message}`;
-    if (mode.animated && painted) write(ANSI_CLEAR_LINE);
+    if (settle(finalLine)) return;
+    if (mode.animated && painted && !projected) write(ANSI_CLEAR_LINE);
     write(finalLine + '\n');
-    if (mode.animated) write(ANSI_SHOW_CURSOR);
+    if (mode.animated && !projected) write(ANSI_SHOW_CURSOR);
   };
 
   return {
@@ -198,11 +212,14 @@ export function startPhaseIndicator(opts: ProgressBarOptions): PhaseIndicator {
   let frame = 0;
   let phase = opts.phases[0] ?? 'working';
   let painted = false;
+  let projected = false;
   let closed = false;
 
   const write = (value: string): void => {
     try { out.write(value); } catch { /* output failure must not break update */ }
   };
+  const update = (value: string): boolean => opts.projection?.update(value) ?? false;
+  const settle = (value: string): boolean => opts.projection?.settle(value) ?? false;
   const format = (): string => {
     const elapsed = `${((Date.now() - startedAt) / 1_000).toFixed(1)}s`;
     const glyph = frames[frame++ % frames.length];
@@ -213,6 +230,11 @@ export function startPhaseIndicator(opts: ProgressBarOptions): PhaseIndicator {
   const paint = (): void => {
     if (closed) return;
     const line = format();
+    if (update(line)) {
+      painted = true;
+      projected = true;
+      return;
+    }
     if (mode.animated) {
       if (!painted) {
         write(ANSI_HIDE_CURSOR);
@@ -224,11 +246,12 @@ export function startPhaseIndicator(opts: ProgressBarOptions): PhaseIndicator {
     }
   };
   const onSigint = (): void => {
-    if (mode.animated && painted) write(ANSI_CLEAR_LINE + ANSI_SHOW_CURSOR);
+    if (mode.animated && painted && !projected) write(ANSI_CLEAR_LINE + ANSI_SHOW_CURSOR);
   };
   if (mode.animated) process.once('SIGINT', onSigint);
 
-  write(`${mode.color ? ANSI_MUTED : ''}${opts.label}${mode.color ? ANSI_RESET : ''}\n`);
+  const label = `${mode.color ? ANSI_MUTED : ''}${opts.label}${mode.color ? ANSI_RESET : ''}`;
+  if (!update(label)) write(`${label}\n`);
   paint();
   const timer = mode.animated ? setInterval(paint, tickMs) : null;
   timer?.unref?.();
@@ -238,12 +261,13 @@ export function startPhaseIndicator(opts: ProgressBarOptions): PhaseIndicator {
     closed = true;
     if (timer) clearInterval(timer);
     process.removeListener('SIGINT', onSigint);
-    if (mode.animated && painted) write(ANSI_CLEAR_LINE);
+    if (mode.animated && painted && !projected) write(ANSI_CLEAR_LINE);
     const line = mode.color
       ? `${color}${icon}${ANSI_RESET} ${message}`
       : `${icon} ${message}`;
+    if (settle(line)) return;
     write(line + '\n');
-    if (mode.animated) write(ANSI_SHOW_CURSOR);
+    if (mode.animated && !projected) write(ANSI_SHOW_CURSOR);
   };
 
   return {

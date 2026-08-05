@@ -59,7 +59,13 @@ function run(executable, args, options = {}) {
     timeout: options.timeout ?? 180_000,
     windowsHide: true,
   });
-  if (result.error) throw result.error;
+  if (result.error) {
+    throw new Error([
+      result.error.message,
+      result.stdout,
+      result.stderr,
+    ].join('\n'));
+  }
   if (result.status !== 0) {
     throw new Error([
       `${path.basename(executable)} ${args.join(' ')} exited ${result.status}`,

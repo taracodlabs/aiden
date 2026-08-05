@@ -117,6 +117,72 @@ export class DurableJobBudgetExceededError extends DurableJobLifecycleError {
   }
 }
 
+export class DurableJobLifecycleDisposedError extends DurableJobLifecycleError {
+  constructor(message = 'Durable lifecycle scope was disposed', handle?: Partial<DurableJobHandle>) {
+    super(message, handle);
+    this.name = 'DurableJobLifecycleDisposedError';
+  }
+}
+
+interface DurableJobLifecycleRegistration {
+  dispose(reason: string): void;
+  done: Promise<void>;
+}
+
+class DurableJobLifecycleDisposalError extends Error {
+  constructor(readonly causes: unknown[]) {
+    super('Durable lifecycle disposal failed');
+    this.name = 'DurableJobLifecycleDisposalError';
+  }
+}
+
+export class DurableJobLifecycleScope {
+  private readonly registrations = new Set<DurableJobLifecycleRegistration>();
+  private disposal: Promise<void> | null = null;
+  private disposedState = false;
+
+  get disposed(): boolean {
+    return this.disposedState;
+  }
+
+  get activeCount(): number {
+    return this.registrations.size;
+  }
+
+  assertActive(): void {
+    if (this.disposedState) throw new DurableJobLifecycleDisposedError();
+  }
+
+  register(registration: DurableJobLifecycleRegistration): () => void {
+    this.assertActive();
+    this.registrations.add(registration);
+    return () => this.registrations.delete(registration);
+  }
+
+  dispose(reason = 'Durable lifecycle scope disposed'): Promise<void> {
+    if (this.disposal) return this.disposal;
+    this.disposedState = true;
+    const registrations = [...this.registrations];
+    const disposalErrors: unknown[] = [];
+    for (const registration of registrations) {
+      try {
+        registration.dispose(reason);
+      } catch (error) {
+        disposalErrors.push(error);
+      }
+    }
+    this.disposal = Promise.allSettled(registrations.map((registration) => registration.done)).then(() => {
+      if (disposalErrors.length === 1) throw disposalErrors[0];
+      if (disposalErrors.length > 1) throw new DurableJobLifecycleDisposalError(disposalErrors);
+    });
+    return this.disposal;
+  }
+}
+
+export function createDurableJobLifecycleScope(): DurableJobLifecycleScope {
+  return new DurableJobLifecycleScope();
+}
+
 export interface ExecuteDurableJobOptions<T> {
   engine: JobEngine;
   ownerId: string;
@@ -134,6 +200,7 @@ export interface ExecuteDurableJobOptions<T> {
   controlPollMs?: number;
   onLeaseLost?: (error: DurableJobLifecycleError) => void;
   onPhase?: (event: DurableJobLifecyclePhaseEvent) => void;
+  lifecycleScope?: DurableJobLifecycleScope;
 }
 
 function isExistingAdmission(admission: DurableJobAdmission): admission is ExistingDurableJobAdmission {
@@ -257,6 +324,7 @@ function notifyPhase(
 export async function executeDurableJob<T>(
   options: ExecuteDurableJobOptions<T>,
 ): Promise<DurableJobExecutionResult<T>> {
+  options.lifecycleScope?.assertActive();
   const producer = producerFor(options.admission);
   const admitted = admitDurableJob(options.engine, options.admission);
   notifyPhase(options.onPhase, 'admitted', admitted);
@@ -334,6 +402,7 @@ export async function executeDurableJob<T>(
   let controlWatcher: ReturnType<typeof setInterval> | null = null;
   let runtimeBudgetTimer: ReturnType<typeof setTimeout> | null = null;
   let runtimeBudgetExpired = false;
+  let disposalError: DurableJobLifecycleDisposedError | null = null;
   const executionStartedAt = Date.now();
 
   const stopHeartbeat = (): void => {
@@ -344,6 +413,7 @@ export async function executeDurableJob<T>(
   const startHeartbeat = (): void => {
     stopHeartbeat();
     heartbeat = setInterval(() => {
+      if (disposalError) return;
       const renewed = options.engine.renewAttemptLease({
         attemptId: handle.attemptId,
         ownerId: options.ownerId,
@@ -365,6 +435,40 @@ export async function executeDurableJob<T>(
     }, Math.max(1_000, Math.floor(leaseTtlMs / 3)));
     heartbeat.unref?.();
   };
+
+  const stopAsyncResources = (): void => {
+    if (runtimeBudgetTimer) clearTimeout(runtimeBudgetTimer);
+    runtimeBudgetTimer = null;
+    stopHeartbeat();
+    if (controlWatcher) clearInterval(controlWatcher);
+    controlWatcher = null;
+    detachRuntime?.();
+    detachRuntime = null;
+  };
+
+  let resolveLifecycleDone!: () => void;
+  const lifecycleDone = new Promise<void>((resolve) => { resolveLifecycleDone = resolve; });
+  const unregisterScope = options.lifecycleScope?.register({
+    done: lifecycleDone,
+    dispose(reason) {
+      if (disposalError) return;
+      disposalError = new DurableJobLifecycleDisposedError(reason, handle);
+      stopAsyncResources();
+      let persistenceError: unknown = null;
+      try {
+        options.engine.cancelJob({
+          jobId: handle.jobId,
+          reason,
+          producer,
+          eventIdempotencyKey: `lifecycle-dispose:${handle.attemptId}:${handle.generation}`,
+        });
+      } catch (error) {
+        persistenceError = error;
+      }
+      leaseAbort.abort(disposalError);
+      if (persistenceError) throw persistenceError;
+    },
+  }) ?? null;
 
   Object.defineProperties(handle, {
     pauseAtBoundary: {
@@ -556,6 +660,7 @@ export async function executeDurableJob<T>(
     if (runtimeBudget?.limit !== null && runtimeBudget !== undefined) {
       const remaining = Math.max(0, runtimeBudget.limit - runtimeBudget.used);
       runtimeBudgetTimer = setTimeout(() => {
+        if (disposalError) return;
         try {
           options.engine.workerProviderCalls.recordInterruptionForAttempt({
             childJobId: handle.jobId,
@@ -580,7 +685,7 @@ export async function executeDurableJob<T>(
     }
 
     controlWatcher = setInterval(() => {
-      if (leaseAbort.signal.aborted) return;
+      if (disposalError || leaseAbort.signal.aborted) return;
       const status = options.engine.getJob(handle.jobId)?.status;
       if (status === 'cancelled' || status === 'cancelling') {
         leaseAbort.abort(new Error('Durable Job cancellation requested'));
@@ -591,6 +696,7 @@ export async function executeDurableJob<T>(
     notifyPhase(options.onPhase, 'running', handle, handle.generation);
     notifyPhase(options.onPhase, 'executing', handle, handle.generation);
     const value = await runWithJobExecutionContext(executionContext, () => options.execute(handle));
+    if (disposalError) throw disposalError;
     if (runtimeBudgetExpired) throw new DurableJobBudgetExceededError('runtime_ms', handle);
     if (leaseLost) throw leaseLost;
     assertAuthority(options.engine, handle);
@@ -606,6 +712,7 @@ export async function executeDurableJob<T>(
     notifyPhase(options.onPhase, 'settled', handle, handle.generation);
     return Object.assign(handle, { value });
   } catch (error) {
+    if (disposalError) throw disposalError;
     if (leaseLost || error instanceof DurableJobAuthorityLostError) throw error;
     const attempt = options.engine.getAttempt(handle.attemptId);
     const job = options.engine.getJob(handle.jobId);
@@ -629,29 +736,28 @@ export async function executeDurableJob<T>(
     }
     throw error;
   } finally {
-    if (runtimeBudgetTimer) clearTimeout(runtimeBudgetTimer);
-    runtimeBudgetTimer = null;
-    if (options.engine.resources.getBudgets(handle.jobId).some((budget) => budget.kind === 'runtime_ms')) {
-      try {
-        options.engine.resources.debit({
-          jobId: handle.jobId,
-          attemptId: handle.attemptId,
-          generation: handle.generation,
-          fenceToken: handle.fenceToken,
-          kind: 'runtime_ms',
-          amount: Math.max(0, Date.now() - executionStartedAt),
-          certainty: 'confirmed',
-          idempotencyKey: `runtime:${handle.attemptId}:${handle.generation}`,
-          enforceLimit: false,
-        });
-      } catch { /* stale authority cannot spend after replacement */ }
+    stopAsyncResources();
+    try {
+      if (!disposalError && options.engine.resources.getBudgets(handle.jobId).some((budget) => budget.kind === 'runtime_ms')) {
+        try {
+          options.engine.resources.debit({
+            jobId: handle.jobId,
+            attemptId: handle.attemptId,
+            generation: handle.generation,
+            fenceToken: handle.fenceToken,
+            kind: 'runtime_ms',
+            amount: Math.max(0, Date.now() - executionStartedAt),
+            certainty: 'confirmed',
+            idempotencyKey: `runtime:${handle.attemptId}:${handle.generation}`,
+            enforceLimit: false,
+          });
+        } catch { /* stale authority cannot spend after replacement */ }
+      }
+      if (!disposalError) notifyPhase(options.onPhase, 'cleanup', handle, handle.generation);
+    } finally {
+      unregisterScope?.();
+      resolveLifecycleDone();
     }
-    stopHeartbeat();
-    if (controlWatcher) clearInterval(controlWatcher);
-    controlWatcher = null;
-    detachRuntime?.();
-    detachRuntime = null;
-    notifyPhase(options.onPhase, 'cleanup', handle, handle.generation);
   }
 }
 

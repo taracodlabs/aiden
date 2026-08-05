@@ -12,7 +12,7 @@
  * tested separately in tests/v4/cli/chatSessionUiPersist.test.ts so
  * a future regression in either layer fails the right test.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -22,26 +22,44 @@ import { createRunStore, type RunStore } from '../../../core/v4/daemon/runStore'
 import { makeTraceQueryTool } from '../../../tools/v4/trace/traceQuery';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 
+let root: string;
+let templatePath: string;
 let tmp: string;
 let db: Database.Database;
 let store: RunStore;
+let fixtureSequence = 0;
 
-beforeEach(async () => {
-  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-trace-query-'));
-  db = new Database(path.join(tmp, 'daemon.db'));
-  runMigrations(db);
-  store = createRunStore({ db });
+beforeAll(async () => {
+  root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-trace-query-'));
+  templatePath = path.join(root, 'template.db');
+  const template = new Database(templatePath);
+  runMigrations(template);
   // Seed a daemon_instances row so the runs FK is satisfied.
-  db.prepare(
+  template.prepare(
     `INSERT OR IGNORE INTO daemon_instances
        (instance_id, pid, hostname, started_at, last_heartbeat, version)
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run('test-inst', process.pid, 'localhost', Date.now(), Date.now(), '4.10.0-test');
+  template.close();
+});
+
+beforeEach(async () => {
+  fixtureSequence += 1;
+  tmp = path.join(root, `case-${fixtureSequence}`);
+  await fs.mkdir(tmp);
+  const databasePath = path.join(tmp, 'daemon.db');
+  await fs.copyFile(templatePath, databasePath);
+  db = new Database(databasePath);
+  store = createRunStore({ db });
 });
 
 afterEach(async () => {
   db.close();
   await fs.rm(tmp, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  await fs.rm(root, { recursive: true, force: true });
 });
 
 // ─── listEventsForSession ─────────────────────────────────────────────

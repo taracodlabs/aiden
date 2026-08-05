@@ -39,6 +39,8 @@ import {
   dockerSessionExec,
 } from '../../../core/v4/dockerSession';
 import { getSandboxConfig } from '../../../core/v4/sandboxConfig';
+import { filterPowerShellProgressClixml } from '../../../core/v4/powerShellClixml';
+import { analyzeCommandIntent } from '../../../moat/dangerousPatterns';
 
 // v4.14.6 — grep-family tools exit 1 to mean "no matches found" — a successful
 // empty search, not a failure. Reporting it as failure made the model re-issue
@@ -83,6 +85,7 @@ export const shellExecTool: ToolHandler = {
     const userOverride = ctx.terminalBackend;
     const effective: 'local' | 'docker' =
       userOverride ?? (config.enabled ? config.defaultBackend : 'local');
+    const intent = analyzeCommandIntent(command, cwd);
     // Lightweight risk hints — same patterns ApprovalEngine uses
     // in smart mode. Kept inline to avoid pulling moat/ into the
     // tool layer.
@@ -97,7 +100,7 @@ export const shellExecTool: ToolHandler = {
     return {
       tool: 'shell_exec',
       args,
-      riskTier: 'dangerous',
+      riskTier: intent.tier,
       sideEffects: [{ type: 'shell_command', command, cwd, backend: effective }],
       detectedRisks: risks,
       summary: `Would run \`${command.length > 80 ? command.slice(0, 80) + '…' : command}\` via ${effective} backend in ${cwd}`,
@@ -157,7 +160,8 @@ export const shellExecTool: ToolHandler = {
     // v4.12 TOC.1 — cap output at the boundary (head40/tail60 + marker, ANSI
     // strip, secret-redact-after-truncation). Under cap → byte-identical.
     const outCap = capToolOutput(result.stdout ?? '');
-    const errCap = capToolOutput(result.stderr ?? '');
+    const filteredStderr = filterPowerShellProgressClixml(result.stderr ?? '').stderr;
+    const errCap = capToolOutput(filteredStderr);
     const omitted = outCap.omittedChars + errCap.omittedChars;
     return attachRawValidationOutput({
       success: result.exitCode === 0 || isGrepNoMatchExit(command, result.exitCode),

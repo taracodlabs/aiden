@@ -20,6 +20,7 @@
  */
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
+import { runtimeTrace } from '../../core/v4/runtimeTrace';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
 import {
@@ -1105,14 +1106,7 @@ export class ChatSession implements ChatSessionLike {
       // summarizing so the user knows where to look for missing data.
       exitHandler = () => {
         if (!this.summarized) {
-          // Best-effort one-liner — stderr because stdout may be torn
-          // down already.
-          try {
-            process.stderr.write(
-              '[aiden] process exiting without session summary — ' +
-              'distillation file not written for this session.\n',
-            );
-          } catch { /* nothing to do */ }
+          runtimeTrace('session', 'summary.missing', { sessionId: this.sessionId });
         }
       };
       process.on('exit', exitHandler);
@@ -2212,6 +2206,22 @@ export class ChatSession implements ChatSessionLike {
     // = exactly one blank row between user input and Aiden header,
     // matching the rhythm Shiva flagged in smoke.
     const turnStartedAt = Date.now();
+    runtimeTrace('turn', 'input.accepted', {
+      turnId,
+      inputChars: userInput.length,
+      persistedInput: inputAlreadyPersisted,
+    });
+    runtimeTrace('turn', 'planning.start', { turnId });
+    let planningSettled = false;
+    const settlePlanning = (reason: 'first_token' | 'tool' | 'provider_complete'): void => {
+      if (planningSettled) return;
+      planningSettled = true;
+      runtimeTrace('turn', 'planning.end', {
+        turnId,
+        reason,
+        durationMs: Date.now() - turnStartedAt,
+      });
+    };
     const userMsg: Message = { role: 'user', content: userInput };
 
     // Apply any queued system prompts (from skill slash commands) by
@@ -2573,11 +2583,7 @@ export class ChatSession implements ChatSessionLike {
 
     const p2aDiagEnabled = process.env.AIDEN_P2A_DIAG === '1';
     const emitP2aDiag = (event: string, data: Record<string, unknown>): void => {
-      if (!p2aDiagEnabled) return;
-      try {
-        const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-        process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, turnId, ...data })}\n`);
-      } catch { /* diagnostics must never affect the turn */ }
+      if (p2aDiagEnabled) runtimeTrace('turn', event, { turnId, ...data });
     };
     let lastHeartbeatAt = Number(process.hrtime.bigint() / 1_000_000n);
     const p2aHeartbeat = p2aDiagEnabled
@@ -2677,6 +2683,11 @@ export class ChatSession implements ChatSessionLike {
         turnContext,
         onFirstDelta: streamingEnabled
           ? wrapTurnId(() => {
+              settlePlanning('first_token');
+              runtimeTrace('turn', 'first_token', {
+                turnId,
+                durationMs: Date.now() - turnStartedAt,
+              });
               stopIndicatorOnce();
               streamingActive = true;
               // v4.11 Slice 1 — a new stream segment is starting (this
@@ -2736,6 +2747,7 @@ export class ChatSession implements ChatSessionLike {
           : undefined,
         onToolCallStart: streamingEnabled
           ? wrapTurnId((call: import('../../providers/v4/types').ToolCallRequest) => {
+              settlePlanning('tool');
               // v4.11 Slice 1 — segment boundary: flush buffered prose
               // before the tool indicator paints, preserving order.
               flushStreamDeltas();
@@ -2789,6 +2801,7 @@ export class ChatSession implements ChatSessionLike {
                   // implementation; cast to any to avoid widening
                   // the public Display surface for one-shot use.
                   (this.opts.display as unknown as { skin: import('./skinEngine').SkinEngine }).skin,
+                  this.opts.display.progressProjection(`turn-${turnId}`),
                 );
               }
               progressBar.update(outputTokens, maxTokens);
@@ -2796,6 +2809,12 @@ export class ChatSession implements ChatSessionLike {
           : undefined,
       }));
       const result = await runAgent();
+      settlePlanning('provider_complete');
+      runtimeTrace('turn', 'final_stream.complete', {
+        turnId,
+        finishReason: result.finishReason,
+        durationMs: Date.now() - turnStartedAt,
+      });
       if (jobEngine && replTaskId && jobAttemptId && jobGeneration !== null && replRunId !== null) {
         currentProviderAttemptLedger()?.reconcileJobLinkage({
           taskId: replTaskId,
@@ -2816,7 +2835,17 @@ export class ChatSession implements ChatSessionLike {
       // Hide the progress bar before any post-stream content
       // (statusFooter, the next prompt) lands on its line.
       progressBar?.hide();
-      if (streamingActive) { flushStreamDeltas(); this.opts.display.streamComplete(); }
+      if (streamingActive) {
+        flushStreamDeltas();
+        const settlementStartedAt = Date.now();
+        runtimeTrace('turn', 'markdown_settlement.start', { turnId });
+        this.opts.display.streamComplete();
+        runtimeTrace('turn', 'markdown_settlement.end', {
+          turnId,
+          durationMs: Date.now() - settlementStartedAt,
+        });
+        runtimeTrace('turn', 'final_frame.queued', { turnId, mode: 'streaming' });
+      }
 
       this.history = result.messages;
       this.compressionCount = result.compressionEvents;
@@ -3159,7 +3188,14 @@ export class ChatSession implements ChatSessionLike {
         // the one-shot reply lands. Idempotent + tool-gated by
         // the shared separator gate.
         const activityDivider = takeToolReplySeparator();
+        const settlementStartedAt = Date.now();
+        runtimeTrace('turn', 'markdown_settlement.start', { turnId });
         this.opts.display.write(this.opts.display.agentTurn(result.finalContent, { activityDivider }));
+        runtimeTrace('turn', 'markdown_settlement.end', {
+          turnId,
+          durationMs: Date.now() - settlementStartedAt,
+        });
+        runtimeTrace('turn', 'final_frame.queued', { turnId, mode: 'complete' });
       }
 
       if (streamingActive && durableEvidenceForDisplay.length > 0) {
@@ -3220,6 +3256,8 @@ export class ChatSession implements ChatSessionLike {
         );
       }
 
+      await this.opts.display.awaitTerminalSettled();
+      runtimeTrace('turn', 'final_frame.accepted', { turnId });
       this.setStatusState({ kind: 'ready' });
       this.lastTurnElapsedMs = Date.now() - turnStartedAt;
       // v4.8.0 Slice 7 — record per-turn outcome for the status dot.
@@ -3247,6 +3285,11 @@ export class ChatSession implements ChatSessionLike {
       // — matches the `\n\n` blank already below `▎ Aiden` header.
       this.opts.display.write(`\n  ${this.opts.display.rule()}\n`);
       this.renderStatusLine();
+      runtimeTrace('turn', 'ready_prompt.emitted', { turnId });
+      runtimeTrace('turn', 'stable_ready', {
+        turnId,
+        durationMs: this.lastTurnElapsedMs,
+      });
       // v4.1.5+ Path A — finalize the loop trace. No-op if the env
       // var is unset OR if the turn didn't trip any threshold. When
       // it DOES emit, the snapshot path goes to a dim status line so
@@ -3838,6 +3881,7 @@ export class ChatSession implements ChatSessionLike {
             'verifying installed version',
             'complete',
           ],
+          projection: this.opts.display.progressProjection('runtime-update'),
         });
         const controller = new AbortController();
         const cancel = (): void => controller.abort();

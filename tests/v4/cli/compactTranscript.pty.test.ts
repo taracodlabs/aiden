@@ -11,6 +11,7 @@ import * as pty from 'node-pty';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { TerminalScreen } from '../harness/terminalScreen';
+import { killPtyIfRunning } from '../harness/ptyProcessLifecycle';
 
 type RunningPty = ReturnType<typeof pty.spawn>;
 let child: RunningPty | null = null;
@@ -41,7 +42,7 @@ function semanticGap(frame: string, before: string, after: string): number {
 
 afterEach(async () => {
   if (child) {
-    try { child.kill(); } catch { /* already exited */ }
+    try { killPtyIfRunning(child); } catch { /* already exited */ }
     child = null;
   }
   await new Promise((resolve) => setTimeout(resolve, 500));
@@ -101,6 +102,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
       let timeout: ReturnType<typeof setTimeout> | null = null;
       let exitProbe: ReturnType<typeof setInterval> | null = null;
       let settled = false;
+      let observedProcessExitAt: number | null = null;
       let dataSubscription: { dispose(): void } | null = null;
       let exitSubscription: { dispose(): void } | null = null;
       const childPid = child!.pid;
@@ -123,8 +125,13 @@ describe.skipIf(process.platform !== 'win32')('built CLI compact hybrid transcri
         exitProbe = setInterval(() => {
           try {
             if (processTableContains(childPid)) return;
-            if (raw.includes('Goodbye.')) finish();
-            else finish(new Error('compact transcript process exited before clean CLI shutdown'));
+            if (raw.includes('Goodbye.')) {
+              finish();
+              return;
+            }
+            observedProcessExitAt ??= Date.now();
+            if (Date.now() - observedProcessExitAt < 1_500) return;
+            finish(new Error('compact transcript process exited before clean CLI shutdown output drained'));
           } catch (error) {
             finish(error as Error);
           }

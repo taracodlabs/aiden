@@ -152,6 +152,32 @@ describe('startProgressBar â€” stream behavior', () => {
 });
 
 describe('startPhaseIndicator â€” truthful indeterminate updater status', () => {
+  it('uses the owned projection for interactive updates and settlement', () => {
+    const cap = captureStream();
+    const projected: string[] = [];
+    const settled: string[] = [];
+    const indicator = startPhaseIndicator({
+      label: 'Updating',
+      phases: ['installing', 'verifying'],
+      out: cap.stream,
+      isTTY: true,
+      env: { NO_COLOR: '1' },
+      tickMs: 60_000,
+      projection: {
+        update: (line) => { projected.push(line); return true; },
+        clear: () => true,
+        settle: (line) => { settled.push(line); return true; },
+      },
+    });
+
+    indicator.setPhase('verifying');
+    indicator.complete('Update verified.');
+
+    expect(projected.join('\n')).toContain('verifying');
+    expect(settled).toEqual(['✓ Update verified.']);
+    expect(cap.chunks).toEqual([]);
+  });
+
   it('renders phases without a fabricated numeric percentage', () => {
     const cap = captureStream();
     const indicator = startPhaseIndicator({
