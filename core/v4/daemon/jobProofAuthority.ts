@@ -36,6 +36,7 @@ export interface ClaimRecord {
   sourceReferences: ClaimSourceReference[];
   requiredValidation: ClaimValidationRequirement[];
   requiredEvidenceCategories: string[];
+  effectIds: string[];
 }
 
 export interface EvidenceRecord {
@@ -74,6 +75,7 @@ export interface JobProofAuthority {
     sourceReferences?: ClaimSourceReference[];
     requiredValidation?: ClaimValidationRequirement[];
     requiredEvidenceCategories?: string[];
+    effectIds?: string[];
   }): ClaimRecord;
   recordEvidence(command: {
     jobId: string; attemptId: string; generation: number; fenceToken: string;
@@ -104,6 +106,7 @@ type ClaimRow = {
   category: ClaimCategory; statement: string; required: number; state: ClaimState;
   repository_snapshot_id: string | null; source_references_json: string;
   required_validation_json: string; required_evidence_categories_json: string;
+  effect_ids_json: string;
 };
 type EvidenceRow = {
   evidence_id: string; job_id: string; attempt_id: string; generation: number; effect_id: string | null;
@@ -122,6 +125,7 @@ const mapClaim = (row: ClaimRow): ClaimRecord => ({
   sourceReferences: JSON.parse(row.source_references_json) as ClaimSourceReference[],
   requiredValidation: JSON.parse(row.required_validation_json) as ClaimValidationRequirement[],
   requiredEvidenceCategories: JSON.parse(row.required_evidence_categories_json) as string[],
+  effectIds: JSON.parse(row.effect_ids_json) as string[],
 });
 const mapEvidence = (row: EvidenceRow): EvidenceRecord => ({
   evidenceId: row.evidence_id, jobId: row.job_id, attemptId: row.attempt_id,
@@ -196,18 +200,31 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       const sourceReferences = validateSourceReferences(command.jobId, repositorySnapshotId, command.sourceReferences ?? []);
       const requiredValidation = command.requiredValidation ?? [];
       const requiredEvidenceCategories = [...new Set(command.requiredEvidenceCategories ?? [])].sort();
+      const effectIds = [...new Set(command.effectIds ?? [])].sort();
+      for (const effectId of effectIds) {
+        const effect = db.prepare(
+          `SELECT job_id, attempt_id, generation FROM side_effect_ledger WHERE key = ?`,
+        ).get(effectId) as { job_id: string; attempt_id: string; generation: number } | undefined;
+        if (!effect || effect.job_id !== command.jobId) {
+          throw new Error('Claim Effect does not belong to the Job');
+        }
+        if (command.attemptId && command.generation !== null && command.generation !== undefined
+          && (effect.attempt_id !== command.attemptId || effect.generation !== command.generation)) {
+          throw new Error('Claim Effect does not match the bound Attempt');
+        }
+      }
       const claimId = id('claim');
       db.prepare(
         `INSERT INTO job_claims
            (claim_id, job_id, attempt_id, generation, category, statement, required, state,
             repository_snapshot_id,source_references_json,required_validation_json,
-            required_evidence_categories_json,created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified', ?, ?, ?, ?, ?)`,
+            required_evidence_categories_json,effect_ids_json,created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'unverified', ?, ?, ?, ?, ?, ?)`,
       ).run(
         claimId, command.jobId, command.attemptId ?? null, command.generation ?? null,
         command.category, command.statement, command.required === true ? 1 : 0,
         repositorySnapshotId, JSON.stringify(sourceReferences), JSON.stringify(requiredValidation),
-        JSON.stringify(requiredEvidenceCategories), command.now ?? Date.now(),
+        JSON.stringify(requiredEvidenceCategories), JSON.stringify(effectIds), command.now ?? Date.now(),
       );
       return authority.listClaims(command.jobId).find((claim) => claim.claimId === claimId)!;
     },
@@ -290,6 +307,17 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       const now = command.now ?? Date.now();
       db.transaction(() => {
         const linkedEvidence: EvidenceRow[] = [];
+        const requiredEffectIds = JSON.parse(claim.effect_ids_json) as string[];
+        const requiredEffects = new Set(requiredEffectIds);
+        for (const effectId of requiredEffectIds) {
+          const effect = db.prepare(
+            `SELECT job_id, attempt_id, generation FROM side_effect_ledger WHERE key = ?`,
+          ).get(effectId) as { job_id: string; attempt_id: string; generation: number } | undefined;
+          if (!effect || effect.job_id !== claim.job_id
+            || effect.attempt_id !== command.attemptId || effect.generation !== command.generation) {
+            throw new Error('Claim Effect authority no longer matches the proving Attempt');
+          }
+        }
         for (const evidenceId of command.evidenceIds) {
           const evidence = db.prepare('SELECT * FROM job_evidence WHERE evidence_id = ?').get(evidenceId) as EvidenceRow | undefined;
           if (!evidence || evidence.job_id !== claim.job_id || evidence.attempt_id !== command.attemptId || evidence.generation !== command.generation) {
@@ -299,6 +327,9 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
             throw new Error('Evidence snapshot does not match the source-bound Claim');
           }
           if (evidence.fresh_until !== null && evidence.fresh_until < now) throw new Error('Stale evidence cannot prove a claim');
+          if (requiredEffects.size > 0 && (!evidence.effect_id || !requiredEffects.has(evidence.effect_id))) {
+            throw new Error('Evidence does not match a required Claim Effect');
+          }
           linkedEvidence.push(evidence);
           db.prepare('INSERT OR IGNORE INTO claim_evidence (claim_id, evidence_id, created_at) VALUES (?, ?, ?)')
             .run(command.claimId, evidenceId, now);
@@ -306,6 +337,7 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
         if (command.state === 'verified' && (
           linkedEvidence.length === 0
           || linkedEvidence.some((item) => item.verification_result !== 'verified' || item.coverage !== 'full')
+          || requiredEffectIds.some((effectId) => !linkedEvidence.some((item) => item.effect_id === effectId))
         )) {
           throw new Error('Verified claims require complete verified evidence');
         }
@@ -361,9 +393,6 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       if (existing) return existing;
       assertAttempt(command.jobId, command.attemptId, command.generation, command.fenceToken);
       const claims = listClaims(command.jobId).filter((claim) => claim.category === 'contract' && claim.required);
-      const evidence = listEvidence(command.jobId).filter(
-        (item) => item.attemptId === command.attemptId && item.generation === command.generation && !item.late,
-      );
       const unresolvedEffect = db.prepare(
         `SELECT 1 FROM side_effect_ledger WHERE job_id = ?
           AND effect_state IN ('unknown','partial','started') LIMIT 1`,
@@ -371,10 +400,9 @@ export function createJobProofAuthority(db: Db): JobProofAuthority {
       const verifiedCount = claims.filter((claim) => claim.state === 'verified').length;
       const failedCount = claims.filter((claim) => claim.state === 'failed').length;
       const unknownCount = claims.filter((claim) => claim.state === 'unknown' || claim.state === 'unverified' || claim.state === 'partial').length;
-      const incompleteCoverage = evidence.some((item) => item.coverage !== 'full' || item.verificationResult === 'unknown');
       let verdict: FinalVerdict;
       if (command.cancelled) verdict = 'cancelled';
-      else if (unresolvedEffect || unknownCount > 0 || incompleteCoverage) verdict = verifiedCount > 0 ? 'partially_verified' : 'unknown';
+      else if (unresolvedEffect || unknownCount > 0) verdict = verifiedCount > 0 ? 'partially_verified' : 'unknown';
       else if (failedCount > 0) verdict = verifiedCount > 0 ? 'partially_verified' : 'failed';
       else if (claims.length > 0 && verifiedCount === claims.length) verdict = 'verified';
       else verdict = 'unknown';

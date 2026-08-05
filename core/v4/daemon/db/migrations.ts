@@ -2288,6 +2288,13 @@ function applyV41(db: Database.Database): void {
   ]);
 }
 
+/** Exact durable Effect bindings for proof Claims. */
+function applyV42(db: Database.Database): void {
+  addMissingColumns(db, 'job_claims', [
+    ['effect_ids_json', "TEXT NOT NULL DEFAULT '[]'"],
+  ]);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2330,6 +2337,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 39, name: 'Worker provider restart and reconciliation', apply: applyV39 },
   { version: 40, name: 'bounded parallel read-only Worker groups', apply: applyV40 },
   { version: 41, name: 'durable TriggerBus claim fencing', apply: applyV41 },
+  { version: 42, name: 'exact Claim Effect bindings', apply: applyV42 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

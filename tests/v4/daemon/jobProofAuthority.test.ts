@@ -185,6 +185,103 @@ describe('JobProofAuthority', () => {
     }).verdict).toBe('verified');
   });
 
+  it('does not let incomplete optional capture poison independently verified required claims', () => {
+    const job = activeJob('optional-capture');
+    const claim = jobs.proof.createClaim({
+      jobId: job.jobId, category: 'contract', statement: 'required output is exact', required: true,
+      requiredEvidenceCategories: ['filesystem.readback'],
+    });
+    jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+      source: 'optional.capture', producer: 'test', observedAt: 410, coverage: 'unknown',
+      verificationResult: 'unknown', payload: { captured: false }, now: 411,
+    });
+    const required = jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+      source: 'filesystem.readback', producer: 'test', observedAt: 412, coverage: 'full',
+      verificationResult: 'verified', payload: { exact: true }, now: 413,
+    });
+    jobs.proof.checkClaim({
+      claimId: claim.claimId, attemptId: job.attemptId, generation: job.generation,
+      evidenceIds: [required.evidenceId], state: 'verified', now: 414,
+    });
+
+    expect(jobs.proof.finalize({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation,
+      fenceToken: job.fenceToken, now: 415,
+    }).verdict).toBe('verified');
+  });
+
+  it('rejects evidence linked to a different durable Effect', () => {
+    const job = activeJob('effect-binding');
+    db.prepare(
+      `INSERT INTO side_effect_ledger
+         (key, task_id, step, tool, args_hash, status, attempted_at, job_id, attempt_id,
+          generation, effect_state)
+       VALUES (?, ?, ?, 'shell_exec', ?, 'confirmed', ?, ?, ?, ?, 'committed')`,
+    ).run('effect_expected', job.jobId, 0, 'digest-a', 420, job.jobId, job.attemptId, job.generation);
+    db.prepare(
+      `INSERT INTO side_effect_ledger
+         (key, task_id, step, tool, args_hash, status, attempted_at, job_id, attempt_id,
+          generation, effect_state)
+       VALUES (?, ?, ?, 'shell_exec', ?, 'confirmed', ?, ?, ?, ?, 'committed')`,
+    ).run('effect_other', job.jobId, 1, 'digest-b', 421, job.jobId, job.attemptId, job.generation);
+    const claim = jobs.proof.createClaim({
+      jobId: job.jobId, category: 'contract', statement: 'expected Effect is verified', required: true,
+      effectIds: ['effect_expected'],
+    });
+    const unrelated = jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+      effectId: 'effect_other', source: 'effect.readback', producer: 'test', observedAt: 422,
+      coverage: 'full', verificationResult: 'verified', payload: { exact: true }, now: 423,
+    });
+
+    expect(() => jobs.proof.checkClaim({
+      claimId: claim.claimId, attemptId: job.attemptId, generation: job.generation,
+      evidenceIds: [unrelated.evidenceId], state: 'verified', now: 424,
+    })).toThrow(/Effect/);
+  });
+
+  it('verifies the complete file, hash, and repository acceptance workflow', () => {
+    const job = activeJob('acceptance-workflow');
+    const definitions = [
+      ['input.txt has exact content', 'filesystem.readback', { path: 'input.txt', content: 'Aiden proof input' }],
+      ['result.json has exact content', 'filesystem.readback', { path: 'result.json', exact: true }],
+      ['input.txt SHA-256 matches', 'filesystem.sha256', { path: 'input.txt', sha256: 'expected-sha256' }],
+      ['repository remains unchanged', 'repository.diff', { changed: [] }],
+    ] as const;
+    const claims = definitions.map(([statement, source]) => jobs.proof.createClaim({
+      jobId: job.jobId,
+      category: 'contract',
+      statement,
+      required: true,
+      requiredEvidenceCategories: [source],
+    }));
+    jobs.proof.recordEvidence({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+      source: 'optional.capture', producer: 'test', observedAt: 430, coverage: 'partial',
+      verificationResult: 'unknown', payload: { helper: 'unavailable' }, now: 431,
+    });
+    definitions.forEach(([_, source, payload], index) => {
+      const evidence = jobs.proof.recordEvidence({
+        jobId: job.jobId, attemptId: job.attemptId, generation: job.generation, fenceToken: job.fenceToken,
+        source, producer: 'test', observedAt: 432 + index, coverage: 'full',
+        verificationResult: 'verified', payload, now: 440 + index,
+      });
+      jobs.proof.checkClaim({
+        claimId: claims[index]!.claimId, attemptId: job.attemptId, generation: job.generation,
+        evidenceIds: [evidence.evidenceId], state: 'verified', now: 450 + index,
+      });
+    });
+
+    const verdict = jobs.proof.finalize({
+      jobId: job.jobId, attemptId: job.attemptId, generation: job.generation,
+      fenceToken: job.fenceToken, now: 460,
+    });
+    expect(verdict.verdict).toBe('verified');
+    expect(verdict.summary).toMatchObject({ requiredClaims: 4, verifiedClaims: 4 });
+  });
+
   it('keeps an unresolved unsafe Effect from producing a verified verdict', () => {
     const job = activeJob('unsafe-unknown');
     const claim = jobs.proof.createClaim({
