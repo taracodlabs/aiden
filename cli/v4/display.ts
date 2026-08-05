@@ -2958,7 +2958,6 @@ export class Display {
       this.streamProjectionId = `assistant-stream:${++this.streamProjectionSequence}`;
       this.streamProjectionHeaderPending = true;
       this.streamProjectionActivityDividerPending = projectedOwner !== null && activityDivider;
-      this.uiEventsFiredThisTurn = false;
       // agentHeader emits trailing `\n\n`; cursor is at col 0 of a fresh
       // line, so the very next chunk needs the leading indent.
       this.streamLastEndedNewline = true;
@@ -3082,14 +3081,6 @@ export class Display {
     if (!this.out.isTTY) return;
     if (process.env.AIDEN_NO_REFORMAT === '1') return;
     if (lines === 0) return;
-    // v4.8.0 Phase 2.3 fix — when ui_* events painted this turn, skip the
-    // cursor-up + erase-to-end-of-screen rerender. The eraser wipes
-    // anything below where the stream started, including our event rows.
-    // Tradeoff: assistant text on a ui-event turn stays raw (no in-place
-    // markdown beautification). Acceptable — when the model is using
-    // structured ui events, it's signalling state, not relying on prose
-    // formatting.
-    if (this.uiEventsFiredThisTurn) return;
     // Cheap structural heuristic — only re-render when formatting
     // actually helps. Plain prose chunks stay raw (no flicker).
     //
@@ -3253,7 +3244,6 @@ export class Display {
       this.streamHeaderShown = false;
       this.streamLastEndedNewline = false;
       this.streamProjectionHeaderPending = false;
-      this.uiEventsFiredThisTurn = false;
       return;
     }
     if (!this.streamLastEndedNewline) {
@@ -3270,8 +3260,6 @@ export class Display {
     this.streamLineCount = 0;
     this.streamHeaderShown = false;
     this.streamLastEndedNewline = false;
-    // v4.8.0 Phase 2.3 fix — turn ends; clear the ui-fired flag.
-    this.uiEventsFiredThisTurn = false;
   }
 
   /**
@@ -3315,12 +3303,6 @@ export class Display {
   private uiTaskTerminalIds = new Set<string>();
   private structuredActivityIds = new Set<string>();
 
-  // v4.8.0 Phase 2.3 fix — set true by renderUiEvent; tryRerenderInPlace
-  // early-returns when set so the cursor-up + erase-to-end-of-screen
-  // sequence can't wipe our ui_* rows. Reset at stream lifecycle
-  // boundaries (streamPartial first-delta init + streamComplete).
-  private uiEventsFiredThisTurn = false;
-
   /** Render semantic ui_* events. Stable task IDs replace active cards in place. */
   /**
    * v4.8.0 Phase 2.3 fix-2 — reset the per-turn ui-event flag. Called
@@ -3331,19 +3313,11 @@ export class Display {
    * authoritative reset for turn-start.
    */
   resetUiTurnState(): void {
-    this.uiEventsFiredThisTurn = false;
     this.structuredActivityIds.clear();
   }
 
   renderUiEvent(name: string, args: Record<string, unknown>): void {
     if (!this.out.isTTY) return;
-    // v4.8.0 Phase 2.3 fix — Option C. The post-stream markdown rerender
-    // (`tryRerenderInPlace`) does `cursor-up-N + erase-to-end-of-screen`,
-    // which wipes anything painted between stream start and stream end —
-    // including our ui_* rows. Mark the turn so the rerender skips this
-    // turn entirely. Resets when the next streaming turn begins (see
-    // streamPartial header init) and on streamComplete cleanup.
-    this.uiEventsFiredThisTurn = true;
     if (name === 'ui_task_update')      { this.renderUiTaskUpdate(args);      return; }
     if (name === 'ui_task_done')        { this.renderUiTaskDone(args);        return; }
     if (name === 'ui_command_result')   { this.renderUiCommandResult(args);   return; }

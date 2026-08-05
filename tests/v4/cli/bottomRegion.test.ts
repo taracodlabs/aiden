@@ -642,6 +642,28 @@ describe('settled activity row spacing', () => {
     expectActivityAnswerBoundary(screen, ['completed', 'second.ts'], 'Streamed activity answer.', false);
   });
 
+  it('settles split markdown atomically after resize and activity projection', async () => {
+    const { display, screen, stream } = createDisplay(80, 24);
+    display.setStatusFooter('provider · runtime · ready');
+    display.setIdleComposer('', 'Type your message');
+
+    display.streamPartial('# Before resize\n```');
+    stream.resize(44, 24);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    display.streamPartial('ts\nconst value = 1;\n```\n');
+    display.renderUiEvent('ui_toast', { kind: 'info', message: 'Evidence recorded' });
+    display.streamPartial('## Final result\n- Run `npm test`\n- Unicode 世界\n');
+    display.streamComplete();
+
+    const rendered = screen.snapshot();
+    expect(rendered.match(/FINAL RESULT/giu)).toHaveLength(1);
+    expect(rendered.match(/Evidence recorded/gu)).toHaveLength(1);
+    expect(rendered.match(/npm test/gu)).toHaveLength(1);
+    expect(rendered).not.toContain('```');
+    expect(rendered.match(/▲ You/gu)).toHaveLength(1);
+    expect(rendered.match(/provider · runtime/gu)).toHaveLength(1);
+  });
+
   it('keeps the activity-to-answer transition bounded at narrow width', () => {
     const { display, screen } = prepare(44);
     display.toolRow('file_read', { path: 'src/narrow-transition.ts' }).ok(12);

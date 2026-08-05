@@ -773,6 +773,21 @@ describe('Display v4.1.3-repl-polish toolRow', () => {
     expect(stripAnsi(totalAtCompletion).toLowerCase()).toContain('chunk 3');
   });
 
+  it('settles final markdown after an activity event interrupts the stream', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.streamPartial('# Before activity\n- first item\n');
+    d.renderUiEvent('ui_toast', { kind: 'info', message: 'Activity recorded' });
+    d.streamPartial('# After activity\n- final item\n');
+    chunks.length = 0;
+
+    d.streamComplete();
+
+    const completion = chunks.join('');
+    expect(completion).toMatch(/\x1b\[\d+F\x1b\[2K/);
+    expect(stripAnsi(completion).toLowerCase()).toContain('after activity');
+    expect(stripAnsi(completion)).toContain('final item');
+  });
+
   it('plain prose (no structure): no eraser fires on tool interrupt or streamComplete', () => {
     const { d, chunks } = captureDisplay({ tty: true });
     // No headers, lists, fences, blockquotes — heuristic should bail.
