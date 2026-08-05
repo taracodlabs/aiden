@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import path from 'node:path';
 import os from 'node:os';
 import * as pty from 'node-pty';
+import { killPtyIfRunning } from '../harness/ptyProcessLifecycle';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 
 type RunningPty = ReturnType<typeof pty.spawn>;
@@ -33,7 +34,7 @@ function stripAnsi(value: string): string {
 
 afterEach(async () => {
   for (const child of children) {
-    try { child.kill(); } catch { /* already exited */ }
+    try { killPtyIfRunning(child); } catch { /* already exited */ }
   }
   children.clear();
   await new Promise((resolve) => setTimeout(resolve, 300));

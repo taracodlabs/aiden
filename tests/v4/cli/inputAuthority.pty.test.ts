@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import path from 'node:path';
 import * as pty from 'node-pty';
+import { killPtyIfRunning } from '../harness/ptyProcessLifecycle';
 
 type RunningPty = ReturnType<typeof pty.spawn>;
 
@@ -9,7 +10,7 @@ const children = new Set<RunningPty>();
 
 afterEach(async () => {
   for (const child of children) {
-    try { child.kill(); } catch { /* already exited */ }
+    try { killPtyIfRunning(child); } catch { /* already exited */ }
   }
   children.clear();
   await new Promise((resolve) => setTimeout(resolve, 500));

@@ -3,6 +3,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as pty from 'node-pty';
+import { killPtyIfRunning } from '../harness/ptyProcessLifecycle';
 
 import { ProviderAttemptLedger } from '../../../core/v4/usageLedger';
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
@@ -38,7 +39,7 @@ function submit(terminal: RunningPty, text: string): void {
 
 afterEach(async () => {
   if (child) {
-    try { child.kill(); } catch { /* already exited */ }
+    try { killPtyIfRunning(child); } catch { /* already exited */ }
     child = null;
   }
   if (provider) {

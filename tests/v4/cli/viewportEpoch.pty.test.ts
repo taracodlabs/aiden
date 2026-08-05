@@ -7,6 +7,7 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import * as pty from 'node-pty';
+import { killPtyIfRunning } from '../harness/ptyProcessLifecycle';
 
 import { COMPOSER_READY_TOKEN } from '../../../cli/v4/composerReadiness';
 import { startMockProvider, type MockProvider } from '../harness/mockProvider';
@@ -47,7 +48,7 @@ function assertClearedFrame(screen: TerminalScreen, oldRows: readonly string[]):
 
 afterEach(async () => {
   if (child) {
-    try { child.kill(); } catch { /* already exited */ }
+    try { killPtyIfRunning(child); } catch { /* already exited */ }
     child = null;
   }
   await new Promise((resolve) => setTimeout(resolve, 500));
