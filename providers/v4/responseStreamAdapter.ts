@@ -1,3 +1,5 @@
+import { runtimeTrace } from '../../core/v4/runtimeTrace';
+
 /**
  * Aiden v4 — local-first AI agent
  * Copyright (C) 2026 Shiva Deore (Taracod)
@@ -518,11 +520,7 @@ export class ResponseStreamAdapter implements ProviderAdapter {
 }
 
 function p2aDiag(event: string, data: Record<string, unknown>): void {
-  if (process.env.AIDEN_P2A_DIAG !== '1') return;
-  try {
-    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
-  } catch { /* diagnostics must never affect provider calls */ }
+  runtimeTrace('response-stream', event, data);
 }
 
 // ── Encoders ────────────────────────────────────────────────────────────
@@ -718,11 +716,7 @@ function parseToolArgs(s: string): Record<string, unknown> {
       ? (v as Record<string, unknown>)
       : {};
   } catch {
-    // eslint-disable-next-line no-console
-    console.warn(
-      '[responseStreamAdapter] function_call.arguments is not valid JSON; ' +
-      'falling back to {}',
-    );
+    runtimeTrace('response-stream', 'tool.arguments.invalid', {});
     return {};
   }
 }
@@ -938,8 +932,7 @@ function handleSseEvent(
 
     default:
       if (debug) {
-        // eslint-disable-next-line no-console
-        console.warn(`[responseStreamAdapter] unknown SSE event: ${type}`);
+        runtimeTrace('response-stream', 'event.unknown', { type });
       }
   }
 }

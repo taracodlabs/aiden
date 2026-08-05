@@ -18,6 +18,7 @@
  */
 
 import type { Display } from './display';
+import { runtimeTrace } from '../../core/v4/runtimeTrace';
 import { ActivityRegistry, type ModalActivityOptions } from './activityRegistry';
 import { boxBottom, boxLine, boxTopTitled, truncateVisible, visibleLength } from './box';
 import type {
@@ -939,11 +940,7 @@ Reply with ONE word: safe, caution, or dangerous.`;
 }
 
 function p2aDiag(event: string, data: Record<string, unknown>): void {
-  if (process.env.AIDEN_P2A_DIAG !== '1') return;
-  try {
-    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
-  } catch { /* diagnostics must never affect callbacks */ }
+  runtimeTrace('callbacks', event, data);
 }
 
 // Tier-3.1 (v4.1-tier3.1): replaced 🟢/🟡/🔴 emoji badges with

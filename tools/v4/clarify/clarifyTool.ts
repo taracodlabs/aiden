@@ -1,3 +1,5 @@
+import { runtimeTrace } from '../../../core/v4/runtimeTrace';
+
 /**
  * Copyright (c) 2026 Shiva Deore (Taracod).
  * Licensed under AGPL-3.0. See LICENSE for details.
@@ -125,9 +127,5 @@ export function makeClarifyTool(): ToolHandler {
 }
 
 function p2aDiag(event: string, data: Record<string, unknown>): void {
-  if (process.env.AIDEN_P2A_DIAG !== '1') return;
-  try {
-    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
-  } catch { /* diagnostics must never affect clarify */ }
+  runtimeTrace('clarify', event, data);
 }

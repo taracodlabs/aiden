@@ -1,3 +1,5 @@
+import { runtimeTrace } from './runtimeTrace';
+
 /**
  * Aiden v4 — local-first AI agent
  * Copyright (C) 2026 Shiva Deore (Taracod)
@@ -1629,9 +1631,13 @@ export class AidenAgent {
           const tokIn = output.usage?.inputTokens ?? 0;
           const tokOut = output.usage?.outputTokens ?? 0;
           const nTools = output.toolCalls?.length ?? 0;
-          process.stderr.write(
-            `[perf:iter=${turnCount + 1} llm=${llmMs}ms tokens_in=${tokIn} tokens_out=${tokOut} toolCalls=${nTools}]\n`,
-          );
+          runtimeTrace('performance', 'provider.complete', {
+            iteration: turnCount + 1,
+            durationMs: llmMs,
+            inputTokens: tokIn,
+            outputTokens: tokOut,
+            toolCallCount: nTools,
+          });
         }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
@@ -1974,9 +1980,14 @@ export class AidenAgent {
               const toolMs = Date.now() - _toolStartedAt;
               const ok = result.error == null;
               const src = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
-              process.stderr.write(
-                `[perf:iter=${turnCount + 1} tool=${call.name} ms=${toolMs} src=${src} ok=${ok} attempt=${attemptNo}]\n`,
-              );
+              runtimeTrace('performance', 'tool.complete', {
+                iteration: turnCount + 1,
+                tool: call.name,
+                durationMs: toolMs,
+                source: src,
+                ok,
+                attempt: attemptNo,
+              });
             }
             // v4.11 Slice 1 (verifier→honesty bridge) — compute the
             // per-tool verification ALWAYS (pure/synchronous) so the
@@ -2810,11 +2821,7 @@ function lastUserMessageContent(history: Message[]): string {
 }
 
 function p2aDiag(event: string, data: Record<string, unknown>): void {
-  if (process.env.AIDEN_P2A_DIAG !== '1') return;
-  try {
-    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
-  } catch { /* diagnostics must never affect the agent loop */ }
+  runtimeTrace('agent-loop', event, data);
 }
 
 function resolvesPendingClarification(content: string): boolean {

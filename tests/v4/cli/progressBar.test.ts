@@ -124,6 +124,27 @@ describe('createProgressBar (v4.1.4 Part 1.6)', () => {
     expect(chunks.length).toBeGreaterThan(after100);
   });
 
+  it('routes owned interactive updates without writing cursor controls to the stream', () => {
+    const { out, chunks } = makeStream(true);
+    const projected: string[] = [];
+    let cleared = 0;
+    const skin = new SkinEngine({ forceMono: true });
+    const bar = createProgressBar(out, skin, {
+      update: (line) => { projected.push(line); return true; },
+      clear: () => { cleared += 1; return true; },
+      settle: () => false,
+    });
+
+    bar.update(100, 1_000);
+    bar.update(200, 1_000);
+    bar.hide();
+
+    expect(projected).toHaveLength(2);
+    expect(stripAnsi(projected.at(-1)!)).toContain('200/1K tokens');
+    expect(cleared).toBe(1);
+    expect(chunks).toEqual([]);
+  });
+
   it('Non-TTY: completely silent — no writes regardless of updates', () => {
     const { out, chunks } = makeStream(false);
     const skin = new SkinEngine({ forceMono: true });

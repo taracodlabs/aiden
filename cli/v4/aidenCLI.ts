@@ -2877,7 +2877,7 @@ export async function buildAgentRuntime(
   installReplCrashHandlers({
     log: (level, msg, meta) => bootLogger.child('crash')[level](msg, meta),
     notify: (line) => {
-      try { process.stderr.write(`\n${line}\n`); } catch { /* stderr torn down */ }
+      try { display.writeError(`\n${line}\n`); } catch { /* display torn down */ }
     },
   });
   // Wire the gateway singleton's logger BEFORE registering its processor

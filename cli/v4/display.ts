@@ -2350,6 +2350,10 @@ export class Display {
   }
 
   writeError(text: string): void {
+    if (this.composerSurfacePauseDepth === 0 && this.composerLane?.isActive()) {
+      this.composerLane.writeAbove(text);
+      return;
+    }
     this.err.write(text);
   }
 
@@ -2834,6 +2838,34 @@ export class Display {
 
   removeDurableActivity(id: string): void {
     this.composerLane?.removeLiveRow(`durable:${id}`);
+  }
+
+  progressProjection(id: string): {
+    update(line: string): boolean;
+    clear(): boolean;
+    settle(line: string): boolean;
+  } {
+    const rowId = `progress:${id}`;
+    return {
+      update: (line) => {
+        const owner = this.projectedStreamOwner();
+        if (!owner) return false;
+        owner.setLiveRow(rowId, line);
+        return true;
+      },
+      clear: () => {
+        const owner = this.projectedStreamOwner();
+        if (!owner) return false;
+        owner.removeLiveRow(rowId);
+        return true;
+      },
+      settle: (line) => {
+        const owner = this.projectedStreamOwner();
+        if (!owner) return false;
+        owner.settleLiveRow(rowId, line);
+        return true;
+      },
+    };
   }
 
   /** Clear the visual transcript while retaining composer and status state. */

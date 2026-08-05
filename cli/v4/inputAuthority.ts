@@ -5,6 +5,7 @@
 /** Render-free exclusive-input lease for prompts that run during a turn. */
 import type { TurnKey } from './turnInputListener';
 import { turnIdleDiagnostic } from './turnIdleDiagnostics';
+import { runtimeTrace } from '../../core/v4/runtimeTrace';
 
 export type RawKeyHandler = (str: string | undefined, key: TurnKey) => void;
 export type InputOwner = 'during_turn' | 'approval' | 'skill_prompt' | 'clarify';
@@ -361,9 +362,5 @@ function defaultEmitKeypress(stdin: RawStdinLike): void {
 }
 
 function p2aDiag(event: string, data: Record<string, unknown>): void {
-  if (process.env.AIDEN_P2A_DIAG !== '1') return;
-  try {
-    const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-    process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, ...data })}\n`);
-  } catch { /* diagnostics must never affect input ownership */ }
+  runtimeTrace('input', event, data);
 }

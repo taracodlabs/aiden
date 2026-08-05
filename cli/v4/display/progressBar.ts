@@ -69,6 +69,12 @@ export interface ProgressBarHandle {
   getTokens(): { output: number; max: number | undefined };
 }
 
+export interface ProgressProjection {
+  update(line: string): boolean;
+  clear(): boolean;
+  settle(line: string): boolean;
+}
+
 /**
  * Number of bar cells. 10 cells gives clean fractions (every 10% of
  * fill ratio == one cell). Wider bars feel noisy at the standard
@@ -106,6 +112,7 @@ const EMPTY  = '░';
 export function createProgressBar(
   out:  NodeJS.WriteStream,
   skin: SkinEngine,
+  projection?: ProgressProjection,
 ): ProgressBarHandle {
   const isTty = !!out.isTTY;
 
@@ -114,6 +121,8 @@ export function createProgressBar(
   let printed     = false;
   let hidden      = false;
   let lastPaintTokens = -1;
+  let projected = false;
+  let rawPrinted = false;
 
   const buildLine = (): string => {
     // Fill ratio: 0..1, then snap to a cell count 0..BAR_CELLS.
@@ -149,23 +158,32 @@ export function createProgressBar(
 
   const paint = (): void => {
     if (!isTty || hidden) return;
-    if (printed) {
+    const line = buildLine();
+    if (projection?.update(line)) {
+      printed = true;
+      projected = true;
+      lastPaintTokens = outputTokens;
+      return;
+    }
+    if (rawPrinted) {
       // Subsequent paint: walk up to the bar's row, clear it, rewrite,
       // drop a newline so the cursor lands on the row BELOW the bar.
-      out.write(`${ANSI_UP_ERASE}${buildLine()}\n`);
+      out.write(`${ANSI_UP_ERASE}${line}\n`);
     } else {
       // First paint: just write the bar + `\n`. Cursor moves to the
       // row below, ready for subsequent walk-up-and-erase ticks.
-      out.write(`${buildLine()}\n`);
+      out.write(`${line}\n`);
       printed = true;
+      rawPrinted = true;
     }
     lastPaintTokens = outputTokens;
   };
 
   const erase = (): void => {
+    if (projected && projection?.clear()) return;
     // Walk up to the bar's row and clear it. No trailing `\n` — the
     // caller will write content here and include its own newline.
-    if (isTty && printed) out.write(ANSI_UP_ERASE);
+    if (isTty && rawPrinted) out.write(ANSI_UP_ERASE);
   };
 
   return {

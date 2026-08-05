@@ -20,6 +20,7 @@
  */
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
+import { runtimeTrace } from '../../core/v4/runtimeTrace';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
 import {
@@ -1105,14 +1106,7 @@ export class ChatSession implements ChatSessionLike {
       // summarizing so the user knows where to look for missing data.
       exitHandler = () => {
         if (!this.summarized) {
-          // Best-effort one-liner — stderr because stdout may be torn
-          // down already.
-          try {
-            process.stderr.write(
-              '[aiden] process exiting without session summary — ' +
-              'distillation file not written for this session.\n',
-            );
-          } catch { /* nothing to do */ }
+          runtimeTrace('session', 'summary.missing', { sessionId: this.sessionId });
         }
       };
       process.on('exit', exitHandler);
@@ -2573,11 +2567,7 @@ export class ChatSession implements ChatSessionLike {
 
     const p2aDiagEnabled = process.env.AIDEN_P2A_DIAG === '1';
     const emitP2aDiag = (event: string, data: Record<string, unknown>): void => {
-      if (!p2aDiagEnabled) return;
-      try {
-        const monoMs = Number(process.hrtime.bigint() / 1_000_000n);
-        process.stderr.write(`[p2a] ${JSON.stringify({ monoMs, event, turnId, ...data })}\n`);
-      } catch { /* diagnostics must never affect the turn */ }
+      if (p2aDiagEnabled) runtimeTrace('turn', event, { turnId, ...data });
     };
     let lastHeartbeatAt = Number(process.hrtime.bigint() / 1_000_000n);
     const p2aHeartbeat = p2aDiagEnabled
@@ -2789,6 +2779,7 @@ export class ChatSession implements ChatSessionLike {
                   // implementation; cast to any to avoid widening
                   // the public Display surface for one-shot use.
                   (this.opts.display as unknown as { skin: import('./skinEngine').SkinEngine }).skin,
+                  this.opts.display.progressProjection(`turn-${turnId}`),
                 );
               }
               progressBar.update(outputTokens, maxTokens);
@@ -3838,6 +3829,7 @@ export class ChatSession implements ChatSessionLike {
             'verifying installed version',
             'complete',
           ],
+          projection: this.opts.display.progressProjection('runtime-update'),
         });
         const controller = new AbortController();
         const cancel = (): void => controller.abort();

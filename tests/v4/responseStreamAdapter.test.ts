@@ -2,6 +2,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ResponseStreamAdapter } from '../../providers/v4/responseStreamAdapter';
 import { ProviderError, ProviderRateLimitError } from '../../providers/v4/errors';
 import type { Message } from '../../providers/v4/types';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 function makeResponse(
   body: unknown,
@@ -31,6 +34,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   vi.useRealTimers();
 });
 
@@ -140,7 +144,10 @@ describe('ResponseStreamAdapter', () => {
     expect(result.finishReason).toBe('tool_use');
   });
 
-  it('4. malformed function_call arguments fall back to {} with warn', async () => {
+  it('4. malformed function_call arguments fall back to {} with a file diagnostic', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'aiden-response-trace-'));
+    const trace = join(root, 'trace.jsonl');
+    vi.stubEnv('AIDEN_RUNTIME_TRACE_FILE', trace);
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     fetchMock.mockResolvedValueOnce(
       makeResponse({
@@ -161,8 +168,10 @@ describe('ResponseStreamAdapter', () => {
       tools: [],
     });
     expect(result.toolCalls[0].arguments).toEqual({});
-    expect(warn).toHaveBeenCalled();
+    expect(readFileSync(trace, 'utf8')).toContain('tool.arguments.invalid');
+    expect(warn).not.toHaveBeenCalled();
     warn.mockRestore();
+    rmSync(root, { recursive: true, force: true });
   });
 
   it('5. empty output[] with output_text backfills a synthetic message', async () => {
