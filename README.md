@@ -56,7 +56,7 @@ Give Aiden a goal. It can work across your files, terminal, browser, supported a
 <!-- Language & runtime -->
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178C6?style=flat-square&logo=typescript&logoColor=white)
 ![JavaScript](https://img.shields.io/badge/JavaScript-ES2022-F7DF1E?style=flat-square&logo=javascript&logoColor=black)
-![Node.js](https://img.shields.io/badge/Node.js-≥18-339933?style=flat-square&logo=node.js&logoColor=white)
+![Node.js](https://img.shields.io/badge/Node.js-20_or_22-339933?style=flat-square&logo=node.js&logoColor=white)
 ![ESM](https://img.shields.io/badge/Modules-ESM-FFB088?style=flat-square)
 ![esbuild](https://img.shields.io/badge/Bundler-esbuild-FFCF00?style=flat-square&logo=esbuild&logoColor=black)
 ![npm](https://img.shields.io/badge/Registry-npm-CB3837?style=flat-square&logo=npm&logoColor=white)
@@ -104,7 +104,7 @@ Give Aiden a goal. It can work across your files, terminal, browser, supported a
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![Stable](https://img.shields.io/badge/Stable-v4.19.0-4ADE80?style=flat-square)
+![Stable](https://img.shields.io/badge/Stable-v4.19.1-4ADE80?style=flat-square)
 
 </details>
 
@@ -183,10 +183,10 @@ Research this topic, compare the strongest findings, and save a structured Markd
 > [!IMPORTANT]
 > **Release channels**
 >
-> - **Stable:** `v4.19.0` through npm `latest`
+> - **Stable:** `v4.19.1` through npm `latest`
 > - **Archived RC:** [`v4.19.0-rc.1`](https://github.com/taracodlabs/aiden/releases/tag/v4.19.0-rc.1)
 
-### Stable — v4.19.0
+### Stable — v4.19.1
 
 ```bash
 npm install -g aiden-runtime
@@ -198,7 +198,7 @@ That’s it. The first launch opens Aiden’s current setup flow, checks the sel
 Stable channel:
 
 ```text
-npm latest → 4.19.0
+npm latest → 4.19.1
 ```
 
 Without permanent installation:
@@ -218,7 +218,7 @@ aiden --version
 Expected output:
 
 ```text
-4.19.0
+4.19.1
 ```
 
 Both public commands, `aiden` and `aiden-runtime`, start the same standalone
@@ -530,13 +530,35 @@ npx aiden-runtime@latest
 npm install -g aiden-runtime@latest
 ```
 
-Or, from inside a running session:
+The permanent bootstrap checks for stable updates before the full runtime loads.
+When an update is available, choose Update, Later, or Skip. You can also use:
+
+```bash
+aiden update --check
+aiden update
+aiden update --yes
+aiden update --version 4.19.1
+```
+
+The default channel is npm `latest`. Set `AIDEN_UPDATE_CHANNEL=beta` to follow
+npm `beta`, or `AIDEN_UPDATE_CHANNEL=off` to disable bootstrap checks.
+
+The existing in-session command remains available:
 
 ```text
 /update install
 ```
 
-Aiden also prompts you on boot when a newer version is available. Use `/update auto off` to silence automatic update notices.
+Aiden supports Node 20 and Node 22. If an older 4.19.0 installation cannot
+start, repair it once under the Node version you intend to use:
+
+```bash
+npm uninstall -g aiden-runtime
+npm install -g aiden-runtime@latest
+```
+
+Reinstalling the global package does not remove Aiden's workspaces, settings,
+history, Jobs, Evidence, or provider configuration from the Aiden data home.
 
 ### Uninstall
 
@@ -781,7 +803,7 @@ Quick reference:
 - **An old setup screen appears** — remove stale global binaries and reinstall with `npm install -g aiden-runtime@latest`
 - **`/help` does not list a command** — some commands require an active session or capability
 - **npm permission errors on Windows** — use a user-writable npm prefix and install into a normal directory rather than a drive root
-- **Native module version mismatch** — run Aiden under the Node version used to install its native dependencies, or reinstall dependencies under the active Node version
+- **Native module version mismatch** — switch to Node 20 or Node 22, then reinstall `aiden-runtime` under that active Node version
 
 <br>
 
