@@ -5,6 +5,27 @@ const fs   = require('fs')
 const path = require('path')
 const root = path.join(__dirname, '..')
 
+// Record only installation provenance needed by the bootstrap updater. This
+// stays inside the package directory and never contains credentials or user
+// configuration. A later launch can keep the active Node executable while
+// targeting the exact prefix that owns this installation.
+try {
+  const receipt = {
+    schemaVersion: 1,
+    global: (process.env.npm_config_global || process.env.NPM_CONFIG_GLOBAL) === 'true',
+    prefix: process.env.npm_config_prefix || process.env.NPM_CONFIG_PREFIX || null,
+    npmCli: process.env.npm_execpath || process.env.NPM_EXECPATH || null,
+    nodeExecutable: process.execPath,
+    installedAt: Date.now(),
+  }
+  const receiptPath = path.join(root, '.aiden-install.json')
+  const temporary = `${receiptPath}.tmp-${process.pid}`
+  fs.writeFileSync(temporary, JSON.stringify(receipt), { encoding: 'utf8', mode: 0o600 })
+  fs.renameSync(temporary, receiptPath)
+} catch {
+  // Installation remains usable; manual repair guidance is the fallback.
+}
+
 const dirs = [
   'workspace/sandbox',
   'workspace/uploads',

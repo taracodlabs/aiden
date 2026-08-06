@@ -18,9 +18,12 @@ describe('CLI entrypoint contract', () => {
       files: string[];
     };
     expect(manifest.bin).toEqual({
-      aiden: './dist/cli/v4/aidenCLI.js',
-      'aiden-runtime': './dist/cli/v4/aidenCLI.js',
+      aiden: './bin/aiden-bootstrap.cjs',
+      'aiden-runtime': './bin/aiden-bootstrap.cjs',
     });
+    expect(manifest.files).toContain('bin/aiden-bootstrap.cjs');
+    expect(manifest.files).toContain('bin/aiden-updater.cjs');
+    expect(manifest.files).not.toContain('bin/');
     expect(manifest.files).not.toContain('dist-bundle/');
     expect(manifest.files).not.toContain('packages/aiden-os/');
     expect(manifest.files).not.toContain('release-notes-v4.16.0.md');

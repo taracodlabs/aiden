@@ -3816,6 +3816,7 @@ export class ChatSession implements ChatSessionLike {
    * sessions constructed without paths wired) don't pay the cost.
    */
   private async maybeShowBootUpdatePrompt(): Promise<void> {
+    if (process.env.AIDEN_BOOTSTRAP_UPDATE_CHECKED === '1') return;
     if (!this.opts.paths) return;
     // eslint-disable-next-line @typescript-eslint/no-var-requires
     const cu = require('../../core/v4/update/checkUpdate') as typeof import('../../core/v4/update/checkUpdate');

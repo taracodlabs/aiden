@@ -1,3 +1,40 @@
+## v4.19.1 — 2026-08-06
+
+### Startup and update reliability
+
+- Both public commands now enter a dependency-light bootstrap before the full
+  runtime or native modules load.
+- Incomplete packages, missing entrypoints, unsupported Node versions, native
+  load failures, and Node ABI mismatches produce concise repair guidance instead
+  of raw startup stacks.
+- Interactive startup performs a cached, fail-open update check with stable,
+  beta, off, Later, and per-version Skip behavior.
+- `aiden update`, `aiden update --check`, `aiden update --yes`, and exact-version
+  updates operate without loading the full runtime.
+- Updates run through an external temporary helper, target the npm prefix that
+  owns the running installation, verify the package, command version, and native
+  runtime, and verify rollback before reporting restoration.
+- A successful update is reported only after all verification gates pass; user
+  data remains outside the replaceable npm package.
+
+### Runtime support
+
+- Supported Node versions are Node 20 and Node 22.
+- Node 24 reaches the bootstrap and receives an actionable compatibility message
+  without loading native runtime dependencies.
+
+### Upgrade instructions
+
+```bash
+npm uninstall -g aiden-runtime
+npm install -g aiden-runtime@latest
+```
+
+The uninstall step repairs already-incomplete v4.19.0 installations without
+removing Aiden's user-data home.
+
+---
+
 ## v4.17.0 — 2026-07-29
 
 ### Overview

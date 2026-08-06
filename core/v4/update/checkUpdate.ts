@@ -72,6 +72,14 @@ export interface UpdateCacheShape {
   failedVersion?: string;
   failureCount?: number;
   retryAfter?: number;
+  /** Bootstrap-owned automatic update preference. */
+  enabled?: boolean;
+  /** Selected public update channel. */
+  channel?: 'stable' | 'beta' | 'off';
+  /** npm beta dist-tag observed by the dependency-light bootstrap. */
+  beta?: string | null;
+  /** Epoch ms before which the bootstrap should not prompt again. */
+  remindAfter?: number;
 }
 
 export interface UpdateStatus {
@@ -327,6 +335,10 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
     failedVersion:  cached?.failedVersion,
     failureCount:   cached?.failureCount,
     retryAfter:     cached?.retryAfter,
+    enabled:        cached?.enabled,
+    channel:        cached?.channel,
+    beta:           cached?.beta,
+    remindAfter:    cached?.remindAfter,
   });
 
   const updateAvailable = latest !== null && safeCompare(latest, installed) > 0;
