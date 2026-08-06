@@ -42,10 +42,9 @@ describe('bootstrap process handoff', () => {
     ].join(''));
     const result = runFixture(packageRoot, ['--flag', 'value with spaces', '--', 'literal'], unrelated);
     expect(result.status).toBe(7);
-    expect(JSON.parse(result.stdout)).toEqual({
-      args: ['--flag', 'value with spaces', '--', 'literal'],
-      cwd: realpathSync.native(unrelated),
-    });
+    const handoff = JSON.parse(result.stdout) as { args: string[]; cwd: string };
+    expect(handoff.args).toEqual(['--flag', 'value with spaces', '--', 'literal']);
+    expect(realpathSync.native(handoff.cwd)).toBe(realpathSync.native(unrelated));
   });
 
   it('translates a pre-ready ABI crash and suppresses its raw stack by default', () => {
