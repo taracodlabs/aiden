@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -44,7 +44,7 @@ describe('bootstrap process handoff', () => {
     expect(result.status).toBe(7);
     expect(JSON.parse(result.stdout)).toEqual({
       args: ['--flag', 'value with spaces', '--', 'literal'],
-      cwd: unrelated,
+      cwd: realpathSync.native(unrelated),
     });
   });
 
