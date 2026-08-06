@@ -1853,16 +1853,18 @@ export async function buildAgentRuntime(
   // Pre-warm the registry probe so the cache is fresh by the time
   // the prompt asks — same non-blocking pattern, same opt-out
   // semantics, no user-visible output from this call.
-  setImmediate(async () => {
-    try {
-      const { checkForUpdate } = await import('../../core/v4/update/checkUpdate');
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const pkg = require('../../package.json') as { version: string };
-      await checkForUpdate({ paths, installedVersion: pkg.version });
-    } catch {
-      /* silent — update check is best-effort */
-    }
-  });
+  if (process.env.AIDEN_BOOTSTRAP_UPDATE_CHECKED !== '1') {
+    setImmediate(async () => {
+      try {
+        const { checkForUpdate } = await import('../../core/v4/update/checkUpdate');
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const pkg = require('../../package.json') as { version: string };
+        await checkForUpdate({ paths, installedVersion: pkg.version });
+      } catch {
+        /* silent — update check is best-effort */
+      }
+    });
+  }
 
   // ── Phase 9 moat (stateless / wraps memory) ──────────────────────────
   const memoryGuard = new MemoryGuard(memoryManager);
@@ -4248,6 +4250,12 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
   };
 
   try {
+    if (
+      process.env.AIDEN_BOOTSTRAP_UPDATE_CHECKED === '1' &&
+      typeof process.send === 'function'
+    ) {
+      process.send({ type: 'aiden-bootstrap-ready' });
+    }
     if (cliOpts.tui) {
       await runTuiMode({
         sessionOpts: sessionOpts as any,

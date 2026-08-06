@@ -176,4 +176,40 @@ describe('checkForUpdate', () => {
     expect(status.failureBackoffActive).toBe(true);
     expect(status.skipped).toBe(false);
   });
+
+  it('preserves bootstrap update preferences when the legacy registry cache refreshes', async () => {
+    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
+    await ensureAidenDirsExist(paths);
+    const cacheFile = path.join(tmpRoot, '.update_check.json');
+    await fs.writeFile(
+      cacheFile,
+      JSON.stringify({
+        ts: 1,
+        latest: '4.19.0',
+        beta: '4.20.0-beta.1',
+        installed: '4.19.0',
+        enabled: true,
+        channel: 'beta',
+        remindAfter: 50_000,
+      }),
+    );
+
+    await checkForUpdate({
+      paths,
+      installedVersion: '4.19.0',
+      cacheTtlMs: 1,
+      now: () => 10_000,
+      fetchImpl: async () => ({ version: '4.19.1' }),
+    });
+
+    const refreshed = JSON.parse(await fs.readFile(cacheFile, 'utf8'));
+    expect(refreshed).toMatchObject({
+      latest: '4.19.1',
+      beta: '4.20.0-beta.1',
+      installed: '4.19.0',
+      enabled: true,
+      channel: 'beta',
+      remindAfter: 50_000,
+    });
+  });
 });
