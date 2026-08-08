@@ -64,6 +64,13 @@ describe('executeDurableJob', () => {
       'job.submitted', 'attempt.created', 'attempt.leased', 'attempt.running',
       'job.running', 'attempt.succeeded', 'job.finalized',
     ]);
+    expect(engine.continuity?.getLatest(execution.jobId)).toMatchObject({
+      jobId: execution.jobId,
+      attemptId: execution.attemptId,
+      attemptGeneration: 1,
+      reason: 'lifecycle:cleanup',
+      validity: 'current',
+    });
   });
 
   it('persists failure and never reports an unknown thrown operation as success', async () => {

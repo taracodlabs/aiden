@@ -20,6 +20,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
+import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 import { startWorkbenchBridge, type WorkbenchBridge } from '../../../core/v4/workbench/bridgeServer';
 
 // ── A tiny SSE client: connects, parses frames, lets tests await events ───────
@@ -509,6 +510,72 @@ describe('Workbench durable Job projections', () => {
     expect(JSON.parse(job.body)).toMatchObject({ id: 'job_exact', status: 'waiting' });
     expect(JSON.parse(attempt.body)).toMatchObject({ id: 'attempt_exact', generation: 3 });
     expect(JSON.parse(events.body)).toEqual([{ jobId: 'job_exact', jobSequence: 8, type: 'approval.created' }]);
+    await b.close();
+  });
+
+  it('serves one canonical projection and current continuity checkpoint', async () => {
+    const engine = createJobEngine({ db });
+    const admitted = engine.submitJob({
+      entryPoint: 'workbench', source: 'test', sessionId: 'session_projection',
+      instanceId: 'inst-1', idempotencyNamespace: 'projection', idempotencyKey: 'exact',
+      goal: 'project exact durable work',
+    });
+    engine.continuity!.capture({
+      jobId: admitted.jobId, attemptId: admitted.attemptId, attemptGeneration: 1,
+      reason: 'interrupted', idempotencyNamespace: 'test', idempotencyKey: 'checkpoint',
+    });
+    const b = await startWorkbenchBridge({ reader: runStore, jobs: engine, continuity: engine.continuity, port: 0 });
+    const projection = await httpGet(
+      b.port,
+      `/api/jobs/${admitted.jobId}/projection?attemptId=${admitted.attemptId}&runId=${admitted.runId}`,
+    );
+    const checkpoint = await httpGet(b.port, `/api/jobs/${admitted.jobId}/continuity`);
+    expect(projection.status).toBe(200);
+    expect(JSON.parse(projection.body)).toMatchObject({
+      identity: { jobId: admitted.jobId, attemptId: admitted.attemptId, runId: admitted.runId },
+      receipt: { terminal: false, status: 'queued' },
+    });
+    expect(JSON.parse(checkpoint.body)).toMatchObject({
+      jobId: admitted.jobId, attemptId: admitted.attemptId, reason: 'interrupted', validity: 'current',
+    });
+    await b.close();
+  });
+
+  it('gates Continue and preserves the exact durable decision', async () => {
+    const calls: string[] = [];
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: 'continue-token',
+      continuity: {
+        get: (checkpointId) => checkpointId === 'checkpoint_exact' ? { checkpointId, jobId: 'job_exact' } : null,
+        getLatest: () => null,
+        listForWorkspace: () => [],
+      },
+      continueTask: {
+        async continue(checkpointId, idempotencyKey) {
+          calls.push(`${checkpointId}:${idempotencyKey}`);
+          await Promise.resolve();
+          return { decision: 'blocked_unknown_effect', checkpointId, reason: 'Unknown effects require reconciliation' };
+        },
+      },
+      port: 0,
+    });
+    expect((await httpPost(b.port, '/api/checkpoints/checkpoint_exact/continue', {
+      jobId: 'job_exact', idempotencyKey: 'continue-key',
+    })).status).toBe(401);
+    const result = await httpPost(b.port, '/api/checkpoints/checkpoint_exact/continue', {
+      jobId: 'job_exact', idempotencyKey: 'continue-key',
+    }, { 'x-workbench-token': 'continue-token' });
+    expect(result.status).toBe(409);
+    expect(JSON.parse(result.body)).toMatchObject({
+      accepted: false, decision: 'blocked_unknown_effect', reason: 'Unknown effects require reconciliation',
+    });
+    expect(calls).toEqual(['checkpoint_exact:continue-key']);
+    const foreign = await httpPost(b.port, '/api/checkpoints/checkpoint_exact/continue', {
+      jobId: 'job_foreign', idempotencyKey: 'foreign-key',
+    }, { 'x-workbench-token': 'continue-token' });
+    expect(foreign.status).toBe(409);
+    expect(calls).toEqual(['checkpoint_exact:continue-key']);
     await b.close();
   });
 });

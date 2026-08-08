@@ -4,6 +4,7 @@
  */
 
 import { runWithJobExecutionContext, type JobExecutionContext } from './jobExecutionContext';
+import type { ContinuityCheckpointAuthority } from '../continuityCheckpoint';
 import type {
   AdmissionResult,
   AttemptRecord,
@@ -201,6 +202,9 @@ export interface ExecuteDurableJobOptions<T> {
   onLeaseLost?: (error: DurableJobLifecycleError) => void;
   onPhase?: (event: DurableJobLifecyclePhaseEvent) => void;
   lifecycleScope?: DurableJobLifecycleScope;
+  /** Optional durable continuity projection. It records references at lifecycle
+   * boundaries and never participates in Job/Attempt transitions. */
+  continuity?: Pick<ContinuityCheckpointAuthority, 'capture'>;
 }
 
 function isExistingAdmission(admission: DurableJobAdmission): admission is ExistingDurableJobAdmission {
@@ -306,19 +310,32 @@ function assertAuthority(engine: JobEngine, handle: DurableJobHandle): { attempt
 }
 
 function notifyPhase(
-  callback: ExecuteDurableJobOptions<unknown>['onPhase'],
+  options: Pick<ExecuteDurableJobOptions<unknown>, 'onPhase' | 'continuity' | 'engine'>,
   phase: DurableJobLifecyclePhase,
   identity: Pick<AdmissionResult, 'jobId' | 'attemptId' | 'runId'>,
   generation?: number,
 ): void {
-  if (!callback) return;
-  callback({
+  options.onPhase?.({
     phase,
     jobId: identity.jobId,
     attemptId: identity.attemptId,
     runId: identity.runId,
     generation,
   });
+  const continuity = options.continuity ?? options.engine.continuity;
+  if (continuity) {
+    const attempt = options.engine.getAttempt(identity.attemptId);
+    if (attempt) {
+      continuity.capture({
+        jobId: identity.jobId,
+        attemptId: identity.attemptId,
+        attemptGeneration: generation ?? attempt.generation,
+        reason: `lifecycle:${phase}`,
+        idempotencyNamespace: 'durable-lifecycle',
+        idempotencyKey: `${phase}:${identity.attemptId}:${generation ?? attempt.generation}`,
+      });
+    }
+  }
 }
 
 export async function executeDurableJob<T>(
@@ -327,7 +344,7 @@ export async function executeDurableJob<T>(
   options.lifecycleScope?.assertActive();
   const producer = producerFor(options.admission);
   const admitted = admitDurableJob(options.engine, options.admission);
-  notifyPhase(options.onPhase, 'admitted', admitted);
+  notifyPhase(options, 'admitted', admitted);
   if (!isExistingAdmission(options.admission) && !isRecoveryAdmission(options.admission) && admitted.reused) {
     throw new DurableJobDuplicateAdmissionError(admitted);
   }
@@ -371,7 +388,7 @@ export async function executeDurableJob<T>(
       admitted,
     );
   }
-  notifyPhase(options.onPhase, 'leased', admitted, lease.generation);
+  notifyPhase(options, 'leased', admitted, lease.generation);
 
   const leaseAbort = new AbortController();
   const handle = {
@@ -693,15 +710,15 @@ export async function executeDurableJob<T>(
     }, Math.max(25, options.controlPollMs ?? 250));
     controlWatcher.unref?.();
 
-    notifyPhase(options.onPhase, 'running', handle, handle.generation);
-    notifyPhase(options.onPhase, 'executing', handle, handle.generation);
+    notifyPhase(options, 'running', handle, handle.generation);
+    notifyPhase(options, 'executing', handle, handle.generation);
     const value = await runWithJobExecutionContext(executionContext, () => options.execute(handle));
     if (disposalError) throw disposalError;
     if (runtimeBudgetExpired) throw new DurableJobBudgetExceededError('runtime_ms', handle);
     if (leaseLost) throw leaseLost;
     assertAuthority(options.engine, handle);
 
-    notifyPhase(options.onPhase, 'verifying', handle, handle.generation);
+    notifyPhase(options, 'verifying', handle, handle.generation);
     const requestedFinalization = await options.finalize(value, handle);
     if (leaseLost) throw leaseLost;
     const authority = assertAuthority(options.engine, handle);
@@ -709,7 +726,7 @@ export async function executeDurableJob<T>(
     attemptStateVersion = authority.attempt.stateVersion;
     jobStateVersion = authority.job.stateVersion;
     settle(options.engine, handle, finalization, attemptStateVersion, jobStateVersion, producer);
-    notifyPhase(options.onPhase, 'settled', handle, handle.generation);
+    notifyPhase(options, 'settled', handle, handle.generation);
     return Object.assign(handle, { value });
   } catch (error) {
     if (disposalError) throw disposalError;
@@ -732,7 +749,7 @@ export async function executeDurableJob<T>(
         authority.job.stateVersion,
         producer,
       );
-      notifyPhase(options.onPhase, 'settled', handle, handle.generation);
+      notifyPhase(options, 'settled', handle, handle.generation);
     }
     throw error;
   } finally {
@@ -753,7 +770,7 @@ export async function executeDurableJob<T>(
           });
         } catch { /* stale authority cannot spend after replacement */ }
       }
-      if (!disposalError) notifyPhase(options.onPhase, 'cleanup', handle, handle.generation);
+      if (!disposalError) notifyPhase(options, 'cleanup', handle, handle.generation);
     } finally {
       unregisterScope?.();
       resolveLifecycleDone();

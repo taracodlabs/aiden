@@ -536,7 +536,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       // under the default safe-only policy: risky/mutating tools auto-denied).
       const triggerBus = createTriggerBus({ db });
       const token = randomBytes(24).toString('hex');
-      const { enqueue, cancel, input, control, approval } = createWorkbenchJobCommands({
+      const { enqueue, cancel, input, control, approval, continuity, continueTask } = createWorkbenchJobCommands({
         db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId,
       });
       // STEER path: the stop button cancels a running job by run id. We record
@@ -549,6 +549,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { existsSync } = await import('node:fs');
       const staticCandidates = [
         process.env.AIDEN_WEB_STATIC,
+        nodePath.resolve(__dirname, '../../../dashboard-next/out'),
         nodePath.resolve(process.cwd(), 'dashboard-next', 'out'),
       ].filter((d): d is string => Boolean(d));
       const staticDir = staticCandidates.find((d) => existsSync(nodePath.join(d, 'index.html')));
@@ -562,6 +563,8 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         control,
         approval,
         jobs: jobEngine,
+        continuity,
+        continueTask,
         token,
         staticDir,
         port,

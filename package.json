@@ -43,6 +43,7 @@
     "bin/aiden-bootstrap.cjs",
     "bin/aiden-updater.cjs",
     "dist/",
+    "dashboard-next/out/",
     "skills/",
     "!skills/installed/*/**",
     "!skills/learned/pending/*/**",

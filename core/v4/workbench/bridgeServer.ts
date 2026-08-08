@@ -30,6 +30,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { RunEventRich, ListEventsScopedOptions } from '../daemon/runStore';
 import { WORKBENCH_DASHBOARD_HTML } from './dashboardHtml';
+import {
+  projectWorkbenchJob,
+  type WorkbenchJobProjectionReader,
+} from './projection';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -129,10 +133,17 @@ export interface ApprovalDecider {
   };
 }
 
-export interface DurableJobReader {
-  getJob(jobId: string): unknown | null;
-  getAttempt(attemptId: string): unknown | null;
-  listEvents(jobId: string, afterSequence?: number): unknown[];
+export interface DurableJobReader extends WorkbenchJobProjectionReader {}
+
+export interface ContinuityReader {
+  get(checkpointId: string): unknown | null;
+  getLatest(jobId: string): unknown | null;
+  listForWorkspace(workspaceId: string | null, limit?: number): unknown[];
+  resolveForWorkspace?(workspaceId: string | null): unknown;
+}
+
+export interface ContinuityController {
+  continue(checkpointId: string, idempotencyKey: string): unknown | Promise<unknown>;
 }
 
 export interface WorkbenchBridgeOptions {
@@ -149,6 +160,8 @@ export interface WorkbenchBridgeOptions {
   control?:    TaskController;
   approval?:   ApprovalDecider;
   jobs?:       DurableJobReader;
+  continuity?: ContinuityReader;
+  continueTask?: ContinuityController;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -324,6 +337,8 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     }
     const approvalMatch = url.pathname.match(/^\/api\/approvals\/([^/]+)\/decision$/);
     if (req.method === 'POST' && approvalMatch) { handleApprovalDecision(req, res, approvalMatch[1]); return; }
+    const continueMatch = url.pathname.match(/^\/api\/checkpoints\/([^/]+)\/continue$/);
+    if (req.method === 'POST' && continueMatch) { handleContinueTask(req, res, continueMatch[1]); return; }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The built-in self-contained dark page. The per-launch write token is
@@ -368,6 +383,43 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       sendJson(res, 200, opts.jobs.listEvents(decodeURIComponent(jobEventsMatch[1]), after));
       return;
     }
+    const jobProjectionMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/projection$/);
+    if (jobProjectionMatch) {
+      if (!opts.jobs) { sendJson(res, 503, { error: 'durable Job query unavailable' }); return; }
+      const runRaw = url.searchParams.get('runId');
+      const runId = runRaw === null ? undefined : Number(runRaw);
+      if (runRaw !== null && !Number.isSafeInteger(runId)) {
+        sendJson(res, 400, { error: 'runId must be an integer' }); return;
+      }
+      const attemptId = url.searchParams.get('attemptId') ?? undefined;
+      const projection = projectWorkbenchJob(opts.jobs, {
+        jobId: decodeURIComponent(jobProjectionMatch[1]), attemptId, runId,
+      });
+      sendJson(res, projection ? 200 : 404, projection ?? { error: 'durable projection not found' });
+      return;
+    }
+    const jobContinuityMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/continuity$/);
+    if (jobContinuityMatch) {
+      if (!opts.continuity) { sendJson(res, 503, { error: 'continuity query unavailable' }); return; }
+      const checkpoint = opts.continuity.getLatest(decodeURIComponent(jobContinuityMatch[1]));
+      sendJson(res, checkpoint ? 200 : 404, checkpoint ?? { error: 'continuity checkpoint not found' });
+      return;
+    }
+    const workspaceContinuityMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)\/continuity$/);
+    if (workspaceContinuityMatch) {
+      if (!opts.continuity?.resolveForWorkspace) {
+        sendJson(res, 503, { error: 'continuity workspace query unavailable' }); return;
+      }
+      sendJson(res, 200, opts.continuity.resolveForWorkspace(decodeURIComponent(workspaceContinuityMatch[1])));
+      return;
+    }
+    const checkpointMatch = url.pathname.match(/^\/api\/checkpoints\/([^/]+)$/);
+    if (checkpointMatch) {
+      if (!opts.continuity) { sendJson(res, 503, { error: 'continuity query unavailable' }); return; }
+      const checkpoint = opts.continuity.get(decodeURIComponent(checkpointMatch[1]));
+      sendJson(res, checkpoint ? 200 : 404, checkpoint ?? { error: 'continuity checkpoint not found' });
+      return;
+    }
     const jobMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)$/);
     if (jobMatch) {
       if (!opts.jobs) { sendJson(res, 503, { error: 'durable Job query unavailable' }); return; }
@@ -396,7 +448,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (runMatch) {
       const runId = Number(decodeURIComponent(runMatch[1]));
       if (!Number.isFinite(runId)) { sendJson(res, 400, { error: 'runId must be numeric' }); return; }
-      streamEvents(req, res, { scope: 'run_id', runId, limit: pageLimit });
+      streamEvents(req, res, { scope: 'run_id', runId, limit: pageLimit }, url.searchParams.get('message') !== '1');
       return;
     }
     if (sesMatch) {
@@ -415,7 +467,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-      endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision'],
+      endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue'],
     });
   });
 
@@ -432,6 +484,8 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     const hdr = req.headers['last-event-id'];
     const hdrVal = Array.isArray(hdr) ? hdr[0] : hdr;
     if (hdrVal && Number.isFinite(Number(hdrVal))) lastId = Number(hdrVal);
+    const queryLastId = Number(new URL(req.url ?? '/', `http://${host}`).searchParams.get('lastId'));
+    if (Number.isFinite(queryLastId) && queryLastId > lastId) lastId = queryLastId;
 
     const flush = (): void => {
       let rows: RunEventRich[];
@@ -591,6 +645,31 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       }
       const result = opts.approval!.decide(approvalId, decision);
       sendJson(res, result.accepted ? 202 : 409, result);
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleContinueTask(req: http.IncomingMessage, res: http.ServerResponse, rawCheckpointId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.continueTask || !opts.continuity) { sendJson(res, 503, { error: 'safe continuation unavailable' }); return; }
+    readJsonBody(req, 16 * 1024).then(async (body) => {
+      const key = typeof body.idempotencyKey === 'string' && body.idempotencyKey.length > 0
+        ? body.idempotencyKey : '';
+      const jobId = typeof body.jobId === 'string' && body.jobId.length > 0 ? body.jobId : '';
+      if (!key || !jobId) { sendJson(res, 400, { error: 'body requires jobId and idempotencyKey' }); return; }
+      try {
+        const checkpointId = decodeURIComponent(rawCheckpointId);
+        const checkpoint = opts.continuity!.get(checkpointId) as { jobId?: unknown } | null;
+        if (!checkpoint || checkpoint.jobId !== jobId) {
+          sendJson(res, 409, { accepted: false, error: 'checkpoint does not belong to the requested Job' });
+          return;
+        }
+        const result = await opts.continueTask!.continue(checkpointId, key) as { decision?: string };
+        const accepted = result?.decision === 'continued' || result?.decision === 'already_applied';
+        sendJson(res, accepted ? 202 : 409, { accepted, ...result });
+      } catch (error) {
+        log(`continue failed: ${error instanceof Error ? error.message : String(error)}`);
+        sendJson(res, 409, { accepted: false, error: error instanceof Error ? error.message : String(error) });
+      }
     }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 

@@ -35,6 +35,28 @@ describe('runMigrations', () => {
     expect(result.to).toBe(LATEST_SCHEMA_VERSION);
   });
 
+  it('upgrades a v42 database without changing existing ledger records', () => {
+    for (const migration of MIGRATIONS_FOR_TESTS.filter((item) => item.version <= 42)) {
+      db.transaction(() => {
+        if (migration.apply) migration.apply(db);
+        else db.exec(migration.sql ?? '');
+        db.prepare('INSERT OR REPLACE INTO schema_version (id, version, applied_at) VALUES (1, ?, ?)')
+          .run(migration.version, migration.version);
+      }).immediate();
+    }
+    db.prepare(
+      `INSERT INTO trigger_events
+         (source, source_key, idempotency_key, payload_json, status, created_at, updated_at)
+       VALUES ('manual', 'continuity-migration', 'existing-record', '{}', 'pending', 1, 1)`,
+    ).run();
+
+    expect(runMigrations(db)).toEqual({ from: 42, to: 43 });
+    expect(db.prepare("SELECT source_key FROM trigger_events WHERE idempotency_key='existing-record'").pluck().get())
+      .toBe('continuity-migration');
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='continuity_checkpoints'").pluck().get())
+      .toBe('continuity_checkpoints');
+  });
+
   it('creates all v1 tables', () => {
     runMigrations(db);
     const tables = db

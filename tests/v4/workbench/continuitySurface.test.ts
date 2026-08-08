@@ -1,0 +1,109 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+
+import {
+  continueTask,
+  loadContinuity,
+  loadRunProjection,
+} from '../../../dashboard-next/lib/aidenClient';
+
+const response = (body: unknown, status = 200): Response => ({
+  ok: status >= 200 && status < 300,
+  status,
+  json: async () => body,
+} as Response);
+
+describe('minimal Workbench continuity surface', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('E1 loads Job detail by exact durable identity', async () => {
+    const fetchMock = vi.fn(async () => response({ identity: { jobId: 'job_1' }, receipt: { terminal: false, status: 'running' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    await loadRunProjection('job_1', 'attempt_1', 7);
+    expect(fetchMock).toHaveBeenCalledWith('/api/jobs/job_1/projection?attemptId=attempt_1&runId=7');
+  });
+  it('E2 loads the current continuity checkpoint by Job identity', async () => {
+    const fetchMock = vi.fn(async () => response({ checkpointId: 'checkpoint_1' }));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(loadContinuity('job_1')).resolves.toMatchObject({ checkpointId: 'checkpoint_1' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/jobs/job_1/continuity');
+  });
+  it('E3 treats an absent checkpoint as absent, not an empty success', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({ error: 'not found' }, 404)));
+    await expect(loadContinuity('job_1')).resolves.toBeNull();
+  });
+  it('E4 sends Continue with exact checkpoint identity and idempotency key', async () => {
+    const fetchMock = vi.fn(async () => response({ accepted: true, decision: 'continued' }, 202));
+    vi.stubGlobal('fetch', fetchMock);
+    await expect(continueTask('checkpoint_1', 'job_1', 'key_1')).resolves.toMatchObject({ accepted: true, decision: 'continued' });
+    expect(fetchMock).toHaveBeenCalledWith('/api/checkpoints/checkpoint_1/continue', expect.objectContaining({ body: JSON.stringify({ jobId: 'job_1', idempotencyKey: 'key_1' }) }));
+  });
+  it('E5 preserves a rejected Continue decision', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({ accepted: false, decision: 'blocked_unknown_effect', reason: 'reconcile' }, 409)));
+    await expect(continueTask('checkpoint_1', 'job_1', 'key_1')).resolves.toEqual({ accepted: false, decision: 'blocked_unknown_effect', reason: 'reconcile' });
+  });
+
+  const source = () => fs.readFileSync(path.resolve('dashboard-next/app/page.tsx'), 'utf8');
+  it('E6 exposes Active Work in the existing Activity view', () => expect(source()).toContain('<strong>Active Work '));
+  it('E7 exposes exact Job, Attempt generation, and run identity', () => {
+    const page = source();
+    expect(page).toContain('projection.identity.jobId} · {projection.identity.attemptId}');
+    expect(page).toContain('generation {projection.identity.generation ?? 0} · run {projection.identity.runId}');
+  });
+  it('E8 exposes the exact Attempt timeline', () => expect(source()).toContain('Attempt Timeline:'));
+  it('E9 exposes the Worker tree', () => expect(source()).toContain('Worker Tree:'));
+  it('E10 exposes pending approvals and Evidence counts', () => {
+    expect(source()).toContain('Pending Approvals:'); expect(source()).toContain('Evidence:');
+  });
+  it('E11 exposes the canonical result receipt status', () => expect(source()).toContain('projection.receipt.status'));
+  it('E12 exposes continuity reason and blocked truth without a new shell', () => {
+    expect(source()).toContain('<strong>Continuity / Continue</strong>');
+    expect(source()).toContain('continuity.blockers.length');
+    expect(source()).not.toContain('ContinuityDashboardShell');
+  });
+  it('E13 restores the exact admitted context on browser reload', () => {
+    expect(source()).toContain('aiden.restoreRunHandle()');
+    expect(source()).toContain('restored.admission.runId');
+    expect(source()).toContain('restored.admission.jobId');
+  });
+  it('E14 exposes a guarded idempotent Continue action', () => {
+    expect(source()).toContain('continueKeys.current[continuity.checkpointId]');
+    expect(source()).toContain('aiden.continueTask(continuity.checkpointId, projection.identity.jobId, key)');
+    expect(source()).toContain('Continue safely');
+  });
+  it('E15 labels Proof, recovery reason, and canonical receipt explicitly', () => {
+    expect(source()).toContain('Verification / Proof');
+    expect(source()).toContain('Recovery Reason:');
+    expect(source()).toContain('Canonical Result Receipt');
+  });
+  it('E16 keeps running state until durable cancellation confirmation arrives', () => {
+    const page = source();
+    const stop = page.slice(page.indexOf('const stopExecution'), page.indexOf('// ── Send message'));
+    expect(stop).toContain('await aiden.cancelTask(rid)');
+    expect(stop).not.toContain('setIsStreaming(false)');
+    expect(stop).not.toContain('setIsExecuting(false)');
+  });
+  it('E17 cleans up canonical projection polling when the view changes or settles', () => {
+    expect(source()).toContain('window.clearInterval(poll)');
+    expect(source()).toContain('projection?.receipt.terminal ? null');
+  });
+  it('E17b keeps the exact terminal Attempt and run bound after Job settlement', () => {
+    const page = source();
+    expect(page).toContain('aiden.loadRunProjection(jobId, attemptId, runId)');
+    expect(page).toContain('attemptId={activeAttemptId}');
+    expect(page).toContain('runId={activeRunId}');
+  });
+  it('E18 reattaches the run-scoped event follower after browser reload', () => {
+    const page = source();
+    const restore = page.slice(page.indexOf('const restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    expect(restore).toContain('const replay = { admission: restored.admission, lastEventId: 0 }');
+    expect(restore).toContain('aiden.followRun(replay');
+    expect(restore).toContain("onConnectionState: (state)");
+    expect(restore).toContain('activeRunFollowAbortRef.current = controller');
+    expect(restore).toContain("{ signal: controller.signal }");
+    expect(restore).toContain('aiden.loadRunProjection(');
+    expect(restore).toContain("if (!projection) throw new Error('stale Workbench run handle')");
+    expect(restore).toContain('aiden.clearRunHandle()');
+  });
+});
