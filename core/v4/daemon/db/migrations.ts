@@ -2295,6 +2295,64 @@ function applyV42(db: Database.Database): void {
   ]);
 }
 
+/** Durable continuity references over the existing Job/Attempt authorities. */
+function applyV43(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS continuity_checkpoints (
+      checkpoint_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      checkpoint_id TEXT NOT NULL UNIQUE,
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      workspace_id TEXT,
+      root_job_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      attempt_generation INTEGER NOT NULL,
+      session_id TEXT NOT NULL,
+      repository_snapshot_id TEXT,
+      repository_fingerprint TEXT,
+      event_cursor INTEGER NOT NULL DEFAULT 0,
+      proof_ids_json TEXT NOT NULL DEFAULT '[]',
+      evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+      pending_wait_ids_json TEXT NOT NULL DEFAULT '[]',
+      pending_approval_ids_json TEXT NOT NULL DEFAULT '[]',
+      durable_input_cursor INTEGER NOT NULL DEFAULT 0,
+      context_recipe_version INTEGER NOT NULL DEFAULT 1,
+      context_recipe_digest TEXT NOT NULL,
+      decisions_json TEXT NOT NULL DEFAULT '[]',
+      blockers_json TEXT NOT NULL DEFAULT '[]',
+      proposed_next_json TEXT NOT NULL DEFAULT '[]',
+      environment_fingerprint TEXT,
+      reason TEXT NOT NULL,
+      validity TEXT NOT NULL CHECK(validity IN ('current','superseded','invalid')),
+      idempotency_namespace TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      supersedes_checkpoint_id TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (attempt_id) REFERENCES runs(attempt_id) ON DELETE CASCADE,
+      FOREIGN KEY (supersedes_checkpoint_id) REFERENCES continuity_checkpoints(checkpoint_id) ON DELETE SET NULL,
+      UNIQUE (job_id, attempt_id, attempt_generation, idempotency_namespace, idempotency_key)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_continuity_one_current_per_job
+      ON continuity_checkpoints(job_id) WHERE validity = 'current';
+    CREATE INDEX IF NOT EXISTS idx_continuity_workspace_recent
+      ON continuity_checkpoints(workspace_id, updated_at DESC, checkpoint_sequence DESC);
+    CREATE INDEX IF NOT EXISTS idx_continuity_job_recent
+      ON continuity_checkpoints(job_id, updated_at DESC, checkpoint_sequence DESC);
+    CREATE TABLE IF NOT EXISTS continuity_actions (
+      action_id TEXT PRIMARY KEY,
+      checkpoint_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      decision TEXT NOT NULL,
+      result_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (checkpoint_id) REFERENCES continuity_checkpoints(checkpoint_id) ON DELETE CASCADE,
+      UNIQUE (checkpoint_id, idempotency_key)
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2338,6 +2396,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 40, name: 'bounded parallel read-only Worker groups', apply: applyV40 },
   { version: 41, name: 'durable TriggerBus claim fencing', apply: applyV41 },
   { version: 42, name: 'exact Claim Effect bindings', apply: applyV42 },
+  { version: 43, name: 'durable continuity checkpoints', apply: applyV43 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2383,7 +2442,8 @@ function validateLatestSchema(db: Database.Database): void {
     'job_budget_reservation_items', 'job_budget_reservation_commits',
     'worker_provider_call_reconciliations', 'worker_provider_late_responses',
     'job_budget_reservation_reconciliations', 'worker_groups', 'worker_group_members',
-    'worker_provider_concurrency_reservations'];
+    'worker_provider_concurrency_reservations', 'continuity_checkpoints',
+    'continuity_actions'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

@@ -4,6 +4,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { statSync } from 'node:fs';
 
 import type { Db } from '../daemon/db/connection';
 import { createActionAuthority, type ActionAuthority } from '../actionAuthority';
@@ -12,6 +13,9 @@ import { admitDurableJob } from '../daemon/jobLifecycle';
 import { createJobControlAuthority, type JobControlAuthority } from '../daemon/jobControlAuthority';
 import type { RunStore } from '../daemon/runStore';
 import type { TriggerBus } from '../daemon/triggerBus';
+import { createTaskStore } from '../daemon/taskStore';
+import { continueFromCheckpoint } from '../safeContinue';
+import { fingerprintContinuityEnvironment } from '../continuityCheckpoint';
 
 export function createWorkbenchJobCommands(options: {
   db: Db;
@@ -25,6 +29,9 @@ export function createWorkbenchJobCommands(options: {
 }) {
   const controlAuthority = options.controlAuthority ?? createJobControlAuthority({ db: options.db, jobEngine: options.jobEngine });
   const actionAuthority = options.actionAuthority ?? createActionAuthority({ db: options.db, jobEngine: options.jobEngine });
+  const checkpoints = options.jobEngine.continuity;
+  if (!checkpoints) throw new Error('Workbench requires the canonical JobEngine continuity authority');
+  const taskStore = createTaskStore({ db: options.db });
   const nextId = options.idFactory ?? randomUUID;
   const enqueueTx = options.db.transaction((task: { message: string; sessionId?: string }) => {
     const idempotencyKey = nextId();
@@ -54,7 +61,7 @@ export function createWorkbenchJobCommands(options: {
     return { trigger, admission };
   }).immediate;
 
-  const finalRun = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+  const finalRun = new Set(['completed', 'succeeded', 'failed', 'cancelled', 'interrupted']);
   const activeTarget = (runId: number) => {
     const run = options.runStore.get(runId);
     if (!run?.taskId) return null;
@@ -63,10 +70,52 @@ export function createWorkbenchJobCommands(options: {
     if (!job || !attempt) return null;
     return { run, job, attempt };
   };
+  const captureBoundary = (jobId: string, attemptId: string, generation: number, reason: string, key: string) => {
+    const inputs = controlAuthority.inputs.listPending(jobId);
+    return checkpoints.capture({
+      jobId, attemptId, attemptGeneration: generation, reason,
+      idempotencyNamespace: 'workbench-boundary', idempotencyKey: key,
+      pendingApprovalIds: actionAuthority.listPending(jobId).map((item) => item.approvalId),
+      durableInputCursor: Math.max(0, ...inputs.map((item) => item.sequence)),
+    });
+  };
+  const resumeRun = (runId: number, idempotencyKey = nextId(), promptOverride?: string) => {
+    const run = options.runStore.get(runId);
+    if (!run?.taskId) return { accepted: false as const, runId };
+    const resumed = controlAuthority.commands.resume({
+      jobId: run.taskId,
+      source: 'workbench',
+      instanceId: options.instanceId,
+      idempotencyNamespace: 'workbench-control',
+      idempotencyKey,
+    });
+    const job = options.jobEngine.getJob(run.taskId)!;
+    const trigger = options.triggerBus.insert({
+      source: 'manual',
+      sourceKey: `workbench-resume:${run.taskId}`,
+      idempotencyKey: `resume:${idempotencyKey}`,
+      payload: {
+        body: { prompt: promptOverride ?? job.goal, source: 'workbench-resume' },
+        sessionId: job.sessionId,
+        durable_job: { job_id: job.id, attempt_id: resumed.attemptId, run_id: resumed.runId },
+      },
+    });
+    options.db.prepare('UPDATE runs SET trigger_event_id = ? WHERE attempt_id = ?').run(trigger.id, resumed.attemptId);
+    captureBoundary(job.id, resumed.attemptId, resumed.generation, 'resumed', `resume:${idempotencyKey}`);
+    return { accepted: true as const, runId, triggerEventId: trigger.id, ...resumed };
+  };
   return {
     enqueue: {
       enqueue(task: { message: string; sessionId?: string }) {
         const accepted = enqueueTx(task);
+        const attempt = options.jobEngine.getAttempt(accepted.admission.attemptId)!;
+        captureBoundary(
+          accepted.admission.jobId,
+          accepted.admission.attemptId,
+          attempt.generation,
+          'admitted',
+          `admitted:${accepted.admission.attemptId}`,
+        );
         return {
           accepted: true,
           triggerEventId: accepted.trigger.id,
@@ -100,6 +149,7 @@ export function createWorkbenchJobCommands(options: {
               source: 'workbench-web', reason: 'stopped from dashboard',
             });
           } catch { /* compatibility projection is best-effort */ }
+          captureBoundary(run.taskId, attempt!.id, attempt!.generation, 'cancel requested', `cancel:${run.taskId}`);
         } else {
           options.runStore.setStatus(runId, 'cancelled', { finishReason: 'stopped from workbench web' });
           options.runStore.emitEvent(runId, 'task_cancelled', {
@@ -149,6 +199,7 @@ export function createWorkbenchJobCommands(options: {
           idempotencyNamespace: 'workbench-control',
           idempotencyKey,
         });
+        captureBoundary(target.job.id, target.attempt.id, target.attempt.generation, 'pause requested', `pause:${idempotencyKey}`);
         return { accepted: true, applied: result.applied, runId, controlId: result.controlId };
       },
       applyPauseBoundary(runId: number) {
@@ -158,33 +209,7 @@ export function createWorkbenchJobCommands(options: {
         return { accepted: true, applied: result.applied };
       },
       resume(runId: number, idempotencyKey = nextId()) {
-        const run = options.runStore.get(runId);
-        if (!run?.taskId) return { accepted: false, runId };
-        const resumed = controlAuthority.commands.resume({
-          jobId: run.taskId,
-          source: 'workbench',
-          instanceId: options.instanceId,
-          idempotencyNamespace: 'workbench-control',
-          idempotencyKey,
-        });
-        const job = options.jobEngine.getJob(run.taskId)!;
-        const trigger = options.triggerBus.insert({
-          source: 'manual',
-          sourceKey: `workbench-resume:${run.taskId}`,
-          idempotencyKey: `resume:${idempotencyKey}`,
-          payload: {
-            body: { prompt: job.goal, source: 'workbench-resume' },
-            sessionId: job.sessionId,
-            durable_job: {
-              job_id: job.id,
-              attempt_id: resumed.attemptId,
-              run_id: resumed.runId,
-            },
-          },
-        });
-        options.db.prepare('UPDATE runs SET trigger_event_id = ? WHERE attempt_id = ?')
-          .run(trigger.id, resumed.attemptId);
-        return { accepted: true, runId, triggerEventId: trigger.id, ...resumed };
+        return resumeRun(runId, idempotencyKey);
       },
     },
     approval: {
@@ -203,6 +228,46 @@ export function createWorkbenchJobCommands(options: {
           decisionChannel: 'workbench',
         });
         return { accepted: true, approvalId, state: decided.state };
+      },
+    },
+    continuity: checkpoints,
+    continueTask: {
+      async continue(checkpointId: string, idempotencyKey: string) {
+        const checkpoint = checkpoints.get(checkpointId);
+        if (!checkpoint) throw new Error('Continuity checkpoint not found');
+        let currentRepositoryFingerprint: string | null | undefined;
+        if (checkpoint.repositorySnapshotId) {
+          const inventory = await options.jobEngine.repository.inventory(
+            checkpoint.repositorySnapshotId,
+            { limit: 1 },
+          );
+          currentRepositoryFingerprint = inventory.stale
+            ? `stale:${inventory.stateDigest}`
+            : inventory.stateDigest;
+        }
+        return continueFromCheckpoint({
+          db: options.db,
+          checkpoints,
+          engine: options.jobEngine,
+          taskStore,
+          checkpointId,
+          idempotencyKey,
+          currentRepositoryFingerprint,
+          currentEnvironmentFingerprint: fingerprintContinuityEnvironment(),
+          fileProbe(filePath) {
+            try { const stat = statSync(filePath); return { exists: true, bytes: stat.size }; }
+            catch { return { exists: false }; }
+          },
+          resume(input) {
+            const priorAttempt = options.jobEngine.getAttempt(input.priorAttemptId);
+            if (!priorAttempt) throw new Error('Prior Attempt not found');
+            const result = resumeRun(priorAttempt.rowId, input.idempotencyKey, input.preamble);
+            if (!result.accepted || !('attemptId' in result) || !('generation' in result)) {
+              throw new Error('Durable Job could not be resumed');
+            }
+            return { attemptId: result.attemptId, generation: result.generation, runId: result.runId };
+          },
+        });
       },
     },
   };

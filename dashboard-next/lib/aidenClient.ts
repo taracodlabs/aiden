@@ -1,109 +1,195 @@
 /**
  * Copyright (c) 2026 Shiva Deore (Taracod).
  * Licensed under AGPL-3.0. See LICENSE for details.
- *
- * Aiden — local-first agent.
- */
-/**
- * lib/aidenClient.ts — the ONE backend client for the dashboard.
- *
- * The dashboard used to talk to the old v3 server (http://localhost:4200 with a
- * bespoke /api/chat token stream). This module repoints everything at the v4
- * Workbench bridge, served same-origin, and is the ONLY place that knows the v4
- * wire shapes:
- *   - GET  /api/sessions               — the recent-session list (sidebar)
- *   - GET  /api/events                 — the live SSE stream of run_events
- *   - POST /api/tasks                  — token-gated: enqueue a task (safe path)
- *   - POST /api/tasks/:runId/cancel    — token-gated: stop a running job
- *
- * v4 has no synchronous "chat" response: a task is ENQUEUED onto the daemon's
- * safe job path, the daemon runs it, and its progress arrives as run_events on
- * the separate event stream. `runTask` bridges that gap — it sends the task,
- * locks onto the run the daemon creates for it (its first `dispatcher.invoked`
- * event), and translates that run's events into the handlers the chat + activity
- * views consume. Written replies come from the agent's `ui_task_update`/`_done`
- * text; tool calls + verified/unverified verdicts go to the Activity view.
  */
 
-/** A run_event exactly as the bridge streams it (payload parsed to an object). */
+/** A run event exactly as the Workbench bridge streams it. */
 export interface V4Event {
-  id:        number;
-  runId:     number;
+  id: number;
+  runId: number;
   sessionId: string | null;
-  ts:        number;
-  category:  string;
-  kind:      string;
-  name:      string | null;
-  status:    string | null;
+  ts: number;
+  category: string;
+  kind: string;
+  name: string | null;
+  status: string | null;
   durationMs: number | null;
-  summary:   string | null;
-  payload:   any;
+  summary: string | null;
+  payload: any;
 }
 
-/** One recent session for the sidebar. */
 export interface SessionSummary {
-  id:         string;
-  label:      string;
+  id: string;
+  label: string;
   lastActive: number;
-  provider?:  string | null;
-  model?:     string | null;
+  provider?: string | null;
+  model?: string | null;
 }
 
-/** A single Activity-view item — a tool call or a verify verdict. */
 export interface ActivityItem {
-  kind:    'tool' | 'verify' | 'note';
-  label:   string;
+  kind: 'tool' | 'verify' | 'note';
+  label: string;
   detail?: string;
-  status:  'running' | 'ok' | 'failed' | 'warn';
+  status: 'running' | 'ok' | 'failed' | 'warn';
 }
 
-/** Handlers the chat page wires to React state. The adapter calls these; it never
- *  touches the DOM or React itself. */
+export type WorkbenchConnectionState =
+  | 'connected' | 'reconnecting' | 'stalled' | 'uncertain' | 'terminal';
+
 export interface TurnHandlers {
-  onRunId?:    (runId: number) => void;
-  onReply?:    (chunk: string) => void;
+  onAdmission?: (admission: TaskAdmission) => void;
+  onRunId?: (runId: number) => void;
+  onReply?: (chunk: string) => void;
   onThinking?: (stage: string, message: string) => void;
   onActivity?: (item: ActivityItem) => void;
-  onTokens?:   (total: number) => void;
-  onDone?:     (info: { stopped?: boolean; summary?: string }) => void;
-  onError?:    (message: string) => void;
+  onTokens?: (total: number) => void;
+  onDone?: (info: { stopped?: boolean; summary?: string; status?: string }) => void;
+  onError?: (message: string) => void;
+  onConnectionState?: (state: WorkbenchConnectionState) => void;
 }
 
-/** The per-launch write token the bridge injected into the served page. */
+/** Exact durable identity returned by task admission. Event order is never an
+ * identity source. */
+export interface TaskAdmission {
+  accepted: true;
+  jobId: string;
+  attemptId: string;
+  runId: number;
+  triggerEventId?: number;
+  duplicate: boolean;
+}
+
+/** Reload-safe client handle. Presentation is rebuilt from durable records. */
+export interface WorkbenchRunHandle {
+  admission: TaskAdmission;
+  lastEventId: number;
+}
+
+const ACTIVE_RUN_STORAGE_KEY = 'aiden.workbench.active-run.v1';
+
+function admissionFromSearch(search: string): TaskAdmission | null {
+  const query = new URLSearchParams(search);
+  const jobId = requiredString(query.get('job'));
+  const attemptId = requiredString(query.get('attempt'));
+  const runRaw = query.get('run');
+  const runId = runRaw === null ? Number.NaN : Number(runRaw);
+  if (!jobId || !attemptId || !Number.isSafeInteger(runId) || runId < 0) return null;
+  return { accepted: true, jobId, attemptId, runId, duplicate: false };
+}
+
+export function persistRunHandle(handle: WorkbenchRunHandle): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  window.localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, JSON.stringify(handle));
+  if (window.location && window.history?.replaceState) {
+    const next = new URL(window.location.href);
+    next.searchParams.set('job', handle.admission.jobId);
+    next.searchParams.set('attempt', handle.admission.attemptId);
+    next.searchParams.set('run', String(handle.admission.runId));
+    window.history.replaceState(window.history.state, '', next);
+  }
+}
+
+export function clearRunHandle(): void {
+  if (typeof window === 'undefined' || !window.localStorage) return;
+  window.localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+  if (window.location && window.history?.replaceState) {
+    const next = new URL(window.location.href);
+    next.searchParams.delete('job');
+    next.searchParams.delete('attempt');
+    next.searchParams.delete('run');
+    window.history.replaceState(window.history.state, '', next);
+  }
+}
+
+export function restoreRunHandle(): WorkbenchRunHandle | null {
+  if (typeof window === 'undefined' || !window.localStorage) return null;
+  const linked = window.location ? admissionFromSearch(window.location.search) : null;
+  const raw = window.localStorage.getItem(ACTIVE_RUN_STORAGE_KEY);
+  if (!raw) return linked ? { admission: linked, lastEventId: 0 } : null;
+  try {
+    const value = JSON.parse(raw) as { admission?: unknown; lastEventId?: unknown };
+    const stored = value.admission && typeof value.admission === 'object'
+      ? value.admission as Record<string, unknown> : {};
+    const admission = parseTaskAdmission({
+      accepted: stored.accepted,
+      job_id: stored.jobId,
+      attempt_id: stored.attemptId,
+      run_id: stored.runId,
+      triggerEventId: stored.triggerEventId,
+      duplicate: stored.duplicate,
+    });
+    const lastEventId = typeof value.lastEventId === 'number'
+      && Number.isSafeInteger(value.lastEventId) && value.lastEventId >= 0
+      ? value.lastEventId : 0;
+    if (linked && (
+      linked.jobId !== admission.jobId
+      || linked.attemptId !== admission.attemptId
+      || linked.runId !== admission.runId
+    )) return { admission: linked, lastEventId: 0 };
+    return { admission: linked ?? admission, lastEventId };
+  } catch {
+    window.localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+    return linked ? { admission: linked, lastEventId: 0 } : null;
+  }
+}
+
+export interface WorkbenchResultReceipt {
+  terminal: boolean;
+  status: string;
+  summary?: string | null;
+  stopped?: boolean;
+  verdict?: { verdict: string } | null;
+}
+
+export interface WorkbenchRunProjection {
+  identity: { jobId: string; attemptId: string; runId: number; generation?: number };
+  receipt: WorkbenchResultReceipt;
+  attempts?: Array<{ id: string; generation: number; status: string }>;
+  timeline?: Array<{ eventId: number; jobSequence: number; type: string; createdAt: number }>;
+  workers?: unknown[];
+  approvals?: unknown[];
+  evidence?: unknown[];
+  verification?: unknown;
+}
+
+export interface ContinuityCheckpointView {
+  checkpointId: string;
+  jobId: string;
+  attemptId: string;
+  attemptGeneration: number;
+  reason: string;
+  validity: string;
+  blockers: string[];
+  proposedNext: string[];
+}
+
 function token(): string {
   if (typeof window === 'undefined') return '';
   return (window as any).__WB_TOKEN__ || '';
 }
 
-/** True when this page can perform writes (the bridge served a token). */
-export function hasWriteToken(): boolean {
-  return token().length > 0;
-}
+export function hasWriteToken(): boolean { return token().length > 0; }
 
-/** The recent-session list for the sidebar. Read-only; never throws. */
 export async function listSessions(): Promise<SessionSummary[]> {
   try {
-    const r = await fetch('/api/sessions');
-    if (!r.ok) return [];
-    const j = await r.json();
-    return Array.isArray(j) ? j : [];
-  } catch {
-    return [];
-  }
+    const response = await fetch('/api/sessions');
+    if (!response.ok) return [];
+    const value = await response.json();
+    return Array.isArray(value) ? value : [];
+  } catch { return []; }
 }
 
-/** Stop a running job by run id (token-gated). Returns whether the bridge accepted it. */
-export async function cancelTask(runId: number | null): Promise<boolean> {
+export async function cancelTask(target: number | WorkbenchRunHandle | null): Promise<boolean> {
+  const runId = typeof target === 'number' ? target : target?.admission.runId ?? null;
   if (runId == null) return false;
   try {
-    const r = await fetch('/api/tasks/' + encodeURIComponent(String(runId)) + '/cancel', {
-      method: 'POST',
-      headers: { 'x-workbench-token': token() },
+    const response = await fetch(`/api/tasks/${encodeURIComponent(String(runId))}/cancel`, {
+      method: 'POST', headers: { 'x-workbench-token': token() },
     });
-    return r.ok;
-  } catch {
-    return false;
-  }
+    if (!response.ok) return false;
+    const body = await response.json() as { accepted?: unknown; runId?: unknown };
+    return body.accepted === true && Number(body.runId) === runId;
+  } catch { return false; }
 }
 
 const TOOL_VERB: Record<string, string> = {
@@ -114,169 +200,274 @@ const TOOL_VERB: Record<string, string> = {
 };
 function verb(name: string): string {
   if (TOOL_VERB[name]) return TOOL_VERB[name];
-  const s = String(name || 'tool').replace(/_/g, ' ');
-  return s.charAt(0).toUpperCase() + s.slice(1);
+  const value = String(name || 'tool').replace(/_/g, ' ');
+  return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
-/** Per-turn mutable state the router threads across events. */
 interface TurnState { gotReply: boolean }
+type RoutedTerminal =
+  | { kind: 'candidate' }
+  | { kind: 'cancelled' }
+  | { kind: 'rejected'; message: string };
 
-/** Translate ONE v4 run_event into handler calls. Returns true when the event is
- *  terminal for the run (so the caller can finish the turn). */
-function routeEvent(ev: V4Event, h: TurnHandlers, state: TurnState): boolean {
-  const n = ev.name || ev.kind || '';
-  const p = ev.payload || {};
-  switch (n) {
+function routeEvent(ev: V4Event, handlers: TurnHandlers, state: TurnState): RoutedTerminal | null {
+  const name = ev.name || ev.kind || '';
+  const payload = ev.payload || {};
+  switch (name) {
     case 'assistant_message':
-      // The agent's final WRITTEN reply — the conversational text for the bubble.
       state.gotReply = true;
-      h.onReply?.(String(p.text ?? ''));
-      return false;
+      handlers.onReply?.(String(payload.text ?? ''));
+      return null;
     case 'tool_call_started':
-      h.onActivity?.({ kind: 'tool', label: verb(p.toolName || 'tool'), status: 'running' });
-      return false;
+      handlers.onActivity?.({ kind: 'tool', label: verb(payload.toolName || 'tool'), status: 'running' });
+      return null;
     case 'tool_call_completed':
-      h.onActivity?.({
-        kind: 'tool', label: verb(p.toolName || 'tool'),
-        detail: ev.durationMs != null ? ev.durationMs + ' ms' : undefined,
+      handlers.onActivity?.({
+        kind: 'tool', label: verb(payload.toolName || 'tool'),
+        detail: ev.durationMs != null ? `${ev.durationMs} ms` : undefined,
         status: ev.status === 'failed' ? 'failed' : 'ok',
       });
-      return false;
+      return null;
     case 'artifact_verified': {
-      const presentation = p.presentation && typeof p.presentation === 'object'
-        ? p.presentation as Record<string, unknown>
-        : undefined;
-      // `outcome` is the evidence-typed verdict (verified | no_evidence | failed
-      // | unverifiable). Only 'verified' is a green check — a zero-evidence turn
-      // is 'no_evidence', never verified. (`p.verified` tolerates old rows.)
+      const presentation = payload.presentation && typeof payload.presentation === 'object'
+        ? payload.presentation as Record<string, unknown> : undefined;
       const kind: string =
-        (p.outcome && typeof p.outcome === 'object' && p.outcome.kind) ||
-        (p.verified ? 'verified' : 'unverifiable');
+        (payload.outcome && typeof payload.outcome === 'object' && payload.outcome.kind)
+        || (payload.verified ? 'verified' : 'unverifiable');
       const ok = kind === 'verified';
-      const label = typeof presentation?.label === 'string'
-        ? presentation.label
-        :
-        kind === 'verified'     ? 'Verified' :
-        kind === 'no_evidence'  ? 'No evidence' :
-        kind === 'failed'       ? 'Failed' :
-                                  'Unverified';
+      const label = typeof presentation?.label === 'string' ? presentation.label
+        : kind === 'verified' ? 'Verified'
+          : kind === 'no_evidence' ? 'No evidence'
+            : kind === 'failed' ? 'Failed' : 'Unverified';
       const severity = presentation?.severity;
-      const status = severity === 'error' || severity === 'warning' ? 'warn' : ok ? 'ok' : 'warn';
-      h.onActivity?.({ kind: 'verify', label, detail: p.verdict, status });
-      return false;
+      handlers.onActivity?.({
+        kind: 'verify', label, detail: payload.verdict,
+        status: severity === 'error' || severity === 'warning' ? 'warn' : ok ? 'ok' : 'warn',
+      });
+      return null;
     }
     case 'cost_updated':
-      if (p.totalTokens != null) h.onTokens?.(p.totalTokens);
-      return false;
+      if (payload.totalTokens != null) handlers.onTokens?.(payload.totalTokens);
+      return null;
     case 'ui_task_update':
-      // Progress narration → the thinking strip, not the reply bubble.
-      h.onThinking?.(String(p.stage || 'working'), String(p.text || p.message || ('step ' + (p.step ?? ''))));
-      return false;
+      handlers.onThinking?.(
+        String(payload.stage || 'working'),
+        String(payload.text || payload.message || `step ${payload.step ?? ''}`),
+      );
+      return null;
     case 'ui_task_done':
-      // Only a fallback reply — if the agent emitted no assistant_message text.
-      if (!state.gotReply && p.summary) { state.gotReply = true; h.onReply?.(String(p.summary)); }
-      h.onDone?.({ summary: p.summary ? String(p.summary) : '' });
-      return true;
+      if (!state.gotReply && payload.summary) {
+        state.gotReply = true;
+        handlers.onReply?.(String(payload.summary));
+      }
+      return { kind: 'candidate' };
     case 'task_cancelled':
-      h.onDone?.({ stopped: true });
-      return true;
+      return { kind: 'cancelled' };
     default:
       break;
   }
-  // Terminal by kind: the dispatcher wraps every run; `completed` ends it even
-  // when the agent narrated nothing.
-  if (ev.kind === 'dispatcher.completed') { h.onDone?.({ summary: ev.summary || '' }); return true; }
+  if (ev.kind === 'dispatcher.completed') return { kind: 'candidate' };
   if (ev.kind === 'dispatcher.rejected' || ev.kind === 'dispatcher.builder_failed') {
-    h.onError?.(ev.summary || 'the run could not start');
-    return true;
+    return { kind: 'rejected', message: ev.summary || 'the run could not start' };
   }
-  return false;
+  return null;
 }
 
 const IDLE_MS = 25_000;
 
-/**
- * Send a task and stream its reply. Resolves when the run ends (or times out).
- *
- * Flow: open the event stream, POST the task, then lock onto the run the daemon
- * creates for it — the first `dispatcher.invoked` seen AFTER we send is ours (a
- * pre-existing run already fired its `invoked` during the replay). From then on
- * every event for that run is routed through `routeEvent`.
- */
-export function runTask(message: string, handlers: TurnHandlers): Promise<void> {
+function requiredString(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+export function parseTaskAdmission(value: unknown): TaskAdmission {
+  const body = value && typeof value === 'object' ? value as Record<string, unknown> : {};
+  const jobId = requiredString(body.job_id);
+  const attemptId = requiredString(body.attempt_id);
+  const runId = typeof body.run_id === 'number' && Number.isSafeInteger(body.run_id) && body.run_id >= 0
+    ? body.run_id : null;
+  if (body.accepted !== true || !jobId || !attemptId || runId === null) {
+    throw new Error('task admission did not return one exact Job, Attempt, and run identity');
+  }
+  const triggerEventId = typeof body.triggerEventId === 'number' && Number.isSafeInteger(body.triggerEventId)
+    ? body.triggerEventId : undefined;
+  return { accepted: true, jobId, attemptId, runId, triggerEventId, duplicate: body.duplicate === true };
+}
+
+export async function admitTask(message: string, sessionId?: string): Promise<WorkbenchRunHandle> {
+  let response: Response;
+  try {
+    response = await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+      body: JSON.stringify({ message, ...(sessionId ? { sessionId } : {}) }),
+    });
+  } catch { throw new Error('could not reach Aiden (is `aiden web` running?)'); }
+  let body: unknown = null;
+  try { body = await response.json(); } catch { /* classified below */ }
+  if (!response.ok) {
+    const detail = body && typeof body === 'object' && typeof (body as { error?: unknown }).error === 'string'
+      ? String((body as { error: string }).error) : `send failed (HTTP ${response.status})`;
+    if (response.status === 401 || response.status === 503) {
+      throw new Error('writes are disabled — open the dashboard via `aiden web` (it carries the local token)');
+    }
+    throw new Error(detail);
+  }
+  const handle = { admission: parseTaskAdmission(body), lastEventId: 0 };
+  persistRunHandle(handle);
+  return handle;
+}
+
+export async function loadRunProjection(jobId: string, attemptId?: string, runId?: number): Promise<WorkbenchRunProjection | null> {
+  const query = new URLSearchParams();
+  if (attemptId) query.set('attemptId', attemptId);
+  if (runId !== undefined) query.set('runId', String(runId));
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/projection?${query.toString()}`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`durable run projection unavailable (HTTP ${response.status})`);
+  return response.json() as Promise<WorkbenchRunProjection>;
+}
+
+export async function loadContinuity(jobId: string): Promise<ContinuityCheckpointView | null> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/continuity`);
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`continuity unavailable (HTTP ${response.status})`);
+  return response.json() as Promise<ContinuityCheckpointView>;
+}
+
+export async function continueTask(checkpointId: string, jobId: string, idempotencyKey: string): Promise<{
+  accepted: boolean; decision?: string; reason?: string; attemptId?: string; generation?: number; runId?: number;
+}> {
+  const response = await fetch(`/api/checkpoints/${encodeURIComponent(checkpointId)}/continue`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+    body: JSON.stringify({ jobId, idempotencyKey }),
+  });
+  const body = await response.json() as {
+    accepted?: unknown; decision?: string; reason?: string; attemptId?: string; generation?: number; runId?: number;
+  };
+  return {
+    accepted: response.ok && body.accepted === true,
+    decision: body.decision,
+    reason: body.reason,
+    ...(typeof body.attemptId === 'string' ? { attemptId: body.attemptId } : {}),
+    ...(typeof body.generation === 'number' ? { generation: body.generation } : {}),
+    ...(typeof body.runId === 'number' ? { runId: body.runId } : {}),
+  };
+}
+
+function projectionMatches(handle: WorkbenchRunHandle, projection: WorkbenchRunProjection): boolean {
+  const identity = projection?.identity;
+  return identity?.jobId === handle.admission.jobId
+    && identity?.attemptId === handle.admission.attemptId
+    && identity?.runId === handle.admission.runId;
+}
+
+async function readProjection(handle: WorkbenchRunHandle): Promise<WorkbenchRunProjection> {
+  const response = await fetch(
+    `/api/jobs/${encodeURIComponent(handle.admission.jobId)}/projection`
+    + `?attemptId=${encodeURIComponent(handle.admission.attemptId)}&runId=${handle.admission.runId}`,
+  );
+  if (!response.ok) throw new Error(`durable run projection unavailable (HTTP ${response.status})`);
+  const projection = await response.json() as WorkbenchRunProjection;
+  if (!projectionMatches(handle, projection)) throw new Error('durable run projection identity mismatch');
+  return projection;
+}
+
+export interface FollowRunOptions { stallMs?: number; signal?: AbortSignal }
+
+export function followRun(
+  handle: WorkbenchRunHandle,
+  handlers: TurnHandlers,
+  options: FollowRunOptions = {},
+): Promise<void> {
   return new Promise<void>((resolve) => {
-    let ours: number | null = null;
-    let sent = false;
     let settled = false;
-    let idle: ReturnType<typeof setTimeout> | null = null;
+    let terminalCheck = false;
+    let stall: ReturnType<typeof setTimeout> | null = null;
     let es: EventSource | null = null;
     const state: TurnState = { gotReply: false };
+    const stallMs = Math.max(1, options.stallMs ?? IDLE_MS);
 
-    const finish = (info: { stopped?: boolean; summary?: string; error?: string }): void => {
+    const cleanup = (): void => {
+      if (stall) clearTimeout(stall);
+      options.signal?.removeEventListener('abort', abort);
+      try { es?.close(); } catch { /* noop */ }
+    };
+    const abort = (): void => {
       if (settled) return;
       settled = true;
-      if (idle) clearTimeout(idle);
-      try { es?.close(); } catch { /* noop */ }
-      if (info.error) handlers.onError?.(info.error);
-      else handlers.onDone?.({ stopped: info.stopped, summary: info.summary });
+      cleanup();
       resolve();
     };
-    const bumpIdle = (): void => {
-      if (idle) clearTimeout(idle);
-      idle = setTimeout(() => finish({ summary: '' }), IDLE_MS);
+    const finish = (info: { stopped?: boolean; summary?: string; status?: string; error?: string }): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      handlers.onConnectionState?.('terminal');
+      if (info.error) handlers.onError?.(info.error);
+      else handlers.onDone?.({ stopped: info.stopped, summary: info.summary, status: info.status });
+      resolve();
     };
-
-    try {
-      es = new EventSource('/api/events');
-    } catch {
-      finish({ error: 'could not open the event stream' });
-      return;
-    }
-    es.onmessage = (e: MessageEvent): void => {
-      let ev: V4Event;
-      try { ev = JSON.parse(e.data); } catch { return; }
-      if (ev.runId == null) return;
-      if (ours == null) {
-        // Ignore the replay + any in-flight run until we've sent, then adopt the
-        // first freshly-invoked run as ours.
-        if (!sent) return;
-        if (ev.kind === 'dispatcher.invoked') {
-          ours = ev.runId;
-          handlers.onRunId?.(ours);
-          bumpIdle();
-        }
-        return;
-      }
-      if (ev.runId !== ours) return;
-      const done = routeEvent(ev, handlers, state);
-      if (done) { finish({}); return; }
-      bumpIdle();
+    const armStall = (): void => {
+      if (settled) return;
+      if (stall) clearTimeout(stall);
+      stall = setTimeout(() => {
+        handlers.onConnectionState?.('stalled');
+        void reconcile(false);
+      }, stallMs);
     };
-    es.onerror = (): void => { /* transient reconnects are fine; the idle timer guards us */ };
-
-    bumpIdle();
-
-    // Send AFTER the stream is open so we never miss our run's first event.
-    void (async (): Promise<void> => {
-      let res: Response;
+    const reconcile = async (terminalCandidate: boolean): Promise<void> => {
+      if (settled || terminalCheck) return;
+      terminalCheck = true;
       try {
-        res = await fetch('/api/tasks', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
-          body: JSON.stringify({ message }),
-        });
-      } catch {
-        finish({ error: 'could not reach Aiden (is `aiden web` running?)' });
-        return;
-      }
-      sent = true;
-      if (!res.ok) {
-        let err = 'send failed (HTTP ' + res.status + ')';
-        try { const j = await res.json(); if (j && j.error) err = j.error; } catch { /* noop */ }
-        if (res.status === 401 || res.status === 503) err = 'writes are disabled — open the dashboard via `aiden web` (it carries the local token)';
-        finish({ error: err });
-      }
-      // success → wait for the run's events; the stream drives the rest.
-    })();
+        const projection = await readProjection(handle);
+        if (projection.receipt.terminal) {
+          if (['failed', 'blocked', 'unknown'].includes(projection.receipt.status)) {
+            finish({ error: projection.receipt.summary || `durable run ended ${projection.receipt.status}` });
+          } else {
+            finish({
+              stopped: projection.receipt.stopped || projection.receipt.status === 'cancelled',
+              summary: projection.receipt.summary ?? undefined,
+              status: projection.receipt.status,
+            });
+          }
+        } else {
+          handlers.onConnectionState?.(terminalCandidate ? 'uncertain' : 'stalled');
+          armStall();
+        }
+      } catch (error) {
+        if (terminalCandidate) finish({ error: error instanceof Error ? error.message : String(error) });
+        else { handlers.onConnectionState?.('uncertain'); armStall(); }
+      } finally { terminalCheck = false; }
+    };
+
+    const query = handle.lastEventId > 0 ? `?message=1&lastId=${handle.lastEventId}` : '?message=1';
+    try { es = new EventSource(`/api/runs/${handle.admission.runId}/events${query}`); }
+    catch { finish({ error: 'could not open the event stream' }); return; }
+    if (options.signal?.aborted) { abort(); return; }
+    options.signal?.addEventListener('abort', abort, { once: true });
+    handlers.onConnectionState?.('connected');
+    es.onmessage = (message: MessageEvent): void => {
+      let ev: V4Event;
+      try { ev = JSON.parse(message.data); } catch { return; }
+      if (ev.runId !== handle.admission.runId || !Number.isSafeInteger(ev.id) || ev.id <= handle.lastEventId) return;
+      handle.lastEventId = ev.id;
+      persistRunHandle(handle);
+      const terminal = routeEvent(ev, handlers, state);
+      if (terminal) { void reconcile(true); return; }
+      armStall();
+    };
+    es.onerror = (): void => { if (!settled) handlers.onConnectionState?.('reconnecting'); };
+    armStall();
   });
+}
+
+export function runTask(message: string, handlers: TurnHandlers, options: FollowRunOptions = {}): Promise<void> {
+  return admitTask(message)
+    .then((handle) => {
+      handlers.onAdmission?.(handle.admission);
+      handlers.onRunId?.(handle.admission.runId);
+      return followRun(handle, handlers, options);
+    })
+    .catch((error) => { handlers.onError?.(error instanceof Error ? error.message : String(error)); });
 }

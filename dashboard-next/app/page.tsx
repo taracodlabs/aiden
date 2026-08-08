@@ -73,11 +73,113 @@ interface ActivityLog {
 // Tool calls + verified/unverified verdicts live here, OUT of the chat
 // conversation. The chat shows the written reply; this shows what ran to
 // produce it. Fed from the v4 event stream (see lib/aidenClient.ts).
-function ActivityView({ logs }: { logs: ActivityLog[] }) {
+function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
+  logs: ActivityLog[]
+  jobId: string | null
+  attemptId: string | null
+  runId: number | null
+  onContinued?: (jobId: string, attemptId: string, runId: number) => void
+}) {
+  const [projection, setProjection] = useState<aiden.WorkbenchRunProjection | null>(null)
+  const [continuity, setContinuity] = useState<aiden.ContinuityCheckpointView | null>(null)
+  const [continueResult, setContinueResult] = useState<{ pending: boolean; accepted?: boolean; reason?: string }>({ pending: false })
+  const continueKeys = useRef<Record<string, string>>({})
+  const [projectionRevision, setProjectionRevision] = useState(0)
+  useEffect(() => {
+    let current = true
+    if (!jobId || !attemptId || runId === null) { setProjection(null); setContinuity(null); return () => { current = false } }
+    const refresh = () => Promise.all([aiden.loadRunProjection(jobId, attemptId, runId), aiden.loadContinuity(jobId)])
+      .then(([nextProjection, nextContinuity]) => {
+        if (current) { setProjection(nextProjection); setContinuity(nextContinuity) }
+      })
+      .catch(() => { /* the event stream remains usable if projection refresh fails */ })
+    void refresh()
+    const poll = projection?.receipt.terminal ? null : window.setInterval(() => { void refresh() }, 1_000)
+    return () => {
+      current = false
+      if (poll !== null) window.clearInterval(poll)
+    }
+  }, [jobId, attemptId, runId, logs.length, projectionRevision, projection?.receipt.terminal])
   const color = (s?: string) =>
     s === 'ok' ? 'var(--green)' : s === 'err' ? 'var(--red)' : s === 'active' ? 'var(--orange)' : 'var(--muted3)'
   return (
     <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '18px 22px' }}>
+      {projection && (
+        <div style={{ maxWidth: 760, margin: '0 auto 12px', padding: '12px 14px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: 'var(--text2)', fontSize: 13 }}>
+            <strong>Active Work <span style={{ color: 'var(--orange)', fontSize: 10 }}>PRO BETA</span></strong>
+            <span style={{ color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>{projection.receipt.status}</span>
+          </div>
+          <div style={{ marginTop: 7, color: 'var(--muted3)', fontSize: 12, fontFamily: 'var(--mono)' }}>
+            {projection.identity.jobId} · {projection.identity.attemptId} · generation {projection.identity.generation ?? 0} · run {projection.identity.runId}
+          </div>
+          <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 10, color: 'var(--muted3)', fontSize: 12 }}>
+            <span>Attempt Timeline: {projection.attempts?.length ?? 0}</span>
+            <span>Worker Tree: {projection.workers?.length ?? 0}</span>
+            <span>Pending Approvals: {projection.approvals?.length ?? 0}</span>
+            <span>Evidence: {projection.evidence?.length ?? 0}</span>
+          </div>
+          <div style={{ marginTop: 8, color: 'var(--muted3)', fontSize: 12 }}>
+            <strong style={{ color: 'var(--text2)' }}>Verification / Proof</strong>
+            {' · '}{projection.receipt.verdict?.verdict ?? 'not yet verified'}
+          </div>
+          {projection.receipt.terminal && (
+            <div style={{ marginTop: 8, color: 'var(--text2)', fontSize: 12 }}>
+              <strong>Canonical Result Receipt</strong> · {projection.receipt.summary ?? projection.receipt.status}
+            </div>
+          )}
+          {continuity && (
+            <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)', color: 'var(--text2)', fontSize: 12 }}>
+              <strong>Continuity / Continue</strong> · Recovery Reason: {continuity.reason}
+              {continuity.blockers.length > 0 && (
+                <div style={{ marginTop: 5, color: 'var(--red)' }}>Blocked: {continuity.blockers.join(' · ')}</div>
+              )}
+              {continuity.proposedNext.length > 0 && (
+                <div style={{ marginTop: 5, color: 'var(--muted3)' }}>Next: {continuity.proposedNext.join(' · ')}</div>
+              )}
+              {!projection.receipt.terminal && projection.receipt.status === 'paused' && (
+                <button
+                  type="button"
+                  disabled={continueResult.pending || continuity.validity !== 'current' || continuity.blockers.length > 0}
+                  onClick={() => {
+                    const key = continueKeys.current[continuity.checkpointId]
+                      ?? `workbench-continue:${continuity.checkpointId}:${Date.now()}`
+                    continueKeys.current[continuity.checkpointId] = key
+                    setContinueResult({ pending: true })
+                    void aiden.continueTask(continuity.checkpointId, projection.identity.jobId, key)
+                      .then((result) => {
+                        setContinueResult({ pending: false, accepted: result.accepted, reason: result.reason ?? result.decision })
+                        if (result.accepted && result.attemptId && result.runId !== undefined) {
+                          aiden.persistRunHandle({
+                            admission: {
+                              accepted: true,
+                              jobId: projection.identity.jobId,
+                              attemptId: result.attemptId,
+                              runId: result.runId,
+                              duplicate: result.decision === 'already_applied',
+                            },
+                            lastEventId: 0,
+                          })
+                          onContinued?.(projection.identity.jobId, result.attemptId, result.runId)
+                          setProjectionRevision((value) => value + 1)
+                        }
+                      })
+                      .catch((error) => setContinueResult({ pending: false, accepted: false, reason: error instanceof Error ? error.message : String(error) }))
+                  }}
+                  style={{ marginTop: 8 }}
+                >
+                  {continueResult.pending ? 'Checking durable state…' : 'Continue safely'}
+                </button>
+              )}
+              {continueResult.reason && (
+                <div style={{ marginTop: 5, color: continueResult.accepted ? 'var(--green)' : 'var(--red)' }}>
+                  {continueResult.reason}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {logs.length === 0 ? (
         <div style={{ padding: '64px 0', textAlign: 'center', color: 'var(--muted2)', fontSize: 13 }}>
           No activity yet — tools, verification and progress from a run appear here.
@@ -4723,6 +4825,89 @@ export default function Home() {
   // ── Main view (chat | activity) + the run currently attached to the chat ──
   const [mainView,       setMainView]       = useState<'chat' | 'activity'>('chat')
   const activeRunIdRef = useRef<number | null>(null)
+  const activeRunFollowAbortRef = useRef<AbortController | null>(null)
+  const [activeJobId, setActiveJobId] = useState<string | null>(null)
+  const [activeAttemptId, setActiveAttemptId] = useState<string | null>(null)
+  const [activeRunId, setActiveRunId] = useState<number | null>(null)
+  useEffect(() => {
+    const restored = aiden.restoreRunHandle()
+    if (!restored) return
+    const controller = new AbortController()
+    const replay = { admission: restored.admission, lastEventId: 0 }
+    const recoveredMessageId = `recovered_${restored.admission.attemptId}`
+    let fullReply = ''
+    const nowTime = () => new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const settle = () => {
+      if (activeRunFollowAbortRef.current === controller) activeRunFollowAbortRef.current = null
+      setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
+    }
+    const startReplay = () => {
+      if (controller.signal.aborted) return
+      activeRunIdRef.current = restored.admission.runId
+      setActiveJobId(restored.admission.jobId)
+      setActiveAttemptId(restored.admission.attemptId)
+      setActiveRunId(restored.admission.runId)
+      activeRunFollowAbortRef.current = controller
+      setIsExecuting(true)
+      setIsStreaming(true)
+      setThinking({ stage: 'reconnecting', message: 'Reconnecting…' })
+      void aiden.followRun(replay, {
+      onConnectionState: (state) => {
+        if (state === 'terminal') return
+        setThinking({ stage: state, message: state === 'connected' ? 'Restoring durable activity…' : `${state}…` })
+      },
+      onThinking: (stage, message) => setThinking({ stage, message }),
+      onReply: (chunk) => {
+        setThinking(null)
+        fullReply += chunk
+        setMessages((prev) => {
+          const recovered = prev.some((message) => message.id === recoveredMessageId)
+          const next: Message = { id: recoveredMessageId, role: 'assistant', content: fullReply, timestamp: Date.now(), isStreaming: true }
+          return recovered ? prev.map((message) => message.id === recoveredMessageId ? next : message) : [...prev, next]
+        })
+      },
+      onActivity: (activity) => {
+        const style: ActivityLog['style'] = activity.status === 'ok'
+          ? 'ok' : (activity.status === 'failed' || activity.status === 'warn') ? 'err' : 'active'
+        const icon = activity.kind === 'verify'
+          ? (activity.status === 'ok' ? '✓' : '⚠')
+          : activity.status === 'failed' ? '✗' : activity.status === 'running' ? '▸' : '✓'
+        const message = activity.label + (activity.detail ? ` · ${activity.detail}` : '')
+        setActivityLogs((prev) => [...prev.slice(-199), { time: nowTime(), icon, agent: 'Aiden', message, style }])
+      },
+      onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
+      onDone: (info) => {
+        settle()
+        if (!fullReply && info.summary) {
+          setMessages((prev) => [...prev, { id: recoveredMessageId, role: 'assistant', content: info.summary!, timestamp: Date.now(), isStreaming: false }])
+        } else if (fullReply) {
+          setMessages((prev) => prev.map((message) => message.id === recoveredMessageId ? { ...message, isStreaming: false } : message))
+        }
+      },
+      onError: (message) => {
+        settle()
+        setMessages((prev) => fullReply ? prev : [...prev, { id: recoveredMessageId, role: 'assistant', content: `⚠ ${message}`, timestamp: Date.now(), isStreaming: false }])
+      },
+      }, { signal: controller.signal })
+    }
+    void aiden.loadRunProjection(
+      restored.admission.jobId,
+      restored.admission.attemptId,
+      restored.admission.runId,
+    ).then((projection) => {
+      if (!projection) throw new Error('stale Workbench run handle')
+      startReplay()
+    }).catch(() => {
+      aiden.clearRunHandle()
+      activeRunIdRef.current = null
+      setActiveJobId(null)
+      setActiveAttemptId(null)
+      setActiveRunId(null)
+      settle()
+    })
+    return () => controller.abort()
+  }, [])
+  useEffect(() => () => activeRunFollowAbortRef.current?.abort(), [])
 
   // ── Plus menu state ─────────────────────────────────────────
   const [plusMenuOpen,      setPlusMenuOpen]      = useState(false)
@@ -5029,12 +5214,13 @@ export default function Home() {
   }, [currentConvId])
 
   // ── Stop execution ───────────────────────────────────────────
-  const stopExecution = useCallback(() => {
+  const stopExecution = useCallback(async () => {
     const rid = activeRunIdRef.current
-    if (rid != null) aiden.cancelTask(rid).catch(() => {})
-    setIsStreaming(false)
-    setThinking(null)
-    setIsExecuting(false)
+    if (rid == null) return
+    const accepted = await aiden.cancelTask(rid)
+    setThinking(accepted
+      ? { stage: 'cancelling', message: 'Cancellation requested…' }
+      : { stage: 'working', message: 'Cancellation was not accepted; work is still running.' })
   }, [])
 
   // ── Send message ────────────────────────────────────────────
@@ -5059,6 +5245,10 @@ export default function Home() {
 
     let fullReply = ''
     activeRunIdRef.current = null
+    setActiveRunId(null)
+    activeRunFollowAbortRef.current?.abort()
+    const followController = new AbortController()
+    activeRunFollowAbortRef.current = followController
 
     const nowTime = () => new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
     const pushActivity = (icon: string, message: string, style: ActivityLog['style']) =>
@@ -5067,7 +5257,12 @@ export default function Home() {
     // Send onto the v4 safe job path; stream the reply + activity back. Tool calls
     // and verified/unverified verdicts go to the Activity view, NOT the chat.
     await aiden.runTask(userMsg.content, {
-      onRunId:    (rid) => { activeRunIdRef.current = rid },
+      onAdmission: (admission) => {
+        setActiveJobId(admission.jobId)
+        setActiveAttemptId(admission.attemptId)
+        setActiveRunId(admission.runId)
+      },
+      onRunId:    (rid) => { activeRunIdRef.current = rid; setActiveRunId(rid) },
       onThinking: (stage, message) => setThinking({ stage, message }),
       onReply:    (chunk) => {
         setThinking(null)
@@ -5084,6 +5279,7 @@ export default function Home() {
       },
       onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
       onDone: (info) => {
+        if (activeRunFollowAbortRef.current === followController) activeRunFollowAbortRef.current = null
         setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
         const finalContent = fullReply
           || (info.stopped
@@ -5093,12 +5289,13 @@ export default function Home() {
         setMessages(prev => { const updated = prev.map(m => m.id === thinkingId ? finalMsg : m); saveToConversation(updated); return updated })
       },
       onError: (message) => {
+        if (activeRunFollowAbortRef.current === followController) activeRunFollowAbortRef.current = null
         setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
         setMessages(m => m.map(msg => msg.id === thinkingId
           ? { ...msg, content: fullReply || `⚠ ${message}`, isStreaming: false }
           : msg))
       },
-    })
+    }, { signal: followController.signal })
   }, [input, isStreaming, messages, saveToConversation])
 
   // ── Quick upload (chat + button) ────────────────────────────
@@ -5453,7 +5650,20 @@ export default function Home() {
             <div style={{ flex: 1, minHeight: 0, display: mainView === 'chat' ? 'flex' : 'none', flexDirection: 'column' }}>
               <ChatPanel />
             </div>
-            {mainView === 'activity' && <ActivityView logs={activityLogs} />}
+            {mainView === 'activity' && (
+              <ActivityView
+                logs={activityLogs}
+                jobId={activeJobId}
+                attemptId={activeAttemptId}
+                runId={activeRunId}
+                onContinued={(jobId, attemptId, runId) => {
+                  setActiveJobId(jobId)
+                  setActiveAttemptId(attemptId)
+                  setActiveRunId(runId)
+                  activeRunIdRef.current = runId
+                }}
+              />
+            )}
           </div>
         </div>
         <StatusBar />

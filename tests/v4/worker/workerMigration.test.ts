@@ -84,8 +84,10 @@ describe('Worker persistence migration', () => {
     db.pragma('foreign_keys = ON');
     const before = new Set(tables());
     expect(runMigrations(db)).toEqual({ from: 38, to: LATEST_SCHEMA_VERSION });
-    expect(LATEST_SCHEMA_VERSION).toBe(42);
+    expect(LATEST_SCHEMA_VERSION).toBe(43);
     expect(tables().filter((table) => !before.has(table))).toEqual([
+      'continuity_actions',
+      'continuity_checkpoints',
       'job_budget_reservation_reconciliations',
       'worker_group_members',
       'worker_groups',
@@ -156,7 +158,7 @@ describe('Worker persistence migration', () => {
   it('is idempotent when the latest schema is already installed', () => {
     expect(runMigrations(db)).toEqual({ from: 0, to: LATEST_SCHEMA_VERSION });
     expect(runMigrations(db)).toEqual({ from: LATEST_SCHEMA_VERSION, to: LATEST_SCHEMA_VERSION });
-    expect(LATEST_SCHEMA_VERSION).toBe(42);
+    expect(LATEST_SCHEMA_VERSION).toBe(43);
     expect(tables()).toEqual(expect.arrayContaining([
       'worker_groups', 'worker_group_members', 'worker_provider_concurrency_reservations',
     ]));

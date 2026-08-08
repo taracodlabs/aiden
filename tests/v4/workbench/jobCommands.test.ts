@@ -4,7 +4,7 @@
  */
 
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
@@ -104,6 +104,18 @@ describe('Workbench durable Job commands', () => {
     expect(jobEngine.listEvents(admitted.jobId).map((event) => event.type)).toContain('job.cancelled');
   });
 
+  it('acknowledges cancellation of a succeeded run as already final', () => {
+    const { enqueue, cancel } = commands();
+    const admitted = enqueue.enqueue({ message: 'already complete' });
+    db.prepare("UPDATE runs SET status = 'succeeded' WHERE id = ?").run(admitted.runId);
+
+    expect(cancel.cancel(admitted.runId)).toEqual({
+      accepted: true,
+      runId: admitted.runId,
+      alreadyFinal: true,
+    });
+  });
+
   it('persists queued input and pause before acknowledging, then resumes with a new Attempt', () => {
     const { enqueue, input, control, jobEngine } = commands();
     const admitted = enqueue.enqueue({ message: 'long work', sessionId: 'workbench-session' });
@@ -173,5 +185,57 @@ describe('Workbench durable Job commands', () => {
     expect(() => commandsWithApproval.input.receive(admitted.runId, 'yes', 'ordinary-yes'))
       .not.toThrow();
     expect(actionAuthority.get(pending.approvalId)?.state).toBe('approved');
+  });
+
+  it('continues a paused Job with bounded durable context on one fresh Attempt', async () => {
+    const value = commands();
+    const admitted = value.enqueue.enqueue({ message: 'inspect durable state', sessionId: 'workbench-session' });
+    value.control.pause(admitted.runId, 'pause-for-continue');
+    expect(value.control.applyPauseBoundary(admitted.runId)).toEqual({ accepted: true, applied: true });
+    const checkpoint = value.continuity.getLatest(admitted.jobId)!;
+
+    const continued = await value.continueTask.continue(checkpoint.checkpointId, 'continue-exactly-once');
+    expect(continued).toMatchObject({
+      decision: 'continued', jobId: admitted.jobId, priorAttemptId: admitted.attemptId, generation: 2,
+    });
+    expect(continued.attemptId).not.toBe(admitted.attemptId);
+    expect(value.jobEngine.getJob(admitted.jobId)?.activeAttemptId).toBe(continued.attemptId);
+    const trigger = db.prepare("SELECT payload_json FROM trigger_events WHERE source_key LIKE 'workbench-resume:%' ORDER BY id DESC LIMIT 1")
+      .get() as { payload_json: string };
+    const payload = JSON.parse(trigger.payload_json);
+    expect(payload.body.prompt).toContain('[resume]');
+    expect(payload.body.prompt).toContain('Original goal:');
+    expect(payload).not.toHaveProperty('messages');
+    expect((await value.continueTask.continue(checkpoint.checkpointId, 'continue-exactly-once')).decision)
+      .toBe('already_applied');
+  });
+
+  it('checks the live repository snapshot and records drift before continuing', async () => {
+    const value = commands();
+    const admitted = value.enqueue.enqueue({ message: 'continue after repository drift', sessionId: 'workbench-session' });
+    db.prepare('UPDATE tasks SET repository_snapshot_id=? WHERE id=?').run('snapshot_exact', admitted.jobId);
+    vi.spyOn(value.jobEngine.repository, 'getSnapshot').mockReturnValue({
+      id: 'snapshot_exact', stateDigest: 'repo_before',
+    } as ReturnType<typeof value.jobEngine.repository.getSnapshot>);
+    const inventory = vi.spyOn(value.jobEngine.repository, 'inventory').mockResolvedValue({
+      snapshotId: 'snapshot_exact', stateDigest: 'repo_before', entries: [],
+      nextCursor: null, truncated: false, stale: true,
+    });
+
+    value.control.pause(admitted.runId, 'pause-for-drift');
+    expect(value.control.applyPauseBoundary(admitted.runId)).toEqual({ accepted: true, applied: true });
+    const checkpoint = value.continuity.getLatest(admitted.jobId)!;
+    expect(checkpoint).toMatchObject({
+      repositorySnapshotId: 'snapshot_exact', repositoryFingerprint: 'repo_before',
+      environmentFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+
+    const continued = await value.continueTask.continue(checkpoint.checkpointId, 'continue-after-drift');
+    expect(inventory).toHaveBeenCalledWith('snapshot_exact', { limit: 1 });
+    expect(continued).toMatchObject({
+      decision: 'continued',
+      revalidation: { repositoryDrift: true, environmentDrift: false },
+      reason: 'Continued with drift revalidation',
+    });
   });
 });

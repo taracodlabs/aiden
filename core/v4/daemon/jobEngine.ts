@@ -22,6 +22,10 @@ import { createJobResourceAuthority, type JobResourceAuthority } from './jobReso
 import type { JobBudgetKind, JobCapabilities } from './jobResourceAuthority';
 import { createJobProofAuthority, type JobProofAuthority } from './jobProofAuthority';
 import { createJobEventProjectionAuthority, type JobEventProjectionAuthority } from './jobEventProjection';
+import {
+  createContinuityCheckpointAuthority,
+  type ContinuityCheckpointAuthority,
+} from '../continuityCheckpoint';
 import { createRepositorySnapshotAuthority, type RepositorySnapshotAuthority } from '../codebase/repositorySnapshotAuthority';
 import {
   createSafeChangeAuthority,
@@ -215,6 +219,9 @@ export interface JobEngine {
   readonly validation: StructuredValidationAuthority;
   readonly gitEffects: GitEffectAuthority;
   readonly understanding: RepositoryUnderstandingAuthority;
+  /** Canonical durable continuity projection for this JobEngine. Optional only
+   * for narrow legacy test doubles; production engines always provide it. */
+  readonly continuity?: ContinuityCheckpointAuthority;
   submitJob(command: SubmitJobCommand): AdmissionResult;
   getJob(jobId: string): JobRecord | null;
   listJobs(filters?: {
@@ -2503,7 +2510,8 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     });
   });
 
-  return {
+  let continuity: ContinuityCheckpointAuthority;
+  const engine: JobEngine = {
     graph,
     worker,
     workerProviderCalls,
@@ -2515,6 +2523,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     validation,
     gitEffects,
     understanding,
+    get continuity() { return continuity; },
     submitJob: submitTx,
     getJob(jobId) {
       const row = getJobRow(jobId);
@@ -2709,4 +2718,6 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       return decisions;
     },
   };
+  continuity = createContinuityCheckpointAuthority({ db, engine });
+  return engine;
 }
