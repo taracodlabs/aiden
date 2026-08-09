@@ -819,6 +819,25 @@ describe('Job queries', () => {
       first.jobId,
     ]);
   });
+
+  it('filters durable Jobs by entry point and terminal state before applying the limit', () => {
+    for (let index = 0; index < 100; index += 1) {
+      submit({
+        entryPoint: 'daemon',
+        sessionId: `old_${index}`,
+        idempotencyKey: `old_${index}`,
+        requestFingerprint: `old_${index}`,
+      });
+    }
+    const workbench = submit({
+      entryPoint: 'workbench',
+      sessionId: 'workbench_live',
+      idempotencyKey: 'workbench_live',
+      requestFingerprint: 'workbench_live',
+    });
+    expect(engine.listJobs({ entryPoint: 'workbench', terminal: false, limit: 10 }).map((job) => job.id))
+      .toEqual([workbench.jobId]);
+  });
 });
 
 describe('Durable child Job contracts', () => {

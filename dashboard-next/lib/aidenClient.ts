@@ -38,8 +38,12 @@ export type WorkbenchConnectionState =
 
 export interface TurnHandlers {
   onAdmission?: (admission: TaskAdmission) => void;
+  onReattached?: (admission: TaskAdmission) => void;
   onRunId?: (runId: number) => void;
   onReply?: (chunk: string) => void;
+  /** Idempotent durable replacement used when terminal reconciliation repairs
+   * missed or reordered live chunks. */
+  onReplySnapshot?: (content: string) => void;
   onThinking?: (stage: string, message: string) => void;
   onActivity?: (item: ActivityItem) => void;
   onTokens?: (total: number) => void;
@@ -89,9 +93,23 @@ export function persistRunHandle(handle: WorkbenchRunHandle): void {
   }
 }
 
-export function clearRunHandle(): void {
+export function clearRunHandle(expected?: Pick<TaskAdmission, 'jobId' | 'attemptId' | 'runId'>): void {
   if (typeof window === 'undefined' || !window.localStorage) return;
+  if (expected) {
+    const raw = window.localStorage.getItem(ACTIVE_RUN_STORAGE_KEY);
+    try {
+      const stored = raw ? JSON.parse(raw) as { admission?: Partial<TaskAdmission> } : {};
+      if (stored.admission?.jobId !== expected.jobId
+        || stored.admission?.attemptId !== expected.attemptId
+        || stored.admission?.runId !== expected.runId) return;
+    } catch { return; }
+  }
   window.localStorage.removeItem(ACTIVE_RUN_STORAGE_KEY);
+  // Settling an exact restore handle must not erase the durable selection.
+  // The Job/Attempt/run deep link remains the authority for terminal projection
+  // and browser navigation; only an unscoped stale-handle cleanup owns URL
+  // removal.
+  if (expected) return;
   if (window.location && window.history?.replaceState) {
     const next = new URL(window.location.href);
     next.searchParams.delete('job');
@@ -144,18 +162,64 @@ export interface WorkbenchResultReceipt {
 export interface WorkbenchRunProjection {
   identity: { jobId: string; attemptId: string; runId: number; generation?: number };
   receipt: WorkbenchResultReceipt;
-  attempts?: Array<{ id: string; generation: number; status: string }>;
+  attempts?: Array<{ rowId?: number; id: string; generation: number; status: string }>;
   timeline?: Array<{ eventId: number; jobSequence: number; type: string; createdAt: number }>;
   workers?: unknown[];
   approvals?: unknown[];
   evidence?: unknown[];
   verification?: unknown;
+  assistantOutput?: Array<{ eventId: number; sequence: number; text: string }>;
+}
+
+export function assistantOutputText(projection: WorkbenchRunProjection): string {
+  const seen = new Set<number>();
+  return [...(projection.assistantOutput ?? [])]
+    .sort((a, b) => a.sequence - b.sequence || a.eventId - b.eventId)
+    .filter((chunk) => {
+      if (seen.has(chunk.eventId)) return false;
+      seen.add(chunk.eventId);
+      return true;
+    })
+    .map((chunk) => chunk.text)
+    .join('');
 }
 
 export interface WorkbenchRuntimeInfo {
   service: 'aiden-workbench-bridge';
   version: string;
   readOnly: boolean;
+}
+
+export interface WorkbenchBootstrap {
+  runtime: { version: string; status: string; local: boolean };
+  provider: { configured?: boolean; id?: string; displayName?: string };
+  model: { id?: string; displayName?: string };
+  connection: 'connected' | 'unavailable' | 'reconnecting';
+  readOnly: boolean;
+  activeJobCount: number;
+  execution: {
+    available: boolean;
+    runner: 'real' | 'unavailable';
+    workerCount: number;
+    pending: number;
+    claimed: number;
+    inflight: number;
+    oldestPendingMs: number | null;
+    processed: number;
+  };
+  activeJobs: Array<{
+    sessionId: string | null;
+    jobId: string;
+    attemptId: string | null;
+    runId: number | null;
+    status: string;
+    title?: string;
+    statusDetail?: string;
+    updatedAt: number;
+    triggerEventId: number | null;
+    triggerStatus: string | null;
+    queue?: { pending: number; claimed: number; oldestPendingMs: number | null };
+  }>;
 }
 
 export interface ContinuityCheckpointView {
@@ -273,6 +337,7 @@ function routeEvent(ev: V4Event, handlers: TurnHandlers, state: TurnState): Rout
       break;
   }
   if (ev.kind === 'dispatcher.completed') return { kind: 'candidate' };
+  if (ev.kind === 'job.finalized') return { kind: 'candidate' };
   if (ev.kind === 'dispatcher.rejected' || ev.kind === 'dispatcher.builder_failed') {
     return { kind: 'rejected', message: ev.summary || 'the run could not start' };
   }
@@ -327,7 +392,10 @@ export async function loadRunProjection(jobId: string, attemptId?: string, runId
   const query = new URLSearchParams();
   if (attemptId) query.set('attemptId', attemptId);
   if (runId !== undefined) query.set('runId', String(runId));
-  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/projection?${query.toString()}`);
+  const response = await fetch(
+    `/api/jobs/${encodeURIComponent(jobId)}/projection?${query.toString()}`,
+    { cache: 'no-store' },
+  );
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`durable run projection unavailable (HTTP ${response.status})`);
   return response.json() as Promise<WorkbenchRunProjection>;
@@ -341,6 +409,62 @@ export async function loadRuntimeInfo(): Promise<WorkbenchRuntimeInfo> {
     throw new Error('Workbench runtime metadata is invalid');
   }
   return { service: body.service, version: body.version, readOnly: body.readOnly === true };
+}
+
+export async function loadWorkbenchBootstrap(): Promise<WorkbenchBootstrap> {
+  const response = await fetch('/api/workbench/bootstrap');
+  if (!response.ok) throw new Error(`Workbench bootstrap unavailable (HTTP ${response.status})`);
+  const body = await response.json() as Partial<WorkbenchBootstrap>;
+  if (!body.runtime || typeof body.runtime.version !== 'string' || !body.provider || !body.model) {
+    throw new Error('Workbench bootstrap metadata is invalid');
+  }
+  return {
+    runtime: {
+      version: body.runtime.version,
+      status: body.runtime.status ?? 'unknown',
+      local: body.runtime.local === true,
+    },
+    provider: body.provider,
+    model: body.model,
+    connection: body.connection === 'unavailable' || body.connection === 'reconnecting' ? body.connection : 'connected',
+    readOnly: body.readOnly === true,
+    execution: {
+      available: body.execution?.available === true,
+      runner: body.execution?.runner === 'real' ? 'real' : 'unavailable',
+      workerCount: typeof body.execution?.workerCount === 'number' ? body.execution.workerCount : 0,
+      pending: typeof body.execution?.pending === 'number' ? body.execution.pending : 0,
+      claimed: typeof body.execution?.claimed === 'number' ? body.execution.claimed : 0,
+      inflight: typeof body.execution?.inflight === 'number' ? body.execution.inflight : 0,
+      oldestPendingMs: typeof body.execution?.oldestPendingMs === 'number' ? body.execution.oldestPendingMs : null,
+      processed: typeof body.execution?.processed === 'number' ? body.execution.processed : 0,
+    },
+    activeJobs: Array.isArray(body.activeJobs) ? body.activeJobs.flatMap((job) => {
+      if (!job || typeof job !== 'object' || typeof job.jobId !== 'string') return [];
+      const value = job as Partial<WorkbenchBootstrap['activeJobs'][number]>;
+      return [{
+        sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
+        jobId: value.jobId,
+        attemptId: typeof value.attemptId === 'string' ? value.attemptId : null,
+        runId: typeof value.runId === 'number' && Number.isSafeInteger(value.runId) ? value.runId : null,
+        status: typeof value.status === 'string' ? value.status : 'unknown',
+        title: typeof value.title === 'string' ? value.title : undefined,
+        statusDetail: typeof value.statusDetail === 'string' ? value.statusDetail : undefined,
+        updatedAt: typeof value.updatedAt === 'number' ? value.updatedAt : Date.now(),
+        triggerEventId: typeof value.triggerEventId === 'number' ? value.triggerEventId : null,
+        triggerStatus: typeof value.triggerStatus === 'string' ? value.triggerStatus : null,
+        queue: value.queue && typeof value.queue.pending === 'number' && typeof value.queue.claimed === 'number'
+          ? {
+              pending: value.queue.pending,
+              claimed: value.queue.claimed,
+              oldestPendingMs: typeof value.queue.oldestPendingMs === 'number' ? value.queue.oldestPendingMs : null,
+            }
+          : undefined,
+      }];
+    }) : [],
+    activeJobCount: typeof body.activeJobCount === 'number'
+      ? body.activeJobCount
+      : (Array.isArray(body.activeJobs) ? body.activeJobs.length : 0),
+  };
 }
 
 export async function loadContinuity(jobId: string): Promise<ContinuityCheckpointView | null> {
@@ -380,8 +504,36 @@ function projectionMatches(handle: WorkbenchRunHandle, projection: WorkbenchRunP
 
 export type RestoredRunResolution =
   | { kind: 'missing' }
-  | { kind: 'terminal'; projection: WorkbenchRunProjection }
-  | { kind: 'active'; projection: WorkbenchRunProjection };
+  | { kind: 'terminal'; projection: WorkbenchRunProjection; handle: WorkbenchRunHandle }
+  | { kind: 'active'; projection: WorkbenchRunProjection; handle: WorkbenchRunHandle };
+
+const NONTERMINAL_ATTEMPT_STATUSES = new Set([
+  'queued', 'claimed', 'leased', 'running', 'waiting', 'paused',
+  'cancelling', 'cancel_requested', 'recovering',
+]);
+
+function currentRecoveryHandle(
+  handle: WorkbenchRunHandle,
+  projection: WorkbenchRunProjection,
+): WorkbenchRunHandle | null {
+  const exactAttempt = projection.attempts?.find((attempt) => attempt.id === handle.admission.attemptId);
+  const currentAttempt = [...(projection.attempts ?? [])]
+    .filter((attempt) => Number.isSafeInteger(attempt.rowId))
+    .sort((a, b) => b.generation - a.generation)[0];
+  if (!exactAttempt || NONTERMINAL_ATTEMPT_STATUSES.has(exactAttempt.status)
+    || !currentAttempt || currentAttempt.id === exactAttempt.id
+    || currentAttempt.generation <= exactAttempt.generation) return null;
+  return {
+    admission: {
+      accepted: true,
+      jobId: handle.admission.jobId,
+      attemptId: currentAttempt.id,
+      runId: currentAttempt.rowId!,
+      duplicate: false,
+    },
+    lastEventId: 0,
+  };
+}
 
 /** Resolve persisted browser state against exact durable identity before SSE.
  * A stored handle is only a reconnect hint; the durable projection owns truth. */
@@ -392,20 +544,48 @@ export async function reconcileRestoredRunHandle(handle: WorkbenchRunHandle): Pr
     handle.admission.runId,
   );
   if (!projection || !projectionMatches(handle, projection)) return { kind: 'missing' };
-  return projection.receipt.terminal
-    ? { kind: 'terminal', projection }
-    : { kind: 'active', projection };
+  const currentHandle = currentRecoveryHandle(handle, projection);
+  if (currentHandle) {
+    const currentProjection = await loadRunProjection(
+      currentHandle.admission.jobId,
+      currentHandle.admission.attemptId,
+      currentHandle.admission.runId,
+    );
+    if (!currentProjection || !projectionMatches(currentHandle, currentProjection)) return { kind: 'missing' };
+    return currentProjection.receipt.terminal
+      ? { kind: 'terminal', projection: currentProjection, handle: currentHandle }
+      : { kind: 'active', projection: currentProjection, handle: currentHandle };
+  }
+  if (projection.receipt.terminal) return { kind: 'terminal', projection, handle };
+  return { kind: 'active', projection, handle };
 }
 
-async function readProjection(handle: WorkbenchRunHandle): Promise<WorkbenchRunProjection> {
+async function readProjection(handle: WorkbenchRunHandle): Promise<{
+  projection: WorkbenchRunProjection;
+  reattached: TaskAdmission | null;
+}> {
   const response = await fetch(
     `/api/jobs/${encodeURIComponent(handle.admission.jobId)}/projection`
     + `?attemptId=${encodeURIComponent(handle.admission.attemptId)}&runId=${handle.admission.runId}`,
+    { cache: 'no-store' },
   );
   if (!response.ok) throw new Error(`durable run projection unavailable (HTTP ${response.status})`);
   const projection = await response.json() as WorkbenchRunProjection;
   if (!projectionMatches(handle, projection)) throw new Error('durable run projection identity mismatch');
-  return projection;
+  const currentHandle = currentRecoveryHandle(handle, projection);
+  if (!currentHandle) return { projection, reattached: null };
+  const currentProjection = await loadRunProjection(
+    currentHandle.admission.jobId,
+    currentHandle.admission.attemptId,
+    currentHandle.admission.runId,
+  );
+  if (!currentProjection || !projectionMatches(currentHandle, currentProjection)) {
+    throw new Error('durable recovery projection identity mismatch');
+  }
+  handle.admission = currentHandle.admission;
+  handle.lastEventId = 0;
+  persistRunHandle(handle);
+  return { projection: currentProjection, reattached: currentHandle.admission };
 }
 
 export interface FollowRunOptions {
@@ -423,8 +603,11 @@ export function followRun(
   return new Promise<void>((resolve) => {
     let settled = false;
     let terminalCheck = false;
+    let pendingTerminalCandidate = false;
     let uncertainSince: number | null = null;
     let stall: ReturnType<typeof setTimeout> | null = null;
+    let terminalPoll: ReturnType<typeof setTimeout> | null = null;
+    let terminalCandidateSince: number | null = null;
     let es: EventSource | null = null;
     const state: TurnState = { gotReply: false };
     const stallMs = Math.max(1, options.stallMs ?? IDLE_MS);
@@ -433,6 +616,7 @@ export function followRun(
 
     const cleanup = (): void => {
       if (stall) clearTimeout(stall);
+      if (terminalPoll) clearTimeout(terminalPoll);
       options.signal?.removeEventListener('abort', abort);
       try { es?.close(); } catch { /* noop */ }
     };
@@ -463,12 +647,29 @@ export function followRun(
     const uncertaintyExpired = (): boolean => maxUncertainMs !== null
       && uncertainSince !== null
       && Date.now() - uncertainSince >= maxUncertainMs;
+    const scheduleTerminalReconcile = (): void => {
+      if (settled || terminalPoll) return;
+      terminalPoll = setTimeout(() => {
+        terminalPoll = null;
+        void reconcile(true);
+      }, 100);
+    };
     const reconcile = async (terminalCandidate: boolean): Promise<void> => {
-      if (settled || terminalCheck) return;
+      if (settled) return;
+      if (terminalCheck) {
+        if (terminalCandidate) pendingTerminalCandidate = true;
+        return;
+      }
       terminalCheck = true;
       try {
-        const projection = await readProjection(handle);
+        const resolvedProjection = await readProjection(handle);
+        const projection = resolvedProjection.projection;
         if (projection.receipt.terminal) {
+          const authoritativeReply = assistantOutputText(projection);
+          if (authoritativeReply) {
+            state.gotReply = true;
+            handlers.onReplySnapshot?.(authoritativeReply);
+          }
           if (['failed', 'blocked', 'unknown'].includes(projection.receipt.status)) {
             finish({ error: projection.receipt.summary || `durable run ended ${projection.receipt.status}` });
           } else {
@@ -479,6 +680,24 @@ export function followRun(
             });
           }
         } else {
+          if (resolvedProjection.reattached) {
+            handlers.onReattached?.(resolvedProjection.reattached);
+            try { es?.close(); } catch { /* noop */ }
+            openStream();
+            armStall();
+            return;
+          }
+          if (terminalCandidate) {
+            terminalCandidateSince ??= Date.now();
+            const terminalBoundMs = maxUncertainMs ?? stallMs;
+            if (Date.now() - terminalCandidateSince >= terminalBoundMs) {
+              finish({ error: 'durable terminal state did not converge after completion was observed' });
+              return;
+            }
+            handlers.onConnectionState?.('uncertain');
+            scheduleTerminalReconcile();
+            return;
+          }
           if (uncertaintyExpired()) {
             finish({ error: 'durable activity could not be confirmed after reconnecting' });
             return;
@@ -490,32 +709,42 @@ export function followRun(
         if (terminalCandidate) finish({ error: error instanceof Error ? error.message : String(error) });
         else if (uncertaintyExpired()) finish({ error: 'durable activity could not be confirmed after reconnecting' });
         else { handlers.onConnectionState?.('uncertain'); armStall(); }
-      } finally { terminalCheck = false; }
+      } finally {
+        terminalCheck = false;
+        if (!settled && pendingTerminalCandidate) {
+          pendingTerminalCandidate = false;
+          void reconcile(true);
+        }
+      }
     };
 
-    const query = handle.lastEventId > 0 ? `?message=1&lastId=${handle.lastEventId}` : '?message=1';
-    try { es = new EventSource(`/api/runs/${handle.admission.runId}/events${query}`); }
-    catch { finish({ error: 'could not open the event stream' }); return; }
+    const openStream = (): void => {
+      const query = handle.lastEventId > 0 ? `?message=1&lastId=${handle.lastEventId}` : '?message=1';
+      try { es = new EventSource(`/api/runs/${handle.admission.runId}/events${query}`); }
+      catch { finish({ error: 'could not open the event stream' }); return; }
+      handlers.onConnectionState?.('connected');
+      es.onmessage = (message: MessageEvent): void => {
+        let ev: V4Event;
+        try { ev = JSON.parse(message.data); } catch { return; }
+        if (ev.runId !== handle.admission.runId || !Number.isSafeInteger(ev.id) || ev.id <= handle.lastEventId) return;
+        handle.lastEventId = ev.id;
+        uncertainSince = null;
+        persistRunHandle(handle);
+        const terminal = routeEvent(ev, handlers, state);
+        if (terminal) { void reconcile(true); return; }
+        armStall();
+      };
+      es.onerror = (): void => {
+        if (settled) return;
+        if (uncertainSince === null) uncertainSince = Date.now();
+        handlers.onConnectionState?.('reconnecting');
+        void reconcile(false);
+      };
+    };
+
     if (options.signal?.aborted) { abort(); return; }
     options.signal?.addEventListener('abort', abort, { once: true });
-    handlers.onConnectionState?.('connected');
-    es.onmessage = (message: MessageEvent): void => {
-      let ev: V4Event;
-      try { ev = JSON.parse(message.data); } catch { return; }
-      if (ev.runId !== handle.admission.runId || !Number.isSafeInteger(ev.id) || ev.id <= handle.lastEventId) return;
-      handle.lastEventId = ev.id;
-      uncertainSince = null;
-      persistRunHandle(handle);
-      const terminal = routeEvent(ev, handlers, state);
-      if (terminal) { void reconcile(true); return; }
-      armStall();
-    };
-    es.onerror = (): void => {
-      if (settled) return;
-      if (uncertainSince === null) uncertainSince = Date.now();
-      handlers.onConnectionState?.('reconnecting');
-      void reconcile(false);
-    };
+    openStream();
     armStall();
   });
 }

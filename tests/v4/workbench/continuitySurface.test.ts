@@ -21,7 +21,10 @@ describe('minimal Workbench continuity surface', () => {
     const fetchMock = vi.fn(async () => response({ identity: { jobId: 'job_1' }, receipt: { terminal: false, status: 'running' } }));
     vi.stubGlobal('fetch', fetchMock);
     await loadRunProjection('job_1', 'attempt_1', 7);
-    expect(fetchMock).toHaveBeenCalledWith('/api/jobs/job_1/projection?attemptId=attempt_1&runId=7');
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/jobs/job_1/projection?attemptId=attempt_1&runId=7',
+      { cache: 'no-store' },
+    );
   });
   it('E2 loads the current continuity checkpoint by Job identity', async () => {
     const fetchMock = vi.fn(async () => response({ checkpointId: 'checkpoint_1' }));
@@ -62,6 +65,12 @@ describe('minimal Workbench continuity surface', () => {
     expect(source()).toContain('continuity.blockers.length');
     expect(source()).not.toContain('ContinuityDashboardShell');
   });
+
+  it('clears the prior transcript when selecting an active Job without cached messages', () => {
+    const page = source();
+    expect(page).toContain('setMessages(stored ?? [])');
+    expect(page).not.toContain('if (stored) setMessages(stored)');
+  });
   it('E13 restores the exact admitted context on browser reload', () => {
     expect(source()).toContain('aiden.restoreRunHandle()');
     expect(source()).toContain('restored.admission.runId');
@@ -96,7 +105,7 @@ describe('minimal Workbench continuity surface', () => {
   });
   it('E18 reattaches the run-scoped event follower after browser reload', () => {
     const page = source();
-    const restore = page.slice(page.indexOf('const restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    const restore = page.slice(page.indexOf('let restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
     expect(restore).toContain('const replay = { admission: restored.admission, lastEventId: 0 }');
     expect(restore).toContain('aiden.followRun(replay');
     expect(restore).toContain("onConnectionState: (state)");
@@ -104,27 +113,80 @@ describe('minimal Workbench continuity surface', () => {
     expect(restore).toContain('signal: controller.signal');
     expect(restore).toContain('aiden.reconcileRestoredRunHandle(restored)');
     expect(restore).toContain("if (resolution.kind === 'missing') throw new Error('stale Workbench run handle')");
-    expect(restore).toContain('aiden.clearRunHandle()');
+    expect(restore).toContain('aiden.clearRunHandle(restored.admission)');
   });
   it('E19 settles a terminal durable projection before attempting SSE restoration', () => {
     const page = source();
-    const restore = page.slice(page.indexOf('const restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    const restore = page.slice(page.indexOf('let restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
     expect(restore).toContain('aiden.reconcileRestoredRunHandle(restored)');
+    expect(restore).toContain('restored = resolution.handle');
     expect(restore).toContain("resolution.kind === 'terminal'");
     expect(restore.indexOf("resolution.kind === 'terminal'")).toBeLessThan(restore.indexOf('startReplay()'));
-    expect(restore).toContain('aiden.clearRunHandle()');
+    expect(restore).toContain('aiden.clearRunHandle(restored.admission)');
     expect(restore).toContain('settle()');
   });
   it('E20 bounds restored SSE uncertainty and reports stale restoration honestly', () => {
     const page = source();
-    const restore = page.slice(page.indexOf('const restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    const restore = page.slice(page.indexOf('let restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
     expect(restore).toContain('maxUncertainMs:');
     expect(restore).toContain('saved activity could not be restored');
   });
   it('E21 renders the backend runtime version instead of a hard-coded release', () => {
     const page = source();
     expect(page).not.toContain("const AIDEN_VERSION = '3.7.0'");
-    expect(page).toContain('aiden.loadRuntimeInfo()');
+    expect(page).toContain('aiden.loadWorkbenchBootstrap()');
     expect(page).toContain('runtimeVersion');
+  });
+  it('E22 reconciles an explicit URL selection instead of skipping durable restoration', () => {
+    const page = source();
+    expect(page).toContain('selectionFromSearch(window.location.search)');
+    expect(page).not.toContain('if (urlSelection.jobId || urlSelection.attemptId || urlSelection.runId !== null) return');
+    expect(page).toContain('let restored = aiden.restoreRunHandle()');
+    expect(page).toContain('aiden.reconcileRestoredRunHandle(restored)');
+  });
+  it('E23 scopes foreground output by exact Job identity when sessions share a context', () => {
+    const page = source();
+    expect(page).toContain('selected.jobId === admittedJobId');
+    expect(page).toContain('activeRunFollowControllersRef');
+  });
+  it('E24 restores conversation content when browser history changes the selection', () => {
+    const page = source();
+    expect(page).toContain('window.addEventListener(\'popstate\', onPopState)');
+    expect(page).toContain('setMessages(conversation.messages)');
+    expect(page).toContain('window.history.pushState');
+  });
+  it('E25 uses one authoritative bootstrap request path and starts disconnected', () => {
+    const page = source();
+    expect(page.match(/aiden\.loadWorkbenchBootstrap\(\)/g)).toHaveLength(1);
+    expect(page).not.toContain('aiden.loadRuntimeInfo()');
+    expect(page).toContain("useState<'connected' | 'reconnecting' | 'unavailable'>('unavailable')");
+  });
+  it('E26 never clears a live foreground activity merely because wall-clock time elapsed', () => {
+    const page = source();
+    expect(page).not.toContain('setTimeout(() => setThinking(null), 30000)');
+  });
+  it('E27 keeps task submission explicitly unavailable when execution authority is absent', () => {
+    const page = source();
+    expect(page).toContain('disabled={!input.trim() || isStreaming || !executionAvailable || workbenchReadOnly}');
+    expect(page).toContain('Task execution is unavailable. Configure a provider with the Aiden CLI');
+  });
+  it('E28 binds a delayed admission only when its original empty conversation is still selected', () => {
+    const page = source();
+    expect(page).toContain('const attachToForeground = shouldAttachAdmission(');
+    expect(page).toContain('workbenchControllerRef.current.register(admission, requestSessionId, userMsg.content)');
+    expect(page).toContain('if (attachToForeground) {');
+  });
+  it('E29 persists a completed turn even when durable Proof remains unknown', () => {
+    const page = source();
+    expect(page).toContain('const persistTurn = () => {');
+    expect(page.match(/persistTurn\(\)/g)).toHaveLength(2);
+  });
+  it('persists exact Attempt and run identity with completed conversation history', () => {
+    const page = source();
+    const persist = page.slice(page.indexOf('const persistTurn = () => {'), page.indexOf('// Send onto the v4 safe job path'));
+    expect(persist).toContain('attemptId: admittedAttemptId ?? c.attemptId');
+    expect(persist).toContain('runId: admittedRunId ?? c.runId');
+    expect(persist).toContain('attemptId: admittedAttemptId ?? undefined');
+    expect(persist).toContain('runId: admittedRunId ?? undefined');
   });
 });

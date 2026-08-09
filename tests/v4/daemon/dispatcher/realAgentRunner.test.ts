@@ -281,6 +281,22 @@ describe('createRealAgentRunner — event emission', () => {
     expect(JSON.parse(reply!.payload).text).toBe('Hello! How can I help?');
   });
 
+  it('emits a long assistant reply as exact replay-safe event chunks', async () => {
+    const finalContent = `${'deterministic recovery '.repeat(360)}🙂 complete`;
+    const builder: AgentBuilder = () =>
+      stubAgent({ finishReason: 'stop', finalContent } as unknown as AidenAgentResult);
+    const runner = createRealAgentRunner({
+      db, runStore, agentBuilder: builder, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput());
+    const replies = runStore.listEvents(result.runId).filter((event) => event.name === 'assistant_message');
+
+    expect(replies.length).toBeGreaterThan(1);
+    expect(replies.every((event) => !event.payloadTruncated)).toBe(true);
+    expect(replies.map((event) => JSON.parse(event.payload).text).join('')).toBe(finalContent);
+  });
+
   it('emits NO assistant_message when the agent produced no written text', async () => {
     const builder: AgentBuilder = () => stubAgent(mkResult({ finishReason: 'stop' }));
     const runner = createRealAgentRunner({

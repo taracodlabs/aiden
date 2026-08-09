@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   admitTask,
+  assistantOutputText,
   cancelTask,
   clearRunHandle,
   followRun,
   loadRuntimeInfo,
+  loadWorkbenchBootstrap,
   parseTaskAdmission,
   persistRunHandle,
   reconcileRestoredRunHandle,
@@ -66,6 +68,32 @@ const response = (body: unknown, ok = true, status = 202): Response => ({
 } as Response);
 
 describe('Workbench exact task admission and run following', () => {
+  it('loads provider/model/runtime from the bounded Workbench bootstrap contract', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      json: async () => ({
+        runtime: { version: '4.19.1', status: 'ready', local: true },
+        provider: { id: 'chatgpt-plus', displayName: 'ChatGPT Plus' },
+        model: { id: 'gpt-5.5', displayName: 'GPT-5.5' },
+        connection: 'connected', readOnly: false,
+        execution: { available: true, runner: 'real', workerCount: 4, pending: 2, claimed: 1, inflight: 1, oldestPendingMs: 80, processed: 5 },
+        activeJobs: [{
+          sessionId: 'session_a', jobId: 'job_a', attemptId: 'attempt_a', runId: 7,
+          title: 'Inspect package.json', status: 'approval_required', statusDetail: 'Approval required',
+          updatedAt: 10, triggerEventId: 9, triggerStatus: 'claimed',
+          queue: { pending: 2, claimed: 1, oldestPendingMs: 80 },
+        }],
+      }),
+    } as Response)));
+    await expect(loadWorkbenchBootstrap()).resolves.toMatchObject({
+      runtime: { version: '4.19.1' },
+      provider: { id: 'chatgpt-plus' },
+      model: { id: 'gpt-5.5' },
+      execution: { available: true, runner: 'real', workerCount: 4, pending: 2 },
+      activeJobCount: 1,
+      activeJobs: [{ jobId: 'job_a', runId: 7, status: 'approval_required', title: 'Inspect package.json' }],
+    });
+  });
   beforeEach(() => {
     FakeEventSource.instances = [];
     vi.stubGlobal('EventSource', FakeEventSource);
@@ -169,6 +197,121 @@ describe('Workbench exact task admission and run following', () => {
     es.emit(event(41, 2, 'dispatcher.completed'));
     await pending;
     expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  it('reconciles a final Job event that arrives while an earlier terminal check is in flight', async () => {
+    let releaseFirstProjection!: () => void;
+    const firstProjectionBlocked = new Promise<void>((resolve) => { releaseFirstProjection = resolve; });
+    const fetchMock = vi.fn(async () => {
+      if (fetchMock.mock.calls.length === 1) {
+        await firstProjectionBlocked;
+        return response({
+          identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+          receipt: { terminal: false, status: 'running' },
+        }, true, 200);
+      }
+      return response({
+        identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+        receipt: { terminal: true, status: 'verified', summary: 'done' },
+      }, true, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const done = vi.fn();
+    const pending = followRun({ admission: admission(), lastEventId: 0 }, { onDone: done });
+    const es = FakeEventSource.instances[0];
+
+    es.emit(event(41, 1, 'dispatcher.completed'));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    es.emit(event(41, 2, 'job.finalized'));
+    releaseFirstProjection();
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2), { timeout: 250 });
+    await pending;
+    expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  it('hydrates authoritative assistant output when the live chunk event was missed', async () => {
+    const fetchMock = vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      assistantOutput: [
+        { eventId: 10, sequence: 1, text: 'first ' },
+        { eventId: 11, sequence: 2, text: 'second' },
+      ],
+      receipt: { terminal: true, status: 'verified', summary: 'done' },
+    }, true, 200));
+    vi.stubGlobal('fetch', fetchMock);
+    const snapshot = vi.fn();
+    const done = vi.fn();
+    const pending = followRun(
+      { admission: admission(), lastEventId: 0 },
+      { onDone: done, onReplySnapshot: snapshot } as TurnHandlers & { onReplySnapshot: (text: string) => void },
+    );
+    FakeEventSource.instances[0].emit(event(41, 12, 'dispatcher.completed'));
+    await pending;
+    expect(snapshot).toHaveBeenCalledOnce();
+    expect(snapshot).toHaveBeenCalledWith('first second');
+    expect(done).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledWith(
+      expect.stringContaining('/projection?attemptId=attempt_exact&runId=41'),
+      { cache: 'no-store' },
+    );
+  });
+
+  it('normalizes durable response chunks by sequence and event identity', () => {
+    expect(assistantOutputText({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      receipt: { terminal: true, status: 'verified' },
+      assistantOutput: [
+        { eventId: 12, sequence: 2, text: 'second' },
+        { eventId: 11, sequence: 1, text: 'first ' },
+        { eventId: 11, sequence: 1, text: 'duplicate' },
+      ],
+    })).toBe('first second');
+  });
+
+  it('replaces live partial output with the exact durable terminal snapshot', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      assistantOutput: [
+        { eventId: 1, sequence: 1, text: 'first ' },
+        { eventId: 2, sequence: 2, text: 'second' },
+      ],
+      receipt: { terminal: true, status: 'verified', summary: 'done' },
+    }, true, 200)));
+    const chunks: string[] = [];
+    const snapshots: string[] = [];
+    const pending = followRun(
+      { admission: admission(), lastEventId: 0 },
+      { onReply: (text) => chunks.push(text), onReplySnapshot: (text) => snapshots.push(text) },
+    );
+    const stream = FakeEventSource.instances[0];
+    stream.emit({ ...event(41, 1, 'assistant.message', 'assistant_message'), payload: { text: 'first ' } });
+    stream.emit(event(41, 3, 'dispatcher.completed'));
+    await pending;
+    expect(chunks).toEqual(['first ']);
+    expect(snapshots).toEqual(['first second']);
+  });
+
+  it('rechecks durable truth when completion is observed before Job finalization', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      receipt: fetchMock.mock.calls.length === 1
+        ? { terminal: false, status: 'running' }
+        : { terminal: true, status: 'verified', summary: 'done' },
+    }, true, 200));
+    vi.stubGlobal('fetch', fetchMock);
+    const done = vi.fn();
+    const pending = followRun(
+      { admission: admission(), lastEventId: 0 },
+      { onDone: done },
+      { stallMs: 10_000 },
+    );
+    FakeEventSource.instances[0].emit(event(41, 12, 'dispatcher.completed'));
+    await vi.advanceTimersByTimeAsync(500);
+    await pending;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(done).toHaveBeenCalledOnce();
   });
 
   it('A8 does not classify stream silence as successful completion', async () => {
@@ -344,6 +487,47 @@ describe('Workbench exact task admission and run following', () => {
       lastEventId: 0,
     });
   });
+  it('A21b does not let one Job settlement clear another persisted run handle', () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+      location: { href: 'http://127.0.0.1:4280/' },
+      history: { state: null, replaceState: () => {} },
+    });
+    const handle = { admission: admission({ jobId: 'job_b', attemptId: 'attempt_b', runId: 2 }), lastEventId: 0 };
+    persistRunHandle(handle);
+    clearRunHandle({ jobId: 'job_a', attemptId: 'attempt_a', runId: 1 });
+    expect(restoreRunHandle()).toEqual(handle);
+    clearRunHandle(handle.admission);
+    expect(restoreRunHandle()).toBeNull();
+  });
+  it('preserves the selected durable deep link when its active restore handle settles', () => {
+    const values = new Map<string, string>();
+    let href = 'http://127.0.0.1:4280/?session=session_exact&job=job_exact&attempt=attempt_exact&run=41';
+    vi.stubGlobal('window', {
+      localStorage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+      location: { href },
+      history: {
+        state: null,
+        replaceState: (_state: unknown, _title: string, next: URL) => { href = next.toString(); },
+      },
+    });
+    const handle = { admission: admission(), lastEventId: 29 };
+    persistRunHandle(handle);
+
+    clearRunHandle(handle.admission);
+
+    expect(values.size).toBe(0);
+    expect(href).toBe('http://127.0.0.1:4280/?session=session_exact&job=job_exact&attempt=attempt_exact&run=41');
+  });
   it('A22 gives simultaneous submissions distinct exact run handles', async () => {
     let sequence = 0;
     vi.stubGlobal('fetch', vi.fn(async () => {
@@ -486,6 +670,112 @@ describe('Workbench exact task admission and run following', () => {
     await expect(reconcileRestoredRunHandle({ admission: admission(), lastEventId: 0 }))
       .resolves.toEqual({ kind: 'missing' });
     expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it('reattaches a restored Job to its current recovery Attempt instead of following the crashed run', async () => {
+    const fetchMock = vi.fn(async (url: string) => response(url.includes('attempt_current') ? {
+      identity: { jobId: 'job_exact', attemptId: 'attempt_current', runId: 42, generation: 2 },
+      attempts: [
+        { rowId: 41, id: 'attempt_exact', generation: 1, status: 'crashed' },
+        { rowId: 42, id: 'attempt_current', generation: 2, status: 'running' },
+      ],
+      receipt: { terminal: false, status: 'running' },
+    } : {
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41, generation: 1 },
+      attempts: [
+        { rowId: 41, id: 'attempt_exact', generation: 1, status: 'crashed' },
+        { rowId: 42, id: 'attempt_current', generation: 2, status: 'running' },
+      ],
+      receipt: { terminal: false, status: 'running', summary: 'lease_expired' },
+    }, true, 200));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(reconcileRestoredRunHandle({ admission: admission(), lastEventId: 29 }))
+      .resolves.toMatchObject({
+        kind: 'active',
+        handle: {
+          admission: { jobId: 'job_exact', attemptId: 'attempt_current', runId: 42 },
+          lastEventId: 0,
+        },
+        projection: { identity: { attemptId: 'attempt_current', runId: 42 } },
+      });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves a terminal recovered Job through the authoritative replacement Attempt', async () => {
+    const fetchMock = vi.fn(async (url: string) => response(url.includes('attempt_current') ? {
+      identity: { jobId: 'job_exact', attemptId: 'attempt_current', runId: 42, generation: 2 },
+      attempts: [
+        { rowId: 41, id: 'attempt_exact', generation: 1, status: 'crashed' },
+        { rowId: 42, id: 'attempt_current', generation: 2, status: 'succeeded' },
+      ],
+      assistantOutput: [{ eventId: 90, sequence: 1, text: 'recovered terminal output' }],
+      receipt: { terminal: true, status: 'verified', summary: 'recovered' },
+    } : {
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41, generation: 1 },
+      attempts: [
+        { rowId: 41, id: 'attempt_exact', generation: 1, status: 'crashed' },
+        { rowId: 42, id: 'attempt_current', generation: 2, status: 'succeeded' },
+      ],
+      receipt: { terminal: true, status: 'unknown', summary: 'stop' },
+    }, true, 200));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(reconcileRestoredRunHandle({ admission: admission(), lastEventId: 29 }))
+      .resolves.toMatchObject({
+        kind: 'terminal',
+        handle: {
+          admission: { jobId: 'job_exact', attemptId: 'attempt_current', runId: 42 },
+          lastEventId: 0,
+        },
+        projection: {
+          identity: { attemptId: 'attempt_current', runId: 42 },
+          assistantOutput: [{ text: 'recovered terminal output' }],
+          receipt: { status: 'verified' },
+        },
+      });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('switches an in-flight restored follower to the recovery run after lease recovery', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async (url: string) => response(
+      fetchMock.mock.calls.length >= 3 ? {
+        identity: { jobId: 'job_exact', attemptId: 'attempt_current', runId: 42, generation: 2 },
+        assistantOutput: [{ eventId: 90, sequence: 1, text: 'recovered output' }],
+        receipt: { terminal: true, status: 'verified', summary: 'recovered' },
+      } : url.includes('attempt_current') ? {
+        identity: { jobId: 'job_exact', attemptId: 'attempt_current', runId: 42, generation: 2 },
+        attempts: [{ rowId: 42, id: 'attempt_current', generation: 2, status: 'running' }],
+        receipt: { terminal: false, status: 'running' },
+      } : {
+        identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41, generation: 1 },
+        attempts: [
+          { rowId: 41, id: 'attempt_exact', generation: 1, status: 'crashed' },
+          { rowId: 42, id: 'attempt_current', generation: 2, status: 'running' },
+        ],
+        receipt: { terminal: false, status: 'running', summary: 'lease_expired' },
+      },
+      true,
+      200,
+    ));
+    vi.stubGlobal('fetch', fetchMock);
+    const reattached = vi.fn();
+    const snapshot = vi.fn();
+    const done = vi.fn();
+    const pending = followRun(
+      { admission: admission(), lastEventId: 0 },
+      { onReattached: reattached, onReplySnapshot: snapshot, onDone: done },
+      { stallMs: 10, maxUncertainMs: 100 },
+    );
+
+    await vi.advanceTimersByTimeAsync(15);
+    await vi.waitFor(() => expect(FakeEventSource.instances).toHaveLength(2));
+    expect(reattached).toHaveBeenCalledWith(expect.objectContaining({ attemptId: 'attempt_current', runId: 42 }));
+    FakeEventSource.instances[1].emit(event(42, 91, 'dispatcher.completed'));
+    await pending;
+    expect(snapshot).toHaveBeenCalledWith('recovered output');
+    expect(done).toHaveBeenCalledOnce();
   });
 
   it('A31 releases a restored run after bounded SSE uncertainty without claiming success', async () => {

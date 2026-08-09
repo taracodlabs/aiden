@@ -11,7 +11,7 @@ import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
 import { createActionAuthority, normalizeExecutionPlan } from '../../../core/v4/actionAuthority';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
 import { createTriggerBus } from '../../../core/v4/daemon/triggerBus';
-import { createWorkbenchJobCommands } from '../../../core/v4/workbench/jobCommands';
+import { createWorkbenchJobCommands, summarizeWorkbenchGoal } from '../../../core/v4/workbench/jobCommands';
 
 describe('Workbench durable Job commands', () => {
   let db: Database.Database;
@@ -43,6 +43,12 @@ describe('Workbench durable Job commands', () => {
     return { ...value, jobEngine, runStore };
   }
 
+  it('stores a compact truthful title without changing the exact trigger prompt', () => {
+    expect(summarizeWorkbenchGoal('  Inspect\npackage.json   and report the version  '))
+      .toBe('Inspect package.json and report the version');
+    expect(summarizeWorkbenchGoal('x'.repeat(200))).toHaveLength(120);
+  });
+
   it('returns authoritative Job and Attempt identities before acknowledging enqueue', () => {
     const { enqueue, jobEngine } = commands();
     const result = enqueue.enqueue({ message: 'read the project notes', sessionId: 'workbench-session' });
@@ -50,6 +56,7 @@ describe('Workbench durable Job commands', () => {
     expect(result).toMatchObject({ accepted: true, duplicate: false });
     expect(jobEngine.getJob(result.jobId)).toMatchObject({
       id: result.jobId, activeAttemptId: result.attemptId, entryPoint: 'workbench',
+      goal: 'read the project notes',
     });
     expect(jobEngine.getAttempt(result.attemptId)).toMatchObject({
       rowId: result.runId, jobId: result.jobId, status: 'queued',
@@ -102,6 +109,16 @@ describe('Workbench durable Job commands', () => {
       producer: 'test',
     }).applied).toBe(false);
     expect(jobEngine.listEvents(admitted.jobId).map((event) => event.type)).toContain('job.cancelled');
+  });
+
+  it('removes a cancelled queued Job from the durable trigger queue', () => {
+    const { enqueue, cancel, jobEngine } = commands();
+    const admitted = enqueue.enqueue({ message: 'cancel before dispatch' });
+
+    expect(cancel.cancel(admitted.runId)).toEqual({ accepted: true, runId: admitted.runId });
+    expect(jobEngine.getJob(admitted.jobId)?.status).toBe('cancelled');
+    expect(db.prepare('SELECT status, last_error FROM trigger_events WHERE id = ?').get(admitted.triggerEventId))
+      .toEqual({ status: 'dead_letter', last_error: 'workbench task cancelled before dispatch' });
   });
 
   it('acknowledges cancellation of a succeeded run as already final', () => {

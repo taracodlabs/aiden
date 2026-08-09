@@ -12,6 +12,15 @@ import ChatHeader from '../components/ChatHeader'
 import Sidebar from '../components/Sidebar'
 import WorkflowView from '../components/WorkflowView'
 import * as aiden from '../lib/aidenClient'
+import {
+  WorkbenchController,
+  emptySelection,
+  normalizeActiveJobStatus,
+  shouldAttachAdmission,
+  selectionFromSearch,
+  selectionToSearch,
+  type WorkbenchSelection,
+} from '../lib/workbenchController'
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -52,6 +61,10 @@ interface Conversation {
   messages:  Message[]
   channels?: string[]   // channels that participated (cross-channel sessions)
   depth?:    number     // compression lineage depth (0 = original)
+  sessionId?: string
+  jobId?: string
+  attemptId?: string
+  runId?: number
 }
 
 interface ActivityLog {
@@ -239,7 +252,15 @@ interface DevOSCtxType {
   thinking:       { stage: string; message: string; tool?: string } | null
   budget:         { current: number; max: number; remaining: number } | null
   activeModel:    string
+  activeProvider: string
+  runtimeConnection: 'connected' | 'reconnecting' | 'unavailable'
   runtimeVersion: string
+  executionAvailable: boolean
+  executionQueue: { pending: number; claimed: number; inflight: number; workerCount: number }
+  workbenchReadOnly: boolean
+  selectedContext: WorkbenchSelection
+  activeJobs: ReturnType<WorkbenchController['active']>
+  controllerRevision: number
   // Messages / conversations
   messages:       Message[]
   setMessages:    Dispatch<SetStateAction<Message[]>>
@@ -285,6 +306,7 @@ interface DevOSCtxType {
   submitMiniPrompt:() => void
   startNewChat:   () => void
   loadConversation: (id: string) => void
+  selectActiveJob: (job: ReturnType<WorkbenchController['active']>[number]) => void
   handleQuickUpload: (e: ChangeEvent<HTMLInputElement>) => void
   // Refs
   inputRef:       RefObject<HTMLTextAreaElement>
@@ -1735,9 +1757,8 @@ function KnowledgeBaseTab() {
 function NavBar() {
   const {
     isExecuting, uiMode,
-    setSettingsOpen, setSettingsTab,
-    licenseStatus, setPricingOpen,
-    activeModel,
+    setSettingsOpen,
+    activeModel, activeProvider, runtimeConnection, executionQueue,
   } = useDevOS()
 
   return (
@@ -1764,12 +1785,17 @@ function NavBar() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 4 }}>
           <span style={{
             width: 6, height: 6, borderRadius: '50%',
-            background: isExecuting ? 'var(--orange)' : 'var(--green)',
+             background: runtimeConnection === 'connected' ? (isExecuting ? 'var(--orange)' : 'var(--green)') : 'var(--red)',
             display: 'inline-block', animation: 'pulse-dot 2s infinite',
           }} />
           <span style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>
-            {activeModel ? activeModel.split('/').pop()?.replace(':latest', '') || activeModel : 'local'}
+             {activeProvider || 'No provider'} · {activeModel || 'No model'} · {runtimeConnection}
           </span>
+          {(executionQueue.inflight > 0 || executionQueue.pending > 0) && (
+            <span style={{ fontSize: 10, color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>
+              · {executionQueue.inflight} running · {executionQueue.pending} queued
+            </span>
+          )}
         </div>
       </div>
 
@@ -1787,23 +1813,6 @@ function NavBar() {
         <ChatHeader />
         <div style={{ width: 1, height: 20, background: 'var(--border2)', margin: '0 4px' }} />
         <NavBtn onClick={() => setSettingsOpen(true)} title="Settings">⚙</NavBtn>
-        <div
-          style={{
-            padding: '2px 9px', borderRadius: 4, fontSize: 10,
-            background: licenseStatus.isPro ? 'var(--orange)' : 'transparent',
-            border: `1px solid ${licenseStatus.isPro ? 'var(--orange)' : 'rgba(249,115,22,0.5)'}`,
-            color: licenseStatus.isPro ? '#fff' : 'var(--orange)',
-            fontFamily: 'var(--mono)', fontWeight: 700, cursor: 'pointer',
-            display: 'flex', alignItems: 'center', gap: 3,
-            letterSpacing: '0.05em',
-          }}
-          onClick={() => { setSettingsOpen(true); setSettingsTab('pro') }}
-          title={licenseStatus.isPro
-            ? `Pro · ${licenseStatus.plan?.replace('pro_', '').replace('_', ' ').toUpperCase() ?? ''}`
-            : 'Activate Pro'}
-        >
-          {licenseStatus.isPro ? '★ PRO' : 'FREE'}
-        </div>
       </div>
     </nav>
   )
@@ -1812,7 +1821,7 @@ function NavBar() {
 // ── HistorySidebar ────────────────────────────────────────────
 
 function HistorySidebar() {
-  const { conversations, currentConvId, startNewChat, loadConversation, runtimeVersion } = useDevOS()
+  const { conversations, currentConvId, startNewChat, loadConversation, selectActiveJob, runtimeVersion, activeJobs } = useDevOS()
 
   const grouped = useMemo(() => {
     const now       = Date.now()
@@ -1839,6 +1848,25 @@ function HistorySidebar() {
       </button>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px' }}>
+        {activeJobs.length > 0 && (
+          <div style={{ margin: '4px 0 8px', padding: '8px', border: '1px solid var(--border)', borderRadius: 5 }}>
+            <div style={{ padding: '0 4px 5px', fontSize: 9, color: 'var(--orange)', textTransform: 'uppercase', letterSpacing: '0.1em' }}>Active Work</div>
+            {activeJobs.map((job) => (
+              <button key={job.jobId} onClick={() => selectActiveJob(job)} style={{
+                display: 'block', width: '100%', padding: '4px', border: 'none', background: 'transparent',
+                color: 'var(--muted2)', fontFamily: 'var(--mono)', fontSize: 10, textAlign: 'left', cursor: 'pointer',
+              }}>
+                <span style={{ color: job.status === 'approval_required' || job.status === 'blocked' ? 'var(--red)' : 'var(--orange)' }}>●</span>{' '}
+                <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {job.title || job.jobId.slice(0, 18)}
+                </span>
+                <span style={{ display: 'block', color: 'var(--muted)', marginTop: 2 }}>
+                  {job.statusDetail || job.status.replace(/_/g, ' ')}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
         {(Object.entries(grouped) as [string, Conversation[]][]).map(([group, convs]) => convs.length > 0 && (
           <div key={group}>
             <div style={{
@@ -2139,7 +2167,7 @@ function ChatPanel() {
     inputRef, kbInputRef, messagesEndRef,
     plusMenuOpen, setPlusMenuOpen,
     voiceStatus, isRecording, ttsEnabled, setTtsEnabled, recordingTimer, startRecording,
-    uiMode,
+    uiMode, executionAvailable, workbenchReadOnly,
   } = useDevOS()
 
   useEffect(() => {
@@ -2312,13 +2340,13 @@ function ChatPanel() {
           ) : (
             <button
               onClick={() => sendMessage()}
-              disabled={!input.trim() || isStreaming}
+              disabled={!input.trim() || isStreaming || !executionAvailable || workbenchReadOnly}
               style={{
                 width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
-                background: input.trim() && !isStreaming ? 'var(--orange)' : 'var(--bg3)',
+                background: input.trim() && !isStreaming && executionAvailable && !workbenchReadOnly ? 'var(--orange)' : 'var(--bg3)',
                 border: 'none',
-                color: input.trim() && !isStreaming ? '#000' : 'var(--muted)',
-                cursor: input.trim() && !isStreaming ? 'pointer' : 'not-allowed',
+                color: input.trim() && !isStreaming && executionAvailable && !workbenchReadOnly ? '#000' : 'var(--muted)',
+                cursor: input.trim() && !isStreaming && executionAvailable && !workbenchReadOnly ? 'pointer' : 'not-allowed',
                 fontSize: 14, transition: 'all 0.2s',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}
@@ -2327,6 +2355,13 @@ function ChatPanel() {
             </button>
           )}
         </div>
+        {(!executionAvailable || workbenchReadOnly) && (
+          <div style={{ maxWidth: 800, margin: '6px auto 0', color: 'var(--muted)', fontSize: 10 }}>
+            {workbenchReadOnly
+              ? 'This Workbench is read-only.'
+              : 'Task execution is unavailable. Configure a provider with the Aiden CLI, then restart Workbench.'}
+          </div>
+        )}
       </div>
     </section>
   )
@@ -2603,10 +2638,8 @@ function LiveViewPanel() {
 // ── StatusBar (replaces ActivityBar + DisclaimerBar) ─────────
 
 function StatusBar() {
-  const { activityLogs, systemStats, activeModel, runtimeVersion, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
-  const providerLabel = activeModel
-    ? activeModel.split('/').pop()?.replace(':latest', '') ?? activeModel
-    : 'local'
+  const { activityLogs, systemStats, activeModel, activeProvider, runtimeConnection, runtimeVersion, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
+  const providerLabel = activeProvider || 'No provider'
   const memCount = systemStats?.recentHistory?.length ?? 0
 
   return (
@@ -2621,10 +2654,10 @@ function StatusBar() {
       <span style={{ color: 'var(--border2)' }}>·</span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-        online
+         {runtimeConnection}
       </span>
       <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>{providerLabel}</span>
+       <span>{providerLabel} · {activeModel || 'No model'}</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
       <span>{memCount} {memCount === 1 ? 'memory' : 'memories'}</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
@@ -4252,26 +4285,11 @@ response = client.chat.completions.create(
 // ── SettingsDrawer ────────────────────────────────────────────
 
 const SETTINGS_TABS = [
-  { id: 'pro',      label: '⭐ License'      },
-  { id: 'updates',  label: '🔄 Updates'     },
-  { id: 'profile',  label: '👤 My Profile'  },
-  { id: 'api',      label: '🔑 API Keys'    },
-  { id: 'custom',   label: '🔌 Custom Providers' },
-  { id: 'model',    label: '🧠 Model'        },
-  { id: 'usage',    label: '📊 Usage'        },
-  { id: 'knowledge',label: '📚 Knowledge'   },
-  { id: 'skills',   label: '🎯 Skills'      },
-  { id: 'plugins',  label: '🧩 Plugins'    },
-  { id: 'channels', label: '💬 Channels'    },
-  { id: 'security', label: '🛡️ Security'   },
-  { id: 'ide',      label: '💻 IDE Integration' },
+  { id: 'runtime',  label: '◆ Runtime'       },
   { id: 'guide',    label: '📖 User Guide'  },
-  { id: 'setup',    label: '🔧 Setup'        },
   { id: 'privacy',  label: '📜 Privacy'     },
   { id: 'legal',    label: '⚖️ Legal'        },
   { id: 'about',    label: 'ℹ️ About'        },
-  { id: 'danger',   label: '⚠️ Danger Zone' },
-  { id: 'debug',    label: '🐛 Debug'       },
 ]
 
 function SettingsDrawer() {
@@ -4279,6 +4297,8 @@ function SettingsDrawer() {
     settingsTab, setSettingsTab, setSettingsOpen, setConversations, setMessages,
     licenseStatus, licenseKey, setLicenseKey, activatingKey, licenseMsg, setLicenseMsg,
     validateKey, clearProLicense, setPricingOpen, runtimeVersion,
+    activeProvider, activeModel, runtimeConnection, executionAvailable,
+    executionQueue, workbenchReadOnly,
   } = useDevOS()
 
   return (
@@ -4325,6 +4345,21 @@ function SettingsDrawer() {
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+          {settingsTab === 'runtime' && (
+            <SettingsSection title="Runtime">
+              <p style={settingsTextStyle}><strong style={{ color: 'var(--text)' }}>Aiden v{runtimeVersion}</strong></p>
+              <p style={settingsTextStyle}>Provider: <strong style={{ color: 'var(--text)' }}>{activeProvider || 'Not configured'}</strong></p>
+              <p style={settingsTextStyle}>Model: <strong style={{ color: 'var(--text)' }}>{activeModel || 'Not configured'}</strong></p>
+              <p style={settingsTextStyle}>Connection: <strong style={{ color: 'var(--text)' }}>{runtimeConnection}</strong></p>
+              <p style={settingsTextStyle}>Execution: <strong style={{ color: executionAvailable ? 'var(--green)' : 'var(--red)' }}>
+                {executionAvailable ? `${executionQueue.workerCount} durable workers ready` : 'unavailable'}
+              </strong></p>
+              <p style={settingsTextStyle}>Queue: {executionQueue.inflight} running · {executionQueue.pending} pending · {executionQueue.claimed} claimed</p>
+              <p style={settingsTextStyle}>{workbenchReadOnly
+                ? 'This browser surface is read-only.'
+                : 'Provider and model configuration is owned by the Aiden CLI. Use `aiden model` or `aiden setup`, then restart Workbench.'}</p>
+            </SettingsSection>
+          )}
           {settingsTab === 'profile'   && <UserProfileTab />}
           {settingsTab === 'api'       && <ApiKeysTab />}
           {settingsTab === 'custom'    && <CustomProvidersTab />}
@@ -4750,38 +4785,10 @@ export default function Home() {
 
   const [runtimeVersion, setRuntimeVersion] = useState('unknown')
 
-  useEffect(() => {
-    let current = true
-    void aiden.loadRuntimeInfo()
-      .then((info) => { if (current) setRuntimeVersion(info.version) })
-      .catch(() => { /* keep an honest unknown value when the bridge is unavailable */ })
-    return () => { current = false }
-  }, [])
-
   // ── Onboarding ──────────────────────────────────────────────
-  const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null)
-
-  useEffect(() => {
-    fetch('http://localhost:4200/api/providers')
-      .then(r => r.json())
-      .then((d: any) => {
-        // Show onboarding if no API key is working (no enabled, non-rate-limited provider with a key)
-        const hasWorkingKey = d.apis?.some((a: any) => a.hasKey && a.enabled && !a.rateLimited)
-        setOnboardingDone(hasWorkingKey ? true : false)
-      })
-      .catch(() => setOnboardingDone(true)) // server not running yet — skip onboarding
-  }, [])
+  const [onboardingDone, setOnboardingDone] = useState(true)
 
   // ── Load active model label for header ───────────────────────
-  useEffect(() => {
-    fetch('http://localhost:4200/api/config')
-      .then(r => r.json())
-      .then((d: any) => {
-        if (d.activeModel) setActiveModel(d.activeModel)
-      })
-      .catch(() => {})
-  }, [])
-
   // ── Auto-update banner wiring ────────────────────────────────
   useEffect(() => {
     // Electron: listen via IPC (aidenUpdater from preload)
@@ -4813,12 +4820,17 @@ export default function Home() {
   const [liveViewOpen,   setLiveViewOpen]   = useState(false)
   const [activityOpen,   setActivityOpen]   = useState(false)
   const [settingsOpen,   setSettingsOpen]   = useState(false)
-  const [settingsTab,    setSettingsTab]    = useState('api')
+  const [settingsTab,    setSettingsTab]    = useState('runtime')
   const [isExecuting,    setIsExecuting]    = useState(false)
   const [isStreaming,    setIsStreaming]    = useState(false)
   const [thinking,       setThinking]       = useState<{ stage: string; message: string; tool?: string } | null>(null)
   const [budget,         setBudget]         = useState<{ current: number; max: number; remaining: number } | null>(null)
   const [activeModel,    setActiveModel]    = useState<string>('')
+  const [activeProvider, setActiveProvider] = useState<string>('')
+  const [runtimeConnection, setRuntimeConnection] = useState<'connected' | 'reconnecting' | 'unavailable'>('unavailable')
+  const [executionAvailable, setExecutionAvailable] = useState(false)
+  const [executionQueue, setExecutionQueue] = useState({ pending: 0, claimed: 0, inflight: 0, workerCount: 0 })
+  const [workbenchReadOnly, setWorkbenchReadOnly] = useState(true)
 
   // ── Messages / conversations ────────────────────────────────
   const [messages,       setMessages]       = useState<Message[]>([])
@@ -4833,11 +4845,96 @@ export default function Home() {
   const [mainView,       setMainView]       = useState<'chat' | 'activity'>('chat')
   const activeRunIdRef = useRef<number | null>(null)
   const activeRunFollowAbortRef = useRef<AbortController | null>(null)
+  const activeRunFollowControllersRef = useRef<Set<AbortController>>(new Set())
   const [activeJobId, setActiveJobId] = useState<string | null>(null)
   const [activeAttemptId, setActiveAttemptId] = useState<string | null>(null)
   const [activeRunId, setActiveRunId] = useState<number | null>(null)
+  const workbenchControllerRef = useRef(new WorkbenchController())
+  const [controllerRevision, setControllerRevision] = useState(0)
+  const selectedContext = workbenchControllerRef.current.snapshot().selected
+  const publishController = useCallback(() => setControllerRevision((value) => value + 1), [])
+  const selectContext = useCallback((selection: WorkbenchSelection, replace = false) => {
+    workbenchControllerRef.current.select(selection)
+    publishController()
+    if (typeof window !== 'undefined') {
+      const next = selectionToSearch(selection)
+      const url = `${window.location.pathname}${next}`
+      if (replace) window.history.replaceState(window.history.state, '', url)
+      else window.history.pushState(window.history.state, '', url)
+    }
+  }, [publishController])
+  const syncForegroundLifecycle = useCallback((jobId: string | null) => {
+    const active = jobId === null
+      ? undefined
+      : workbenchControllerRef.current.active().find((job) => job.jobId === jobId)
+    setIsExecuting(Boolean(active))
+    setIsStreaming(Boolean(active))
+    setThinking(active ? {
+      stage: active.status,
+      message: active.statusDetail || active.status.replace(/_/g, ' '),
+    } : null)
+    if (!active) setBudget(null)
+  }, [])
   useEffect(() => {
-    const restored = aiden.restoreRunHandle()
+    let current = true
+    const refreshActiveJobs = async () => {
+      const bootstrap = await aiden.loadWorkbenchBootstrap()
+      if (!current) return
+      setRuntimeVersion(bootstrap.runtime.version)
+      setActiveProvider(bootstrap.provider.displayName || bootstrap.provider.id || '')
+      setActiveModel(bootstrap.model.displayName || bootstrap.model.id || '')
+      setRuntimeConnection(bootstrap.connection)
+      setExecutionAvailable(bootstrap.execution.available)
+      setExecutionQueue({
+        pending: bootstrap.execution.pending,
+        claimed: bootstrap.execution.claimed,
+        inflight: bootstrap.execution.inflight,
+        workerCount: bootstrap.execution.workerCount,
+      })
+      setWorkbenchReadOnly(bootstrap.readOnly)
+      workbenchControllerRef.current.reconcileActive(bootstrap.activeJobs.map((job) => ({
+          sessionId: job.sessionId,
+          jobId: job.jobId,
+          attemptId: job.attemptId,
+          runId: job.runId,
+          status: normalizeActiveJobStatus(job.status),
+          title: job.title,
+          statusDetail: job.statusDetail,
+          updatedAt: job.updatedAt,
+      })))
+      const selectedJobId = workbenchControllerRef.current.snapshot().selected.jobId
+      if (selectedJobId) syncForegroundLifecycle(selectedJobId)
+      publishController()
+    }
+    void refreshActiveJobs().catch(() => { /* the bridge may be read-only or temporarily unavailable */ })
+    const timer = window.setInterval(() => {
+      void refreshActiveJobs().catch(() => { /* keep the last authoritative snapshot on transient failure */ })
+    }, 5_000)
+    return () => { current = false; window.clearInterval(timer) }
+  }, [publishController, syncForegroundLifecycle])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onPopState = () => {
+      const selection = selectionFromSearch(window.location.search)
+      const conversation = conversations.find((item) =>
+        (selection.jobId && item.jobId === selection.jobId)
+        || (selection.sessionId && (item.id === selection.sessionId || item.sessionId === selection.sessionId)))
+      selectContext(selection, true)
+      setCurrentConvId(conversation?.id || selection.sessionId || '')
+      if (conversation) setMessages(conversation.messages)
+      else if (!selection.jobId) setMessages([])
+      setActiveJobId(selection.jobId)
+      setActiveAttemptId(selection.attemptId)
+      setActiveRunId(selection.runId)
+      activeRunIdRef.current = selection.runId
+      syncForegroundLifecycle(selection.jobId)
+    }
+    onPopState()
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
+  }, [conversations, selectContext, syncForegroundLifecycle])
+  useEffect(() => {
+    let restored = aiden.restoreRunHandle()
     if (!restored) return
     const controller = new AbortController()
     const replay = { admission: restored.admission, lastEventId: 0 }
@@ -4846,15 +4943,19 @@ export default function Home() {
     const nowTime = () => new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
     const settle = () => {
       if (activeRunFollowAbortRef.current === controller) activeRunFollowAbortRef.current = null
+      activeRunFollowControllersRef.current.delete(controller)
       setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
     }
     const startReplay = () => {
       if (controller.signal.aborted) return
       activeRunIdRef.current = restored.admission.runId
+      workbenchControllerRef.current.register(restored.admission, restored.admission.jobId)
+      publishController()
       setActiveJobId(restored.admission.jobId)
       setActiveAttemptId(restored.admission.attemptId)
       setActiveRunId(restored.admission.runId)
       activeRunFollowAbortRef.current = controller
+       activeRunFollowControllersRef.current.add(controller)
       setIsExecuting(true)
       setIsStreaming(true)
       setThinking({ stage: 'reconnecting', message: 'Reconnecting…' })
@@ -4863,6 +4964,20 @@ export default function Home() {
         if (state === 'terminal') return
         setThinking({ stage: state, message: state === 'connected' ? 'Restoring durable activity…' : `${state}…` })
       },
+      onReattached: (admission) => {
+        restored = { admission, lastEventId: 0 }
+        const sessionId = workbenchControllerRef.current.snapshot().selected.sessionId
+        setActiveJobId(admission.jobId)
+        setActiveAttemptId(admission.attemptId)
+        setActiveRunId(admission.runId)
+        activeRunIdRef.current = admission.runId
+        selectContext({
+          sessionId,
+          jobId: admission.jobId,
+          attemptId: admission.attemptId,
+          runId: admission.runId,
+        }, true)
+      },
       onThinking: (stage, message) => setThinking({ stage, message }),
       onReply: (chunk) => {
         setThinking(null)
@@ -4870,6 +4985,15 @@ export default function Home() {
         setMessages((prev) => {
           const recovered = prev.some((message) => message.id === recoveredMessageId)
           const next: Message = { id: recoveredMessageId, role: 'assistant', content: fullReply, timestamp: Date.now(), isStreaming: true }
+          return recovered ? prev.map((message) => message.id === recoveredMessageId ? next : message) : [...prev, next]
+        })
+      },
+      onReplySnapshot: (content) => {
+        setThinking(null)
+        fullReply = content
+        setMessages((prev) => {
+          const recovered = prev.some((message) => message.id === recoveredMessageId)
+          const next: Message = { id: recoveredMessageId, role: 'assistant', content, timestamp: Date.now(), isStreaming: true }
           return recovered ? prev.map((message) => message.id === recoveredMessageId ? next : message) : [...prev, next]
         })
       },
@@ -4884,7 +5008,7 @@ export default function Home() {
       },
       onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
       onDone: (info) => {
-        aiden.clearRunHandle()
+        aiden.clearRunHandle(restored.admission)
         settle()
         if (!fullReply && info.summary) {
           setMessages((prev) => [...prev, { id: recoveredMessageId, role: 'assistant', content: info.summary!, timestamp: Date.now(), isStreaming: false }])
@@ -4893,7 +5017,7 @@ export default function Home() {
         }
       },
       onError: (message) => {
-        aiden.clearRunHandle()
+        aiden.clearRunHandle(restored.admission)
         settle()
         setMessages((prev) => fullReply ? prev : [...prev, { id: recoveredMessageId, role: 'assistant', content: `⚠ ${message}`, timestamp: Date.now(), isStreaming: false }])
       },
@@ -4901,14 +5025,25 @@ export default function Home() {
     }
     void aiden.reconcileRestoredRunHandle(restored).then((resolution) => {
       if (resolution.kind === 'missing') throw new Error('stale Workbench run handle')
+      restored = resolution.handle
       setActiveJobId(restored.admission.jobId)
       setActiveAttemptId(restored.admission.attemptId)
       setActiveRunId(restored.admission.runId)
       activeRunIdRef.current = restored.admission.runId
+      selectContext({
+        sessionId: null,
+        jobId: restored.admission.jobId,
+        attemptId: restored.admission.attemptId,
+        runId: restored.admission.runId,
+      }, true)
       if (resolution.kind === 'terminal') {
-        aiden.clearRunHandle()
+        workbenchControllerRef.current.register(restored.admission, null)
+        workbenchControllerRef.current.settle(restored.admission.jobId)
+        publishController()
+        aiden.clearRunHandle(restored.admission)
         settle()
-        const summary = resolution.projection.receipt.summary
+        const summary = aiden.assistantOutputText(resolution.projection)
+          || resolution.projection.receipt.summary
         if (summary) {
           setMessages((prev) => prev.some((message) => message.id === recoveredMessageId)
             ? prev
@@ -4918,7 +5053,9 @@ export default function Home() {
       }
       startReplay()
     }).catch(() => {
-      aiden.clearRunHandle()
+      aiden.clearRunHandle(restored.admission)
+      workbenchControllerRef.current.settle(restored.admission.jobId)
+      publishController()
       activeRunIdRef.current = null
       setActiveJobId(null)
       setActiveAttemptId(null)
@@ -4932,9 +5069,15 @@ export default function Home() {
         isStreaming: false,
       }])
     })
-    return () => controller.abort()
+    return () => {
+      controller.abort()
+      activeRunFollowControllersRef.current.delete(controller)
+    }
+  }, [publishController, selectContext])
+  useEffect(() => () => {
+    for (const controller of Array.from(activeRunFollowControllersRef.current)) controller.abort()
+    activeRunFollowControllersRef.current.clear()
   }, [])
-  useEffect(() => () => activeRunFollowAbortRef.current?.abort(), [])
 
   // ── Plus menu state ─────────────────────────────────────────
   const [plusMenuOpen,      setPlusMenuOpen]      = useState(false)
@@ -5026,6 +5169,7 @@ export default function Home() {
   const messagesEndRef   = useRef<HTMLDivElement>(null)
   const logsEndRef       = useRef<HTMLDivElement>(null)
   const knowledgeInputRef= useRef<HTMLInputElement>(null)
+  const conversationMessagesRef = useRef(new Map<string, Message[]>());
 
   // ── Auto-switch modes based on execution state ──────────────
   useEffect(() => {
@@ -5222,14 +5366,49 @@ export default function Home() {
   // ── Conversation helpers ────────────────────────────────────
   const startNewChat = useCallback(() => {
     const id = `conv_${Date.now()}`
+    workbenchControllerRef.current.newChat(id)
+    publishController()
     setCurrentConvId(id)
     setMessages([])
-  }, [])
+    setActiveJobId(null)
+    setActiveAttemptId(null)
+    setActiveRunId(null)
+    activeRunIdRef.current = null
+    setIsExecuting(false)
+    setIsStreaming(false)
+    setThinking(null)
+    setBudget(null)
+    if (typeof window !== 'undefined') window.history.pushState(window.history.state, '', window.location.pathname)
+  }, [publishController])
 
   const loadConversation = useCallback((id: string) => {
     const conv = conversations.find(c => c.id === id)
-    if (conv) { setCurrentConvId(id); setMessages(conv.messages) }
-  }, [conversations])
+    if (conv) {
+      const selection = conv.jobId
+        ? { sessionId: conv.sessionId ?? conv.id, jobId: conv.jobId, attemptId: conv.attemptId ?? null, runId: conv.runId ?? null }
+        : emptySelection(conv.sessionId ?? conv.id)
+      selectContext(selection)
+      setCurrentConvId(id)
+      setMessages(conv.messages)
+      setActiveJobId(selection.jobId)
+      setActiveAttemptId(selection.attemptId)
+      setActiveRunId(selection.runId)
+      activeRunIdRef.current = selection.runId
+      syncForegroundLifecycle(selection.jobId)
+    }
+  }, [conversations, selectContext, syncForegroundLifecycle])
+
+  const selectActiveJob = useCallback((job: ReturnType<WorkbenchController['active']>[number]) => {
+    selectContext({ sessionId: job.sessionId, jobId: job.jobId, attemptId: job.attemptId, runId: job.runId })
+    setCurrentConvId(job.sessionId || job.jobId)
+    setActiveJobId(job.jobId)
+    setActiveAttemptId(job.attemptId)
+    setActiveRunId(job.runId)
+    activeRunIdRef.current = job.runId
+    const stored = conversationMessagesRef.current.get(job.sessionId || job.jobId)
+    setMessages(stored ?? [])
+    syncForegroundLifecycle(job.jobId)
+  }, [selectContext, syncForegroundLifecycle])
 
   const saveToConversation = useCallback((msgs: Message[]) => {
     const title = msgs.find(m => m.role === 'user')?.content.slice(0, 40) || 'New Chat'
@@ -5253,13 +5432,38 @@ export default function Home() {
   // ── Send message ────────────────────────────────────────────
   const sendMessage = useCallback(async (overrideText?: string) => {
     const text = overrideText ?? input
-    if (!text.trim() || isStreaming) return
+    if (!text.trim() || (isStreaming && selectedContext.jobId !== null)) return
+    if (!executionAvailable || workbenchReadOnly) {
+      setMessages((current) => [...current, {
+        id: `runtime_unavailable_${Date.now()}`,
+        role: 'assistant',
+        content: workbenchReadOnly
+          ? 'This Workbench is read-only.'
+          : 'Task execution is unavailable. Configure a provider with the Aiden CLI, then restart Workbench.',
+        timestamp: Date.now(),
+        isStreaming: false,
+      }])
+      return
+    }
+    const requestSessionId = currentConvId || sessionId
+    if (selectedContext.sessionId !== requestSessionId || selectedContext.jobId !== null) {
+      selectContext(emptySelection(requestSessionId), true)
+    }
+    let admittedJobId: string | null = null
+    let admittedAttemptId: string | null = null
+    let admittedRunId: number | null = null
+    const isForeground = () => {
+      const selected = workbenchControllerRef.current.snapshot().selected
+      return selected.sessionId === requestSessionId
+        && (admittedJobId === null || selected.jobId === admittedJobId)
+    }
 
     const userMsg: Message = {
       id: `msg_${Date.now()}`, role: 'user',
       content: text.trim(), timestamp: Date.now(),
     }
     const newMessages = [...messages, userMsg]
+    conversationMessagesRef.current.set(requestSessionId, newMessages)
     setMessages(newMessages)
     if (!overrideText) setInput('')
     if (!overrideText && inputRef.current) inputRef.current.style.height = 'auto'
@@ -5271,30 +5475,76 @@ export default function Home() {
     setMessages(m => [...m, { id: thinkingId, role: 'assistant', content: '', timestamp: Date.now(), isStreaming: true }])
 
     let fullReply = ''
+    let turnMessages = [...newMessages, { id: thinkingId, role: 'assistant' as const, content: '', timestamp: Date.now(), isStreaming: true }]
+    conversationMessagesRef.current.set(requestSessionId, turnMessages)
     activeRunIdRef.current = null
     setActiveRunId(null)
-    activeRunFollowAbortRef.current?.abort()
     const followController = new AbortController()
     activeRunFollowAbortRef.current = followController
+    activeRunFollowControllersRef.current.add(followController)
 
     const nowTime = () => new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    const pushActivity = (icon: string, message: string, style: ActivityLog['style']) =>
+    const pushActivity = (icon: string, message: string, style: ActivityLog['style']) => {
+      if (!isForeground()) return
       setActivityLogs(prev => [...prev.slice(-199), { time: nowTime(), icon, agent: 'Aiden', message, style }])
+    }
+    const persistTurn = () => {
+      conversationMessagesRef.current.set(requestSessionId, turnMessages)
+      setConversations(prev => {
+        const existing = prev.find(c => c.id === requestSessionId)
+        if (existing) return prev.map(c => c.id === requestSessionId ? {
+          ...c, messages: turnMessages, timestamp: Date.now(),
+          jobId: admittedJobId ?? c.jobId,
+          attemptId: admittedAttemptId ?? c.attemptId,
+          runId: admittedRunId ?? c.runId,
+          sessionId: requestSessionId,
+        } : c)
+        return [{
+          id: requestSessionId, title: userMsg.content.slice(0, 40), timestamp: Date.now(),
+          messages: turnMessages, sessionId: requestSessionId,
+          jobId: admittedJobId ?? undefined,
+          attemptId: admittedAttemptId ?? undefined,
+          runId: admittedRunId ?? undefined,
+        }, ...prev]
+      })
+      if (isForeground()) { setMessages(turnMessages); saveToConversation(turnMessages) }
+    }
 
     // Send onto the v4 safe job path; stream the reply + activity back. Tool calls
     // and verified/unverified verdicts go to the Activity view, NOT the chat.
     await aiden.runTask(userMsg.content, {
       onAdmission: (admission) => {
-        setActiveJobId(admission.jobId)
-        setActiveAttemptId(admission.attemptId)
-        setActiveRunId(admission.runId)
+        const attachToForeground = shouldAttachAdmission(
+          workbenchControllerRef.current.snapshot().selected,
+          requestSessionId,
+        )
+        admittedJobId = admission.jobId
+        admittedAttemptId = admission.attemptId
+        admittedRunId = admission.runId
+        workbenchControllerRef.current.register(admission, requestSessionId, userMsg.content)
+        publishController()
+        if (attachToForeground) {
+          setActiveJobId(admission.jobId)
+          setActiveAttemptId(admission.attemptId)
+          setActiveRunId(admission.runId)
+          selectContext({ sessionId: requestSessionId, jobId: admission.jobId, attemptId: admission.attemptId, runId: admission.runId }, true)
+        }
       },
-      onRunId:    (rid) => { activeRunIdRef.current = rid; setActiveRunId(rid) },
-      onThinking: (stage, message) => setThinking({ stage, message }),
+      onRunId:    (rid) => { if (isForeground()) { activeRunIdRef.current = rid; setActiveRunId(rid) } },
+      onThinking: (stage, message) => { if (isForeground()) setThinking({ stage, message }) },
       onReply:    (chunk) => {
-        setThinking(null)
+        if (isForeground()) setThinking(null)
         fullReply += chunk
-        setMessages(m => m.map(msg => msg.id === thinkingId ? { ...msg, content: fullReply, isStreaming: true } : msg))
+        turnMessages = turnMessages.map(msg => msg.id === thinkingId ? { ...msg, content: fullReply, isStreaming: true } : msg)
+        conversationMessagesRef.current.set(requestSessionId, turnMessages)
+        if (isForeground()) setMessages(turnMessages)
+      },
+      onReplySnapshot: (content) => {
+        if (isForeground()) setThinking(null)
+        fullReply = content
+        turnMessages = turnMessages.map(msg => msg.id === thinkingId ? { ...msg, content, isStreaming: true } : msg)
+        conversationMessagesRef.current.set(requestSessionId, turnMessages)
+        if (isForeground()) setMessages(turnMessages)
       },
       onActivity: (a) => {
         const style: ActivityLog['style'] =
@@ -5304,28 +5554,44 @@ export default function Home() {
           : a.status === 'failed' ? '✗' : a.status === 'running' ? '▸' : '✓'
         pushActivity(icon, a.label + (a.detail ? ` · ${a.detail}` : ''), style)
       },
-      onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
+      onTokens: (total) => { if (isForeground()) setBudget({ current: total, max: 0, remaining: 0 }) },
       onDone: (info) => {
-        aiden.clearRunHandle()
+        if (admittedJobId && admittedAttemptId && admittedRunId !== null) {
+          aiden.clearRunHandle({ jobId: admittedJobId, attemptId: admittedAttemptId, runId: admittedRunId })
+        }
+        if (admittedJobId) {
+          workbenchControllerRef.current.settle(admittedJobId)
+          publishController()
+        }
         if (activeRunFollowAbortRef.current === followController) activeRunFollowAbortRef.current = null
-        setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
+        activeRunFollowControllersRef.current.delete(followController)
+        if (isForeground()) { setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false) }
         const finalContent = fullReply
           || (info.stopped
             ? '_Stopped._'
             : '_Task completed — no written reply was emitted. Open the **Activity** tab to see what ran._')
         const finalMsg: Message = { id: thinkingId, role: 'assistant', content: finalContent, timestamp: Date.now(), isStreaming: false }
-        setMessages(prev => { const updated = prev.map(m => m.id === thinkingId ? finalMsg : m); saveToConversation(updated); return updated })
+        turnMessages = turnMessages.map(m => m.id === thinkingId ? finalMsg : m)
+        persistTurn()
       },
       onError: (message) => {
-        aiden.clearRunHandle()
+        if (admittedJobId && admittedAttemptId && admittedRunId !== null) {
+          aiden.clearRunHandle({ jobId: admittedJobId, attemptId: admittedAttemptId, runId: admittedRunId })
+        }
+        if (admittedJobId) {
+          workbenchControllerRef.current.settle(admittedJobId)
+          publishController()
+        }
         if (activeRunFollowAbortRef.current === followController) activeRunFollowAbortRef.current = null
-        setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
-        setMessages(m => m.map(msg => msg.id === thinkingId
+        activeRunFollowControllersRef.current.delete(followController)
+        if (isForeground()) { setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false) }
+        turnMessages = turnMessages.map(msg => msg.id === thinkingId
           ? { ...msg, content: fullReply || `⚠ ${message}`, isStreaming: false }
-          : msg))
+          : msg)
+        persistTurn()
       },
     }, { signal: followController.signal })
-  }, [input, isStreaming, messages, saveToConversation])
+  }, [input, isStreaming, messages, saveToConversation, selectedContext, currentConvId, sessionId, selectContext, publishController, executionAvailable, workbenchReadOnly])
 
   // ── Quick upload (chat + button) ────────────────────────────
   const handleQuickUpload = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
@@ -5559,26 +5825,21 @@ export default function Home() {
     }
   }, [isRecording, isStreaming, sendMessage])
 
-  // ── Auto-clear thinking on timeout ──────────────────────────
-  useEffect(() => {
-    if (thinking) {
-      const timeout = setTimeout(() => setThinking(null), 30000)
-      return () => clearTimeout(timeout)
-    }
-  }, [thinking])
-
   // ── Context value ───────────────────────────────────────────
   const ctxValue: DevOSCtxType = {
     uiMode, setUIMode, execMode, setExecMode,
     historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen,
     activityOpen, setActivityOpen, settingsOpen, setSettingsOpen,
     settingsTab, setSettingsTab,
-    isExecuting, isStreaming, thinking, budget, activeModel, runtimeVersion,
+    isExecuting, isStreaming, thinking, budget, activeModel, activeProvider, runtimeConnection, runtimeVersion,
+    executionAvailable, executionQueue, workbenchReadOnly,
+    selectedContext, activeJobs: workbenchControllerRef.current.active(),
     messages, setMessages, conversations, setConversations, currentConvId,
     input, setInput,
     activityLogs, setActivityLogs, screenshot, setScreenshot, sessionId,
     systemStats, recentTasks,
     sendMessage, stopExecution, startNewChat, loadConversation,
+    selectActiveJob,
     handleQuickUpload,
     inputRef, kbInputRef, messagesEndRef, logsEndRef,
     // Plus menu
@@ -5606,6 +5867,7 @@ export default function Home() {
     validateKey, clearProLicense,
     // Update banner
     updateBanner, setUpdateBanner,
+    controllerRevision,
   }
 
   // ── Loading splash ──────────────────────────────────────────

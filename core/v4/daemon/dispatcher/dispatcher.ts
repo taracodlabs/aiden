@@ -80,6 +80,28 @@ const DEFAULT_RENEW_MS          = 60_000;
 const DEFAULT_MAX_ATTEMPTS      = 3;
 const DEFAULT_STOP_TIMEOUT_MS   = 30_000;
 
+export function directWorkbenchPrompt(event: Pick<ClaimedEvent, 'source' | 'sourceKey' | 'payload'>): string | null {
+  if (event.source !== 'manual' || !event.sourceKey.startsWith('workbench-')) return null;
+  const body = event.payload.body;
+  if (!body || typeof body !== 'object') return null;
+  const prompt = (body as { prompt?: unknown }).prompt;
+  return typeof prompt === 'string' && prompt.trim() ? prompt : null;
+}
+
+export function resolveDispatcherSessionId(
+  event: Pick<ClaimedEvent, 'source' | 'sourceKey' | 'idempotencyKey' | 'payload'>,
+): string {
+  if (event.source === 'manual' && event.sourceKey.startsWith('workbench-')
+    && typeof event.payload.sessionId === 'string' && event.payload.sessionId.trim()) {
+    return event.payload.sessionId;
+  }
+  return buildTriggerSessionId({
+    source: event.source,
+    sourceKey: event.sourceKey,
+    idempotencyKey: event.idempotencyKey,
+  });
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export type DispatcherLogFn = (level: 'info' | 'warn' | 'error', msg: string) => void;
@@ -246,6 +268,10 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       const { rendered, missing } = renderPromptTemplate(template, vars);
       return { message: rendered, missing };
     }
+    const directPrompt = directWorkbenchPrompt(event);
+    if (directPrompt !== null) {
+      return { message: directPrompt, missing: [] };
+    }
     // Fallback: structured payload header so the model knows the
     // source + can reason over the JSON body. Keeps the initial
     // message useful when the operator skipped the template.
@@ -284,11 +310,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
   async function processClaim(event: ClaimedEvent): Promise<void> {
     const spec    = readTriggerSpec(event.sourceKey);
     const context = buildContext(event, spec);
-    const sessionId = buildTriggerSessionId({
-      source:         event.source,
-      sourceKey:      event.sourceKey,
-      idempotencyKey: event.idempotencyKey,
-    });
+    const sessionId = resolveDispatcherSessionId(event);
 
     // Record in-flight.
     const inflightRow: DispatcherInflight = {

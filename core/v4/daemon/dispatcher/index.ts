@@ -16,6 +16,8 @@
 export {
   createDispatcher,
   _dispatcherOwnerId,
+  directWorkbenchPrompt,
+  resolveDispatcherSessionId,
 } from './dispatcher';
 export type {
   Dispatcher,

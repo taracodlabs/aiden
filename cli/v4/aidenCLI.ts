@@ -80,7 +80,7 @@ import type { ProviderOption } from '../../core/v4/subagent/providerRotation';
 import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import { daemonDbPath } from '../../core/v4/daemon/daemonConfig';
-import { openDaemonDb } from '../../core/v4/daemon/db/connection';
+import { closeDaemonDb, openDaemonDb } from '../../core/v4/daemon/db/connection';
 import { createRunStore } from '../../core/v4/daemon/runStore';
 import { createJobEngine } from '../../core/v4/daemon/jobEngine';
 import type { JobEngine } from '../../core/v4/daemon/jobEngine';
@@ -508,7 +508,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   program
     .command('web')
     .alias('workbench')
-    .description('Open the Aiden Workbench — a read-only live dashboard in your browser')
+    .description('Open the Aiden Workbench in your browser')
     .option('--port <n>', 'Port to bind on 127.0.0.1 (default 4280)', (v: string) => Number.parseInt(v, 10))
     .option('--no-open', 'Do not auto-open the browser (just print the URL)')
     .action(async (cmdOpts: { port?: number; open?: boolean }) => {
@@ -517,6 +517,9 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createSessionLister }  = await import('../../core/v4/workbench/sessionList');
       const { createTriggerBus }     = await import('../../core/v4/daemon/triggerBus');
       const { createWorkbenchJobCommands } = await import('../../core/v4/workbench/jobCommands');
+      const { createWorkbenchExecutionHost } = await import('../../core/v4/workbench/executionHost');
+      const { listWorkbenchActiveJobs } = await import('../../core/v4/workbench/activeJobs');
+      const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
       const { randomBytes } = await import('node:crypto');
       const paths    = resolveAidenPaths();
       const dbPath   = daemonDbPath(paths.root);
@@ -530,15 +533,42 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
            (instance_id, pid, hostname, started_at, last_heartbeat, version)
          VALUES (?, ?, ?, ?, ?, ?)`,
       ).run(workbenchInstanceId, process.pid, os.hostname(), workbenchStartedAt, workbenchStartedAt, VERSION);
-      const sessions = createSessionLister(new SessionStore(paths.sessionsDb));
+      const sessionStore = new SessionStore(paths.sessionsDb);
+      const sessions = createSessionLister(sessionStore);
       // WRITE path: a per-launch token gates it, and the task is only ENQUEUED
       // onto the daemon's safe job path (manual trigger → dispatcher runs it
       // under the default safe-only policy: risky/mutating tools auto-denied).
       const triggerBus = createTriggerBus({ db });
       const token = randomBytes(24).toString('hex');
+      const actionAuthority = createActionAuthority({ db, jobEngine });
+      const jobControlAuthority = createJobControlAuthority({ db, jobEngine });
       const { enqueue, cancel, input, control, approval, continuity, continueTask } = createWorkbenchJobCommands({
         db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId,
+        actionAuthority, controlAuthority: jobControlAuthority,
       });
+      let workbenchRuntime: AgentRuntime | null = null;
+      let executionHost: ReturnType<typeof createWorkbenchExecutionHost> | null = null;
+      try {
+        workbenchRuntime = await buildAgentRuntime({ headless: true }, opts);
+        executionHost = createWorkbenchExecutionHost({
+          db,
+          triggerBus,
+          runStore,
+          jobEngine,
+          taskStore: createTaskStore({ db }),
+          instanceId: workbenchInstanceId,
+          agentBuilder: workbenchRuntime.daemonAgentBuilder,
+          persistedDefault: {
+            provider: workbenchRuntime.providerId,
+            model: workbenchRuntime.modelId,
+          },
+          workerCount: 4,
+        });
+        executionHost.start();
+      } catch {
+        workbenchRuntime = null;
+        executionHost = null;
+      }
       // STEER path: the stop button cancels a running job by run id. We record
       // the stop durably — mark the run `cancelled` (so the dispatcher won't
       // dispatch it again) and emit a `task_cancelled` event so it shows in the
@@ -557,12 +587,45 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const bridge   = await startWorkbenchBridge({
         reader: runStore,
         sessions,
-        enqueue,
+        enqueue: executionHost ? enqueue : undefined,
         cancel,
         input,
         control,
         approval,
         jobs: jobEngine,
+        runtime: () => {
+          if (workbenchRuntime && executionHost) {
+            return {
+              provider: workbenchRuntime.providerId,
+              model: workbenchRuntime.modelId,
+              local: true,
+              connection: 'connected' as const,
+            };
+          }
+          try {
+            const cfg = new ConfigManager(paths).loadSync();
+            return {
+              provider: cfg.model?.provider ?? null,
+              model: cfg.model?.modelId ?? null,
+              local: true,
+              connection: 'unavailable' as const,
+            };
+          } catch {
+            return { local: true, connection: 'unavailable' as const };
+          }
+        },
+        activeJobs: () => listWorkbenchActiveJobs({
+          jobs: jobEngine,
+          runs: runStore,
+          triggers: triggerBus,
+          approvals: actionAuthority,
+          waits: jobControlAuthority.waits,
+        }),
+        execution: () => executionHost?.snapshot() ?? {
+          available: false, runner: 'unavailable', workerCount: 0,
+          pending: triggerBus.stats().pending, claimed: triggerBus.stats().claimed,
+          inflight: 0, oldestPendingMs: triggerBus.stats().oldestPendingMs, processed: 0,
+        },
         continuity,
         continueTask,
         token,
@@ -570,20 +633,37 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         port,
       });
       const dashUrl  = `http://${bridge.host}:${bridge.port}/`;
-      const daemonUp = process.env.AIDEN_DAEMON === '1';
       process.stdout.write(
         `\n  Aiden Workbench — live dashboard\n` +
         `    open:   ${dashUrl}\n` +
         `    ui:     ${staticDir ? 'React dashboard' : 'built-in page (build the React app: npm --prefix dashboard-next run build)'}\n` +
-        `    chat:   enabled (local token — only this browser can send tasks)\n` +
-        `    tasks:  run under safe-mode; risky actions are auto-denied from web\n` +
-        (daemonUp ? '' : `    note:   start the daemon (AIDEN_DAEMON=1) for sent tasks to execute\n`) +
+        (executionHost
+          ? `    tasks:  enabled (local token — only this browser can send tasks)\n`
+          : `    tasks:  unavailable until a provider is configured\n`) +
+        `    policy: safe-mode; risky actions are auto-denied from web\n` +
+        (executionHost
+          ? `    queue:  ready (4 concurrent durable workers)\n`
+          : `    queue:  unavailable (configure a provider before sending tasks)\n`) +
         `    store:  ${dbPath}\n` +
         `  Ctrl+C to stop.\n\n`,
       );
       // Commander maps `--no-open` to `open === false`; default (undefined) opens.
       if (cmdOpts.open !== false) openBrowser(dashUrl);
-      const shutdown = (): void => { void bridge.close().finally(() => process.exit(0)); };
+      let shutdownPromise: Promise<void> | null = null;
+      const shutdown = (): void => {
+        if (shutdownPromise) return;
+        shutdownPromise = (async () => {
+          try { if (executionHost) await executionHost.stop(); } catch { /* best-effort bounded drain */ }
+          try { await bridge.close(); } catch { /* listener may already be closed */ }
+          try { workbenchRuntime?.processRegistry.cleanup(); } catch { /* best-effort */ }
+          try { if (workbenchRuntime?.mcpClient) await workbenchRuntime.mcpClient.closeAll(); } catch { /* best-effort */ }
+          try { await workbenchRuntime?.pluginLoader.teardown(); } catch { /* best-effort */ }
+          try { await workbenchRuntime?.channelManager.stopAll(); } catch { /* best-effort */ }
+          try { workbenchRuntime?.store.close?.(); } catch { /* best-effort */ }
+          try { sessionStore.close?.(); } catch { /* best-effort */ }
+          closeDaemonDb(dbPath);
+        })().finally(() => process.exit(0));
+      };
       process.on('SIGINT',  shutdown);
       process.on('SIGTERM', shutdown);
     });

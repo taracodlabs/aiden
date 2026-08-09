@@ -514,6 +514,68 @@ describe('Workbench durable Job projections', () => {
     await b.close();
   });
 
+  it('serves bounded authoritative Workbench runtime/provider/model bootstrap', async () => {
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      port: 0,
+      runtime: () => ({ provider: 'chatgpt-plus', model: 'gpt-5.5', local: true, connection: 'connected' }),
+      execution: () => ({ available: true, runner: 'real', workerCount: 4, pending: 2, claimed: 1, inflight: 1, oldestPendingMs: 50, processed: 9 }),
+      activeJobs: () => [{
+        sessionId: 'session_exact', jobId: 'job_live', attemptId: 'attempt_live', runId: 17,
+        title: 'Inspect package.json', status: 'approval_required', statusDetail: 'Approval required',
+        updatedAt: 123, triggerEventId: 5, triggerStatus: 'claimed',
+        queue: { pending: 2, claimed: 1, oldestPendingMs: 50 },
+      }],
+    });
+    const { status, body } = await httpGet(b.port, '/api/workbench/bootstrap');
+    expect(status).toBe(200);
+    expect(JSON.parse(body)).toMatchObject({
+      runtime: { version: expect.any(String), local: true },
+      provider: { id: 'chatgpt-plus' },
+      model: { id: 'gpt-5.5' },
+      connection: 'connected',
+      execution: { available: true, runner: 'real', workerCount: 4, pending: 0, claimed: 1, inflight: 0 },
+      activeJobCount: 1,
+      activeJobs: [{
+        jobId: 'job_live', attemptId: 'attempt_live', runId: 17,
+        title: 'Inspect package.json', status: 'approval_required', triggerEventId: 5,
+      }],
+    });
+    expect(body).not.toMatch(/apiKey|token|secret|password/i);
+    await b.close();
+  });
+
+  it('derives running and queued counts from the same semantic active Job projection', async () => {
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      port: 0,
+      execution: () => ({ available: true, runner: 'real', workerCount: 4, pending: 9, claimed: 9, inflight: 9, oldestPendingMs: 50, processed: 9 }),
+      activeJobs: () => [
+        { sessionId: 's1', jobId: 'running', attemptId: 'a1', runId: 1, status: 'running', updatedAt: 1, triggerEventId: 1, triggerStatus: 'claimed' },
+        { sessionId: 's2', jobId: 'queued', attemptId: 'a2', runId: 2, status: 'queued', updatedAt: 2, triggerEventId: 2, triggerStatus: 'pending' },
+        { sessionId: 's3', jobId: 'approval', attemptId: 'a3', runId: 3, status: 'approval_required', updatedAt: 3, triggerEventId: 3, triggerStatus: 'claimed' },
+        { sessionId: 's4', jobId: 'paused', attemptId: 'a4', runId: 4, status: 'paused', updatedAt: 4, triggerEventId: 4, triggerStatus: 'claimed' },
+      ],
+    });
+    const { body } = await httpGet(b.port, '/api/workbench/bootstrap');
+    expect(JSON.parse(body)).toMatchObject({
+      activeJobCount: 4,
+      execution: { inflight: 1, pending: 1, claimed: 3 },
+    });
+    await b.close();
+  });
+
+  it('does not claim a connected runtime when no runtime authority is wired', async () => {
+    const b = await startWorkbenchBridge({ reader: runStore, port: 0 });
+    const { body } = await httpGet(b.port, '/api/workbench/bootstrap');
+    expect(JSON.parse(body)).toMatchObject({
+      connection: 'unavailable',
+      execution: { available: false, runner: 'unavailable' },
+      readOnly: true,
+    });
+    await b.close();
+  });
+
   it('serves one canonical projection and current continuity checkpoint', async () => {
     const engine = createJobEngine({ db });
     const admitted = engine.submitJob({
@@ -526,16 +588,30 @@ describe('Workbench durable Job projections', () => {
       reason: 'interrupted', idempotencyNamespace: 'test', idempotencyKey: 'checkpoint',
     });
     const b = await startWorkbenchBridge({ reader: runStore, jobs: engine, continuity: engine.continuity, port: 0 });
+    runStore.emitEventRich({
+      runId: admitted.runId, category: 'assistant', kind: 'assistant.message', name: 'assistant_message',
+      payload: { text: 'first ' }, visibility: 'user', source: 'test',
+    });
+    runStore.emitEventRich({
+      runId: admitted.runId, category: 'assistant', kind: 'assistant.message', name: 'assistant_message',
+      payload: { text: 'second' }, visibility: 'user', source: 'test',
+    });
     const projection = await httpGet(
       b.port,
       `/api/jobs/${admitted.jobId}/projection?attemptId=${admitted.attemptId}&runId=${admitted.runId}`,
     );
     const checkpoint = await httpGet(b.port, `/api/jobs/${admitted.jobId}/continuity`);
     expect(projection.status).toBe(200);
-    expect(JSON.parse(projection.body)).toMatchObject({
+    const projectedBody = JSON.parse(projection.body);
+    expect(projectedBody).toMatchObject({
       identity: { jobId: admitted.jobId, attemptId: admitted.attemptId, runId: admitted.runId },
       receipt: { terminal: false, status: 'queued' },
+      assistantOutput: [
+        { text: 'first ' },
+        { text: 'second' },
+      ],
     });
+    expect(projectedBody.assistantOutput[0].sequence).toBeLessThan(projectedBody.assistantOutput[1].sequence);
     expect(JSON.parse(checkpoint.body)).toMatchObject({
       jobId: admitted.jobId, attemptId: admitted.attemptId, reason: 'interrupted', validity: 'current',
     });

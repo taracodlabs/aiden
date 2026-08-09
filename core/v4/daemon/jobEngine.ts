@@ -228,6 +228,8 @@ export interface JobEngine {
     sessionId?: string;
     status?: string;
     rootJobId?: string;
+    entryPoint?: string;
+    terminal?: boolean;
     limit?: number;
   }): JobRecord[];
   getAttempt(attemptId: string): AttemptRecord | null;
@@ -2535,6 +2537,9 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       if (filters.sessionId) { clauses.push('session_id = ?'); params.push(filters.sessionId); }
       if (filters.status) { clauses.push('status = ?'); params.push(filters.status); }
       if (filters.rootJobId) { clauses.push('root_job_id = ?'); params.push(filters.rootJobId); }
+      if (filters.entryPoint) { clauses.push('entry_point = ?'); params.push(filters.entryPoint); }
+      if (filters.terminal === true) clauses.push('terminal_at IS NOT NULL');
+      if (filters.terminal === false) clauses.push('terminal_at IS NULL');
       const limit = Math.max(1, Math.min(1_000, filters.limit ?? 100));
       const rows = db.prepare(
         `SELECT id, status, state_version, active_attempt_id, root_job_id,

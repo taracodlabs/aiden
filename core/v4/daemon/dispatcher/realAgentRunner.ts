@@ -179,6 +179,33 @@ export interface CreateRealAgentRunnerOptions {
   lifecycleScope?: DurableJobLifecycleScope;
 }
 
+const RUN_EVENT_INLINE_BYTES = 4096;
+
+function assistantReplyEventChunks(text: string): string[] {
+  const codePoints = Array.from(text);
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < codePoints.length) {
+    let low = start + 1;
+    let high = codePoints.length;
+    let best = start;
+    while (low <= high) {
+      const middle = Math.floor((low + high) / 2);
+      const candidate = codePoints.slice(start, middle).join('');
+      if (Buffer.byteLength(JSON.stringify({ text: candidate }), 'utf8') <= RUN_EVENT_INLINE_BYTES) {
+        best = middle;
+        low = middle + 1;
+      } else {
+        high = middle - 1;
+      }
+    }
+    if (best === start) throw new Error('assistant reply contains an event chunk larger than the durable inline limit');
+    chunks.push(codePoints.slice(start, best).join(''));
+    start = best;
+  }
+  return chunks;
+}
+
 // ── Implementation ─────────────────────────────────────────────────────────
 
 const ENV_DAEMON_MODEL  = 'AIDEN_DAEMON_MODEL';
@@ -504,16 +531,18 @@ export function createRealAgentRunner(
       const finalReply = result?.finalContent ?? '';
       if (finalReply.trim()) {
         try {
-          opts.runStore.emitEventRich({
-            runId,
-            category:   'assistant',
-            kind:       'assistant.message',
-            name:       'assistant_message',
-            sessionId:  input.sessionId,
-            payload:    { text: finalReply },
-            visibility: 'user',
-            source:     'daemon',
-          });
+          for (const text of assistantReplyEventChunks(finalReply)) {
+            opts.runStore.emitEventRich({
+              runId,
+              category:   'assistant',
+              kind:       'assistant.message',
+              name:       'assistant_message',
+              sessionId:  input.sessionId,
+              payload:    { text },
+              visibility: 'user',
+              source:     'daemon',
+            });
+          }
         } catch { /* persistence faults must never break dispatch */ }
       }
 

@@ -17,6 +17,12 @@ import { createTaskStore } from '../daemon/taskStore';
 import { continueFromCheckpoint } from '../safeContinue';
 import { fingerprintContinuityEnvironment } from '../continuityCheckpoint';
 
+export function summarizeWorkbenchGoal(message: string, maxLength = 120): string {
+  const compact = message.replace(/\s+/g, ' ').trim();
+  if (!compact) return 'Workbench task';
+  return compact.length <= maxLength ? compact : `${compact.slice(0, Math.max(1, maxLength - 1)).trimEnd()}…`;
+}
+
 export function createWorkbenchJobCommands(options: {
   db: Db;
   triggerBus: TriggerBus;
@@ -46,7 +52,7 @@ export function createWorkbenchJobCommands(options: {
       instanceId: options.instanceId,
       idempotencyNamespace: 'workbench-web', idempotencyKey,
       requestFingerprint: fingerprint,
-      goal: `Workbench request ${fingerprint.slice(0, 16)}`,
+      goal: summarizeWorkbenchGoal(task.message),
       triggerEventId: trigger.id,
     });
     options.db.prepare('UPDATE trigger_events SET payload_json = ? WHERE id = ?').run(JSON.stringify({
@@ -144,6 +150,12 @@ export function createWorkbenchJobCommands(options: {
             idempotencyKey: `cancel:${run.taskId}`,
           });
           if (!result.applied && !result.duplicate) return { accepted: false, runId };
+          if (run.triggerEventId) {
+            const trigger = options.triggerBus.get(run.triggerEventId);
+            if (trigger && (trigger.status === 'pending' || trigger.status === 'claimed')) {
+              options.triggerBus.deadLetter(run.triggerEventId, 'workbench task cancelled before dispatch');
+            }
+          }
           try {
             options.runStore.emitEvent(runId, 'task_cancelled', {
               source: 'workbench-web', reason: 'stopped from dashboard',

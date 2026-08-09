@@ -35,6 +35,7 @@ import {
   projectWorkbenchJob,
   type WorkbenchJobProjectionReader,
 } from './projection';
+import { summarizeWorkbenchActiveJobs } from './activeJobs';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -136,6 +137,20 @@ export interface ApprovalDecider {
 
 export interface DurableJobReader extends WorkbenchJobProjectionReader {}
 
+export interface WorkbenchActiveJob {
+  sessionId: string | null;
+  jobId: string;
+  attemptId: string | null;
+  runId: number | null;
+  status: string;
+  title?: string;
+  statusDetail?: string;
+  updatedAt?: number;
+  triggerEventId?: number | null;
+  triggerStatus?: string | null;
+  queue?: { pending: number; claimed: number; oldestPendingMs: number | null };
+}
+
 export interface ContinuityReader {
   get(checkpointId: string): unknown | null;
   getLatest(jobId: string): unknown | null;
@@ -168,6 +183,28 @@ export interface WorkbenchBridgeOptions {
    *  writes are refused. Injected into the served page so only the local
    *  dashboard has it. Read-only GET endpoints ignore it. */
   token?:      string;
+  /** Authoritative runtime metadata for the Workbench header/settings. */
+  runtime?: () => {
+    provider?: string | null;
+    model?: string | null;
+    local?: boolean;
+    connection?: 'connected' | 'unavailable' | 'reconnecting';
+  };
+  /** Bounded durable snapshot used to restore active jobs without treating
+   * browser state as authoritative. */
+  activeJobs?: () => WorkbenchActiveJob[];
+  /** Health-only projection of the existing durable dispatcher hosted by the
+   * standalone Workbench entry point. */
+  execution?: () => {
+    available: boolean;
+    runner: 'real' | 'unavailable';
+    workerCount: number;
+    pending: number;
+    claimed: number;
+    inflight: number;
+    oldestPendingMs: number | null;
+    processed: number;
+  };
   /** Optional directory of a BUILT static dashboard (dashboard-next/out). When
    *  set, the bridge serves that React app at `/` (with the token injected into
    *  index.html) plus its assets, and moves the built-in page to `/plain`. When
@@ -210,6 +247,12 @@ interface WireEvent {
   payload:       unknown;
 }
 
+export interface WorkbenchAssistantOutputChunk {
+  eventId: number;
+  sequence: number;
+  text: string;
+}
+
 function toWire(r: RunEventRich): WireEvent {
   let payload: unknown = null;
   try { payload = r.payload ? JSON.parse(r.payload) : null; } catch { payload = r.payload; }
@@ -219,6 +262,24 @@ function toWire(r: RunEventRich): WireEvent {
     toolCallId: r.toolCallId, parentEventId: r.parentEventId, status: r.status,
     durationMs: r.durationMs, summary: r.summary, payload,
   };
+}
+
+function projectAssistantOutput(reader: RunEventReader, runId: number): WorkbenchAssistantOutputChunk[] {
+  const seen = new Set<number>();
+  return reader.listEventsScoped({
+    scope: 'run_id', runId, category: 'assistant', kind: 'assistant.message', limit: 5_000,
+  })
+    .sort((a, b) => a.seq - b.seq || a.id - b.id)
+    .flatMap((event) => {
+      if (seen.has(event.id)) return [];
+      seen.add(event.id);
+      try {
+        const payload = JSON.parse(event.payload) as { text?: unknown };
+        return typeof payload.text === 'string'
+          ? [{ eventId: event.id, sequence: event.seq, text: payload.text }]
+          : [];
+      } catch { return []; }
+    });
 }
 
 /** SSE `event:` names must be single-line — collapse any newlines/CRs. */
@@ -231,6 +292,7 @@ function sendJson(res: http.ServerResponse, code: number, body: unknown): void {
   res.writeHead(code, {
     'Content-Type':   'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(s),
+    'Cache-Control':  'no-store',
   });
   res.end(s);
 }
@@ -396,7 +458,51 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       const projection = projectWorkbenchJob(opts.jobs, {
         jobId: decodeURIComponent(jobProjectionMatch[1]), attemptId, runId,
       });
-      sendJson(res, projection ? 200 : 404, projection ?? { error: 'durable projection not found' });
+      sendJson(res, projection ? 200 : 404, projection
+        ? { ...projection, assistantOutput: projectAssistantOutput(opts.reader, projection.identity.runId) }
+        : { error: 'durable projection not found' });
+      return;
+    }
+
+    if (url.pathname === '/api/workbench/bootstrap') {
+      const runtime = opts.runtime?.() ?? {};
+      let activeJobs: WorkbenchActiveJob[] = [];
+      try { activeJobs = opts.activeJobs?.() ?? []; } catch { /* an unavailable store is reported as an empty snapshot */ }
+      const execution = opts.execution?.() ?? {
+        available: false, runner: 'unavailable' as const, workerCount: 0,
+        pending: 0, claimed: 0, inflight: 0, oldestPendingMs: null, processed: 0,
+      };
+      const activeSummary = summarizeWorkbenchActiveJobs(activeJobs.map((job) => ({
+        status: job.status,
+        triggerStatus: job.triggerStatus ?? null,
+      })));
+      sendJson(res, 200, {
+        runtime: { version: VERSION, status: 'ready', local: runtime.local !== false },
+        provider: runtime.provider ? { id: runtime.provider, displayName: runtime.provider } : { configured: false },
+        model: runtime.model ? { id: runtime.model, displayName: runtime.model } : {},
+        connection: runtime.connection ?? 'unavailable',
+        execution: {
+          ...execution,
+          pending: activeSummary.queued,
+          claimed: activeSummary.claimed,
+          inflight: activeSummary.running,
+        },
+        activeJobCount: activeSummary.total,
+        activeJobs: activeJobs.slice(0, 100).map((job) => ({
+          sessionId: job.sessionId,
+          jobId: job.jobId,
+          attemptId: job.attemptId,
+          runId: job.runId,
+          status: job.status,
+          title: job.title,
+          statusDetail: job.statusDetail,
+          updatedAt: job.updatedAt ?? Date.now(),
+          triggerEventId: job.triggerEventId ?? null,
+          triggerStatus: job.triggerStatus ?? null,
+          queue: job.queue,
+        })),
+        readOnly: !Boolean(opts.token && opts.enqueue),
+      });
       return;
     }
     const jobContinuityMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/continuity$/);
@@ -468,7 +574,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-      endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue'],
     });
   });
 
