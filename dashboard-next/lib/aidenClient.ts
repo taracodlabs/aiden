@@ -152,6 +152,12 @@ export interface WorkbenchRunProjection {
   verification?: unknown;
 }
 
+export interface WorkbenchRuntimeInfo {
+  service: 'aiden-workbench-bridge';
+  version: string;
+  readOnly: boolean;
+}
+
 export interface ContinuityCheckpointView {
   checkpointId: string;
   jobId: string;
@@ -327,6 +333,16 @@ export async function loadRunProjection(jobId: string, attemptId?: string, runId
   return response.json() as Promise<WorkbenchRunProjection>;
 }
 
+export async function loadRuntimeInfo(): Promise<WorkbenchRuntimeInfo> {
+  const response = await fetch('/api/health');
+  if (!response.ok) throw new Error(`Workbench runtime metadata unavailable (HTTP ${response.status})`);
+  const body = await response.json() as Partial<WorkbenchRuntimeInfo>;
+  if (body.service !== 'aiden-workbench-bridge' || typeof body.version !== 'string' || !body.version.trim()) {
+    throw new Error('Workbench runtime metadata is invalid');
+  }
+  return { service: body.service, version: body.version, readOnly: body.readOnly === true };
+}
+
 export async function loadContinuity(jobId: string): Promise<ContinuityCheckpointView | null> {
   const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/continuity`);
   if (response.status === 404) return null;
@@ -362,6 +378,25 @@ function projectionMatches(handle: WorkbenchRunHandle, projection: WorkbenchRunP
     && identity?.runId === handle.admission.runId;
 }
 
+export type RestoredRunResolution =
+  | { kind: 'missing' }
+  | { kind: 'terminal'; projection: WorkbenchRunProjection }
+  | { kind: 'active'; projection: WorkbenchRunProjection };
+
+/** Resolve persisted browser state against exact durable identity before SSE.
+ * A stored handle is only a reconnect hint; the durable projection owns truth. */
+export async function reconcileRestoredRunHandle(handle: WorkbenchRunHandle): Promise<RestoredRunResolution> {
+  const projection = await loadRunProjection(
+    handle.admission.jobId,
+    handle.admission.attemptId,
+    handle.admission.runId,
+  );
+  if (!projection || !projectionMatches(handle, projection)) return { kind: 'missing' };
+  return projection.receipt.terminal
+    ? { kind: 'terminal', projection }
+    : { kind: 'active', projection };
+}
+
 async function readProjection(handle: WorkbenchRunHandle): Promise<WorkbenchRunProjection> {
   const response = await fetch(
     `/api/jobs/${encodeURIComponent(handle.admission.jobId)}/projection`
@@ -373,7 +408,12 @@ async function readProjection(handle: WorkbenchRunHandle): Promise<WorkbenchRunP
   return projection;
 }
 
-export interface FollowRunOptions { stallMs?: number; signal?: AbortSignal }
+export interface FollowRunOptions {
+  stallMs?: number;
+  signal?: AbortSignal;
+  /** Optional restored-run safety bound. Normal admitted runs leave this unset. */
+  maxUncertainMs?: number;
+}
 
 export function followRun(
   handle: WorkbenchRunHandle,
@@ -383,10 +423,13 @@ export function followRun(
   return new Promise<void>((resolve) => {
     let settled = false;
     let terminalCheck = false;
+    let uncertainSince: number | null = null;
     let stall: ReturnType<typeof setTimeout> | null = null;
     let es: EventSource | null = null;
     const state: TurnState = { gotReply: false };
     const stallMs = Math.max(1, options.stallMs ?? IDLE_MS);
+    const maxUncertainMs = options.maxUncertainMs === undefined
+      ? null : Math.max(1, options.maxUncertainMs);
 
     const cleanup = (): void => {
       if (stall) clearTimeout(stall);
@@ -412,10 +455,14 @@ export function followRun(
       if (settled) return;
       if (stall) clearTimeout(stall);
       stall = setTimeout(() => {
+        if (uncertainSince === null) uncertainSince = Date.now();
         handlers.onConnectionState?.('stalled');
         void reconcile(false);
       }, stallMs);
     };
+    const uncertaintyExpired = (): boolean => maxUncertainMs !== null
+      && uncertainSince !== null
+      && Date.now() - uncertainSince >= maxUncertainMs;
     const reconcile = async (terminalCandidate: boolean): Promise<void> => {
       if (settled || terminalCheck) return;
       terminalCheck = true;
@@ -432,11 +479,16 @@ export function followRun(
             });
           }
         } else {
+          if (uncertaintyExpired()) {
+            finish({ error: 'durable activity could not be confirmed after reconnecting' });
+            return;
+          }
           handlers.onConnectionState?.(terminalCandidate ? 'uncertain' : 'stalled');
           armStall();
         }
       } catch (error) {
         if (terminalCandidate) finish({ error: error instanceof Error ? error.message : String(error) });
+        else if (uncertaintyExpired()) finish({ error: 'durable activity could not be confirmed after reconnecting' });
         else { handlers.onConnectionState?.('uncertain'); armStall(); }
       } finally { terminalCheck = false; }
     };
@@ -452,12 +504,18 @@ export function followRun(
       try { ev = JSON.parse(message.data); } catch { return; }
       if (ev.runId !== handle.admission.runId || !Number.isSafeInteger(ev.id) || ev.id <= handle.lastEventId) return;
       handle.lastEventId = ev.id;
+      uncertainSince = null;
       persistRunHandle(handle);
       const terminal = routeEvent(ev, handlers, state);
       if (terminal) { void reconcile(true); return; }
       armStall();
     };
-    es.onerror = (): void => { if (!settled) handlers.onConnectionState?.('reconnecting'); };
+    es.onerror = (): void => {
+      if (settled) return;
+      if (uncertainSince === null) uncertainSince = Date.now();
+      handlers.onConnectionState?.('reconnecting');
+      void reconcile(false);
+    };
     armStall();
   });
 }

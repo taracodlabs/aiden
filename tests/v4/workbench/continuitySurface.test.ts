@@ -101,9 +101,30 @@ describe('minimal Workbench continuity surface', () => {
     expect(restore).toContain('aiden.followRun(replay');
     expect(restore).toContain("onConnectionState: (state)");
     expect(restore).toContain('activeRunFollowAbortRef.current = controller');
-    expect(restore).toContain("{ signal: controller.signal }");
-    expect(restore).toContain('aiden.loadRunProjection(');
-    expect(restore).toContain("if (!projection) throw new Error('stale Workbench run handle')");
+    expect(restore).toContain('signal: controller.signal');
+    expect(restore).toContain('aiden.reconcileRestoredRunHandle(restored)');
+    expect(restore).toContain("if (resolution.kind === 'missing') throw new Error('stale Workbench run handle')");
     expect(restore).toContain('aiden.clearRunHandle()');
+  });
+  it('E19 settles a terminal durable projection before attempting SSE restoration', () => {
+    const page = source();
+    const restore = page.slice(page.indexOf('const restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    expect(restore).toContain('aiden.reconcileRestoredRunHandle(restored)');
+    expect(restore).toContain("resolution.kind === 'terminal'");
+    expect(restore.indexOf("resolution.kind === 'terminal'")).toBeLessThan(restore.indexOf('startReplay()'));
+    expect(restore).toContain('aiden.clearRunHandle()');
+    expect(restore).toContain('settle()');
+  });
+  it('E20 bounds restored SSE uncertainty and reports stale restoration honestly', () => {
+    const page = source();
+    const restore = page.slice(page.indexOf('const restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    expect(restore).toContain('maxUncertainMs:');
+    expect(restore).toContain('saved activity could not be restored');
+  });
+  it('E21 renders the backend runtime version instead of a hard-coded release', () => {
+    const page = source();
+    expect(page).not.toContain("const AIDEN_VERSION = '3.7.0'");
+    expect(page).toContain('aiden.loadRuntimeInfo()');
+    expect(page).toContain('runtimeVersion');
   });
 });

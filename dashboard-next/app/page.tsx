@@ -13,11 +13,6 @@ import Sidebar from '../components/Sidebar'
 import WorkflowView from '../components/WorkflowView'
 import * as aiden from '../lib/aidenClient'
 
-// ── Version ───────────────────────────────────────────────────
-// Single source of truth for display version in the dashboard.
-// Updated by scripts/inject-version.js on each release.
-const AIDEN_VERSION = '3.7.0'
-
 // ── Types ─────────────────────────────────────────────────────
 
 type UIMode   = 'focus' | 'execution' | 'power' | 'watch'
@@ -244,6 +239,7 @@ interface DevOSCtxType {
   thinking:       { stage: string; message: string; tool?: string } | null
   budget:         { current: number; max: number; remaining: number } | null
   activeModel:    string
+  runtimeVersion: string
   // Messages / conversations
   messages:       Message[]
   setMessages:    Dispatch<SetStateAction<Message[]>>
@@ -1816,7 +1812,7 @@ function NavBar() {
 // ── HistorySidebar ────────────────────────────────────────────
 
 function HistorySidebar() {
-  const { conversations, currentConvId, startNewChat, loadConversation } = useDevOS()
+  const { conversations, currentConvId, startNewChat, loadConversation, runtimeVersion } = useDevOS()
 
   const grouped = useMemo(() => {
     const now       = Date.now()
@@ -1901,7 +1897,7 @@ function HistorySidebar() {
         fontFamily: 'var(--mono)',
       }}>
         <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-        Aiden v{AIDEN_VERSION} · local
+        Aiden v{runtimeVersion} · local
       </div>
     </aside>
   )
@@ -2607,7 +2603,7 @@ function LiveViewPanel() {
 // ── StatusBar (replaces ActivityBar + DisclaimerBar) ─────────
 
 function StatusBar() {
-  const { activityLogs, systemStats, activeModel, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
+  const { activityLogs, systemStats, activeModel, runtimeVersion, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
   const providerLabel = activeModel
     ? activeModel.split('/').pop()?.replace(':latest', '') ?? activeModel
     : 'local'
@@ -2621,7 +2617,7 @@ function StatusBar() {
       fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--muted)',
       userSelect: 'none',
     }}>
-      <span style={{ color: 'var(--muted3)' }}>Aiden v{AIDEN_VERSION}</span>
+      <span style={{ color: 'var(--muted3)' }}>Aiden v{runtimeVersion}</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
@@ -3264,6 +3260,7 @@ function PluginsList() {
 type UpdateState = 'idle' | 'checking' | 'uptodate' | 'available' | 'downloading' | 'ready' | 'error'
 
 function UpdatesTab() {
+  const { runtimeVersion } = useDevOS()
   const [updateState,   setUpdateState]   = useState<UpdateState>('idle')
   const [latestVersion, setLatestVersion] = useState('')
   const [releaseNotes,  setReleaseNotes]  = useState('')
@@ -3374,7 +3371,7 @@ function UpdatesTab() {
           }}>
             <span style={{ fontSize: 18 }}>🤖</span>
             <div>
-              <div style={{ ...mono12, color: 'var(--text)', fontWeight: 600 }}>Aiden v{AIDEN_VERSION}</div>
+              <div style={{ ...mono12, color: 'var(--text)', fontWeight: 600 }}>Aiden v{runtimeVersion}</div>
               <div style={{ ...mono10, color: 'var(--muted)', marginTop: 2 }}>
                 Installed · Local AI OS{!isElectron ? ' · browser mode' : ''}
               </div>
@@ -3386,7 +3383,7 @@ function UpdatesTab() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
               {updateState === 'uptodate' && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, ...mono12, color: '#4ade80' }}>
-                  ✓ Aiden v{AIDEN_VERSION} — You&apos;re on the latest version
+                  ✓ Aiden v{runtimeVersion} — You&apos;re on the latest version
                   {checkedAt && <span style={{ ...mono10, color: 'var(--muted)' }}>· checked {checkedAt}</span>}
                 </div>
               )}
@@ -3422,7 +3419,7 @@ function UpdatesTab() {
                     Aiden v{latestVersion} is available!
                   </div>
                   <div style={{ ...mono10, color: 'var(--muted)', marginTop: 2 }}>
-                    Current: v{AIDEN_VERSION}{releaseDate ? ` · Released ${releaseDate}` : ''}
+                    Current: v{runtimeVersion}{releaseDate ? ` · Released ${releaseDate}` : ''}
                   </div>
                 </div>
                 <button onClick={handleDownload} style={{
@@ -4281,7 +4278,7 @@ function SettingsDrawer() {
   const {
     settingsTab, setSettingsTab, setSettingsOpen, setConversations, setMessages,
     licenseStatus, licenseKey, setLicenseKey, activatingKey, licenseMsg, setLicenseMsg,
-    validateKey, clearProLicense, setPricingOpen,
+    validateKey, clearProLicense, setPricingOpen, runtimeVersion,
   } = useDevOS()
 
   return (
@@ -4670,7 +4667,7 @@ function SettingsDrawer() {
                   fontFamily: 'var(--sans)',
                 }}>D/</div>
                 <div style={{ fontFamily: 'var(--sans)', fontSize: 16, fontWeight: 700, color: 'var(--text)' }}>DevOS · Aiden</div>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>v{AIDEN_VERSION} · Local AI OS</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>v{runtimeVersion} · Local AI OS</div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {[
@@ -4750,6 +4747,16 @@ function SettingsDrawer() {
 // ── Main component ────────────────────────────────────────────
 
 export default function Home() {
+
+  const [runtimeVersion, setRuntimeVersion] = useState('unknown')
+
+  useEffect(() => {
+    let current = true
+    void aiden.loadRuntimeInfo()
+      .then((info) => { if (current) setRuntimeVersion(info.version) })
+      .catch(() => { /* keep an honest unknown value when the bridge is unavailable */ })
+    return () => { current = false }
+  }, [])
 
   // ── Onboarding ──────────────────────────────────────────────
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null)
@@ -4877,6 +4884,7 @@ export default function Home() {
       },
       onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
       onDone: (info) => {
+        aiden.clearRunHandle()
         settle()
         if (!fullReply && info.summary) {
           setMessages((prev) => [...prev, { id: recoveredMessageId, role: 'assistant', content: info.summary!, timestamp: Date.now(), isStreaming: false }])
@@ -4885,17 +4893,29 @@ export default function Home() {
         }
       },
       onError: (message) => {
+        aiden.clearRunHandle()
         settle()
         setMessages((prev) => fullReply ? prev : [...prev, { id: recoveredMessageId, role: 'assistant', content: `⚠ ${message}`, timestamp: Date.now(), isStreaming: false }])
       },
-      }, { signal: controller.signal })
+      }, { signal: controller.signal, stallMs: 2_000, maxUncertainMs: 15_000 })
     }
-    void aiden.loadRunProjection(
-      restored.admission.jobId,
-      restored.admission.attemptId,
-      restored.admission.runId,
-    ).then((projection) => {
-      if (!projection) throw new Error('stale Workbench run handle')
+    void aiden.reconcileRestoredRunHandle(restored).then((resolution) => {
+      if (resolution.kind === 'missing') throw new Error('stale Workbench run handle')
+      setActiveJobId(restored.admission.jobId)
+      setActiveAttemptId(restored.admission.attemptId)
+      setActiveRunId(restored.admission.runId)
+      activeRunIdRef.current = restored.admission.runId
+      if (resolution.kind === 'terminal') {
+        aiden.clearRunHandle()
+        settle()
+        const summary = resolution.projection.receipt.summary
+        if (summary) {
+          setMessages((prev) => prev.some((message) => message.id === recoveredMessageId)
+            ? prev
+            : [...prev, { id: recoveredMessageId, role: 'assistant', content: summary, timestamp: Date.now(), isStreaming: false }])
+        }
+        return
+      }
       startReplay()
     }).catch(() => {
       aiden.clearRunHandle()
@@ -4904,6 +4924,13 @@ export default function Home() {
       setActiveAttemptId(null)
       setActiveRunId(null)
       settle()
+      setMessages((prev) => [...prev, {
+        id: recoveredMessageId,
+        role: 'assistant',
+        content: '⚠ saved activity could not be restored. The stale browser handle was cleared; durable state was not changed.',
+        timestamp: Date.now(),
+        isStreaming: false,
+      }])
     })
     return () => controller.abort()
   }, [])
@@ -5279,6 +5306,7 @@ export default function Home() {
       },
       onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
       onDone: (info) => {
+        aiden.clearRunHandle()
         if (activeRunFollowAbortRef.current === followController) activeRunFollowAbortRef.current = null
         setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
         const finalContent = fullReply
@@ -5289,6 +5317,7 @@ export default function Home() {
         setMessages(prev => { const updated = prev.map(m => m.id === thinkingId ? finalMsg : m); saveToConversation(updated); return updated })
       },
       onError: (message) => {
+        aiden.clearRunHandle()
         if (activeRunFollowAbortRef.current === followController) activeRunFollowAbortRef.current = null
         setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
         setMessages(m => m.map(msg => msg.id === thinkingId
@@ -5544,7 +5573,7 @@ export default function Home() {
     historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen,
     activityOpen, setActivityOpen, settingsOpen, setSettingsOpen,
     settingsTab, setSettingsTab,
-    isExecuting, isStreaming, thinking, budget, activeModel,
+    isExecuting, isStreaming, thinking, budget, activeModel, runtimeVersion,
     messages, setMessages, conversations, setConversations, currentConvId,
     input, setInput,
     activityLogs, setActivityLogs, screenshot, setScreenshot, sessionId,

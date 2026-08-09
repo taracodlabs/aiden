@@ -28,6 +28,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { VERSION } from '../../version';
 import type { RunEventRich, ListEventsScopedOptions } from '../daemon/runStore';
 import { WORKBENCH_DASHBOARD_HTML } from './dashboardHtml';
 import {
@@ -362,7 +363,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (url.pathname === '/api/health') {
       // readOnly unless BOTH a write token and an enqueuer are wired.
       const writeEnabled = Boolean(opts.token && opts.enqueue);
-      sendJson(res, 200, { ok: true, service: 'aiden-workbench-bridge', readOnly: !writeEnabled });
+      sendJson(res, 200, { ok: true, service: 'aiden-workbench-bridge', version: VERSION, readOnly: !writeEnabled });
       return;
     }
 

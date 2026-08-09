@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
+import { VERSION } from '../../../core/version';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../core/v4/daemon/runStore';
 import { createJobEngine } from '../../../core/v4/daemon/jobEngine';
@@ -113,7 +114,7 @@ describe('Workbench bridge — health + shape', () => {
       });
     });
     expect(bridge.host).toBe('127.0.0.1');
-    expect(JSON.parse(body)).toMatchObject({ ok: true, service: 'aiden-workbench-bridge', readOnly: true });
+    expect(JSON.parse(body)).toMatchObject({ ok: true, service: 'aiden-workbench-bridge', version: VERSION, readOnly: true });
   });
 
   it('rejects non-GET (read-only)', async () => {

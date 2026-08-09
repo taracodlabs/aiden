@@ -5,8 +5,10 @@ import {
   cancelTask,
   clearRunHandle,
   followRun,
+  loadRuntimeInfo,
   parseTaskAdmission,
   persistRunHandle,
+  reconcileRestoredRunHandle,
   restoreRunHandle,
   runTask,
   type TaskAdmission,
@@ -459,5 +461,59 @@ describe('Workbench exact task admission and run following', () => {
     expect(done).toHaveBeenCalledWith(expect.objectContaining({
       status: 'verified', summary: 'proved without UI event',
     }));
+  });
+
+  it('A29 classifies a terminal restored Job before opening a run stream', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      receipt: { terminal: true, status: 'verified', summary: 'already complete' },
+    }, true, 200)));
+
+    await expect(reconcileRestoredRunHandle({ admission: admission(), lastEventId: 0 }))
+      .resolves.toMatchObject({ kind: 'terminal', projection: { receipt: { status: 'verified' } } });
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it('A30 rejects a stale or foreign restored handle without opening a run stream', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({ error: 'not found' }, false, 404)));
+    await expect(reconcileRestoredRunHandle({ admission: admission(), lastEventId: 0 }))
+      .resolves.toEqual({ kind: 'missing' });
+
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      identity: { jobId: 'job_other', attemptId: 'attempt_exact', runId: 41 },
+      receipt: { terminal: false, status: 'running' },
+    }, true, 200)));
+    await expect(reconcileRestoredRunHandle({ admission: admission(), lastEventId: 0 }))
+      .resolves.toEqual({ kind: 'missing' });
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
+  it('A31 releases a restored run after bounded SSE uncertainty without claiming success', async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      receipt: { terminal: false, status: 'running' },
+    }, true, 200)));
+    const done = vi.fn();
+    const error = vi.fn();
+    const pending = followRun(
+      { admission: admission(), lastEventId: 0 },
+      { onDone: done, onError: error },
+      { stallMs: 10, maxUncertainMs: 20 },
+    );
+    FakeEventSource.instances[0].onerror?.();
+    await vi.advanceTimersByTimeAsync(30);
+    await pending;
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/could not be confirmed/i));
+    expect(done).not.toHaveBeenCalled();
+  });
+
+  it('A32 loads the running backend version from Workbench health', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      ok: true, service: 'aiden-workbench-bridge', version: '9.8.7-test', readOnly: false,
+    }, true, 200)));
+    await expect(loadRuntimeInfo()).resolves.toEqual({
+      service: 'aiden-workbench-bridge', version: '9.8.7-test', readOnly: false,
+    });
   });
 });
