@@ -35,12 +35,22 @@
  * sidecar so the classifier can recognise the pattern.
  */
 
+import { createHash } from 'node:crypto';
+
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import type { ActionResult } from '../../../core/v4/browserState';
-import { createBrowserState } from '../../../core/v4/browserState';
+import { createBrowserState, normalizeUrl } from '../../../core/v4/browserState';
 import { detectBlocker, type BlockerSurface } from './browserBlocker';
-import { pwSnapshot } from '../../../core/playwrightBridge';
+import { pwClose, pwSnapshot } from '../../../core/playwrightBridge';
 import { reResolveAndRetry } from './reResolve';
+import {
+  currentBrowserExecutionScope,
+  runWithAuthorizedBrowserSession,
+} from '../../../core/v4/browser/browserExecutionScope';
+import { currentPreparedDurableToolCall } from '../../../core/v4/daemon/jobExecutionContext';
+import { currentBrowserLeaseStore } from '../../../core/v4/browser/browserLeaseScope';
+import { BrowserAuthorityError } from '../../../core/v4/browser/browserSessionAuthority';
+import { classifyBrowserError, classifyBrowserResult } from '../../../core/v4/browser/browserErrors';
 
 /**
  * Shared observer — one instance per server process. The HOC closes
@@ -51,6 +61,71 @@ import { reResolveAndRetry } from './reResolve';
  * loader and call `withBrowserState(handler, customState)` directly.
  */
 export const browserState = createBrowserState();
+const sessionBrowserStates = new Map<string, typeof browserState>();
+
+export function clearBrowserObservationSession(browserSessionId: string): void {
+  sessionBrowserStates.delete(browserSessionId);
+}
+
+function scopedBrowserState(defaultState: typeof browserState): typeof browserState {
+  if (defaultState !== browserState) return defaultState;
+  const sessionId = currentBrowserExecutionScope()?.session.browserSessionId;
+  if (!sessionId) return defaultState;
+  let state = sessionBrowserStates.get(sessionId);
+  if (!state) {
+    // Durable Browser Sessions cannot opt out of observe/verify authority.
+    // The environment gate remains available only for legacy non-Job calls.
+    state = createBrowserState({ enabled: true });
+    sessionBrowserStates.set(sessionId, state);
+  }
+  return state;
+}
+
+function snapshotDigest(snapshot: ActionResult['pre_state']): string | null {
+  if (!snapshot) return null;
+  return createHash('sha256').update(JSON.stringify({
+    url: snapshot.normalized_url,
+    title: snapshot.title,
+    dom: snapshot.dom_text_hash,
+    frames: snapshot.frame_tree_hash,
+  })).digest('hex');
+}
+
+function boundedResultEvidence(result: unknown): Record<string, unknown> | null {
+  if (!result || typeof result !== 'object') return null;
+  const value = result as Record<string, unknown>;
+  const allowed = ['url', 'title', 'verified', 'filename', 'size', 'bytes', 'sha256', 'value', 'checked', 'files'];
+  const projected: Record<string, unknown> = {};
+  for (const key of allowed) {
+    const item = value[key];
+    if (typeof item === 'string') projected[key] = item.slice(0, 2_000);
+    else if (typeof item === 'number' || typeof item === 'boolean') projected[key] = item;
+    else if (Array.isArray(item)) projected[key] = item.slice(0, 20).map((entry) => String(entry).slice(0, 500));
+  }
+  return Object.keys(projected).length > 0 ? projected : null;
+}
+
+async function executeWithCancellation<T>(
+  operation: () => Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T> {
+  if (!signal) return operation();
+  if (signal.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Browser operation cancelled');
+  let removeAbortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    const onAbort = () => {
+      void pwClose();
+      reject(signal.reason instanceof Error ? signal.reason : new Error('Browser operation cancelled'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+  });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    removeAbortListener?.();
+  }
+}
 
 // ── Phase 2 — stale-ref retry primitives ─────────────────────────────
 
@@ -172,11 +247,81 @@ export function withBrowserState(
   return {
     ...handler,
     async execute(args, ctx) {
-      if (!state.isEnabled()) {
-        return handler.execute(args, ctx);
-      }
-      const pre = await state.captureState();
-      let result = await handler.execute(args, ctx);
+      return runWithAuthorizedBrowserSession(ctx.signal, async () => {
+        const activeState = scopedBrowserState(state);
+        const observerEnabled = activeState.isEnabled();
+        const pre = observerEnabled ? await activeState.captureState() : null;
+        const scope = currentBrowserExecutionScope();
+        const prepared = currentPreparedDurableToolCall();
+        let session = scope?.authority.getSession(scope.session.browserSessionId);
+        if (scope && session?.state === 'reconciling'
+          && session.recoveryState === 'fresh_observation_required'
+          && session.controlledTabId && pre) {
+          scope.authority.recordObservation(scope.binding, {
+            tabId: session.controlledTabId,
+            url: pre.url,
+            title: pre.title,
+            stateDigest: snapshotDigest(pre)!,
+            informationDigest: pre.dom_text_hash,
+            byteLength: Buffer.byteLength(JSON.stringify(pre)),
+          });
+          session = scope.authority.getSession(scope.session.browserSessionId);
+        }
+        if (scope && handler.schema.name === 'browser_navigate' && typeof (args as Record<string, unknown>)?.url === 'string') {
+          const target = normalizeUrl(String((args as Record<string, unknown>).url));
+          if (!scope.authority.canRepeatNavigation(scope.binding, target)) {
+            throw new BrowserAuthorityError('NO_PROGRESS', `Browser session already observed ${target}`);
+          }
+        }
+        const receipt = scope?.authority.beginAction(scope.binding, {
+          toolCallId: prepared?.toolCallId ?? null,
+          effectId: prepared?.effectId ?? null,
+          tabId: session?.controlledTabId ?? null,
+          actionType: handler.schema.name,
+          args: (args ?? {}) as Record<string, unknown>,
+          preStateDigest: snapshotDigest(pre),
+        });
+        if (scope && receipt) scope.authority.markActionDispatched(scope.binding, receipt.actionId);
+        let result: unknown;
+        try {
+          result = await executeWithCancellation(() => handler.execute(args, ctx), ctx.signal);
+        } catch (error) {
+          const typedError = classifyBrowserError(error, handler.schema.name);
+          if (scope && receipt) {
+            scope.authority.completeAction(scope.binding, receipt.actionId, {
+              outcome: handler.mutates ? 'unknown' : 'failed',
+              commandOk: false,
+              semanticOk: handler.mutates ? null : false,
+              postStateDigest: null,
+              verification: { error: error instanceof Error ? error.name : 'Error' },
+              evidencePayload: null,
+              errorCode: handler.mutates && typedError.code !== 'ACTION_CANCELLED'
+                ? 'ACTION_UNKNOWN'
+                : typedError.code,
+            });
+          }
+          throw error;
+        }
+
+        if (!observerEnabled) {
+          const successful = isSuccessResult(result);
+          const typedFailure = classifyBrowserResult(result, handler.schema.name);
+          if (scope && receipt) {
+            scope.authority.completeAction(scope.binding, receipt.actionId, {
+              outcome: handler.mutates ? 'returned' : successful ? 'verified' : 'failed',
+              commandOk: successful,
+              semanticOk: handler.mutates ? null : successful,
+              postStateDigest: null,
+              verification: { observer: 'disabled', successful },
+              evidencePayload: null,
+              errorCode: typedFailure?.code ?? (successful ? null : 'UNEXPECTED_PAGE_STATE'),
+            });
+          }
+          if (handler.mutates === true && successful) currentBrowserLeaseStore().invalidate();
+          return typedFailure && result && typeof result === 'object' && !Array.isArray(result)
+            ? { ...(result as object), errorCode: typedFailure.code }
+            : result;
+        }
 
       // v4.3 Phase 3 — manual-blocker detection. Runs on every
       // browser-tool result when enabled. Uses the configured
@@ -206,7 +351,7 @@ export function withBrowserState(
       // the tabs map has no active entry (the reconciliation in
       // captureState above sets activeTabId).
       try {
-        state.updateActiveTabBlocker(blocker
+        activeState.updateActiveTabBlocker(blocker
           ? {
               kind:       blocker.kind,
               subtype:    blocker.subtype,
@@ -240,8 +385,8 @@ export function withBrowserState(
           // hasn't changed, a transient race condition (element
           // attached one tick after the original timeout) is the
           // common case the retry catches.
-          const between = await state.captureState();
-          const state_delta = state.computeStateDelta(pre, between);
+          const between = await activeState.captureState();
+          const state_delta = activeState.computeStateDelta(pre, between);
 
           // v4.12 B2.1 — ref-based single-target actions (browser_click /
           // browser_type) get SEMANTIC re-resolution: outcome-already-happened
@@ -266,7 +411,7 @@ export function withBrowserState(
           } else {
             // Existing same-args retry — safe by the "error fires before the DOM
             // event" invariant (no element identity shift to double-act on).
-            const retryResult = await handler.execute(args, ctx);
+            const retryResult = await executeWithCancellation(() => handler.execute(args, ctx), ctx.signal);
             const retryOk = isSuccessResult(retryResult);
             staleRefRetry = { attempted: true, succeeded: retryOk, reason: staleReason, state_delta };
             if (retryOk) result = retryResult;
@@ -274,8 +419,64 @@ export function withBrowserState(
         }
       }
 
-      const post = await state.captureState();
-      const observerMeta = state.buildActionResult({ pre, post });
+      // Closing a durable browser surface must not recreate a page merely to
+      // observe it. The close result itself carries semantic verification.
+      const post = handler.schema.name === 'browser_close'
+        ? null
+        : await activeState.captureState();
+      const observerMeta = activeState.buildActionResult({ pre, post });
+      const successful = isSuccessResult(result);
+      const typedFailure = classifyBrowserResult(result, handler.schema.name);
+      if (scope && receipt) {
+        const mutates = handler.mutates === true;
+        const explicitlyVerified = Boolean(
+          result && typeof result === 'object' && (result as { verified?: unknown }).verified === true,
+        );
+        const semanticOk = successful && (!mutates || explicitlyVerified || observerMeta?.maybe_noop === false);
+        const outcome = !successful ? 'failed'
+          : mutates && !explicitlyVerified && observerMeta?.maybe_noop !== false ? 'returned'
+          : 'verified';
+        scope.authority.completeAction(scope.binding, receipt.actionId, {
+          outcome,
+          commandOk: successful,
+          semanticOk: mutates && observerMeta === null ? null : semanticOk,
+          postStateDigest: snapshotDigest(post),
+          verification: observerMeta ? {
+            progressScore: observerMeta.progress_score,
+            evidence: observerMeta.evidence,
+            maybeNoop: observerMeta.maybe_noop,
+            blocker: blocker?.kind ?? null,
+          } : { observer: 'unavailable' },
+          evidencePayload: post ? {
+            observation: {
+              url: post.normalized_url,
+              title: post.title,
+              stateDigest: snapshotDigest(post),
+              progressScore: observerMeta?.progress_score ?? 0,
+            },
+            result: boundedResultEvidence(result),
+          } : null,
+          errorCode: typedFailure?.code ?? (successful ? null : 'UNEXPECTED_PAGE_STATE'),
+        });
+        const controlledTabId = scope.authority.getSession(scope.session.browserSessionId)?.controlledTabId;
+        if (controlledTabId && post) {
+          scope.authority.recordObservation(scope.binding, {
+            tabId: controlledTabId,
+            url: post.url,
+            title: post.title,
+            stateDigest: snapshotDigest(post)!,
+            informationDigest: post.dom_text_hash,
+            byteLength: Buffer.byteLength(JSON.stringify(post)),
+          });
+        }
+      }
+      if (handler.mutates === true && successful) currentBrowserLeaseStore().invalidate();
+      if (scope && blocker) {
+        scope.authority.requireUserControl(
+          scope.binding,
+          `${blocker.kind}${blocker.subtype ? `:${blocker.subtype}` : ''}`,
+        );
+      }
       if (
         observerMeta &&
         result !== null && result !== undefined &&
@@ -286,9 +487,14 @@ export function withBrowserState(
           ...(staleRefRetry && { staleRefRetry }),
           ...(blocker && { blocker }),
         };
-        return { ...(result as object), browserState: sidecar };
+        return {
+          ...(result as object),
+          ...(typedFailure ? { errorCode: typedFailure.code } : {}),
+          browserState: sidecar,
+        };
       }
       return result;
+      });
     },
   };
 }

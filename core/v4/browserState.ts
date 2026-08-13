@@ -123,6 +123,20 @@ export interface ElementLease {
    * destructive-action guard so a stale submit is never blind-retried.
    */
   submit:            boolean;
+  form_id?:          string;
+  /** Bounded form/control state captured with the same snapshot lease. Password
+   * values are never populated. */
+  control?: {
+    type: string;
+    required: boolean;
+    disabled: boolean;
+    value: string;
+    checked: boolean | null;
+    options: Array<{ value: string; label: string; selected: boolean }>;
+    validationMessage: string;
+    formId: string | null;
+    autocomplete: string;
+  };
 }
 
 /**
@@ -682,8 +696,8 @@ export class BrowserState {
  * playwrightBridge. One instance is shared across all browser tool
  * wrappers in `tools/v4/browser/_observer.ts`.
  */
-export function createBrowserState(): BrowserState {
-  const bs = new BrowserState();
+export function createBrowserState(options: BrowserStateOptions = {}): BrowserState {
+  const bs = new BrowserState(options);
   bs.setBridgeLoader(() => import('../playwrightBridge'));
   return bs;
 }
@@ -711,6 +725,14 @@ export interface AxRawDescriptor {
   frame_id:       string;
   /** v4.12 B2.1 — submit/commit-like (set by the in-page walk). */
   submit:         boolean;
+  required?: boolean;
+  disabled?: boolean;
+  value?: string;
+  checked?: boolean | null;
+  options?: Array<{ value: string; label: string; selected: boolean }>;
+  validationMessage?: string;
+  formId?: string | null;
+  autocomplete?: string;
 }
 
 const AX_NAME_CAP = 200;
@@ -770,6 +792,26 @@ export class LeaseStore {
         bbox:              d.bbox,
         visible_text_hash: sha256Hex(d.textContent.slice(0, SHORT_TEXT_HASH_CAP)),
         submit:            d.submit === true,
+        ...(d.formId ? { form_id: String(d.formId).slice(0, 500) } : {}),
+        ...((d.tag === 'input' || d.tag === 'textarea' || d.tag === 'select'
+          || d.roleAttr === 'textbox' || d.roleAttr === 'checkbox'
+          || d.roleAttr === 'radio' || d.roleAttr === 'combobox') ? {
+          control: {
+            type: d.inputType || (d.tag === 'textarea' ? 'textarea' : d.tag === 'select' ? 'select' : d.roleAttr || d.tag),
+            required: d.required === true,
+            disabled: d.disabled === true,
+            value: d.inputType === 'password' ? '' : String(d.value ?? '').slice(0, 2_000),
+            checked: typeof d.checked === 'boolean' ? d.checked : null,
+            options: (d.options ?? []).slice(0, 200).map((option) => ({
+              value: String(option.value).slice(0, 500),
+              label: String(option.label).slice(0, 500),
+              selected: option.selected === true,
+            })),
+            validationMessage: String(d.validationMessage ?? '').slice(0, 500),
+            formId: d.formId ? String(d.formId).slice(0, 500) : null,
+            autocomplete: String(d.autocomplete ?? '').slice(0, 200),
+          },
+        } : {}),
       };
       this.leases.set(lease.ref, lease);
       out.push(lease);
@@ -780,6 +822,42 @@ export class LeaseStore {
   get(ref: string): ElementLease | undefined { return this.leases.get(ref); }
   all(): ElementLease[] { return [...this.leases.values()]; }
   get currentSnapshotId(): number { return this.snapshotId; }
+  invalidate(): void { this.leases.clear(); this.snapshotId = 0; }
+}
+
+export interface StructuredFormProjection {
+  formId: string;
+  fields: Array<{
+    ref: string; label: string; role: string; type: string; required: boolean; disabled: boolean;
+    value: string; checked: boolean | null;
+    options: Array<{ value: string; label: string; selected: boolean }>;
+    validationMessage: string; autocomplete: string;
+  }>;
+  submitRefs: string[];
+}
+
+/** Project structured forms from the same snapshot-scoped leases used for
+ * browser actions. This is perception only and never submits a form. */
+export function projectStructuredForms(leases: readonly ElementLease[]): StructuredFormProjection[] {
+  const forms = new Map<string, StructuredFormProjection>();
+  for (const lease of leases) {
+    const formId = lease.control?.formId ?? lease.form_id ?? (lease.submit ? 'unscoped' : null);
+    if (!formId && !lease.control) continue;
+    const key = formId ?? 'unscoped';
+    let form = forms.get(key);
+    if (!form) {
+      form = { formId: key, fields: [], submitRefs: [] };
+      forms.set(key, form);
+    }
+    if (lease.submit) form.submitRefs.push(lease.ref);
+    if (lease.control) form.fields.push({
+      ref: lease.ref, label: lease.name, role: lease.role, type: lease.control.type,
+      required: lease.control.required, disabled: lease.control.disabled, value: lease.control.value,
+      checked: lease.control.checked, options: lease.control.options,
+      validationMessage: lease.control.validationMessage, autocomplete: lease.control.autocomplete,
+    });
+  }
+  return [...forms.values()];
 }
 
 // ── v4.12 B2.1 — semantic re-resolution + destructive guard ─────────────────
@@ -861,7 +939,7 @@ export function isSecretBearingUrl(url: string): boolean {
 export function classifyBrowserAction(
   toolName: string,
   args: Record<string, unknown>,
-  opts: { attached?: boolean } = {},
+  opts: { attached?: boolean; leaseStore?: Pick<LeaseStore, 'get'> } = {},
 ): { tier: 'dangerous'; reason: string } | undefined {
   // B5.3 — navigating an EXTERNAL secret-bearing URL is possible credential
   // exfiltration → confirm. Local URLs (dev) are never flagged or blocked.
@@ -891,7 +969,7 @@ export function classifyBrowserAction(
   const ref = typeof args.ref === 'string' ? args.ref.trim() : '';
   let lease: Pick<ElementLease, 'name' | 'submit'> | undefined;
   if (ref) {
-    lease = getLeaseStore().get(ref);
+    lease = (opts.leaseStore ?? getLeaseStore()).get(ref);
   } else {
     const target = typeof args.target === 'string'
       ? args.target
@@ -969,11 +1047,21 @@ export function matchLeaseBySignature(old: ElementLease, candidates: ElementLeas
   return { status: 'unique', match: sorted[0] };
 }
 
-let _leaseStore: LeaseStore | null = null;
-/** Process-wide lease store (lifecycle matches the persistent browser context). */
-export function getLeaseStore(): LeaseStore {
-  if (!_leaseStore) _leaseStore = new LeaseStore();
-  return _leaseStore;
+const _leaseStores = new Map<string, LeaseStore>();
+/** Lease store scoped to one durable browser session; legacy callers share the default store. */
+export function getLeaseStore(browserSessionId = 'legacy'): LeaseStore {
+  let store = _leaseStores.get(browserSessionId);
+  if (!store) {
+    store = new LeaseStore();
+    _leaseStores.set(browserSessionId, store);
+  }
+  return store;
+}
+
+export function clearLeaseStore(browserSessionId: string): void {
+  const store = _leaseStores.get(browserSessionId);
+  store?.invalidate();
+  _leaseStores.delete(browserSessionId);
 }
 
 /** Model-facing snapshot listing, grouped by frame: `@e1 button "Sign in"`. */

@@ -15,7 +15,7 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwType } from '../../../core/playwrightBridge';
 import { pwActByLease } from '../../../core/playwrightBridge';
-import { getLeaseStore } from '../../../core/v4/browserState';
+import { currentBrowserLeaseStore } from '../../../core/v4/browser/browserLeaseScope';
 import { withBrowserState } from './_observer';
 
 const _browserTypeTool: ToolHandler = {
@@ -60,18 +60,18 @@ const _browserTypeTool: ToolHandler = {
     // B1.2 — ref-based addressing (additive; selector path below unchanged).
     const ref = String(args.ref ?? '').trim();
     if (ref) {
-      const lease = getLeaseStore().get(ref);
+      const lease = currentBrowserLeaseStore().get(ref);
       if (!lease) {
         return { success: false, error: `Element ref ${ref} is not in the current snapshot. Run browser_snapshot to refresh element refs, then retry.` };
       }
       const r = await pwActByLease(lease, { kind: 'fill', text });
-      if (r.ok) return { success: true, ref };
+      if (r.ok) return { success: true, ref, value: r.value, verified: r.verified === true };
       return { success: false, error: r.error, ref };
     }
 
     const selector = String(args.selector ?? 'input').trim();
     const r = await pwType(selector, text);
-    if (r.ok) return { success: true, selector };
+    if (r.ok) return { success: true, selector, value: r.value, verified: r.verified === true };
     return { success: false, error: r.error, selector };
   },
 };

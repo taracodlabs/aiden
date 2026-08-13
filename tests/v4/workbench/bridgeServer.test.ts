@@ -206,9 +206,9 @@ describe('Workbench bridge — ordered replay + live tail', () => {
 
 // ── The dashboard page + the browser feed ────────────────────────────────────
 
-function httpGet(port: number, path: string): Promise<{ status: number; contentType: string; body: string }> {
+function httpGet(port: number, path: string, headers: Record<string, string> = {}): Promise<{ status: number; contentType: string; body: string }> {
   return new Promise((resolve) => {
-    http.get({ host: '127.0.0.1', port, path }, (res) => {
+    http.get({ host: '127.0.0.1', port, path, headers }, (res) => {
       let b = ''; res.setEncoding('utf8');
       res.on('data', (c) => (b += c));
       res.on('end', () => resolve({ status: res.statusCode ?? 0, contentType: String(res.headers['content-type'] ?? ''), body: b }));
@@ -495,6 +495,88 @@ describe('Workbench durable input, pause, resume, and approval commands', () => 
   });
 });
 
+describe('Workbench attachment and artifact mediation', () => {
+  const TOKEN = 'file-bridge-token';
+
+  it('admits only uploaded attachment identities and places trusted references in durable input', async () => {
+    const enqueued: string[] = [];
+    const stored = new Map<string, { id: string; name: string; mime: string; size: number; path: string }>();
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: TOKEN,
+      enqueue: {
+        enqueue: ({ message }) => {
+          enqueued.push(message);
+          return { accepted: true, jobId: 'job_file', attemptId: 'attempt_file', runId: 9 };
+        },
+      },
+      attachments: {
+        saveAttachment: ({ name, mime, bytes }) => {
+          const item = { id: 'attachment_exact', name, mime, size: bytes.length, path: 'C:\\safe\\attachment.txt' };
+          stored.set(item.id, item);
+          return item;
+        },
+        resolveAttachments: (ids) => ids.map((id) => {
+          const item = stored.get(id);
+          if (!item) throw new Error('unknown attachment');
+          return item;
+        }),
+      },
+      port: 0,
+    });
+    const headers = { 'x-workbench-token': TOKEN };
+    const upload = await httpPost(b.port, '/api/attachments', {
+      name: 'notes.txt', mime: 'text/plain', base64: Buffer.from('hello').toString('base64'),
+    }, headers);
+    expect(upload.status).toBe(201);
+    expect(JSON.parse(upload.body)).toMatchObject({ id: 'attachment_exact', name: 'notes.txt', size: 5 });
+
+    const admission = await httpPost(b.port, '/api/tasks', {
+      message: 'Summarize this file', attachmentIds: ['attachment_exact'],
+    }, headers);
+    expect(admission.status).toBe(202);
+    expect(enqueued).toHaveLength(1);
+    expect(enqueued[0]).toContain('Summarize this file');
+    expect(enqueued[0]).toContain('notes.txt');
+    expect(enqueued[0]).toContain('C:\\safe\\attachment.txt');
+
+    const forged = await httpPost(b.port, '/api/tasks', {
+      message: 'Read it', attachmentIds: ['C:\\Windows\\win.ini'],
+    }, headers);
+    expect(forged.status).toBe(400);
+    expect(enqueued).toHaveLength(1);
+    await b.close();
+  });
+
+  it('token-gates exact artifact metadata and content without accepting raw paths', async () => {
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: TOKEN,
+      artifacts: {
+        listArtifacts: ({ runId }) => runId === 7 ? [{
+          id: 'art_exact', path: 'sun.svg', kind: 'file', tool: 'file_write', action: 'create',
+          runId: 7, taskId: 'job_exact', sessionId: 'session_exact', createdAt: 1, bytes: 20, preview: 'sun',
+        }] : [],
+        readArtifact: (id) => id === 'art_exact'
+          ? { id, name: 'sun.svg', mime: 'image/svg+xml', bytes: Buffer.from('<svg/>') }
+          : null,
+      },
+      port: 0,
+    });
+    expect((await httpGet(b.port, '/api/artifacts?runId=7')).status).toBe(401);
+    const headers = { 'x-workbench-token': TOKEN };
+    const list = await httpGet(b.port, '/api/artifacts?runId=7', headers);
+    expect(list.status).toBe(200);
+    expect(JSON.parse(list.body)).toMatchObject([{ id: 'art_exact', runId: 7 }]);
+    const content = await httpGet(b.port, '/api/artifacts/art_exact/content', headers);
+    expect(content.status).toBe(200);
+    expect(content.contentType).toContain('image/svg+xml');
+    expect(content.body).toBe('<svg/>');
+    expect((await httpGet(b.port, '/api/artifacts/C%3A%5CWindows%5Cwin.ini/content', headers)).status).toBe(404);
+    await b.close();
+  });
+});
+
 describe('Workbench durable Job projections', () => {
   it('queries Job and Attempt identity and replays events from a Job sequence cursor', async () => {
     const jobs = {
@@ -653,6 +735,44 @@ describe('Workbench durable Job projections', () => {
     }, { 'x-workbench-token': 'continue-token' });
     expect(foreign.status).toBe(409);
     expect(calls).toEqual(['checkpoint_exact:continue-key']);
+    await b.close();
+  });
+
+  it('projects exact browser state and gates user-control transitions', async () => {
+    const actions: string[] = [];
+    const browser = {
+      browserSessionId: 'browser_exact', jobId: 'job_exact', attemptId: 'attempt_exact',
+      generation: 3, state: 'ready', mode: 'owned',
+    };
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: 'browser-token',
+      browser: {
+        get: (jobId) => jobId === 'job_exact' ? browser : null,
+        take: (jobId) => { actions.push(`take:${jobId}`); return { ...browser, state: 'user_control' }; },
+        return: (jobId) => { actions.push(`return:${jobId}`); return browser; },
+        clear: (jobId) => { actions.push(`clear:${jobId}`); return { ...browser, state: 'lost' }; },
+      },
+      port: 0,
+    });
+
+    const projected = await httpGet(b.port, '/api/jobs/job_exact/browser');
+    expect(projected.status).toBe(200);
+    expect(JSON.parse(projected.body)).toEqual({ browser });
+
+    expect((await httpPost(b.port, '/api/jobs/job_exact/browser/take', {})).status).toBe(401);
+    const taken = await httpPost(
+      b.port,
+      '/api/jobs/job_exact/browser/take',
+      {},
+      { 'x-workbench-token': 'browser-token' },
+    );
+    expect(taken.status).toBe(202);
+    expect(JSON.parse(taken.body)).toMatchObject({
+      accepted: true,
+      browser: { browserSessionId: 'browser_exact', state: 'user_control' },
+    });
+    expect(actions).toEqual(['take:job_exact']);
     await b.close();
   });
 });

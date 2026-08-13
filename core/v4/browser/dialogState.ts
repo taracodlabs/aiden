@@ -124,8 +124,17 @@ class DialogSupervisor {
   }
 }
 
-let _supervisor: DialogSupervisor | null = null;
-export function getDialogSupervisor(): DialogSupervisor {
-  if (!_supervisor) _supervisor = new DialogSupervisor();
-  return _supervisor;
+const _supervisors = new Map<string, DialogSupervisor>();
+export function getDialogSupervisor(browserSessionId = 'legacy'): DialogSupervisor {
+  let supervisor = _supervisors.get(browserSessionId);
+  if (!supervisor) {
+    supervisor = new DialogSupervisor();
+    _supervisors.set(browserSessionId, supervisor);
+  }
+  return supervisor;
+}
+
+export function clearDialogSupervisors(): void {
+  for (const supervisor of _supervisors.values()) supervisor.clear();
+  _supervisors.clear();
 }

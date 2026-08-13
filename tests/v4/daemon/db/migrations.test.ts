@@ -50,11 +50,15 @@ describe('runMigrations', () => {
        VALUES ('manual', 'continuity-migration', 'existing-record', '{}', 'pending', 1, 1)`,
     ).run();
 
-    expect(runMigrations(db)).toEqual({ from: 42, to: 43 });
+    expect(runMigrations(db)).toEqual({ from: 42, to: LATEST_SCHEMA_VERSION });
     expect(db.prepare("SELECT source_key FROM trigger_events WHERE idempotency_key='existing-record'").pluck().get())
       .toBe('continuity-migration');
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='continuity_checkpoints'").pluck().get())
       .toBe('continuity_checkpoints');
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='browser_sessions'").pluck().get())
+      .toBe('browser_sessions');
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='browser_action_receipts'").pluck().get())
+      .toBe('browser_action_receipts');
   });
 
   it('creates all v1 tables', () => {

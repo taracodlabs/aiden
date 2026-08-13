@@ -54,6 +54,8 @@ import { browserScrollTool } from './browser/browserScroll';
 import { browserCloseTool } from './browser/browserClose';
 import { browserDialogTool } from './browser/browserDialog';
 import { browserUploadTool } from './browser/browserUpload';
+import { browserControlTool } from './browser/browserControl';
+import { browserDownloadTool } from './browser/browserDownload';
 
 import { sessionSearchTool } from './sessions/sessionSearch';
 import { sessionListTool } from './sessions/sessionList';
@@ -278,6 +280,8 @@ export function registerWriteTools(registry: ToolRegistry): void {
   register(browserCloseTool);
   register(browserDialogTool);
   register(browserUploadTool);
+  register(browserControlTool);
+  register(browserDownloadTool);
 
   register(executeCodeTool);
 

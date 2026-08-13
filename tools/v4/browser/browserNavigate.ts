@@ -26,7 +26,7 @@ const _browserNavigateTool: ToolHandler = {
     description:
       'Navigate the browser to a URL. Reuses the active tab; opens one if none exists. ' +
       'Returns success:false when the loaded page appears to be a CAPTCHA / bot challenge ' +
-      '— in that case prefer `open_url` (real user profile, no detection).',
+      'and requests explicit user control instead of bypassing durable browser authority.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -61,7 +61,8 @@ const _browserNavigateTool: ToolHandler = {
     // browser_navigate returned success:true on Cloudflare-walled pages
     // and the agent confidently said "search completed." Bias toward
     // sensitivity — false negatives caused the original bug; false
-    // positives just nudge the agent to retry via open_url.
+    // positives pause for explicit user control rather than switching to an
+    // untracked browser path.
     try {
       const snap = await pwSnapshot();
       if (snap.ok && snap.text) {
@@ -73,8 +74,7 @@ const _browserNavigateTool: ToolHandler = {
             error:
               `Page appears to be a CAPTCHA / bot challenge ` +
               `(matched: ${check.markers.slice(0, 3).join(', ')}). ` +
-              `Try open_url instead — it launches your real browser ` +
-              `with your existing cookies/login state, no detection.`,
+              `User control is required before this durable browser session can continue.`,
             captcha_detected: true,
             captcha_markers: check.markers,
           };

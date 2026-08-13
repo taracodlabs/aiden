@@ -131,6 +131,7 @@ const FILE_TOOLS: Readonly<Record<string, { kind: ArtifactKind; action: Artifact
     file_move:    { kind: 'file',  action: 'move',      pathField: 'to'   },
     file_copy:    { kind: 'file',  action: 'copy',      pathField: 'to'   },
     skill_manage: { kind: 'skill', action: 'create',    pathField: 'path' },
+    browser_download: { kind: 'file', action: 'create', pathField: 'path' },
   });
 
 /**

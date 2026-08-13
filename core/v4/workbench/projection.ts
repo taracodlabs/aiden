@@ -97,6 +97,34 @@ export function projectWorkbenchStatus(job: JobRecord, verdict: JobVerdictRecord
 
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 
+function safeFailureText(value: unknown): string | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const firstLine = value.split(/\r?\n/u)[0]!.trim();
+  return firstLine
+    .replace(/\b(?:bearer|api[_-]?key|token|authorization)\s*[:=]\s*\S+/ig, '$1: [redacted]')
+    .replace(/\s+/g, ' ')
+    .slice(0, 320);
+}
+
+function failureSummary(
+  status: WorkbenchProjectionStatus,
+  job: JobRecord,
+  verdict: JobVerdictRecord | null,
+  timeline: JobEventRecord[],
+): string {
+  if (!['failed', 'unknown', 'blocked'].includes(status)) {
+    return job.finishReason ?? verdict?.verdict ?? status;
+  }
+  for (const event of [...timeline].reverse()) {
+    const payload = event.payload ?? {};
+    const detail = safeFailureText(
+      payload.error ?? payload.invocationError ?? payload.reason ?? payload.lastError,
+    );
+    if (detail) return detail;
+  }
+  return job.finishReason ?? verdict?.verdict ?? status;
+}
+
 /** Build a read-only projection from existing durable authorities. */
 export function projectWorkbenchJob(
   reader: WorkbenchJobProjectionReader,
@@ -144,7 +172,7 @@ export function projectWorkbenchJob(
       outcome: job.terminalOutcome,
       finishReason: job.finishReason,
       verdict,
-      summary: job.finishReason ?? verdict?.verdict ?? status,
+        summary: failureSummary(status, job, verdict, timeline),
     },
     eventCursor: timeline.length > 0 ? timeline[timeline.length - 1].jobSequence : 0,
   };

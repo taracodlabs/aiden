@@ -18,7 +18,7 @@
  * with a clear next-step error.
  *
  * Heuristic philosophy: false positives (incorrectly flagging a page
- * as CAPTCHA) are recoverable — the model retries via open_url. False
+ * as CAPTCHA) are recoverable through explicit user control. False
  * negatives (missing a CAPTCHA wall) cause the original bug. Bias
  * toward sensitivity. Patterns are case-insensitive substring matches
  * against a normalised lowercased view of the first ~3000 characters.
@@ -43,8 +43,8 @@ export const CAPTCHA_MARKERS: ReadonlyArray<string> = [
   'bot detection',
   'verify your identity',
 
-  // Cloudflare
-  'cloudflare',
+  // Cloudflare challenge text. The vendor name alone is deliberately not a
+  // blocker: ordinary repository and documentation pages often mention it.
   'just a moment',
   'checking your browser',
   'checking if the site connection is secure',

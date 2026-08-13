@@ -327,6 +327,40 @@ export class SessionStore {
     };
   }
 
+  /**
+   * Return the exact durable session requested by an ingress surface, creating
+   * it when the surface has no prior record. Workbench session identifiers are
+   * browser-owned strings rather than UUIDs; the sessions table intentionally
+   * accepts both forms so the browser can reconnect to the same conversation.
+   */
+  ensureSession(id: string, opts: CreateSessionOptions = {}): SessionRecord {
+    const normalized = id.trim();
+    if (!normalized) throw new Error('session id must not be empty');
+    const existing = this.getSession(normalized);
+    if (existing) return existing;
+    const now = Date.now();
+    this.insertSessionStmt.run(
+      normalized,
+      opts.title ?? null,
+      now,
+      now,
+      opts.providerId ?? null,
+      opts.modelId ?? null,
+      JSON.stringify(opts.metadata ?? {}),
+    );
+    return {
+      id: normalized,
+      title: opts.title ?? null,
+      createdAt: now,
+      updatedAt: now,
+      providerId: opts.providerId ?? null,
+      modelId: opts.modelId ?? null,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      metadata: opts.metadata ?? {},
+    };
+  }
+
   getSession(id: string): SessionRecord | null {
     const row = this.getSessionStmt.get(id) as SessionRow | undefined;
     return row ? rowToSession(row) : null;

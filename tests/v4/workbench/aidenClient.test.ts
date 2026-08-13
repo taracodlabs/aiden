@@ -4,19 +4,23 @@ import {
   admitTask,
   assistantOutputText,
   cancelTask,
+  controlBrowserSession,
   clearRunHandle,
   followRun,
   loadRuntimeInfo,
+  loadBrowserSession,
   loadWorkbenchBootstrap,
   parseTaskAdmission,
   persistRunHandle,
   reconcileRestoredRunHandle,
   restoreRunHandle,
   runTask,
+  type ActivityItem,
   type TaskAdmission,
   type TurnHandlers,
   type V4Event,
 } from '../../../dashboard-next/lib/aidenClient';
+import { mergeLiveActivity } from '../../../dashboard-next/lib/workbenchUx';
 
 class FakeEventSource {
   static instances: FakeEventSource[] = [];
@@ -185,7 +189,33 @@ describe('Workbench exact task admission and run following', () => {
     expect(replies).toEqual(['current']);
   });
 
-  it('A7 emits terminal completion exactly once when compatibility terminal events duplicate', async () => {
+  it('projects an exact tool target from the durable serialized argument payload', () => {
+    const activities: ActivityItem[] = [];
+    void followRun({ admission: admission(), lastEventId: 0 }, { onActivity: (item) => activities.push(item) });
+    const stream = FakeEventSource.instances[0];
+    stream.emit({
+      ...event(41, 15, 'tool.call.started', 'tool_call_started'),
+      toolCallId: 'call_exact',
+      payload: { toolName: 'file_read', args: JSON.stringify({ path: 'package.json', limit: 12000 }) },
+    });
+    stream.emit({
+      ...event(41, 16, 'tool.call.completed', 'tool_call_completed'),
+      toolCallId: 'call_exact',
+      status: 'completed',
+      durationMs: 12,
+      payload: { toolName: 'file_read', durationMs: 12 },
+    });
+
+    expect(activities).toMatchObject([
+      { id: 'tool:call_exact', detail: 'package.json', status: 'running' },
+      { id: 'tool:call_exact', status: 'ok' },
+    ]);
+    expect(activities.reduce(mergeLiveActivity, [])).toMatchObject([
+      { id: 'tool:call_exact', detail: 'package.json', status: 'ok', durationMs: 12 },
+    ]);
+  });
+
+  it('A7 treats ui_task_done as ephemeral and settles only from durable terminal truth', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => response({
       identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
       receipt: { terminal: true, status: 'verified', summary: 'done' },
@@ -194,9 +224,75 @@ describe('Workbench exact task admission and run following', () => {
     const pending = followRun({ admission: admission(), lastEventId: 0 }, { onDone: done });
     const es = FakeEventSource.instances[0];
     es.emit(event(41, 1, 'ui', 'ui_task_done'));
+    expect(done).not.toHaveBeenCalled();
     es.emit(event(41, 2, 'dispatcher.completed'));
     await pending;
     expect(done).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps following while final synthesis continues after ui_task_done', async () => {
+    vi.useFakeTimers();
+    let terminal = false;
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      assistantOutput: terminal ? [{ eventId: 7, sequence: 1, text: 'late answer' }] : [],
+      receipt: terminal
+        ? { terminal: true, status: 'verified', summary: 'done' }
+        : { terminal: false, status: 'running' },
+    }, true, 200)));
+    const snapshots = vi.fn();
+    const done = vi.fn();
+    const error = vi.fn();
+    const pending = followRun(
+      { admission: admission(), lastEventId: 0 },
+      { onReplySnapshot: snapshots, onDone: done, onError: error },
+      { stallMs: 25_000 },
+    );
+    const es = FakeEventSource.instances[0];
+    es.emit(event(41, 1, 'ui', 'ui_task_done'));
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(done).not.toHaveBeenCalled();
+    expect(error).not.toHaveBeenCalled();
+
+    terminal = true;
+    es.emit(event(41, 2, 'dispatcher.completed'));
+    await pending;
+    expect(snapshots).toHaveBeenCalledWith('late answer');
+    expect(done).toHaveBeenCalledOnce();
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  it('keeps task completion summaries out of assistant output and hydrates durable reply truth', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      assistantOutput: [
+        { eventId: 12, sequence: 1, text: 'Authoritative ' },
+        { eventId: 13, sequence: 2, text: 'answer' },
+      ],
+      receipt: { terminal: true, status: 'verified', summary: 'task step summary' },
+    }, true, 200)));
+    const chunks: string[] = [];
+    const snapshots: string[] = [];
+    const done = vi.fn();
+    const pending = followRun(
+      { admission: admission(), lastEventId: 0 },
+      {
+        onReply: (text) => chunks.push(text),
+        onReplySnapshot: (text) => snapshots.push(text),
+        onDone: done,
+      },
+    );
+    const stream = FakeEventSource.instances[0];
+
+    stream.emit({
+      ...event(41, 10, 'task.done', 'ui_task_done'),
+      payload: { status: 'success', summary: 'Read package.json, README.md, and tsconfig.json' },
+    });
+    await pending;
+
+    expect(chunks).toEqual([]);
+    expect(snapshots).toEqual(['Authoritative answer']);
+    expect(done).toHaveBeenCalledOnce();
   });
 
   it('reconciles a final Job event that arrives while an earlier terminal check is in flight', async () => {
@@ -805,5 +901,27 @@ describe('Workbench exact task admission and run following', () => {
     await expect(loadRuntimeInfo()).resolves.toEqual({
       service: 'aiden-workbench-bridge', version: '9.8.7-test', readOnly: false,
     });
+  });
+
+  it('projects and controls only the selected durable browser Job', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => response({
+      accepted: true,
+      browser: {
+        browserSessionId: 'browser_exact', jobId: 'job_exact', attemptId: 'attempt_exact',
+        generation: 2, state: init?.method === 'POST' ? 'user_control' : 'ready', mode: 'owned',
+      },
+    }, true, 200));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(loadBrowserSession('job_exact')).resolves.toMatchObject({
+      browserSessionId: 'browser_exact', jobId: 'job_exact', state: 'ready',
+    });
+    await expect(controlBrowserSession('job_exact', 'take')).resolves.toMatchObject({
+      browserSessionId: 'browser_exact', state: 'user_control',
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      '/api/jobs/job_exact/browser/take',
+      expect.objectContaining({ method: 'POST', headers: { 'x-workbench-token': 'token_exact' } }),
+    );
   });
 });

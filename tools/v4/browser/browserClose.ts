@@ -41,7 +41,7 @@ const _browserCloseTool: ToolHandler = {
   async execute() {
     try {
       await pwClose();
-      return { success: true };
+      return { success: true, verified: true };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       return { success: false, error: message };

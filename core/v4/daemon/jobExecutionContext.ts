@@ -45,13 +45,17 @@ export interface JobExecutionContext {
   generation: number;
   fenceToken: string;
   producer: string;
+  signal?: AbortSignal;
   controlAuthority?: JobControlAuthority;
   workspacePath?: string;
   repository?: RepositoryExecutionBinding;
   repositoryPromise?: Promise<RepositoryExecutionBinding>;
+  /** Source keys already promoted to Evidence during this Attempt. */
+  researchEvidenceKeys?: Set<string>;
 }
 
 const storage = new AsyncLocalStorage<JobExecutionContext>();
+const durableToolCallStorage = new AsyncLocalStorage<PreparedDurableToolCall>();
 
 export function runWithJobExecutionContext<T>(context: JobExecutionContext, operation: () => T): T {
   return storage.run(context, operation);
@@ -59,6 +63,11 @@ export function runWithJobExecutionContext<T>(context: JobExecutionContext, oper
 
 export function currentJobExecutionContext(): JobExecutionContext | undefined {
   return storage.getStore();
+}
+
+/** Exact persisted ToolCall currently dispatching physical work. */
+export function currentPreparedDurableToolCall(): PreparedDurableToolCall | undefined {
+  return durableToolCallStorage.getStore();
 }
 
 /** Lazily bind repository tools to the exact active Attempt and source snapshot. */
@@ -379,7 +388,7 @@ export async function executeWithDurableToolCall<T>(command: {
   }));
 
   try {
-    const result = await command.execute();
+    const result = await durableToolCallStorage.run(prepared, command.execute);
     const succeeded = command.isSuccessful?.(result) ?? true;
     requireApplied('complete', context.engine.completeToolCall({
       toolCallId,
@@ -422,4 +431,112 @@ export function recordDurableToolVerification(toolCallId: string, verification: 
     verificationRef: opaqueReference('tool-verification', verification),
     producer: context.producer,
   }));
+}
+
+const RESEARCH_EVIDENCE_TOOLS = new Set([
+  'web_search',
+  'fetch_url',
+  'fetch_page',
+  'youtube_search',
+]);
+
+const SENSITIVE_QUERY_PARAMETER = /^(?:token|api[_-]?key|access[_-]?token|auth(?:orization)?|key|secret|password)$/i;
+
+function redactResearchText(value: string, limit = 2000): string {
+  return value
+    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
+    .replace(/\b(?:api[_-]?key|access[_-]?token|token|authorization|secret|password)\s*[:=]\s*[^\s,;]+/gi, '$1: [redacted]')
+    .replace(/\s+/g, ' ')
+    .slice(0, limit);
+}
+
+function sanitizeResearchValue(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return redactResearchText(value);
+  if (value === null || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (depth >= 2) return '[truncated]';
+  if (Array.isArray(value)) return value.slice(0, 20).map((item) => sanitizeResearchValue(item, depth + 1));
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(
+      Object.keys(record).slice(0, 24).map((key) => [key, sanitizeResearchValue(record[key], depth + 1)]),
+    );
+  }
+  return String(value);
+}
+
+function normalizedResearchSource(toolName: string, args: Record<string, unknown>): {
+  key: string;
+  source: string;
+} {
+  const candidate = typeof args.url === 'string'
+    ? args.url.trim()
+    : typeof args.query === 'string'
+      ? args.query.trim()
+      : '';
+  if (candidate && /^https?:\/\//i.test(candidate)) {
+    try {
+      const url = new URL(candidate);
+      url.hash = '';
+      for (const key of Array.from(url.searchParams.keys())) {
+        if (SENSITIVE_QUERY_PARAMETER.test(key)) url.searchParams.delete(key);
+      }
+      url.searchParams.sort();
+      const normalized = url.toString().replace(/\/$/, '');
+      return { key: `url:${normalized.toLowerCase()}`, source: normalized };
+    } catch {
+      // Fall through to a bounded tool/query key when the input is not a URL.
+    }
+  }
+  const query = redactResearchText(candidate, 500).toLowerCase();
+  return { key: `${toolName}:${query}`, source: query || toolName };
+}
+
+function researchResultSucceeded(result: unknown): boolean {
+  if (!result || typeof result !== 'object') return result !== null && result !== undefined;
+  const record = result as Record<string, unknown>;
+  if (record.success === false) return false;
+  if (typeof record.error === 'string' && record.error.trim() && record.success !== true) return false;
+  return true;
+}
+
+/** Promote bounded, read-only research output into the existing Proof authority. */
+export function recordDurableResearchEvidence(command: {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result: unknown;
+  observedAt?: number;
+}): void {
+  if (!RESEARCH_EVIDENCE_TOOLS.has(command.toolName) || !researchResultSucceeded(command.result)) return;
+  const context = currentJobExecutionContext();
+  if (!context) return;
+  const source = normalizedResearchSource(command.toolName, command.args);
+  const keys = context.researchEvidenceKeys ?? (context.researchEvidenceKeys = new Set<string>());
+  if (keys.has(source.key)) return;
+  keys.add(source.key);
+  try {
+    const observedAt = command.observedAt ?? Date.now();
+    context.engine.proof.recordEvidence({
+      jobId: context.jobId,
+      attemptId: context.attemptId,
+      generation: context.generation,
+      fenceToken: context.fenceToken,
+      effectId: null,
+      source: `research.${command.toolName}`,
+      producer: context.producer,
+      observedAt,
+      freshUntil: observedAt + 300_000,
+      coverage: 'partial',
+      verificationResult: 'unknown',
+      payload: {
+        source: source.source,
+        toolCallId: command.toolCallId,
+        durableToolCallId: durableToolCallId(context, command.toolCallId),
+        arguments: sanitizeResearchValue(command.args),
+        result: sanitizeResearchValue(command.result),
+      },
+    });
+  } catch {
+    // Evidence projection must never turn a successful read into a failed Job.
+  }
 }

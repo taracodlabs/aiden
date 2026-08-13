@@ -50,6 +50,10 @@ import {
   createWorkerProviderCallAuthority,
   type WorkerProviderCallAuthority,
 } from '../worker/workerProviderCallAuthority';
+import {
+  createBrowserSessionAuthority,
+  type BrowserSessionAuthority,
+} from '../browser/browserSessionAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -219,6 +223,8 @@ export interface JobEngine {
   readonly validation: StructuredValidationAuthority;
   readonly gitEffects: GitEffectAuthority;
   readonly understanding: RepositoryUnderstandingAuthority;
+  /** Durable browser authority bound to this engine's Job and Attempt ledger. */
+  readonly browser: BrowserSessionAuthority;
   /** Canonical durable continuity projection for this JobEngine. Optional only
    * for narrow legacy test doubles; production engines always provide it. */
   readonly continuity?: ContinuityCheckpointAuthority;
@@ -2448,6 +2454,11 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     getAttempt(attemptId) { const row = getAttemptRow(attemptId); return row ? mapAttempt(row) : null; },
     appendJobEvent: appendJobEventTx,
   });
+  const browser = createBrowserSessionAuthority({
+    db,
+    proof,
+    recordEffectReconciliation: (command) => recordEffectReconciliationTx(command),
+  });
   worker = createWorkerAuthority({
     db,
     graph,
@@ -2525,6 +2536,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     validation,
     gitEffects,
     understanding,
+    browser,
     get continuity() { return continuity; },
     submitJob: submitTx,
     getJob(jobId) {

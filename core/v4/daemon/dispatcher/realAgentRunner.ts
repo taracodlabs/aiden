@@ -79,6 +79,12 @@ import { computeTaskFinalization } from '../../taskVerification';
 import { mapTaskOutcomePresentation, taskOutcomeInputFromFinalization } from '../../taskOutcomePresentation';
 import { emitArtifactVerified, emitCostUpdated, type PillarEventSink } from '../../pillarEvents';
 import type { TaskStore } from '../taskStore';
+import type { SessionStore, MessageRecord } from '../../sessionStore';
+import {
+  captureArtifactFromTrace,
+  type ArtifactStore,
+  type TraceEntryLike,
+} from '../artifactStore';
 import type { JobEngine } from '../jobEngine';
 import { createJobControlAuthority, type JobControlAuthority } from '../jobControlAuthority';
 import {
@@ -161,6 +167,11 @@ export interface CreateRealAgentRunnerOptions {
    * placeholder environments keep working unchanged.
    */
   taskStore?:        TaskStore;
+  /** Optional durable conversation history for Workbench and compatible ingress. */
+  sessionStore?:     SessionStore;
+  /** Existing durable artifact authority. File-producing trace entries are
+   * registered only after the authoritative Job lifecycle accepts settlement. */
+  artifactStore?:    ArtifactStore;
   resourceRegistry?: ResourceRegistry;
   log?:              (level: 'info' | 'warn' | 'error', msg: string) => void;
   /** Builds AidenAgent per turn (caller-injected). */
@@ -177,6 +188,17 @@ export interface CreateRealAgentRunnerOptions {
   executionSignal?: AbortSignal;
   /** Optional owner that drains canonical lifecycle work before durable stores close. */
   lifecycleScope?: DurableJobLifecycleScope;
+  /** Entry-point adapter for an exact interactive approval surface. */
+  approvalCallbacksFactory?: (input: {
+    policy: DaemonApprovalPolicy;
+    runId: number;
+    admission: DaemonAgentInput['admission'];
+    signal?: AbortSignal;
+    fallback: ReturnType<typeof buildDaemonApprovalCallbacks>;
+  }) => ReturnType<typeof buildDaemonApprovalCallbacks>;
+  /** Internal durable-wrapper seam: collect candidates without persisting them
+   * before generation/fence/lease settlement has succeeded. */
+  artifactCandidateSink?: (entries: readonly TraceEntryLike[]) => void;
 }
 
 const RUN_EVENT_INLINE_BYTES = 4096;
@@ -357,15 +379,22 @@ export function createRealAgentRunner(
         source:     'daemon',
       });
 
-      const approvalCallbacks = buildDaemonApprovalCallbacks({
+      const fallbackApprovalCallbacks = buildDaemonApprovalCallbacks({
         policy:   approvalPolicy,
         runStore: opts.runStore,
         runId,
         log:      (lvl, msg) => log(lvl, msg),
       });
+      const approvalCallbacks = opts.approvalCallbacksFactory?.({
+        policy: approvalPolicy,
+        runId,
+        admission: input.admission,
+        signal: opts.executionSignal,
+        fallback: fallbackApprovalCallbacks,
+      }) ?? fallbackApprovalCallbacks;
 
       // ── 6: initial history ────────────────────────────────────────────
-      const history: Message[] = buildInitialHistory(input);
+      const history: Message[] = loadDurableHistory(opts.sessionStore, input);
 
       // ── 7: build agent via injected factory ───────────────────────────
       let agent: AidenAgent;
@@ -486,6 +515,11 @@ export function createRealAgentRunner(
           },
         }));
         result = await invokeAgent();
+        if (result.toolCallTrace?.length) {
+          const trace = result.toolCallTrace as readonly TraceEntryLike[];
+          if (opts.artifactCandidateSink) opts.artifactCandidateSink(trace);
+          else if (opts.artifactStore) registerArtifacts(opts, trace, input.sessionId, runId, durableJobId);
+        }
         // Stamp the actual token usage onto the watcher for the
         // post-turn snapshot below.
         const tokens = extractLedgerTokens(runId) ?? extractTokens(result);
@@ -545,6 +579,7 @@ export function createRealAgentRunner(
           }
         } catch { /* persistence faults must never break dispatch */ }
       }
+      persistDurableAssistantReply(opts.sessionStore, input, finalReply, invocationError);
 
       // ── 9: post-turn budget consume + dispatcher:completed ─────────────
       const finalSnapshot = consumePostTurn({
@@ -682,6 +717,76 @@ export function createRealAgentRunner(
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+function messageFromDurableRecord(record: MessageRecord): Message {
+  if (record.role === 'assistant') {
+    return {
+      role: 'assistant',
+      content: record.content,
+      ...(record.toolCalls ? { toolCalls: record.toolCalls } : {}),
+    };
+  }
+  if (record.role === 'tool') {
+    return { role: 'tool', content: record.content, toolCallId: record.toolCallId ?? '' };
+  }
+  if (record.role === 'system') return { role: 'system', content: record.content };
+  return { role: 'user', content: record.content };
+}
+
+function loadDurableHistory(store: SessionStore | undefined, input: DaemonAgentInput): Message[] {
+  if (!store) return buildInitialHistory(input);
+  try {
+    const records = store.getMessages(input.sessionId);
+    const history = records.map(messageFromDurableRecord);
+    const currentTurnRecorded = records.some((record) =>
+      record.role === 'user' && record.turnNumber === input.triggerEventId,
+    );
+    if (!currentTurnRecorded) {
+      const last = history[history.length - 1];
+      if (last?.role !== 'user' || last.content !== input.initialMessage) {
+        history.push({ role: 'user', content: input.initialMessage });
+      }
+    }
+    return history.length > 0 ? history : buildInitialHistory(input);
+  } catch {
+    return buildInitialHistory(input);
+  }
+}
+
+function durableConversationError(error: string): string {
+  const firstLine = error.split(/\r?\n/, 1)[0] ?? error;
+  return firstLine
+    .replace(/\s+/g, ' ')
+    .replace(/\b(api[_-]?key|token|authorization)\s*[:=]\s*\S+/ig, '$1: [redacted]')
+    .slice(0, 500);
+}
+
+function persistDurableAssistantReply(
+  store: SessionStore | undefined,
+  input: DaemonAgentInput,
+  finalReply: string,
+  invocationError: string | null,
+): void {
+  if (!store) return;
+  try {
+    if (!store.getSession(input.sessionId)) return;
+    const existing = store.getMessages(input.sessionId).some((message) =>
+      message.role === 'assistant' && message.turnNumber === input.triggerEventId,
+    );
+    if (existing) return;
+    const content = finalReply.trim()
+      ? finalReply
+      : invocationError
+        ? `⚠ ${durableConversationError(invocationError)}`
+        : '';
+    if (!content) return;
+    store.appendMessage(input.sessionId, {
+      role: 'assistant', content, turnNumber: input.triggerEventId,
+    });
+  } catch {
+    // Conversation projection must not rewrite Job/Attempt truth.
+  }
+}
+
 async function invokeDurableDaemon(
   input: DaemonAgentInput,
   opts: CreateRealAgentRunnerOptions & { jobEngine: JobEngine },
@@ -689,6 +794,7 @@ async function invokeDurableDaemon(
 ): Promise<DaemonAgentResult> {
   let activeHandle: DurableJobHandle | null = null;
   let projectedResult: DaemonAgentResult | null = null;
+  let artifactCandidates: readonly TraceEntryLike[] = [];
   const admission = input.admission
     ? { existing: { ...input.admission, reused: true }, source: 'daemon' } as const
     : input.resume?.taskId && opts.jobEngine.getJob(input.resume.taskId)
@@ -778,6 +884,8 @@ async function invokeDurableDaemon(
           runStore: projectedRunStore,
           jobEngine: undefined,
           taskStore: undefined,
+          artifactStore: undefined,
+          artifactCandidateSink: (entries) => { artifactCandidates = entries; },
           jobControlAuthority: jobControls,
           executionSignal: handle.signal,
           agentBuilder: (builderInput) => opts.agentBuilder({
@@ -824,6 +932,15 @@ async function invokeDurableDaemon(
         evidence: { error: result.error ?? null },
       },
     });
+    if (activeHandle && opts.artifactStore && artifactCandidates.length > 0) {
+      registerArtifacts(
+        opts,
+        artifactCandidates,
+        input.sessionId,
+        execution.value.runId,
+        activeHandle.jobId,
+      );
+    }
     return execution.value;
   } catch (error) {
     const identity = activeHandle;
@@ -836,6 +953,33 @@ async function invokeDurableDaemon(
       finishReason: 'error',
       error: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+function registerArtifacts(
+  opts: Pick<CreateRealAgentRunnerOptions, 'artifactStore' | 'taskStore'>,
+  entries: readonly TraceEntryLike[],
+  sessionId: string,
+  runId: number,
+  taskId: string | null,
+): void {
+  if (!opts.artifactStore) return;
+  for (const entry of entries) {
+    try {
+      const artifact = captureArtifactFromTrace(entry);
+      if (!artifact) continue;
+      const artifactId = opts.artifactStore.create({
+        path: artifact.path,
+        kind: artifact.kind,
+        tool: entry.name,
+        action: artifact.action,
+        sessionId,
+        runId,
+        taskId,
+        bytes: artifact.bytes,
+      });
+      if (taskId && opts.taskStore) opts.taskStore.appendArtifactId(taskId, artifactId);
+    } catch { /* artifact projection must never rewrite durable Job truth */ }
   }
 }
 

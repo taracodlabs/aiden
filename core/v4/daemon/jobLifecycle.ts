@@ -406,6 +406,7 @@ export async function executeDurableJob<T>(
     generation: handle.generation,
     fenceToken: handle.fenceToken,
     producer,
+    signal: handle.signal,
     controlAuthority: options.controlAuthority,
     ...(options.engine.getJob(handle.jobId)?.workspaceId
       ? { workspacePath: options.engine.getJob(handle.jobId)!.workspaceId! }
@@ -755,6 +756,33 @@ export async function executeDurableJob<T>(
   } finally {
     stopAsyncResources();
     try {
+      const browserSession = options.engine.browser.getSessionForAttempt(
+        handle.jobId,
+        handle.attemptId,
+        handle.generation,
+      );
+      if (browserSession) {
+        try {
+          const { pwCloseBrowserSessionResources } = await import('../../playwrightBridge');
+          await pwCloseBrowserSessionResources(browserSession.browserSessionId);
+          const { clearBrowserObservationSession } = await import('../../../tools/v4/browser/_observer');
+          clearBrowserObservationSession(browserSession.browserSessionId);
+        } catch { /* browser runtime may be unavailable during shutdown */ }
+        const jobStatus = options.engine.getJob(handle.jobId)?.status;
+        const state = jobStatus === 'cancelled' || jobStatus === 'cancelling'
+          ? 'cancelled'
+          : leaseLost || disposalError
+            ? 'lost'
+            : 'closed';
+        try {
+          options.engine.browser.settleSession({
+            jobId: handle.jobId,
+            attemptId: handle.attemptId,
+            generation: handle.generation,
+            fenceToken: handle.fenceToken,
+          }, state, `durable lifecycle ${jobStatus ?? 'ended'}`);
+        } catch { /* stale replacement already owns browser authority */ }
+      }
       if (!disposalError && options.engine.resources.getBudgets(handle.jobId).some((budget) => budget.kind === 'runtime_ms')) {
         try {
           options.engine.resources.debit({

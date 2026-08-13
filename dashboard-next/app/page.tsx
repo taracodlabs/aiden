@@ -1,7 +1,7 @@
 "use client"
 import {
   useState, useEffect, useRef, useMemo, useCallback,
-  createContext, useContext,
+  createContext, useContext, Fragment,
   type Dispatch, type SetStateAction, type CSSProperties,
   type ReactNode, type RefObject, type ChangeEvent,
 } from 'react'
@@ -12,6 +12,15 @@ import ChatHeader from '../components/ChatHeader'
 import Sidebar from '../components/Sidebar'
 import WorkflowView from '../components/WorkflowView'
 import * as aiden from '../lib/aidenClient'
+import { PUBLIC_SPONSORS, SPONSOR_URL } from '../lib/publicSponsors'
+import {
+  mergeLiveActivity,
+  pendingApprovalCards,
+  selectChatLiveActivity,
+  shouldShowChatTelemetry,
+  summarizeCompletedActivity,
+  type LiveActivityItem,
+} from '../lib/workbenchUx'
 import {
   WorkbenchController,
   emptySelection,
@@ -26,6 +35,8 @@ import {
 
 type UIMode   = 'focus' | 'execution' | 'power' | 'watch'
 type ExecMode = 'auto'  | 'plan'      | 'chat'  | 'react'
+type MainView = 'chat' | 'activity' | 'artifacts' | 'sponsors'
+type WorkbenchAppearance = 'dark' | 'system'
 
 interface AutomationPattern {
   pattern:        string
@@ -52,6 +63,7 @@ interface Message {
   isStreaming?:   boolean
   isBriefing?:    boolean
   briefingLabel?: string
+  attachments?:   aiden.WorkbenchAttachment[]
 }
 
 interface Conversation {
@@ -116,17 +128,22 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
         <div style={{ maxWidth: 760, margin: '0 auto 12px', padding: '12px 14px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: 'var(--text2)', fontSize: 13 }}>
             <strong>Active Work <span style={{ color: 'var(--orange)', fontSize: 10 }}>PRO BETA</span></strong>
-            <span style={{ color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>{projection.receipt.status}</span>
+            <span style={{ color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>{projection.job?.status ?? projection.receipt.status}</span>
           </div>
           <div style={{ marginTop: 7, color: 'var(--muted3)', fontSize: 12, fontFamily: 'var(--mono)' }}>
             {projection.identity.jobId} · {projection.identity.attemptId} · generation {projection.identity.generation ?? 0} · run {projection.identity.runId}
           </div>
           <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 10, color: 'var(--muted3)', fontSize: 12 }}>
-            <span>Attempt Timeline: {projection.attempts?.length ?? 0}</span>
+            <span>Timeline: {projection.timeline?.length ?? 0}</span>
             <span>Worker Tree: {projection.workers?.length ?? 0}</span>
             <span>Pending Approvals: {projection.approvals?.length ?? 0}</span>
             <span>Evidence: {projection.evidence?.length ?? 0}</span>
           </div>
+          {pendingApprovalCards(projection.approvals ?? []).map((approval) => (
+            <div key={approval.approvalId} style={{ marginTop: 8, color: 'var(--orange)', fontSize: 11, fontFamily: 'var(--mono)' }}>
+              Approval pending · {approval.toolName} · {approval.approvalId}
+            </div>
+          ))}
           <div style={{ marginTop: 8, color: 'var(--muted3)', fontSize: 12 }}>
             <strong style={{ color: 'var(--text2)' }}>Verification / Proof</strong>
             {' · '}{projection.receipt.verdict?.verdict ?? 'not yet verified'}
@@ -189,9 +206,15 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
         </div>
       )}
       {logs.length === 0 ? (
+        (projection?.timeline?.length ?? 0) > 0 ? (
+          <div style={{ maxWidth: 760, margin: '0 auto', padding: '12px 14px', color: 'var(--muted3)', fontSize: 13 }}>
+            Durable timeline restored · {projection?.timeline?.length ?? 0} ordered events
+          </div>
+        ) : (
         <div style={{ padding: '64px 0', textAlign: 'center', color: 'var(--muted2)', fontSize: 13 }}>
           No activity yet — tools, verification and progress from a run appear here.
         </div>
+        )
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 760, margin: '0 auto' }}>
           {logs.map((l, i) => (
@@ -246,6 +269,10 @@ interface DevOSCtxType {
   setSettingsOpen:(v: boolean) => void
   settingsTab:    string
   setSettingsTab: (v: string) => void
+  mainView:       MainView
+  setMainView:    Dispatch<SetStateAction<MainView>>
+  appearance:     WorkbenchAppearance
+  setAppearance:  Dispatch<SetStateAction<WorkbenchAppearance>>
   // Execution
   isExecuting:    boolean
   isStreaming:    boolean
@@ -258,6 +285,11 @@ interface DevOSCtxType {
   executionAvailable: boolean
   executionQueue: { pending: number; claimed: number; inflight: number; workerCount: number }
   workbenchReadOnly: boolean
+  runProjection: aiden.WorkbenchRunProjection | null
+  runArtifacts: aiden.WorkbenchArtifact[]
+  capabilities: aiden.WorkbenchCapabilities | null
+  browserSession: aiden.WorkbenchBrowserSession | null
+  controlBrowser: (action: 'take' | 'return' | 'clear') => Promise<void>
   selectedContext: WorkbenchSelection
   activeJobs: ReturnType<WorkbenchController['active']>
   controllerRevision: number
@@ -272,6 +304,7 @@ interface DevOSCtxType {
   // Activity
   activityLogs:    ActivityLog[]
   setActivityLogs: Dispatch<SetStateAction<ActivityLog[]>>
+  liveActivity: LiveActivityItem[]
   // Screenshot
   screenshot:     string | null
   setScreenshot:  Dispatch<SetStateAction<string | null>>
@@ -308,6 +341,11 @@ interface DevOSCtxType {
   loadConversation: (id: string) => void
   selectActiveJob: (job: ReturnType<WorkbenchController['active']>[number]) => void
   handleQuickUpload: (e: ChangeEvent<HTMLInputElement>) => void
+  addAttachmentFiles: (files: readonly File[]) => Promise<void>
+  attachments: aiden.WorkbenchAttachment[]
+  removeAttachment: (id: string) => void
+  refreshProjection: () => void
+  clearCurrentView: () => void
   // Refs
   inputRef:       RefObject<HTMLTextAreaElement>
   kbInputRef:     RefObject<HTMLInputElement>
@@ -570,12 +608,23 @@ function NavBtn({
 
 function ExportButton() {
   const [open, setOpen] = useState(false)
+  const { messages, currentConvId } = useDevOS()
 
-  const download = (format: 'md' | 'json') => {
+  const exportCurrentConversation = (format: 'md' | 'json') => {
+    const content = format === 'json'
+      ? JSON.stringify({ id: currentConvId || null, exportedAt: new Date().toISOString(), messages }, null, 2)
+      : messages.map((message) => {
+          const attachments = message.attachments?.length
+            ? `\n\nAttachments: ${message.attachments.map((item) => item.name).join(', ')}`
+            : ''
+          return `## ${message.role === 'user' ? 'You' : 'Aiden'}\n\n${message.content}${attachments}`
+        }).join('\n\n')
+    const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/markdown' })
     const a = document.createElement('a')
-    a.href = `http://localhost:4200/api/export/conversation?format=${format}`
-    a.download = ''
+    a.href = URL.createObjectURL(blob)
+    a.download = `aiden-conversation-${currentConvId || 'current'}.${format}`
     a.click()
+    URL.revokeObjectURL(a.href)
     setOpen(false)
   }
 
@@ -601,7 +650,7 @@ function ExportButton() {
             padding: 4, minWidth: 160, marginTop: 4,
           }}>
             {(['md', 'json'] as const).map(fmt => (
-              <button key={fmt} onClick={() => download(fmt)} style={{
+              <button key={fmt} onClick={() => exportCurrentConversation(fmt)} style={{
                 display: 'block', width: '100%', textAlign: 'left',
                 padding: '8px 12px', background: 'none', border: 'none',
                 borderRadius: 4, color: '#ccc', cursor: 'pointer', fontSize: 13,
@@ -900,6 +949,14 @@ function ChatMessage({ message }: { message: Message }) {
       {/* Tool execution card */}
       {!isUser && message.phases && message.phases.length > 0 && (
         <ToolExecutionCard phases={message.phases} />
+      )}
+
+      {isUser && message.attachments && message.attachments.length > 0 && (
+        <div className="message-attachments">
+          {message.attachments.map((attachment) => (
+            <span key={attachment.id}>📎 {attachment.name} <small>{attachment.size} bytes</small></span>
+          ))}
+        </div>
       )}
 
       {/* Bubble */}
@@ -1754,61 +1811,86 @@ function KnowledgeBaseTab() {
 
 // ── NavBar ────────────────────────────────────────────────────
 
+function ModelControl() {
+  const {
+    activeModel, activeProvider, runtimeConnection,
+    setSettingsOpen, setSettingsTab, capabilities,
+  } = useDevOS()
+  const available = capabilities?.modelSwitch.available === true
+  return (
+    <button
+      type="button"
+      className="model-control"
+      aria-label={`Model: ${activeModel || 'not configured'}`}
+      title={available ? 'Open model controls' : (capabilities?.modelSwitch.reason || 'Managed by the Aiden runtime')}
+      onClick={() => { setSettingsTab('model'); setSettingsOpen(true) }}
+    >
+      <span className={`connection-dot is-${runtimeConnection}`} aria-hidden="true" />
+      <span className="model-control-copy">
+        <strong>{activeModel || 'No model'}</strong>
+        <small>{activeProvider || 'No provider'}</small>
+      </span>
+      <span aria-hidden="true">⌄</span>
+    </button>
+  )
+}
+
 function NavBar() {
   const {
-    isExecuting, uiMode,
-    setSettingsOpen,
-    activeModel, activeProvider, runtimeConnection, executionQueue,
+    isExecuting,
+    setSettingsOpen, historyOpen, setHistoryOpen, startNewChat, clearCurrentView,
+    runtimeConnection, executionQueue, activeJobs,
   } = useDevOS()
 
   return (
     <nav style={{
       height: 48, display: 'flex', alignItems: 'center',
       justifyContent: 'space-between', padding: '0 16px',
-      background: 'rgba(14,14,14,0.95)', backdropFilter: 'blur(12px)',
+      background: 'var(--topbar)', backdropFilter: 'blur(12px)',
       borderBottom: '1px solid var(--border)', flexShrink: 0, zIndex: 100,
     }}>
       {/* Brand */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          type="button"
+          className="nav-btn"
+          aria-label={historyOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          title={historyOpen ? 'Collapse sidebar' : 'Expand sidebar'}
+          onClick={() => setHistoryOpen((open) => !open)}
+          style={{ width: 28, height: 28, border: '1px solid var(--border)', borderRadius: 7, background: 'transparent', color: 'var(--muted3)', cursor: 'pointer' }}
+        >{historyOpen ? '‹' : '›'}</button>
         <div style={{
           width: 24, height: 24, borderRadius: 5,
           background: 'var(--orange)',
           display: 'flex', alignItems: 'center', justifyContent: 'center',
           fontSize: 10, fontWeight: 800, color: '#000', flexShrink: 0,
           animation: isExecuting ? 'pulse-orange 1s infinite' : 'none',
-        }}>◉</div>
+        }}>A</div>
         <span style={{ fontSize: 13, color: 'var(--text)', letterSpacing: '0.05em', fontFamily: 'var(--mono)' }}>
-          DEVOS
+          AIDEN
         </span>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>·</span>
-        <span style={{ fontSize: 13, color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>AIDEN</span>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 4 }}>
+        <span className="workbench-brand-suffix" style={{ fontSize: 11, color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>WORKBENCH</span>
+        <div className="topbar-connection" style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 4 }}>
           <span style={{
             width: 6, height: 6, borderRadius: '50%',
              background: runtimeConnection === 'connected' ? (isExecuting ? 'var(--orange)' : 'var(--green)') : 'var(--red)',
             display: 'inline-block', animation: 'pulse-dot 2s infinite',
           }} />
-          <span style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>
-             {activeProvider || 'No provider'} · {activeModel || 'No model'} · {runtimeConnection}
-          </span>
-          {(executionQueue.inflight > 0 || executionQueue.pending > 0) && (
-            <span style={{ fontSize: 10, color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>
-              · {executionQueue.inflight} running · {executionQueue.pending} queued
-            </span>
-          )}
+          <span style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>{runtimeConnection}</span>
         </div>
       </div>
 
-      {/* Mode indicator */}
-      <div style={{ fontSize: 10, fontFamily: 'var(--mono)', color: 'var(--muted)', letterSpacing: '0.1em', textTransform: 'uppercase' }}>
-        {uiMode === 'focus'     && 'Focus Mode'}
-        {uiMode === 'execution' && <span style={{ color: 'var(--orange)' }}>● Executing...</span>}
-        {uiMode === 'power'     && 'Power Mode'}
-        {uiMode === 'watch'     && 'Watch Mode'}
+      <div className="topbar-work-state" style={{ fontSize: 11, fontFamily: 'var(--mono)', color: activeJobs.length > 0 ? 'var(--blue)' : 'var(--muted2)' }}>
+        {activeJobs.length > 0 ? `● ${activeJobs.length} running` : 'Ready'}
+        {executionQueue.pending > 0 ? ` · ${executionQueue.pending} queued` : ''}
       </div>
 
       {/* Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <ModelControl />
+        <button type="button" className="nav-btn" onClick={startNewChat} title="New Chat (Ctrl+K)" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>New Chat</button>
+        <button type="button" className="nav-btn" onClick={clearCurrentView} title="Clear only the current browser view" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>Clear view</button>
         <ExportButton />
         <ChatHeader />
         <div style={{ width: 1, height: 20, background: 'var(--border2)', margin: '0 4px' }} />
@@ -1821,7 +1903,11 @@ function NavBar() {
 // ── HistorySidebar ────────────────────────────────────────────
 
 function HistorySidebar() {
-  const { conversations, currentConvId, startNewChat, loadConversation, selectActiveJob, runtimeVersion, activeJobs } = useDevOS()
+  const {
+    conversations, currentConvId, startNewChat, loadConversation, selectActiveJob,
+    runtimeVersion, activeJobs, historyOpen, mainView, setMainView,
+    setSettingsOpen, setSettingsTab,
+  } = useDevOS()
 
   const grouped = useMemo(() => {
     const now       = Date.now()
@@ -1831,8 +1917,27 @@ function HistorySidebar() {
     return { today, yesterday, earlier }
   }, [conversations])
 
+  const openSettings = (tab: string) => {
+    setSettingsTab(tab)
+    setSettingsOpen(true)
+  }
+
+  if (!historyOpen) return (
+    <aside className="history-sidebar sidebar-rail" aria-label="Collapsed navigation">
+      <button type="button" className="rail-brand" title="Aiden Workbench" aria-label="Aiden Workbench">A</button>
+      <button type="button" className="rail-action is-primary" title="New Chat" aria-label="New Chat" onClick={startNewChat}>+</button>
+      <button type="button" className={mainView === 'chat' ? 'rail-action is-active' : 'rail-action'} title="Chat" aria-label="Chat" onClick={() => setMainView('chat')}>△</button>
+      <button type="button" className={mainView === 'activity' ? 'rail-action is-active' : 'rail-action'} title={`Active Work (${activeJobs.length})`} aria-label="Active Work" onClick={() => setMainView('activity')}>◉</button>
+      <button type="button" className={mainView === 'artifacts' ? 'rail-action is-active' : 'rail-action'} title="Artifacts" aria-label="Artifacts" onClick={() => setMainView('artifacts')}>◇</button>
+      <button type="button" className="rail-action" title="Skills" aria-label="Skills" onClick={() => openSettings('skills')}>⌁</button>
+      <span className="rail-spacer" />
+      <button type="button" className={mainView === 'sponsors' ? 'rail-action is-active' : 'rail-action'} title="Sponsors" aria-label="Sponsors" onClick={() => setMainView('sponsors')}>♥</button>
+      <button type="button" className="rail-action" title="Settings" aria-label="Settings" onClick={() => openSettings('runtime')}>⚙</button>
+    </aside>
+  )
+
   return (
-    <aside style={{
+    <aside className="history-sidebar" style={{
       overflow: 'hidden', borderRight: '1px solid var(--border)',
       background: 'var(--bg1)', display: 'flex', flexDirection: 'column',
     }}>
@@ -1844,8 +1949,16 @@ function HistorySidebar() {
         display: 'flex', alignItems: 'center', gap: 8,
       }}>
         + New Chat
-        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted)' }}>⌘K</span>
+        <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted)' }}>Ctrl+K</span>
       </button>
+
+      <nav className="sidebar-nav" aria-label="Workbench surfaces">
+        <button type="button" className={mainView === 'chat' ? 'is-active' : ''} onClick={() => setMainView('chat')}><span>△</span>Chat</button>
+        <button type="button" className={mainView === 'activity' ? 'is-active' : ''} onClick={() => setMainView('activity')}><span>◉</span>Active Work{activeJobs.length > 0 && <small>{activeJobs.length}</small>}</button>
+        <button type="button" className={mainView === 'artifacts' ? 'is-active' : ''} onClick={() => setMainView('artifacts')}><span>◇</span>Artifacts</button>
+        <button type="button" onClick={() => openSettings('skills')}><span>⌁</span>Skills</button>
+        <button type="button" onClick={() => openSettings('plugins')}><span>◆</span>Plugins</button>
+      </nav>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px' }}>
         {activeJobs.length > 0 && (
@@ -1856,7 +1969,7 @@ function HistorySidebar() {
                 display: 'block', width: '100%', padding: '4px', border: 'none', background: 'transparent',
                 color: 'var(--muted2)', fontFamily: 'var(--mono)', fontSize: 10, textAlign: 'left', cursor: 'pointer',
               }}>
-                <span style={{ color: job.status === 'approval_required' || job.status === 'blocked' ? 'var(--red)' : 'var(--orange)' }}>●</span>{' '}
+                <span style={{ color: job.status === 'approval_required' ? 'var(--orange)' : job.status === 'blocked' ? 'var(--red)' : 'var(--blue)' }}>●</span>{' '}
                 <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {job.title || job.jobId.slice(0, 18)}
                 </span>
@@ -1888,8 +2001,9 @@ function HistorySidebar() {
                 fontFamily: 'var(--mono)', fontSize: 11, cursor: 'pointer',
                 transition: 'all 0.15s', overflow: 'hidden',
               }}>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1 }}>
-                  {conv.title.slice(0, 32)}{conv.title.length > 32 ? '...' : ''}
+                <span style={{ overflow: 'hidden', minWidth: 0, flex: 1 }}>
+                  <span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{conv.title.slice(0, 32)}{conv.title.length > 32 ? '...' : ''}</span>
+                  <small style={{ display: 'block', marginTop: 2, color: 'var(--muted)' }}>{new Date(conv.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small>
                 </span>
                 {conv.channels && conv.channels.length > 1 && (
                   <span className="cross-channel-badge" title={`Started on ${conv.channels[0]}`}>
@@ -1918,6 +2032,11 @@ function HistorySidebar() {
         <Sidebar />
       </div>
 
+      <div className="sidebar-secondary-nav">
+        <button type="button" className={mainView === 'sponsors' ? 'is-active' : ''} onClick={() => setMainView('sponsors')}><span>♥</span>Sponsors</button>
+        <button type="button" onClick={() => openSettings('runtime')}><span>⚙</span>Settings</button>
+      </div>
+
       <div style={{
         padding: '12px 16px', borderTop: '1px solid var(--border)',
         fontSize: 10, color: 'var(--muted)',
@@ -1936,10 +2055,10 @@ function HistorySidebar() {
 function EmptyState() {
   const { setInput } = useDevOS()
   const suggestions = [
-    'Research top AI agents 2025',
-    'What is the weather in Mumbai',
-    'Check NSE top gainers today',
-    'Create a Python script for me',
+    'Analyze this repository',
+    'Investigate this error',
+    'Summarize these files',
+    'Check my project status',
   ]
   return (
     <div style={{
@@ -1953,9 +2072,10 @@ function EmptyState() {
         display: 'flex', alignItems: 'center', justifyContent: 'center',
         fontSize: 20, fontWeight: 800, color: '#000',
         fontFamily: 'var(--sans)',
-      }}>D/</div>
-      <div style={{ fontSize: 18, fontFamily: 'var(--sans)', fontWeight: 600, color: 'var(--text)' }}>
-        What can I help you with?
+      }}>A</div>
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontSize: 20, fontFamily: 'var(--sans)', fontWeight: 650, color: 'var(--text)' }}>Aiden</div>
+        <div style={{ marginTop: 6, fontSize: 15, color: 'var(--muted3)' }}>What would you like to work on?</div>
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', maxWidth: 480 }}>
         {suggestions.map(s => (
@@ -1977,27 +2097,19 @@ function PlusMenu() {
   const {
     plusMenuOpen, setPlusMenuOpen,
     activeSubmenu, setActiveSubmenu,
-    channelStatuses, miniPrompt, setMiniPrompt,
+    miniPrompt, setMiniPrompt,
     miniPromptValue, setMiniPromptValue, submitMiniPrompt,
-    kbInputRef, takeScreenshot, setChannelModal,
+    kbInputRef,
   } = useDevOS()
 
   if (!plusMenuOpen) return null
-
-  const CHANNEL_IDS = ['telegram', 'whatsapp', 'discord', 'slack', 'email']
 
   const PLUS_MENU: MenuItem[] = [
     {
       id: 'upload',
       icon: '📎',
-      label: 'Upload to Knowledge Base',
+      label: 'Attach files',
       action: () => { kbInputRef.current?.click(); setPlusMenuOpen(false) },
-    },
-    {
-      id: 'screenshot',
-      icon: '🖼️',
-      label: 'Take Screenshot',
-      action: () => { takeScreenshot(); setPlusMenuOpen(false) },
     },
     {
       id: 'research',
@@ -2007,28 +2119,6 @@ function PlusMenu() {
         { id: 'websearch',    icon: '🌐', label: 'Web Search',    action: () => { setMiniPrompt({ type: 'websearch',  placeholder: 'Search for...' }) } },
         { id: 'deepresearch', icon: '🔬', label: 'Deep Research', action: () => { setMiniPrompt({ type: 'research',   placeholder: 'Research topic...' }) } },
         { id: 'stocks',       icon: '📊', label: 'Stock Data',    action: () => { setMiniPrompt({ type: 'stocks',     placeholder: 'e.g. NSE top gainers...' }) } },
-      ],
-    },
-    {
-      id: 'connect',
-      icon: '📡',
-      label: 'Connect',
-      children: [
-        { id: 'telegram',  icon: '💬', label: 'Telegram',  action: () => setChannelModal('telegram') },
-        { id: 'whatsapp',  icon: '📱', label: 'WhatsApp',  action: () => setChannelModal('whatsapp') },
-        { id: 'discord',   icon: '🎮', label: 'Discord',   action: () => setChannelModal('discord') },
-        { id: 'slack',     icon: '💼', label: 'Slack',     action: () => setChannelModal('slack') },
-        { id: 'email',     icon: '📧', label: 'Email',     action: () => setChannelModal('email') },
-      ],
-    },
-    {
-      id: 'skills',
-      icon: '⚡',
-      label: 'Skills',
-      children: [
-        { id: 'memory',       icon: '🧠', label: 'View Memory',   action: () => setChannelModal('memory') },
-        { id: 'skillsbrowse', icon: '📚', label: 'Browse Skills', action: () => setChannelModal('skills') },
-        { id: 'mcp',          icon: '🔌', label: 'MCP Plugins',   action: () => setChannelModal('mcp') },
       ],
     },
   ]
@@ -2115,12 +2205,6 @@ function PlusMenu() {
                   >
                     <span style={{ fontSize: 14, minWidth: 20 }}>{child.icon}</span>
                     <span style={{ flex: 1 }}>{child.label}</span>
-                    {CHANNEL_IDS.includes(child.id) && (
-                      <span style={{
-                        width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
-                        background: channelStatuses[child.id] ? 'var(--green)' : 'var(--muted)',
-                      }} />
-                    )}
                   </button>
                 ))}
 
@@ -2159,11 +2243,239 @@ function PlusMenu() {
 
 // ── ChatPanel ─────────────────────────────────────────────────
 
+function ArtifactCard({ artifact }: { artifact: aiden.WorkbenchArtifact }) {
+  const [preview, setPreview] = useState<{ url?: string; svg?: string; error?: string } | null>(null)
+
+  useEffect(() => () => { if (preview?.url) URL.revokeObjectURL(preview.url) }, [preview?.url])
+
+  const open = async () => {
+    if (preview) { setPreview(null); return }
+    try {
+      const content = await aiden.loadArtifactContent(artifact.id)
+      if (content.mime === 'image/svg+xml') setPreview({ svg: await content.blob.text() })
+      else if (content.mime.startsWith('image/')) setPreview({ url: URL.createObjectURL(content.blob) })
+      else setPreview({ error: 'Preview is available for image artifacts only.' })
+    } catch (error) {
+      setPreview({ error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  return (
+    <div className="artifact-card">
+      <button type="button" onClick={() => { void open() }} className="artifact-card-button">
+        <span aria-hidden="true">◇</span>
+        <span style={{ minWidth: 0, flex: 1 }}>
+          <strong>{artifact.name}</strong>
+          <small>{artifact.kind} · {artifact.tool} · {artifact.bytes === null ? 'size unknown' : `${artifact.bytes} bytes`}</small>
+        </span>
+        <span>{preview ? '−' : '+'}</span>
+      </button>
+      {preview?.url && <img className="artifact-preview" src={preview.url} alt={artifact.name} />}
+      {preview?.svg && <iframe className="artifact-preview" title={`${artifact.name} preview`} sandbox="" srcDoc={preview.svg} />}
+      {preview?.error && <div className="artifact-preview-error">{preview.error}</div>}
+    </div>
+  )
+}
+
+function ArtifactsView() {
+  const { runArtifacts, selectedContext } = useDevOS()
+  return (
+    <section className="workspace-surface" aria-labelledby="artifacts-title">
+      <header className="workspace-surface-header">
+        <div>
+          <span className="eyebrow">Current work</span>
+          <h2 id="artifacts-title">Artifacts</h2>
+          <p>Files created or modified by the selected durable Job.</p>
+        </div>
+        <span className="surface-count">{runArtifacts.length}</span>
+      </header>
+      {runArtifacts.length === 0 ? (
+        <div className="workspace-empty-state">
+          <strong>No artifacts for this work yet</strong>
+          <span>{selectedContext.jobId ? 'Resulting files will appear here after durable verification.' : 'Select Active Work or run a task that creates a file.'}</span>
+        </div>
+      ) : (
+        <div className="artifact-gallery">
+          {runArtifacts.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function SponsorsView() {
+  return (
+    <section className="workspace-surface sponsor-surface" aria-labelledby="sponsors-title">
+      <header className="workspace-surface-header">
+        <div>
+          <span className="eyebrow">Independent and local-first</span>
+          <h2 id="sponsors-title">Sponsors</h2>
+          <p>Aiden is built independently. Support helps fund development, testing and infrastructure.</p>
+        </div>
+        <a className="sponsor-button" href={SPONSOR_URL} target="_blank" rel="noopener noreferrer">Sponsor Aiden</a>
+      </header>
+      <div className="sponsor-list" aria-label="Top Sponsors">
+        <h3>Top Sponsors</h3>
+        {PUBLIC_SPONSORS.length === 0 ? (
+          <div className="workspace-empty-state">
+            <strong>No public sponsors yet</strong>
+            <span>Become the first supporter. Recognition is always opt-in.</span>
+            <a href={SPONSOR_URL} target="_blank" rel="noopener noreferrer">Sponsor Aiden</a>
+          </div>
+        ) : PUBLIC_SPONSORS.map((sponsor) => (
+          <article className="sponsor-card" key={sponsor.displayName}>
+            <span className="sponsor-avatar" aria-hidden="true">{sponsor.displayName.slice(0, 1).toUpperCase()}</span>
+            <div>
+              {sponsor.profileUrl
+                ? <a href={sponsor.profileUrl} target="_blank" rel="noopener noreferrer"><strong>{sponsor.displayName}</strong></a>
+                : <strong>{sponsor.displayName}</strong>}
+              {sponsor.tier && <small>{sponsor.tier}</small>}
+              {sponsor.message && <p>{sponsor.message}</p>}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function LiveActivitySurface() {
+  const {
+    liveActivity, runProjection, runArtifacts, selectedContext,
+    isStreaming, thinking, refreshProjection, browserSession, controlBrowser,
+  } = useDevOS()
+  const [expanded, setExpanded] = useState(false)
+  const [decisionPending, setDecisionPending] = useState<string | null>(null)
+  const [telemetryVisible, setTelemetryVisible] = useState(false)
+  const [telemetryLeaving, setTelemetryLeaving] = useState(false)
+  const summary = summarizeCompletedActivity(liveActivity)
+  const generation = runProjection?.identity.generation
+  const approvals = pendingApprovalCards(runProjection?.approvals ?? []).filter((approval) =>
+    approval.jobId === selectedContext.jobId
+    && approval.attemptId === selectedContext.attemptId
+    && (generation === undefined || approval.generation === generation))
+  const running = isStreaming || summary.running > 0 || Boolean(thinking)
+  const showTelemetry = shouldShowChatTelemetry({
+    running,
+    pendingApprovalCount: approvals.length,
+    terminal: runProjection?.receipt.terminal,
+  })
+  const visibleActivity = selectChatLiveActivity(liveActivity)
+  const currentActivity = visibleActivity.at(-1)
+  const currentDuration = currentActivity?.durationMs == null
+    ? null
+    : currentActivity.durationMs < 1_000
+      ? `${currentActivity.durationMs}ms`
+      : `${(currentActivity.durationMs / 1_000).toFixed(1)}s`
+  const currentLabel = approvals.length > 0 && !running
+    ? 'Approval required'
+    : runProjection?.receipt.terminal
+      ? 'Completed'
+      : currentActivity
+        ? `${currentActivity.label}${currentActivity.detail ? ` · ${currentActivity.detail}` : ''}`
+        : (thinking?.message || 'Aiden is working')
+
+  useEffect(() => {
+    if (showTelemetry) {
+      setTelemetryVisible(true)
+      setTelemetryLeaving(false)
+      if (approvals.length > 0) setExpanded(true)
+      return
+    }
+    setExpanded(false)
+    if (!telemetryVisible) return
+    const fadeTimer = window.setTimeout(() => setTelemetryLeaving(true), 1_000)
+    const removeTimer = window.setTimeout(() => {
+      setTelemetryVisible(false)
+      setTelemetryLeaving(false)
+    }, 1_180)
+    return () => {
+      window.clearTimeout(fadeTimer)
+      window.clearTimeout(removeTimer)
+    }
+  }, [showTelemetry, telemetryVisible, approvals.length])
+  if (!telemetryVisible && runArtifacts.length === 0) return null
+
+  const decide = async (approvalId: string, decision: 'approved' | 'denied') => {
+    setDecisionPending(approvalId)
+    try {
+      await aiden.decideApproval(approvalId, decision)
+      refreshProjection()
+    } finally {
+      setDecisionPending(null)
+    }
+  }
+
+  return (
+    <section className={`live-activity-surface ${telemetryVisible ? 'has-telemetry' : 'is-artifact-only'}`} aria-label="Current activity and artifacts">
+      {telemetryVisible && (
+        <div className={`live-telemetry ${telemetryLeaving ? 'is-leaving' : ''}`}>
+          <button type="button" className="live-activity-summary" onClick={() => setExpanded((open) => !open)}>
+            <span className={running ? 'activity-pulse' : ''}>{approvals.length > 0 && !running ? '!' : '◐'}</span>
+            <span className="live-activity-current">{currentLabel}</span>
+            <span className="live-activity-count">{currentDuration ? `${currentDuration} · ` : ''}{expanded ? '−' : '+'}</span>
+          </button>
+          {expanded && (
+            <div className="live-activity-details">
+              {visibleActivity.map((item) => (
+            <div key={item.id} className={`live-activity-row status-${item.status}`} data-activity-id={item.id}>
+              <span>{item.status === 'running' ? '◐' : item.status === 'ok' ? '✓' : item.status === 'failed' ? '×' : '!'}</span>
+              <strong>{item.kind}</strong>
+              <span className="live-activity-label">{item.label}{item.detail ? ` · ${item.detail}` : ''}</span>
+              {item.durationMs != null && <small>{item.durationMs < 1000 ? `${item.durationMs}ms` : `${(item.durationMs / 1000).toFixed(1)}s`}</small>}
+            </div>
+          ))}
+              </div>
+          )}
+          {approvals.map((approval) => (
+            <div key={approval.approvalId} className="approval-card">
+              <div><strong>Approval required</strong><span>{approval.riskTier}</span></div>
+              <p>{approval.toolName} requests permission for this exact action.</p>
+              {approval.target && <code className="approval-target">{approval.target}</code>}
+              <small>{approval.approvalId} · generation {approval.generation}</small>
+              <div className="approval-actions">
+                <button disabled={decisionPending === approval.approvalId} onClick={() => { void decide(approval.approvalId, 'approved') }}>Approve once</button>
+                <button disabled={decisionPending === approval.approvalId} onClick={() => { void decide(approval.approvalId, 'denied') }}>Deny</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      {runArtifacts.length > 0 && (
+        <div className="artifact-list">
+          <h4>Artifacts</h4>
+          {runArtifacts.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+        </div>
+      )}
+      {browserSession && (
+        <div className="browser-control-surface" aria-label="Browser control">
+          <div>
+            <strong>Browser</strong>
+            <span>{browserSession.mode} · {browserSession.state.replace(/_/g, ' ')}</span>
+          </div>
+          <small>{browserSession.browserSessionId} · generation {browserSession.generation}</small>
+          <div className="approval-actions">
+            {browserSession.state === 'user_control'
+              ? <button type="button" onClick={() => { void controlBrowser('return') }}>Return control</button>
+              : ['ready', 'user_control_required'].includes(browserSession.state)
+                ? <button type="button" onClick={() => { void controlBrowser('take') }}>Take control</button>
+                : null}
+            {['closed', 'cancelled', 'lost', 'failed'].includes(browserSession.state)
+              ? <button type="button" onClick={() => { void controlBrowser('clear') }}>Clear stale session</button>
+              : null}
+          </div>
+        </div>
+      )}
+    </section>
+  )
+}
+
 function ChatPanel() {
   const {
     messages, input, setInput, isStreaming, execMode, setExecMode,
     thinking, budget,
-    sendMessage, stopExecution, handleQuickUpload,
+    sendMessage, stopExecution, handleQuickUpload, addAttachmentFiles,
+    attachments, removeAttachment, selectedContext,
     inputRef, kbInputRef, messagesEndRef,
     plusMenuOpen, setPlusMenuOpen,
     voiceStatus, isRecording, ttsEnabled, setTtsEnabled, recordingTimer, startRecording,
@@ -2183,10 +2495,18 @@ function ChatPanel() {
     e.target.style.height = 'auto'
     e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px'
   }
+  const activityAnchor = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index].role === 'assistant') return index
+    }
+    return messages.length
+  }, [messages])
+  const hasSelectedWork = selectedContext.jobId !== null
 
   return (
     <section style={{
       display: 'flex', flexDirection: 'column',
+      flex: 1, minHeight: 0,
       overflow: 'hidden', background: 'var(--bg)', minWidth: 0,
       position: 'relative',
     }}>
@@ -2197,14 +2517,20 @@ function ChatPanel() {
           <EmptyState />
         ) : (
           <div style={{ maxWidth: 800, width: '100%', margin: '0 auto', padding: '0 24px' }}>
-            {messages.map(msg => <ChatMessage key={msg.id} message={msg} />)}
+            {messages.map((msg, index) => (
+              <Fragment key={msg.id}>
+                {index === activityAnchor && hasSelectedWork && <LiveActivitySurface />}
+                <ChatMessage message={msg} />
+              </Fragment>
+            ))}
+            {activityAnchor === messages.length && hasSelectedWork && <LiveActivitySurface />}
             <div ref={messagesEndRef} />
           </div>
         )}
       </div>
 
       {/* Thinking indicator */}
-      {thinking && (
+      {thinking && !hasSelectedWork && (
         <div style={{
           maxWidth: 800, width: '100%', margin: '0 auto', padding: '4px 24px 2px',
           display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
@@ -2236,7 +2562,20 @@ function ChatPanel() {
         borderTop: '1px solid var(--border)',
         padding: '12px 24px',
         background: 'var(--bg1)', flexShrink: 0,
+      }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' }} onDrop={(event) => {
+        event.preventDefault()
+        void addAttachmentFiles(Array.from(event.dataTransfer.files))
       }}>
+        {attachments.length > 0 && (
+          <div className="attachment-tray">
+            {attachments.map((attachment) => (
+              <span key={attachment.id} className="attachment-chip">
+                <span>📎 {attachment.name}</span>
+                <button type="button" aria-label={`Remove ${attachment.name}`} onClick={() => removeAttachment(attachment.id)}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
         <div style={{ maxWidth: 800, margin: '0 auto', display: 'flex', gap: 8, alignItems: 'flex-end', position: 'relative' }}>
           {/* Plus menu trigger */}
           <div style={{ position: 'relative', flexShrink: 0 }}>
@@ -2256,7 +2595,7 @@ function ChatPanel() {
             >+</button>
           </div>
           <input
-            ref={kbInputRef} type="file" accept=".txt,.md,.pdf,.epub,.markdown"
+            ref={kbInputRef} type="file" multiple accept=".txt,.md,.markdown,.json,.yaml,.yml,.csv,.ts,.tsx,.js,.jsx,.py,.rs,.go,.java,.c,.cpp,.h,.hpp,.html,.css,.svg,.png,.jpg,.jpeg,.webp,.gif,.pdf"
             style={{ display: 'none' }} onChange={handleQuickUpload}
           />
 
@@ -2268,7 +2607,7 @@ function ChatPanel() {
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
             placeholder="Ask Aiden anything..."
             rows={1}
-            disabled={isStreaming}
+            disabled={isStreaming && hasSelectedWork}
             style={{
               flex: 1, resize: 'none',
               background: 'var(--bg2)', border: '1px solid var(--border2)',
@@ -2340,13 +2679,13 @@ function ChatPanel() {
           ) : (
             <button
               onClick={() => sendMessage()}
-              disabled={!input.trim() || isStreaming || !executionAvailable || workbenchReadOnly}
+              disabled={(!input.trim() && attachments.length === 0) || (isStreaming && hasSelectedWork) || !executionAvailable || workbenchReadOnly}
               style={{
                 width: 36, height: 36, borderRadius: '50%', flexShrink: 0,
-                background: input.trim() && !isStreaming && executionAvailable && !workbenchReadOnly ? 'var(--orange)' : 'var(--bg3)',
+                background: (input.trim() || attachments.length > 0) && !(isStreaming && hasSelectedWork) && executionAvailable && !workbenchReadOnly ? 'var(--orange)' : 'var(--bg3)',
                 border: 'none',
-                color: input.trim() && !isStreaming && executionAvailable && !workbenchReadOnly ? '#000' : 'var(--muted)',
-                cursor: input.trim() && !isStreaming && executionAvailable && !workbenchReadOnly ? 'pointer' : 'not-allowed',
+                color: (input.trim() || attachments.length > 0) && !(isStreaming && hasSelectedWork) && executionAvailable && !workbenchReadOnly ? '#000' : 'var(--muted)',
+                cursor: (input.trim() || attachments.length > 0) && !(isStreaming && hasSelectedWork) && executionAvailable && !workbenchReadOnly ? 'pointer' : 'not-allowed',
                 fontSize: 14, transition: 'all 0.2s',
                 display: 'flex', alignItems: 'center', justifyContent: 'center',
               }}
@@ -2638,12 +2977,12 @@ function LiveViewPanel() {
 // ── StatusBar (replaces ActivityBar + DisclaimerBar) ─────────
 
 function StatusBar() {
-  const { activityLogs, systemStats, activeModel, activeProvider, runtimeConnection, runtimeVersion, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
+  const { activityLogs, systemStats, activeModel, activeProvider, runtimeConnection, runtimeVersion, executionQueue, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
   const providerLabel = activeProvider || 'No provider'
   const memCount = systemStats?.recentHistory?.length ?? 0
 
   return (
-    <div style={{
+    <div className="system-awareness-strip" style={{
       height: 24, display: 'flex', alignItems: 'center', justifyContent: 'center',
       gap: 10, flexShrink: 0,
       background: 'var(--bg1)', borderTop: '1px solid var(--border)',
@@ -2652,12 +2991,16 @@ function StatusBar() {
     }}>
       <span style={{ color: 'var(--muted3)' }}>Aiden v{runtimeVersion}</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
+      <span>Local</span>
+      <span style={{ color: 'var(--border2)' }}>·</span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
          {runtimeConnection}
       </span>
       <span style={{ color: 'var(--border2)' }}>·</span>
        <span>{providerLabel} · {activeModel || 'No model'}</span>
+      <span style={{ color: 'var(--border2)' }}>·</span>
+      <span>{executionQueue.workerCount} workers · {activeJobs.length} active</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
       <span>{memCount} {memCount === 1 ? 'memory' : 'memories'}</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
@@ -2728,44 +3071,17 @@ const SOURCE_COLORS: Record<string, string> = {
 }
 
 function SkillsManager() {
-  const [skills, setSkills]       = useState<any[]>([])
-  const [loading, setLoading]     = useState(true)
-  const [toggling, setToggling]   = useState<string | null>(null)
-  const [deleting, setDeleting]   = useState<string | null>(null)
+  const { capabilities } = useDevOS()
+  const [skills, setSkills]       = useState<any[]>(capabilities?.skills ?? [])
+  const [loading, setLoading]     = useState(capabilities === null)
   const [filter, setFilter]       = useState<'all' | 'built-in' | 'learned' | 'approved' | 'workspace'>('all')
 
-  const load = () => {
-    setLoading(true)
-    fetch('http://localhost:4200/api/skills')
-      .then(r => r.json())
-      .then(d => { setSkills(Array.isArray(d) ? d : []); setLoading(false) })
-      .catch(() => setLoading(false))
-  }
+  useEffect(() => {
+    setSkills((capabilities?.skills ?? []).map((skill) => ({ ...skill, source: skill.category || 'runtime', enabled: true })))
+    setLoading(capabilities === null)
+  }, [capabilities])
 
-  useEffect(() => { load() }, [])
-
-  const toggle = async (name: string) => {
-    setToggling(name)
-    try {
-      await fetch(`http://localhost:4200/api/skills/${encodeURIComponent(name)}/toggle`, { method: 'POST' })
-      setSkills(prev => prev.map(s => s.name === name ? { ...s, enabled: !s.enabled } : s))
-    } catch {}
-    setToggling(null)
-  }
-
-  const remove = async (name: string) => {
-    if (!confirm(`Delete skill "${name}"? This cannot be undone.`)) return
-    setDeleting(name)
-    try {
-      const r = await fetch(`http://localhost:4200/api/skills/${encodeURIComponent(name)}`, { method: 'DELETE' })
-      if (r.ok) setSkills(prev => prev.filter(s => s.name !== name))
-    } catch {}
-    setDeleting(null)
-  }
-
-  const refresh = () => {
-    fetch('http://localhost:4200/api/skills/refresh', { method: 'POST' }).then(load).catch(load)
-  }
+  const refresh = () => undefined
 
   const visible = filter === 'all' ? skills : skills.filter(s => s.source === filter)
   const counts  = skills.reduce((acc: Record<string, number>, s) => {
@@ -2789,7 +3105,7 @@ function SkillsManager() {
             }}>{f} ({count})</button>
           )
         })}
-        <button type="button" onClick={refresh} style={{
+        <button type="button" onClick={refresh} disabled title="Managed by the Aiden runtime" style={{
           marginLeft: 'auto', padding: '3px 10px', borderRadius: 4,
           border: '1px solid var(--border)', background: 'transparent',
           color: 'var(--muted2)', fontSize: 10, cursor: 'pointer',
@@ -2804,8 +3120,7 @@ function SkillsManager() {
       {visible.map((skill: any) => {
         const isBuiltIn  = skill.source === 'built-in'
         const srcColor   = SOURCE_COLORS[skill.source] || 'var(--muted)'
-        const isToggling = toggling === skill.name
-        const isDeleting = deleting === skill.name
+        const isToggling = false
         return (
           <div key={skill.name} style={{
             padding: '10px 12px', marginBottom: 6,
@@ -2832,19 +3147,19 @@ function SkillsManager() {
               </div>
               <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
                 {/* Toggle */}
-                <button type="button" onClick={() => toggle(skill.name)} disabled={isToggling} title={skill.enabled ? 'Disable' : 'Enable'} style={{
+                <button type="button" disabled title="Managed by the Aiden runtime" style={{
                   padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
                   border: `1px solid ${skill.enabled ? 'rgba(52,211,153,0.4)' : 'var(--border)'}`,
                   background: skill.enabled ? 'rgba(52,211,153,0.08)' : 'transparent',
                   color: skill.enabled ? '#34d399' : 'var(--muted)', fontSize: 10,
                 }}>{isToggling ? '…' : skill.enabled ? 'ON' : 'OFF'}</button>
                 {/* Delete — only for non built-in */}
-                {!isBuiltIn && (
-                  <button type="button" onClick={() => remove(skill.name)} disabled={isDeleting} title="Delete skill" style={{
+                {false && !isBuiltIn && (
+                  <button type="button" disabled title="Managed by the Aiden runtime" style={{
                     padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
                     border: '1px solid rgba(239,68,68,0.3)', background: 'transparent',
                     color: 'var(--red)', fontSize: 10,
-                  }}>{isDeleting ? '…' : '✕'}</button>
+                  }}>✕</button>
                 )}
               </div>
             </div>
@@ -3218,15 +3533,12 @@ interface PluginInfo {
 }
 
 function PluginsList() {
-  const [plugins, setPlugins] = useState<PluginInfo[]>([])
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    fetch('/api/plugins')
-      .then(r => r.json())
-      .then((d: { plugins: PluginInfo[] }) => { setPlugins(d.plugins || []); setLoading(false) })
-      .catch(() => setLoading(false))
-  }, [])
+  const { capabilities } = useDevOS()
+  const plugins = (capabilities?.plugins ?? []).map((plugin) => ({
+    ...plugin,
+    active: plugin.status === 'active' || plugin.status === 'loaded' || plugin.status === 'ready',
+  }))
+  const loading = capabilities === null
 
   if (loading) return <p style={settingsTextStyle}>Loading plugins...</p>
 
@@ -3280,9 +3592,7 @@ function PluginsList() {
         ))
       )}
       <p style={{ ...settingsTextStyle, marginTop: 16, fontSize: 10 }}>
-        Each plugin needs a{' '}
-        <code style={{ fontFamily: 'var(--mono)' }}>plugin.json</code> manifest and a JS entry file.
-        See <code style={{ fontFamily: 'var(--mono)' }}>workspace/plugins/hello-world/</code> for an example.
+        Managed by the Aiden runtime. Workbench shows the exact loaded inventory and does not mutate it.
       </p>
     </div>
   )
@@ -4286,6 +4596,12 @@ response = client.chat.completions.create(
 
 const SETTINGS_TABS = [
   { id: 'runtime',  label: '◆ Runtime'       },
+  { id: 'model',    label: '◈ Model'         },
+  { id: 'skills',   label: '◇ Skills'        },
+  { id: 'plugins',  label: '◇ Plugins'       },
+  { id: 'conversation', label: '◇ Conversation' },
+  { id: 'appearance', label: '◐ Appearance'    },
+  { id: 'sponsor',  label: '♥ Sponsor'        },
   { id: 'guide',    label: '📖 User Guide'  },
   { id: 'privacy',  label: '📜 Privacy'     },
   { id: 'legal',    label: '⚖️ Legal'        },
@@ -4298,7 +4614,8 @@ function SettingsDrawer() {
     licenseStatus, licenseKey, setLicenseKey, activatingKey, licenseMsg, setLicenseMsg,
     validateKey, clearProLicense, setPricingOpen, runtimeVersion,
     activeProvider, activeModel, runtimeConnection, executionAvailable,
-    executionQueue, workbenchReadOnly,
+    executionQueue, workbenchReadOnly, capabilities, startNewChat, clearCurrentView,
+    appearance, setAppearance, setMainView,
   } = useDevOS()
 
   return (
@@ -4307,7 +4624,7 @@ function SettingsDrawer() {
         position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)',
         zIndex: 200, backdropFilter: 'blur(2px)',
       }} />
-      <div style={{
+      <div className="settings-drawer" style={{
         position: 'fixed', top: 0, right: 0, bottom: 0, width: 420,
         background: 'var(--bg1)', borderLeft: '1px solid var(--border)',
         zIndex: 201, display: 'flex', flexDirection: 'column',
@@ -4350,6 +4667,7 @@ function SettingsDrawer() {
               <p style={settingsTextStyle}><strong style={{ color: 'var(--text)' }}>Aiden v{runtimeVersion}</strong></p>
               <p style={settingsTextStyle}>Provider: <strong style={{ color: 'var(--text)' }}>{activeProvider || 'Not configured'}</strong></p>
               <p style={settingsTextStyle}>Model: <strong style={{ color: 'var(--text)' }}>{activeModel || 'Not configured'}</strong></p>
+              <p style={settingsTextStyle}>Managed by the Aiden runtime. Change provider or model from the CLI, then reopen Workbench.</p>
               <p style={settingsTextStyle}>Connection: <strong style={{ color: 'var(--text)' }}>{runtimeConnection}</strong></p>
               <p style={settingsTextStyle}>Execution: <strong style={{ color: executionAvailable ? 'var(--green)' : 'var(--red)' }}>
                 {executionAvailable ? `${executionQueue.workerCount} durable workers ready` : 'unavailable'}
@@ -4368,7 +4686,45 @@ function SettingsDrawer() {
 
           {settingsTab === 'model' && (
             <SettingsSection title="Active Model">
-              <p style={settingsTextStyle}>Configure your LLM provider in the API Keys tab. DevOS automatically routes between providers based on availability.</p>
+              <p style={settingsTextStyle}>Provider: <strong style={{ color: 'var(--text)' }}>{activeProvider || 'No provider configured'}</strong></p>
+              <p style={settingsTextStyle}>Model: <strong style={{ color: 'var(--text)' }}>{activeModel || 'No model configured'}</strong></p>
+              <p style={settingsTextStyle}>Status: <strong style={{ color: runtimeConnection === 'connected' ? 'var(--green)' : 'var(--red)' }}>{runtimeConnection}</strong></p>
+              <p style={settingsTextStyle}>{capabilities?.modelSwitch.available
+                ? 'Model changes are available through the runtime.'
+                : (capabilities?.modelSwitch.reason || 'Managed by the Aiden runtime. Use the CLI to change models.')}</p>
+            </SettingsSection>
+          )}
+
+          {settingsTab === 'conversation' && (
+            <SettingsSection title="Conversation">
+              <p style={settingsTextStyle}>These controls change only the current browser view. Durable Job, Attempt, Evidence and Proof records remain intact.</p>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button type="button" className="nav-btn" onClick={() => { startNewChat(); setSettingsOpen(false) }}>New Chat</button>
+                <button type="button" className="nav-btn" onClick={() => { clearCurrentView(); setSettingsOpen(false) }}>Clear current view</button>
+              </div>
+              <p style={settingsTextStyle}>Use Export in the Workbench header for Markdown or JSON. Durable deletion is not exposed because no safe deletion authority is available.</p>
+            </SettingsSection>
+          )}
+
+          {settingsTab === 'appearance' && (
+            <SettingsSection title="Appearance">
+              <p style={settingsTextStyle}>Appearance is a local Workbench preference and does not change durable runtime state.</p>
+              <div className="appearance-options" role="group" aria-label="Appearance">
+                <button type="button" className={appearance === 'dark' ? 'is-selected' : ''} onClick={() => setAppearance('dark')}>
+                  <strong>Dark</strong><small>Always use Aiden’s designed dark workspace.</small>
+                </button>
+                <button type="button" className={appearance === 'system' ? 'is-selected' : ''} onClick={() => setAppearance('system')}>
+                  <strong>System</strong><small>Follow the operating-system appearance.</small>
+                </button>
+              </div>
+            </SettingsSection>
+          )}
+
+          {settingsTab === 'sponsor' && (
+            <SettingsSection title="Sponsor Aiden">
+              <p style={settingsTextStyle}>Aiden is built independently. Support helps fund development, testing and infrastructure.</p>
+              <button type="button" className="sponsor-button" onClick={() => { setMainView('sponsors'); setSettingsOpen(false) }}>Open Sponsors</button>
+              <p style={settingsTextStyle}>Support opens the reviewed external payment page. Aiden never reads or stores payment details.</p>
             </SettingsSection>
           )}
 
@@ -4821,6 +5177,7 @@ export default function Home() {
   const [activityOpen,   setActivityOpen]   = useState(false)
   const [settingsOpen,   setSettingsOpen]   = useState(false)
   const [settingsTab,    setSettingsTab]    = useState('runtime')
+  const [appearance,     setAppearance]     = useState<WorkbenchAppearance>('dark')
   const [isExecuting,    setIsExecuting]    = useState(false)
   const [isStreaming,    setIsStreaming]    = useState(false)
   const [thinking,       setThinking]       = useState<{ stage: string; message: string; tool?: string } | null>(null)
@@ -4840,9 +5197,22 @@ export default function Home() {
 
   // ── Activity / screenshot ───────────────────────────────────
   const [activityLogs,   setActivityLogs]   = useState<ActivityLog[]>([])
+  const [liveActivity,   setLiveActivity]   = useState<LiveActivityItem[]>([])
+  const liveActivityByJobRef = useRef(new Map<string, LiveActivityItem[]>())
+  const [attachments,    setAttachments]    = useState<aiden.WorkbenchAttachment[]>([])
+  const [runProjection,  setRunProjection]  = useState<aiden.WorkbenchRunProjection | null>(null)
+  const [runArtifacts,   setRunArtifacts]   = useState<aiden.WorkbenchArtifact[]>([])
+  const [capabilities,   setCapabilities]   = useState<aiden.WorkbenchCapabilities | null>(null)
+  const [browserSession, setBrowserSession] = useState<aiden.WorkbenchBrowserSession | null>(null)
+  const [projectionRevision, setProjectionRevision] = useState(0)
+  const recordLiveActivity = useCallback((jobId: string, activity: LiveActivityItem, foreground: boolean) => {
+    const next = mergeLiveActivity(liveActivityByJobRef.current.get(jobId) ?? [], activity)
+    liveActivityByJobRef.current.set(jobId, next)
+    if (foreground) setLiveActivity(next)
+  }, [])
   const [screenshot,     setScreenshot]     = useState<string | null>(null)
   // ── Main view (chat | activity) + the run currently attached to the chat ──
-  const [mainView,       setMainView]       = useState<'chat' | 'activity'>('chat')
+  const [mainView,       setMainView]       = useState<MainView>('chat')
   const activeRunIdRef = useRef<number | null>(null)
   const activeRunFollowAbortRef = useRef<AbortController | null>(null)
   const activeRunFollowControllersRef = useRef<Set<AbortController>>(new Set())
@@ -4856,6 +5226,7 @@ export default function Home() {
   const selectContext = useCallback((selection: WorkbenchSelection, replace = false) => {
     workbenchControllerRef.current.select(selection)
     publishController()
+    setMainView('chat')
     if (typeof window !== 'undefined') {
       const next = selectionToSearch(selection)
       const url = `${window.location.pathname}${next}`
@@ -4913,6 +5284,82 @@ export default function Home() {
     return () => { current = false; window.clearInterval(timer) }
   }, [publishController, syncForegroundLifecycle])
   useEffect(() => {
+    let current = true
+    void aiden.loadWorkbenchCapabilities()
+      .then((next) => { if (current) setCapabilities(next) })
+      .catch(() => { if (current) setCapabilities({ modelSwitch: { available: false, reason: 'Managed by the Aiden runtime.' }, skills: [], plugins: [] }) })
+    return () => { current = false }
+  }, [])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const saved = window.localStorage.getItem('aiden.workbench.sidebar.v1')
+    if (saved === 'closed') setHistoryOpen(false)
+    if (window.matchMedia('(max-width: 980px)').matches) setHistoryOpen(false)
+  }, [])
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('aiden.workbench.sidebar.v1', historyOpen ? 'open' : 'closed')
+    }
+  }, [historyOpen])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const saved = window.localStorage.getItem('aiden.workbench.appearance.v1')
+    if (saved === 'system' || saved === 'dark') setAppearance(saved)
+  }, [])
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return
+    document.documentElement.dataset.appearance = appearance
+    window.localStorage.setItem('aiden.workbench.appearance.v1', appearance)
+  }, [appearance])
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const narrow = window.matchMedia('(max-width: 980px)')
+    const collapse = (event: MediaQueryListEvent) => { if (event.matches) setHistoryOpen(false) }
+    narrow.addEventListener('change', collapse)
+    return () => narrow.removeEventListener('change', collapse)
+  }, [])
+  useEffect(() => {
+    let current = true
+    if (!activeJobId || !activeAttemptId || activeRunId === null) {
+      setRunProjection(null)
+      setRunArtifacts([])
+      return () => { current = false }
+    }
+    const refresh = async () => {
+      const [projection, artifacts] = await Promise.all([
+        aiden.loadRunProjection(activeJobId, activeAttemptId, activeRunId),
+        aiden.listArtifacts(activeRunId),
+      ])
+      if (!current) return
+      setRunProjection(projection)
+      setRunArtifacts(artifacts)
+    }
+    void refresh().catch(() => { /* live events remain available during transient projection failure */ })
+    const timer = runProjection?.receipt.terminal ? null : window.setInterval(() => {
+      void refresh().catch(() => { /* keep the last exact durable projection */ })
+    }, 1_000)
+    return () => { current = false; if (timer !== null) window.clearInterval(timer) }
+  }, [activeJobId, activeAttemptId, activeRunId, projectionRevision, runProjection?.receipt.terminal])
+  useEffect(() => {
+    let current = true
+    if (!activeJobId) {
+      setBrowserSession(null)
+      return () => { current = false }
+    }
+    const refresh = async () => {
+      const next = await aiden.loadBrowserSession(activeJobId)
+      if (current) setBrowserSession(next)
+    }
+    void refresh().catch(() => { if (current) setBrowserSession(null) })
+    const timer = window.setInterval(() => { void refresh().catch(() => { /* keep last durable state */ }) }, 1_000)
+    return () => { current = false; window.clearInterval(timer) }
+  }, [activeJobId])
+  const controlBrowser = useCallback(async (action: 'take' | 'return' | 'clear') => {
+    if (!activeJobId) return
+    const next = await aiden.controlBrowserSession(activeJobId, action)
+    setBrowserSession(next)
+  }, [activeJobId])
+  useEffect(() => {
     if (typeof window === 'undefined') return
     const onPopState = () => {
       const selection = selectionFromSearch(window.location.search)
@@ -4923,6 +5370,7 @@ export default function Home() {
       setCurrentConvId(conversation?.id || selection.sessionId || '')
       if (conversation) setMessages(conversation.messages)
       else if (!selection.jobId) setMessages([])
+      setLiveActivity(selection.jobId ? (liveActivityByJobRef.current.get(selection.jobId) ?? []) : [])
       setActiveJobId(selection.jobId)
       setActiveAttemptId(selection.attemptId)
       setActiveRunId(selection.runId)
@@ -4998,6 +5446,7 @@ export default function Home() {
         })
       },
       onActivity: (activity) => {
+        recordLiveActivity(restored.admission.jobId, activity, true)
         const style: ActivityLog['style'] = activity.status === 'ok'
           ? 'ok' : (activity.status === 'failed' || activity.status === 'warn') ? 'err' : 'active'
         const icon = activity.kind === 'verify'
@@ -5073,7 +5522,7 @@ export default function Home() {
       controller.abort()
       activeRunFollowControllersRef.current.delete(controller)
     }
-  }, [publishController, selectContext])
+  }, [publishController, selectContext, recordLiveActivity])
   useEffect(() => () => {
     for (const controller of Array.from(activeRunFollowControllersRef.current)) controller.abort()
     activeRunFollowControllersRef.current.clear()
@@ -5307,11 +5756,6 @@ export default function Home() {
   }, [uiMode, settingsOpen])
 
   // ── Grid columns ────────────────────────────────────────────
-  const gridColumns = useMemo(() => {
-    const left = historyOpen ? '260px' : '0px'
-    return `${left} 1fr`
-  }, [historyOpen])
-
   // ── License helpers ─────────────────────────────────────────
   const refreshLicenseStatus = useCallback(() => {
     Promise.all([
@@ -5368,8 +5812,13 @@ export default function Home() {
     const id = `conv_${Date.now()}`
     workbenchControllerRef.current.newChat(id)
     publishController()
+    setMainView('chat')
     setCurrentConvId(id)
     setMessages([])
+    setLiveActivity([])
+    setRunProjection(null)
+    setRunArtifacts([])
+    setAttachments([])
     setActiveJobId(null)
     setActiveAttemptId(null)
     setActiveRunId(null)
@@ -5381,6 +5830,41 @@ export default function Home() {
     if (typeof window !== 'undefined') window.history.pushState(window.history.state, '', window.location.pathname)
   }, [publishController])
 
+  const clearCurrentView = useCallback(() => {
+    setMessages([])
+    setActivityLogs([])
+    setLiveActivity([])
+    setRunProjection(null)
+    setRunArtifacts([])
+    setThinking(null)
+    setBudget(null)
+  }, [])
+
+  const refreshProjection = useCallback(() => {
+    setProjectionRevision((revision) => revision + 1)
+  }, [])
+
+  const addAttachmentFiles = useCallback(async (files: readonly File[]) => {
+    const pending = Array.from(files).slice(0, Math.max(0, 10 - attachments.length))
+    if (pending.length === 0) return
+    try {
+      const uploaded = await Promise.all(pending.map((file) => aiden.uploadAttachment(file)))
+      setAttachments((current) => [...current, ...uploaded].slice(0, 10))
+    } catch (error) {
+      setMessages((current) => [...current, {
+        id: `attachment_error_${Date.now()}`,
+        role: 'assistant',
+        content: `Attachment could not be added: ${error instanceof Error ? error.message : String(error)}`,
+        timestamp: Date.now(),
+        isStreaming: false,
+      }])
+    }
+  }, [attachments.length])
+
+  const removeAttachment = useCallback((id: string) => {
+    setAttachments((current) => current.filter((attachment) => attachment.id !== id))
+  }, [])
+
   const loadConversation = useCallback((id: string) => {
     const conv = conversations.find(c => c.id === id)
     if (conv) {
@@ -5390,6 +5874,7 @@ export default function Home() {
       selectContext(selection)
       setCurrentConvId(id)
       setMessages(conv.messages)
+      setLiveActivity(selection.jobId ? (liveActivityByJobRef.current.get(selection.jobId) ?? []) : [])
       setActiveJobId(selection.jobId)
       setActiveAttemptId(selection.attemptId)
       setActiveRunId(selection.runId)
@@ -5407,6 +5892,7 @@ export default function Home() {
     activeRunIdRef.current = job.runId
     const stored = conversationMessagesRef.current.get(job.sessionId || job.jobId)
     setMessages(stored ?? [])
+    setLiveActivity(liveActivityByJobRef.current.get(job.jobId) ?? [])
     syncForegroundLifecycle(job.jobId)
   }, [selectContext, syncForegroundLifecycle])
 
@@ -5431,8 +5917,8 @@ export default function Home() {
 
   // ── Send message ────────────────────────────────────────────
   const sendMessage = useCallback(async (overrideText?: string) => {
-    const text = overrideText ?? input
-    if (!text.trim() || (isStreaming && selectedContext.jobId !== null)) return
+    const text = (overrideText ?? input).trim() || (attachments.length > 0 ? 'Review the attached file(s).' : '')
+    if (!text || (isStreaming && selectedContext.jobId !== null)) return
     if (!executionAvailable || workbenchReadOnly) {
       setMessages((current) => [...current, {
         id: `runtime_unavailable_${Date.now()}`,
@@ -5458,14 +5944,17 @@ export default function Home() {
         && (admittedJobId === null || selected.jobId === admittedJobId)
     }
 
+    const attachmentSnapshot = [...attachments]
     const userMsg: Message = {
       id: `msg_${Date.now()}`, role: 'user',
-      content: text.trim(), timestamp: Date.now(),
+      content: text, timestamp: Date.now(), attachments: attachmentSnapshot,
     }
     const newMessages = [...messages, userMsg]
     conversationMessagesRef.current.set(requestSessionId, newMessages)
     setMessages(newMessages)
     if (!overrideText) setInput('')
+    setAttachments([])
+    setLiveActivity([])
     if (!overrideText && inputRef.current) inputRef.current.style.height = 'auto'
     setIsStreaming(true)
     setIsExecuting(true)
@@ -5547,6 +6036,7 @@ export default function Home() {
         if (isForeground()) setMessages(turnMessages)
       },
       onActivity: (a) => {
+        if (admittedJobId) recordLiveActivity(admittedJobId, a, isForeground())
         const style: ActivityLog['style'] =
           a.status === 'ok' ? 'ok' : (a.status === 'failed' || a.status === 'warn') ? 'err' : 'active'
         const icon = a.kind === 'verify'
@@ -5573,6 +6063,7 @@ export default function Home() {
         const finalMsg: Message = { id: thinkingId, role: 'assistant', content: finalContent, timestamp: Date.now(), isStreaming: false }
         turnMessages = turnMessages.map(m => m.id === thinkingId ? finalMsg : m)
         persistTurn()
+        if (isForeground()) refreshProjection()
       },
       onError: (message) => {
         if (admittedJobId && admittedAttemptId && admittedRunId !== null) {
@@ -5589,48 +6080,19 @@ export default function Home() {
           ? { ...msg, content: fullReply || `⚠ ${message}`, isStreaming: false }
           : msg)
         persistTurn()
+        if (isForeground()) refreshProjection()
       },
-    }, { signal: followController.signal })
-  }, [input, isStreaming, messages, saveToConversation, selectedContext, currentConvId, sessionId, selectContext, publishController, executionAvailable, workbenchReadOnly])
+    }, { signal: followController.signal }, {
+      sessionId: requestSessionId,
+      attachmentIds: attachmentSnapshot.map((attachment) => attachment.id),
+    })
+  }, [input, attachments, isStreaming, messages, saveToConversation, selectedContext, currentConvId, sessionId, selectContext, publishController, executionAvailable, workbenchReadOnly, refreshProjection, recordLiveActivity])
 
   // ── Quick upload (chat + button) ────────────────────────────
   const handleQuickUpload = useCallback(async (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (!file) return
-    try {
-      const fd = new FormData()
-      fd.append('file', file)
-      fd.append('category', 'general')
-
-      const r = await fetch('http://localhost:4200/api/knowledge/upload/async', { method: 'POST', body: fd })
-      const d = await r.json() as any
-      if (!d.success) return
-
-      // Poll for completion
-      const jobId = d.jobId as string
-      const pollResult = await new Promise<any>((resolve) => {
-        const iv = setInterval(async () => {
-          try {
-            const pr = await fetch(`http://localhost:4200/api/knowledge/progress/${encodeURIComponent(jobId)}`).then(x => x.json()) as any
-            if (pr.status === 'done' || pr.status === 'error') { clearInterval(iv); resolve(pr) }
-          } catch { clearInterval(iv); resolve({ status: 'error', message: 'Poll failed' }) }
-        }, 700)
-      })
-
-      if (pollResult.status === 'done') {
-        const res = pollResult.result as any
-        const details = res
-          ? `${res.chunkCount} chunks${res.wordCount ? `, ${res.wordCount.toLocaleString()} words` : ''}${res.pageCount ? `, ${res.pageCount} pages` : ''}`
-          : ''
-        setMessages(prev => [...prev, {
-          id: `sys_${Date.now()}`, role: 'assistant' as const,
-          content: `📎 Added **${file.name}** to knowledge base (${details}). You can now reference this file in your questions.`,
-          timestamp: Date.now(), isStreaming: false,
-        }])
-      }
-    } catch {}
+    await addAttachmentFiles(Array.from(e.target.files ?? []))
     if (kbInputRef.current) kbInputRef.current.value = ''
-  }, [])
+  }, [addAttachmentFiles])
 
   // ── Settings: API Key handlers ──────────────────────────────
   const saveKey = useCallback(async (providerID: string) => {
@@ -5830,17 +6292,19 @@ export default function Home() {
     uiMode, setUIMode, execMode, setExecMode,
     historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen,
     activityOpen, setActivityOpen, settingsOpen, setSettingsOpen,
-    settingsTab, setSettingsTab,
+    settingsTab, setSettingsTab, mainView, setMainView, appearance, setAppearance,
     isExecuting, isStreaming, thinking, budget, activeModel, activeProvider, runtimeConnection, runtimeVersion,
     executionAvailable, executionQueue, workbenchReadOnly,
+    runProjection, runArtifacts, capabilities, browserSession, controlBrowser,
     selectedContext, activeJobs: workbenchControllerRef.current.active(),
     messages, setMessages, conversations, setConversations, currentConvId,
     input, setInput,
-    activityLogs, setActivityLogs, screenshot, setScreenshot, sessionId,
+    activityLogs, setActivityLogs, liveActivity, screenshot, setScreenshot, sessionId,
     systemStats, recentTasks,
     sendMessage, stopExecution, startNewChat, loadConversation,
     selectActiveJob,
     handleQuickUpload,
+    addAttachmentFiles, attachments, removeAttachment, refreshProjection, clearCurrentView,
     inputRef, kbInputRef, messagesEndRef, logsEndRef,
     // Plus menu
     plusMenuOpen, setPlusMenuOpen,
@@ -5913,9 +6377,8 @@ export default function Home() {
         )}
         {/* Headless connector — keeps WebSocket alive for briefings */}
         <LiveViewPanel />
-        <div style={{
+        <div className={`workbench-grid ${historyOpen ? 'sidebar-open' : 'sidebar-closed'}`} style={{
           flex: 1, display: 'grid', overflow: 'hidden',
-          gridTemplateColumns: gridColumns,
           transition: 'grid-template-columns 0.3s cubic-bezier(0.22,1,0.36,1)',
         }}>
           <HistorySidebar />
@@ -5955,6 +6418,8 @@ export default function Home() {
                 }}
               />
             )}
+            {mainView === 'artifacts' && <ArtifactsView />}
+            {mainView === 'sponsors' && <SponsorsView />}
           </div>
         </div>
         <StatusBar />

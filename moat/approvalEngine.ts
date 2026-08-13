@@ -101,6 +101,8 @@ export interface ApprovalRequest {
   toolName: string;
   category: ToolCategory;
   args: Record<string, unknown>;
+  /** Exact durable approval identity when the tool call belongs to a Job. */
+  durableApprovalId?: string;
   /** Pre-flagged risk tier from the dangerous-patterns catalog. */
   riskTier?: RiskTier;
   /** Why was this flagged? (description from the matching pattern) */

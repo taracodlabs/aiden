@@ -55,6 +55,12 @@ describe('detectCaptchaMarkers — positive cases', () => {
 });
 
 describe('detectCaptchaMarkers — negative cases', () => {
+  it('does not block an ordinary page that only mentions Cloudflare', () => {
+    expect(detectCaptchaMarkers(
+      'This repository includes a Cloudflare deployment adapter and documentation.',
+    )).toEqual({ detected: false, markers: [] });
+  });
+
   it('does NOT flag normal product copy', () => {
     const text =
       'Welcome to Example.com! Browse our catalog of widgets and gadgets. ' +

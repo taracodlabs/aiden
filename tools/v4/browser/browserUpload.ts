@@ -14,6 +14,9 @@
  */
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwUpload } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
+import { isAbsolute } from 'node:path';
+import { statSync } from 'node:fs';
 
 const _browserUploadTool: ToolHandler = {
   schema: {
@@ -48,9 +51,22 @@ const _browserUploadTool: ToolHandler = {
     const selector = String(args.selector ?? '').trim();
     const paths = Array.isArray(args.paths) ? (args.paths as unknown[]).map(String) : [];
     if (!selector || paths.length === 0) return { success: false, error: 'selector and paths are required' };
+    if (paths.length > 10) return { success: false, error: 'At most 10 files may be uploaded in one action' };
+    for (const file of paths) {
+      if (!isAbsolute(file)) return { success: false, error: 'Upload paths must be absolute' };
+      try {
+        const stat = statSync(file);
+        if (!stat.isFile()) return { success: false, error: 'Upload target must be a regular file' };
+        if (stat.size > 25 * 1024 * 1024) return { success: false, error: 'Upload file exceeds the 25 MB safety limit' };
+      } catch {
+        return { success: false, error: 'Upload file is unavailable' };
+      }
+    }
     const r = await pwUpload(selector, paths);
-    return r.ok ? { success: true } : { success: false, error: r.error };
+    return r.ok
+      ? { success: true, files: r.files, verified: r.verified === true }
+      : { success: false, error: r.error, files: r.files };
   },
 };
 
-export const browserUploadTool = _browserUploadTool;
+export const browserUploadTool = withBrowserState(_browserUploadTool);

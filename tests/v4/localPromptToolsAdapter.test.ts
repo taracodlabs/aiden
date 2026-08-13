@@ -176,6 +176,21 @@ describe('LocalPromptToolsAdapter', () => {
     expect(result.finishReason).toBe('stop');
   });
 
+  it('7b. preserves Ollama done_reason=length as an incomplete response', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({
+        message: { role: 'assistant', content: 'partial reply' },
+        done: true,
+        done_reason: 'length',
+      }),
+    );
+    const result = await new LocalPromptToolsAdapter(baseOptions).call({
+      messages: [userMsg('continue')],
+      tools: [],
+    });
+    expect(result.finishReason).toBe('length');
+  });
+
   it('8. token usage maps prompt_eval_count → inputTokens, eval_count → outputTokens', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({

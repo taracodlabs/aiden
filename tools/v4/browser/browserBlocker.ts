@@ -373,8 +373,18 @@ function detectLogin(text: string, url: string): BlockerSurface | null {
   const textHit = matchesAny(lowerText, LOGIN_TEXT_PATTERNS);
   const urlHit  = matchesAny(lowerUrl,  LOGIN_URL_PATTERNS);
   const domHit  = matchesAny(lowerText, LOGIN_DOM_HINTS);
+  const strongTextHit = matchesAny(lowerText, LOGIN_TEXT_PATTERNS.slice(5));
 
   if (!textHit && !urlHit) return null;
+  const weakTextOnly = textHit !== null
+    && ['sign in', 'sign-in', 'log in', 'log-in', 'login'].includes(textHit)
+    && !urlHit
+    && !domHit;
+  if (weakTextOnly && !strongTextHit) {
+    const compactWall = /^(?:please\s+)?(?:sign[ -]?in|log[ -]?in|login)(?:\s+to\s+continue)?[.!]?$/.test(lowerText.trim());
+    const explicitRequirement = /(?:sign[ -]?in|log[ -]?in|login)[\s\S]{0,120}(?:to continue|with (?:your )?password|password|required)/.test(lowerText);
+    if (!compactWall && !explicitRequirement) return null;
+  }
 
   const evidence: string[] = [];
   if (textHit) evidence.push(`text:${textHit}`);

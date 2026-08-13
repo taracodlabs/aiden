@@ -2353,6 +2353,132 @@ function applyV43(db: Database.Database): void {
   `);
 }
 
+/** Job-scoped browser sessions, owned tabs, action receipts and bounded history. */
+function applyV44(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS browser_sessions (
+      browser_session_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL DEFAULT 1,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      fence_digest TEXT NOT NULL,
+      workspace_id TEXT,
+      mode TEXT NOT NULL CHECK(mode IN ('owned','attached')),
+      profile_identity TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN (
+        'initializing','ready','user_control_required','user_control',
+        'reconciling','closing','closed','lost','failed','cancelled'
+      )),
+      controlled_tab_id TEXT,
+      recovery_state TEXT NOT NULL DEFAULT 'none',
+      lease_epoch INTEGER NOT NULL DEFAULT 1,
+      usage_json TEXT NOT NULL DEFAULT '{}',
+      budget_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      closed_at INTEGER,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (attempt_id) REFERENCES runs(attempt_id) ON DELETE CASCADE,
+      UNIQUE (job_id, attempt_id, generation)
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_sessions_job_state
+      ON browser_sessions(job_id, state, updated_at, browser_session_id);
+    CREATE INDEX IF NOT EXISTS idx_browser_sessions_attempt
+      ON browser_sessions(attempt_id, generation, state);
+
+    CREATE TABLE IF NOT EXISTS browser_tabs (
+      browser_session_id TEXT NOT NULL,
+      tab_id TEXT NOT NULL,
+      owner_job_id TEXT NOT NULL,
+      owner_attempt_id TEXT NOT NULL,
+      owner_generation INTEGER NOT NULL,
+      created_by TEXT NOT NULL CHECK(created_by IN ('aiden','user')),
+      controlled INTEGER NOT NULL DEFAULT 0 CHECK(controlled IN (0,1)),
+      opener_tab_id TEXT,
+      purpose TEXT,
+      url TEXT NOT NULL DEFAULT '',
+      normalized_url TEXT NOT NULL DEFAULT '',
+      title TEXT NOT NULL DEFAULT '',
+      dirty_form INTEGER NOT NULL DEFAULT 0 CHECK(dirty_form IN (0,1)),
+      last_state_digest TEXT,
+      last_observed_at INTEGER,
+      last_evidence_at INTEGER,
+      close_policy TEXT NOT NULL CHECK(close_policy IN ('aiden_owned','user_owned')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      closed_at INTEGER,
+      PRIMARY KEY (browser_session_id, tab_id),
+      FOREIGN KEY (browser_session_id) REFERENCES browser_sessions(browser_session_id) ON DELETE CASCADE,
+      FOREIGN KEY (owner_job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (owner_attempt_id) REFERENCES runs(attempt_id) ON DELETE CASCADE
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_one_controlled_tab
+      ON browser_tabs(browser_session_id) WHERE controlled = 1 AND closed_at IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_browser_tabs_owner
+      ON browser_tabs(owner_job_id, owner_attempt_id, owner_generation, closed_at);
+
+    CREATE TABLE IF NOT EXISTS browser_action_receipts (
+      action_id TEXT PRIMARY KEY,
+      browser_session_id TEXT NOT NULL,
+      action_sequence INTEGER NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      tool_call_id TEXT,
+      effect_id TEXT,
+      tab_id TEXT,
+      action_type TEXT NOT NULL,
+      action_signature TEXT NOT NULL,
+      args_digest TEXT NOT NULL,
+      expected_json TEXT NOT NULL DEFAULT '{}',
+      state TEXT NOT NULL CHECK(state IN (
+        'prepared','dispatched','returned','verified','failed','unknown',
+        'reconciling','not_applied','cancelled','stale_rejected'
+      )),
+      command_ok INTEGER,
+      semantic_ok INTEGER,
+      pre_state_digest TEXT,
+      post_state_digest TEXT,
+      verification_json TEXT,
+      evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+      error_code TEXT,
+      dispatched_at INTEGER,
+      returned_at INTEGER,
+      observed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (browser_session_id) REFERENCES browser_sessions(browser_session_id) ON DELETE CASCADE,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (attempt_id) REFERENCES runs(attempt_id) ON DELETE CASCADE,
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key) ON DELETE SET NULL,
+      UNIQUE (browser_session_id, action_signature, created_at)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_browser_action_sequence
+      ON browser_action_receipts(browser_session_id, action_sequence);
+    CREATE INDEX IF NOT EXISTS idx_browser_actions_job_state
+      ON browser_action_receipts(job_id, state, created_at, action_id);
+    CREATE INDEX IF NOT EXISTS idx_browser_actions_effect
+      ON browser_action_receipts(effect_id, state) WHERE effect_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS browser_navigation_history (
+      navigation_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      browser_session_id TEXT NOT NULL,
+      tab_id TEXT NOT NULL,
+      normalized_url TEXT NOT NULL,
+      purpose TEXT,
+      state_digest TEXT,
+      information_digest TEXT,
+      observed_at INTEGER NOT NULL,
+      FOREIGN KEY (browser_session_id) REFERENCES browser_sessions(browser_session_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_browser_navigation_recent
+      ON browser_navigation_history(browser_session_id, observed_at DESC, navigation_sequence DESC);
+    CREATE INDEX IF NOT EXISTS idx_browser_navigation_url
+      ON browser_navigation_history(browser_session_id, normalized_url, observed_at DESC);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2397,6 +2523,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 41, name: 'durable TriggerBus claim fencing', apply: applyV41 },
   { version: 42, name: 'exact Claim Effect bindings', apply: applyV42 },
   { version: 43, name: 'durable continuity checkpoints', apply: applyV43 },
+  { version: 44, name: 'durable browser operator authority', apply: applyV44 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2443,7 +2570,8 @@ function validateLatestSchema(db: Database.Database): void {
     'worker_provider_call_reconciliations', 'worker_provider_late_responses',
     'job_budget_reservation_reconciliations', 'worker_groups', 'worker_group_members',
     'worker_provider_concurrency_reservations', 'continuity_checkpoints',
-    'continuity_actions'];
+    'continuity_actions', 'browser_sessions', 'browser_tabs',
+    'browser_action_receipts', 'browser_navigation_history'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

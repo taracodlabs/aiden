@@ -16,6 +16,10 @@ export interface V4Event {
   durationMs: number | null;
   summary: string | null;
   payload: any;
+  seq?: number;
+  turnId?: string | null;
+  toolCallId?: string | null;
+  parentEventId?: number | null;
 }
 
 export interface SessionSummary {
@@ -27,10 +31,13 @@ export interface SessionSummary {
 }
 
 export interface ActivityItem {
-  kind: 'tool' | 'verify' | 'note';
+  id: string;
+  eventId: number;
+  kind: 'tool' | 'verify' | 'note' | 'worker' | 'skill';
   label: string;
   detail?: string;
   status: 'running' | 'ok' | 'failed' | 'warn';
+  durationMs?: number | null;
 }
 
 export type WorkbenchConnectionState =
@@ -161,14 +168,66 @@ export interface WorkbenchResultReceipt {
 
 export interface WorkbenchRunProjection {
   identity: { jobId: string; attemptId: string; runId: number; generation?: number };
+  job?: { id?: string; status?: string; terminalOutcome?: string | null; finishReason?: string | null };
   receipt: WorkbenchResultReceipt;
   attempts?: Array<{ rowId?: number; id: string; generation: number; status: string }>;
   timeline?: Array<{ eventId: number; jobSequence: number; type: string; createdAt: number }>;
   workers?: unknown[];
-  approvals?: unknown[];
+  approvals?: Array<{
+    approval_id?: unknown; job_id?: unknown; attempt_id?: unknown; generation?: unknown;
+    tool_call_id?: unknown; effect_id?: unknown; tool_name?: unknown; risk_tier?: unknown;
+    normalized_execution_plan?: unknown; state?: unknown; requested_at?: unknown;
+  }>;
   evidence?: unknown[];
   verification?: unknown;
   assistantOutput?: Array<{ eventId: number; sequence: number; text: string }>;
+}
+
+export interface WorkbenchAttachment {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+}
+
+export interface WorkbenchArtifact {
+  id: string;
+  name: string;
+  kind: string;
+  tool: string;
+  action: string;
+  runId: number | null;
+  taskId: string | null;
+  sessionId: string;
+  createdAt: number;
+  bytes: number | null;
+  preview: string | null;
+}
+
+export interface WorkbenchCapabilities {
+  modelSwitch: { available: boolean; reason?: string };
+  skills: Array<{ name: string; description: string; version: string; category?: string; trustLevel?: string; readiness?: unknown }>;
+  plugins: Array<{ name: string; version: string; description: string; author?: string; status: string; permissions: string[] }>;
+}
+
+export interface WorkbenchBrowserSession {
+  browserSessionId: string;
+  jobId: string;
+  attemptId: string;
+  generation: number;
+  workspaceId: string | null;
+  mode: 'owned' | 'attached';
+  profileIdentity: string;
+  state: 'initializing' | 'ready' | 'user_control_required' | 'user_control'
+    | 'reconciling' | 'closing' | 'closed' | 'lost' | 'failed' | 'cancelled';
+  controlledTabId: string | null;
+  recoveryState: string;
+  leaseEpoch: number;
+  usage: Record<string, number>;
+  budget: Record<string, number>;
+  createdAt: number;
+  updatedAt: number;
+  closedAt: number | null;
 }
 
 export function assistantOutputText(projection: WorkbenchRunProjection): string {
@@ -274,9 +333,35 @@ function verb(name: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function activityIdentity(ev: V4Event, prefix: string): string {
+  if (typeof ev.toolCallId === 'string' && ev.toolCallId) return `${prefix}:${ev.toolCallId}`;
+  const payload = ev.payload && typeof ev.payload === 'object' ? ev.payload as Record<string, unknown> : {};
+  const exact = payload.toolCallId ?? payload.evidenceId ?? payload.workerId ?? payload.skillInvocationId;
+  return typeof exact === 'string' && exact ? `${prefix}:${exact}` : `event:${ev.id}`;
+}
+
+function safeTarget(payload: Record<string, unknown>): string | undefined {
+  for (const key of ['path', 'file', 'url', 'query', 'target']) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 180);
+  }
+  let args: unknown = payload.args;
+  if (typeof args === 'string') {
+    try { args = JSON.parse(args); } catch { return undefined; }
+  }
+  if (args && typeof args === 'object') {
+    for (const key of ['path', 'file', 'url', 'query', 'target']) {
+      const value = (args as Record<string, unknown>)[key];
+      if (typeof value === 'string' && value.trim()) return value.trim().slice(0, 180);
+    }
+  }
+  return undefined;
+}
+
 interface TurnState { gotReply: boolean }
 type RoutedTerminal =
   | { kind: 'candidate' }
+  | { kind: 'reconcile' }
   | { kind: 'cancelled' }
   | { kind: 'rejected'; message: string };
 
@@ -289,13 +374,19 @@ function routeEvent(ev: V4Event, handlers: TurnHandlers, state: TurnState): Rout
       handlers.onReply?.(String(payload.text ?? ''));
       return null;
     case 'tool_call_started':
-      handlers.onActivity?.({ kind: 'tool', label: verb(payload.toolName || 'tool'), status: 'running' });
+      handlers.onActivity?.({
+        id: activityIdentity(ev, 'tool'), eventId: ev.id,
+        kind: 'tool', label: verb(payload.toolName || 'tool'), detail: safeTarget(payload),
+        status: 'running', durationMs: ev.durationMs,
+      });
       return null;
     case 'tool_call_completed':
       handlers.onActivity?.({
+        id: activityIdentity(ev, 'tool'), eventId: ev.id,
         kind: 'tool', label: verb(payload.toolName || 'tool'),
-        detail: ev.durationMs != null ? `${ev.durationMs} ms` : undefined,
+        detail: safeTarget(payload),
         status: ev.status === 'failed' ? 'failed' : 'ok',
+        durationMs: ev.durationMs,
       });
       return null;
     case 'artifact_verified': {
@@ -311,8 +402,10 @@ function routeEvent(ev: V4Event, handlers: TurnHandlers, state: TurnState): Rout
             : kind === 'failed' ? 'Failed' : 'Unverified';
       const severity = presentation?.severity;
       handlers.onActivity?.({
+        id: activityIdentity(ev, 'verify'), eventId: ev.id,
         kind: 'verify', label, detail: payload.verdict,
         status: severity === 'error' || severity === 'warning' ? 'warn' : ok ? 'ok' : 'warn',
+        durationMs: ev.durationMs,
       });
       return null;
     }
@@ -326,11 +419,13 @@ function routeEvent(ev: V4Event, handlers: TurnHandlers, state: TurnState): Rout
       );
       return null;
     case 'ui_task_done':
-      if (!state.gotReply && payload.summary) {
-        state.gotReply = true;
-        handlers.onReply?.(String(payload.summary));
-      }
-      return { kind: 'candidate' };
+      // The model-level UI marker only describes ephemeral activity. Final
+      // synthesis and durable assistant output may still be in flight, so it
+      // can never arm terminal convergence or settle the run. It is still a
+      // useful prompt to refresh durable state in case the terminal receipt
+      // was already committed before this UI event reached the browser.
+      handlers.onThinking?.('responding', 'Preparing response…');
+      return { kind: 'reconcile' };
     case 'task_cancelled':
       return { kind: 'cancelled' };
     default:
@@ -364,13 +459,13 @@ export function parseTaskAdmission(value: unknown): TaskAdmission {
   return { accepted: true, jobId, attemptId, runId, triggerEventId, duplicate: body.duplicate === true };
 }
 
-export async function admitTask(message: string, sessionId?: string): Promise<WorkbenchRunHandle> {
+export async function admitTask(message: string, sessionId?: string, attachmentIds: readonly string[] = []): Promise<WorkbenchRunHandle> {
   let response: Response;
   try {
     response = await fetch('/api/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
-      body: JSON.stringify({ message, ...(sessionId ? { sessionId } : {}) }),
+      body: JSON.stringify({ message, ...(sessionId ? { sessionId } : {}), ...(attachmentIds.length ? { attachmentIds } : {}) }),
     });
   } catch { throw new Error('could not reach Aiden (is `aiden web` running?)'); }
   let body: unknown = null;
@@ -386,6 +481,95 @@ export async function admitTask(message: string, sessionId?: string): Promise<Wo
   const handle = { admission: parseTaskAdmission(body), lastEventId: 0 };
   persistRunHandle(handle);
   return handle;
+}
+
+export async function uploadAttachment(file: File): Promise<WorkbenchAttachment> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  const stride = 0x8000;
+  for (let index = 0; index < bytes.length; index += stride) {
+    const end = Math.min(bytes.length, index + stride);
+    for (let cursor = index; cursor < end; cursor += 1) binary += String.fromCharCode(bytes[cursor]);
+  }
+  const response = await fetch('/api/attachments', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+    body: JSON.stringify({ name: file.name, mime: file.type || 'application/octet-stream', base64: btoa(binary) }),
+  });
+  const body = await response.json() as Partial<WorkbenchAttachment> & { error?: string };
+  if (!response.ok || typeof body.id !== 'string' || typeof body.name !== 'string' || typeof body.size !== 'number') {
+    throw new Error(body.error || `attachment upload failed (HTTP ${response.status})`);
+  }
+  return { id: body.id, name: body.name, mime: body.mime || file.type || 'application/octet-stream', size: body.size };
+}
+
+export async function listArtifacts(runId: number): Promise<WorkbenchArtifact[]> {
+  const response = await fetch(`/api/artifacts?runId=${encodeURIComponent(String(runId))}`, {
+    cache: 'no-store', headers: { 'x-workbench-token': token() },
+  });
+  if (response.status === 503) return [];
+  if (!response.ok) throw new Error(`artifact projection unavailable (HTTP ${response.status})`);
+  const body = await response.json();
+  return Array.isArray(body) ? body as WorkbenchArtifact[] : [];
+}
+
+export async function loadArtifactContent(artifactId: string): Promise<{ blob: Blob; mime: string }> {
+  const response = await fetch(`/api/artifacts/${encodeURIComponent(artifactId)}/content`, {
+    cache: 'no-store', headers: { 'x-workbench-token': token() },
+  });
+  if (!response.ok) throw new Error(`artifact content unavailable (HTTP ${response.status})`);
+  return { blob: await response.blob(), mime: response.headers.get('content-type') || 'application/octet-stream' };
+}
+
+export async function decideApproval(approvalId: string, decision: 'approved' | 'denied'): Promise<{ accepted: boolean; state?: string }> {
+  const response = await fetch(`/api/approvals/${encodeURIComponent(approvalId)}/decision`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+    body: JSON.stringify({ decision }),
+  });
+  const body = await response.json() as { accepted?: unknown; state?: string; error?: string };
+  if (!response.ok || body.accepted !== true) throw new Error(body.error || 'approval decision was not accepted');
+  return { accepted: true, state: body.state };
+}
+
+export async function loadWorkbenchCapabilities(): Promise<WorkbenchCapabilities> {
+  const response = await fetch('/api/workbench/capabilities', { cache: 'no-store' });
+  if (!response.ok) throw new Error(`Workbench capabilities unavailable (HTTP ${response.status})`);
+  const body = await response.json() as Partial<WorkbenchCapabilities>;
+  return {
+    modelSwitch: body.modelSwitch?.available === true
+      ? { available: true }
+      : { available: false, reason: body.modelSwitch?.reason || 'Model changes are managed by the Aiden runtime.' },
+    skills: Array.isArray(body.skills) ? body.skills : [],
+    plugins: Array.isArray(body.plugins) ? body.plugins : [],
+  };
+}
+
+export async function loadBrowserSession(jobId: string): Promise<WorkbenchBrowserSession | null> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/browser`, { cache: 'no-store' });
+  if (response.status === 404 || response.status === 503) return null;
+  if (!response.ok) throw new Error(`browser session unavailable (HTTP ${response.status})`);
+  const body = await response.json() as { browser?: WorkbenchBrowserSession | null };
+  return body.browser ?? null;
+}
+
+export async function controlBrowserSession(
+  jobId: string,
+  action: 'take' | 'return' | 'clear',
+): Promise<WorkbenchBrowserSession | null> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/browser/${action}`, {
+    method: 'POST',
+    headers: { 'x-workbench-token': token() },
+  });
+  const body = await response.json() as {
+    accepted?: unknown;
+    browser?: WorkbenchBrowserSession | null;
+    error?: string;
+  };
+  if (!response.ok || body.accepted !== true) {
+    throw new Error(body.error || `browser ${action} was not accepted`);
+  }
+  return body.browser ?? null;
 }
 
 export async function loadRunProjection(jobId: string, attemptId?: string, runId?: number): Promise<WorkbenchRunProjection | null> {
@@ -706,7 +890,12 @@ export function followRun(
           armStall();
         }
       } catch (error) {
-        if (terminalCandidate) finish({ error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        // A projection identity mismatch is an integrity failure, not a
+        // transient reconnect condition. Waiting for another poll could
+        // leave the browser following a foreign Job indefinitely.
+        if (/identity mismatch/i.test(message)) finish({ error: message });
+        else if (terminalCandidate) finish({ error: message });
         else if (uncertaintyExpired()) finish({ error: 'durable activity could not be confirmed after reconnecting' });
         else { handlers.onConnectionState?.('uncertain'); armStall(); }
       } finally {
@@ -731,7 +920,8 @@ export function followRun(
         uncertainSince = null;
         persistRunHandle(handle);
         const terminal = routeEvent(ev, handlers, state);
-        if (terminal) { void reconcile(true); return; }
+        if (terminal?.kind === 'candidate') { void reconcile(true); return; }
+        if (terminal?.kind === 'reconcile') { void reconcile(false); return; }
         armStall();
       };
       es.onerror = (): void => {
@@ -749,8 +939,13 @@ export function followRun(
   });
 }
 
-export function runTask(message: string, handlers: TurnHandlers, options: FollowRunOptions = {}): Promise<void> {
-  return admitTask(message)
+export function runTask(
+  message: string,
+  handlers: TurnHandlers,
+  options: FollowRunOptions = {},
+  admission: { sessionId?: string; attachmentIds?: readonly string[] } = {},
+): Promise<void> {
+  return admitTask(message, admission.sessionId, admission.attachmentIds)
     .then((handle) => {
       handlers.onAdmission?.(handle.admission);
       handlers.onRunId?.(handle.admission.runId);

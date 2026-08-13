@@ -12,6 +12,7 @@ import {
   isLaunchableUrl,
   openUrlTool,
 } from '../../../tools/v4/web/openUrl';
+import { runWithJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
 
 describe('open_url — platform launcher resolution', () => {
   it('uses cmd.exe /c start "" <url> on Windows', () => {
@@ -89,5 +90,18 @@ describe('open_url — execute() validation surface', () => {
     expect(openUrlTool.schema.inputSchema.required).toEqual(['url']);
     expect(openUrlTool.toolset).toBe('web');
     expect(openUrlTool.mutates).toBe(true);
+  });
+
+  it('refuses to bypass the canonical browser session inside a durable Job', async () => {
+    const result = await runWithJobExecutionContext({
+      engine: {} as any,
+      jobId: 'job_exact',
+      attemptId: 'attempt_exact',
+      generation: 2,
+      fenceToken: 'fence_exact',
+      producer: 'test',
+    }, () => openUrlTool.execute({ url: 'https://example.com' }, {} as any)) as any;
+    expect(result).toMatchObject({ success: false });
+    expect(result.error).toMatch(/browser_navigate.*Browser Session/i);
   });
 });

@@ -46,4 +46,11 @@ copyRecursive(
   path.join(STANDALONE, 'public')
 );
 
+// Reuse the established Aiden product icon for the static Workbench export.
+const aidenIcon = path.resolve(ROOT, '../assets/icon.png');
+const exportDir = path.join(ROOT, 'out');
+if (fs.existsSync(aidenIcon) && fs.existsSync(exportDir)) {
+  fs.copyFileSync(aidenIcon, path.join(exportDir, 'favicon.png'));
+}
+
 console.log('✓ Static assets copied to standalone');

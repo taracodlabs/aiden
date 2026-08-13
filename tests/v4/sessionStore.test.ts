@@ -55,6 +55,14 @@ describe('SessionStore', () => {
     expect(msgs[1].id < msgs[2].id).toBe(true);
   });
 
+  it('2b. ensureSession preserves browser-owned ids and is idempotent', () => {
+    const first = store.ensureSession('session_workbench_exact', { title: 'Workbench task' });
+    const second = store.ensureSession('session_workbench_exact', { title: 'changed title' });
+    expect(first.id).toBe('session_workbench_exact');
+    expect(second).toEqual(first);
+    expect(store.listSessions().filter((session) => session.id === first.id)).toHaveLength(1);
+  });
+
   it('3. appendMessage round-trips toolCalls JSON', () => {
     const s = store.createSession();
     store.appendMessage(s.id, {

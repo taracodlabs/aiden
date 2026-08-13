@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   executeWithDurableToolCall,
+  recordDurableResearchEvidence,
   recordDurableToolVerification,
   runWithJobExecutionContext,
 } from '../../../core/v4/daemon/jobExecutionContext';
@@ -22,6 +23,7 @@ import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobControlAuthority } from '../../../core/v4/daemon/jobControlAuthority';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import { ToolRegistry } from '../../../core/v4/toolRegistry';
+import { responseCache } from '../../../core/responseCache';
 import { createActionAuthority, type ActionAuthority, type NormalizedAction, type PolicySnapshotInput } from '../../../core/v4/actionAuthority';
 import { ApprovalEngine } from '../../../moat/approvalEngine';
 
@@ -627,5 +629,118 @@ describe('ToolRegistry durable execution identity', () => {
     expect(actionAuthority.authorizeExecution).toHaveBeenCalledOnce();
     expect(handler).not.toHaveBeenCalled();
     expect(result.error).toContain('binding mismatch');
+  });
+
+  it('binds a cached read to the current durable ToolCall before verification', async () => {
+    responseCache.clear();
+    const order: string[] = [];
+    const engine = {
+      ...resourceAuthorityMock(),
+      prepareToolCall: vi.fn(() => { order.push('prepared'); return { applied: true }; }),
+      startToolCall: vi.fn(() => { order.push('started'); return { applied: true }; }),
+      completeToolCall: vi.fn(() => { order.push('completed'); return { applied: true }; }),
+      attachToolVerification: vi.fn(() => ({ applied: true })),
+    } as unknown as JobEngine;
+    const handler = vi.fn(async () => 'physical result');
+    const registry = new ToolRegistry();
+    registry.register({
+      schema: { name: 'fetch_url', description: 'fetches', inputSchema: { type: 'object' } },
+      category: 'network', riskTier: 'safe', mutates: false, toolset: 'web', execute: handler,
+    });
+    responseCache.set('fetch_url', { url: 'https://example.test/feed' }, 'cached result');
+    const execute = registry.buildExecutor({ cwd: process.cwd(), paths: resolveAidenPaths({ rootOverride: 'C:/tmp/aiden-cache-identity' }) });
+
+    let result;
+    await runWithJobExecutionContext({
+      engine, jobId: 'job_cache', attemptId: 'attempt_cache', generation: 1,
+      fenceToken: 'fence_cache', producer: 'test',
+    }, async () => {
+      result = await execute({
+        id: 'cached-call', name: 'fetch_url', arguments: { url: 'https://example.test/feed' },
+      });
+      recordDurableToolVerification('cached-call', { source: 'cache', verified: true });
+    });
+
+    expect(result).toMatchObject({ result: 'cached result' });
+    expect(handler).not.toHaveBeenCalled();
+    expect(order).toEqual(['prepared', 'started', 'completed']);
+    expect(engine.attachToolVerification).toHaveBeenCalledWith(expect.objectContaining({
+      attemptId: 'attempt_cache', generation: 1, fenceToken: 'fence_cache',
+    }));
+    responseCache.clear();
+  });
+
+  it('records bounded research Evidence once per normalized source', async () => {
+    const recordEvidence = vi.fn(() => ({ evidenceId: 'evidence-research' }));
+    const engine = {
+      proof: { recordEvidence },
+    } as unknown as JobEngine;
+
+    await runWithJobExecutionContext({
+      engine, jobId: 'job_research', attemptId: 'attempt_research', generation: 2,
+      fenceToken: 'fence_research', producer: 'test',
+    }, () => {
+      recordDurableResearchEvidence({
+        toolCallId: 'fetch-one',
+        toolName: 'fetch_url',
+        args: { url: 'https://example.test/article?token=secret' },
+        result: {
+          success: true,
+          status: 200,
+          body: 'A bounded source excerpt with Authorization: Bearer private-value',
+        },
+      });
+      recordDurableResearchEvidence({
+        toolCallId: 'fetch-two',
+        toolName: 'fetch_page',
+        args: { url: 'https://example.test/article?token=secret' },
+        result: { success: true, content: 'same normalized source' },
+      });
+    });
+
+    expect(recordEvidence).toHaveBeenCalledOnce();
+    expect(recordEvidence).toHaveBeenCalledWith(expect.objectContaining({
+      jobId: 'job_research', attemptId: 'attempt_research', generation: 2,
+      fenceToken: 'fence_research', effectId: null,
+      source: 'research.fetch_url', coverage: 'partial', verificationResult: 'unknown',
+      payload: expect.objectContaining({
+        source: 'https://example.test/article',
+        toolCallId: 'fetch-one',
+      }),
+    }));
+    const payload = recordEvidence.mock.calls[0]?.[0].payload as Record<string, unknown>;
+    expect(JSON.stringify(payload)).not.toContain('private-value');
+  });
+
+  it('checks every browser upload path against the active Job capability boundary', async () => {
+    const handler = vi.fn(async () => ({ success: true }));
+    const authorize = vi.fn((resource: { kind: string; value: string }) =>
+      resource.kind !== 'path' || !resource.value.endsWith('foreign.txt'));
+    const engine = {
+      resources: {
+        authorize,
+        getBudgets: vi.fn(() => []),
+        debit: vi.fn(() => ({ applied: true })),
+      },
+    } as unknown as JobEngine;
+    const registry = new ToolRegistry();
+    registry.register({
+      schema: { name: 'browser_upload', description: 'upload', inputSchema: { type: 'object' } },
+      category: 'browser', riskTier: 'dangerous', mutates: true, toolset: 'browser', execute: handler,
+    });
+    const execute = registry.buildExecutor({
+      cwd: process.cwd(),
+      paths: resolveAidenPaths({ rootOverride: 'C:/tmp/aiden-job-identity' }),
+    });
+    const result = await runWithJobExecutionContext({
+      engine, jobId: 'job_upload', attemptId: 'attempt_upload', generation: 1,
+      fenceToken: 'fence_upload', producer: 'test',
+    }, () => execute({
+      id: 'tool_upload', name: 'browser_upload',
+      arguments: { selector: '#file', paths: ['approved.txt', 'foreign.txt'] },
+    }));
+    expect(result.error).toBe('Path is outside this Job capability boundary');
+    expect(handler).not.toHaveBeenCalled();
+    expect(authorize.mock.calls.filter(([resource]) => resource.kind === 'path')).toHaveLength(2);
   });
 });

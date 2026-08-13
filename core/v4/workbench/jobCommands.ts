@@ -16,6 +16,7 @@ import type { TriggerBus } from '../daemon/triggerBus';
 import { createTaskStore } from '../daemon/taskStore';
 import { continueFromCheckpoint } from '../safeContinue';
 import { fingerprintContinuityEnvironment } from '../continuityCheckpoint';
+import type { SessionStore } from '../sessionStore';
 
 export function summarizeWorkbenchGoal(message: string, maxLength = 120): string {
   const compact = message.replace(/\s+/g, ' ').trim();
@@ -31,6 +32,8 @@ export function createWorkbenchJobCommands(options: {
   instanceId: string;
   controlAuthority?: JobControlAuthority;
   actionAuthority?: ActionAuthority;
+  /** Durable conversation authority shared with the Workbench dispatcher. */
+  sessionStore?: SessionStore;
   idFactory?: () => string;
 }) {
   const controlAuthority = options.controlAuthority ?? createJobControlAuthority({ db: options.db, jobEngine: options.jobEngine });
@@ -114,6 +117,23 @@ export function createWorkbenchJobCommands(options: {
     enqueue: {
       enqueue(task: { message: string; sessionId?: string }) {
         const accepted = enqueueTx(task);
+        if (accepted.trigger.inserted && options.sessionStore) {
+          try {
+            const sessionId = task.sessionId ?? `workbench:${accepted.admission.jobId}`;
+            options.sessionStore.ensureSession(sessionId, {
+              title: summarizeWorkbenchGoal(task.message),
+            });
+            const alreadyRecorded = options.sessionStore.getMessages(sessionId)
+              .some((message) => message.role === 'user' && message.turnNumber === accepted.trigger.id);
+            if (!alreadyRecorded) {
+              options.sessionStore.appendMessage(sessionId, {
+                role: 'user', content: task.message, turnNumber: accepted.trigger.id,
+              });
+            }
+          } catch {
+            // Conversation persistence must never undo an already-admitted Job.
+          }
+        }
         const attempt = options.jobEngine.getAttempt(accepted.admission.attemptId)!;
         captureBoundary(
           accepted.admission.jobId,

@@ -16,7 +16,7 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwType, pwActByLease } from '../../../core/playwrightBridge';
-import { getLeaseStore } from '../../../core/v4/browserState';
+import { currentBrowserLeaseStore } from '../../../core/v4/browser/browserLeaseScope';
 import { withBrowserState } from './_observer';
 
 const _browserFillTool: ToolHandler = {
@@ -58,23 +58,26 @@ const _browserFillTool: ToolHandler = {
       return { success: false, error: 'fields must be an object' };
     }
     const filled: string[] = [];
+    let verified = true;
     for (const [key, value] of Object.entries(fields)) {
       const text = value == null ? '' : String(value);
       // B1.2 — "@eN" keys resolve via the lease store; CSS keys use the old path.
       if (key.startsWith('@e')) {
-        const lease = getLeaseStore().get(key);
+        const lease = currentBrowserLeaseStore().get(key);
         if (!lease) {
           return { success: false, error: `Element ref ${key} is not in the current snapshot. Run browser_snapshot to refresh element refs, then retry.`, selector: key, filled };
         }
         const r = await pwActByLease(lease, { kind: 'fill', text });
         if (!r.ok) return { success: false, error: r.error, selector: key, filled };
+        verified = verified && r.verified === true;
       } else {
         const r = await pwType(key, text);
         if (!r.ok) return { success: false, error: r.error, selector: key, filled };
+        verified = verified && r.verified === true;
       }
       filled.push(key);
     }
-    return { success: true, filled, count: filled.length };
+    return { success: true, filled, count: filled.length, verified };
   },
 };
 

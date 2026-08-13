@@ -109,6 +109,14 @@ describe('extractFileArtifact', () => {
   it('skill_manage success → skill kind', () => {
     expect(extractFileArtifact('skill_manage', { success: true, path: '/skills/x' })?.kind).toBe('skill');
   });
+
+  it('verified browser download becomes a local file artifact', () => {
+    expect(extractFileArtifact('browser_download', {
+      success: true, verified: true, path: 'C:/aiden/downloads/report.txt', bytes: 42,
+    })).toEqual({
+      path: 'C:/aiden/downloads/report.txt', kind: 'file', action: 'create', bytes: 42,
+    });
+  });
   it('non-file tools → null', () => {
     expect(extractFileArtifact('file_read', { success: true, path: '/x' })).toBeNull();
     expect(extractFileArtifact('shell_exec', { success: true, stdout: 'x' })).toBeNull();

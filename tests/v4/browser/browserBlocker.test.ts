@@ -117,6 +117,13 @@ describe('2FA detection', () => {
 // ── Login tier ──────────────────────────────────────────────────────────────
 
 describe('Login detection', () => {
+  it('does not treat a public page header sign-in link as a login wall', () => {
+    expect(detect(
+      'Sign in  Repository navigation  Source code and documentation for a Cloudflare deployment adapter.',
+      'https://github.com/example/project',
+    )).toBeNull();
+  });
+
   it('detects text "sign in"', () => {
     const b = detect('Sign in to continue. Enter your password below.');
     expect(b?.kind).toBe('login');
@@ -210,7 +217,7 @@ describe('Consent detection', () => {
 describe('Priority order: captcha > 2fa > login > verification > consent', () => {
   it('captcha wins over 2fa when both match', () => {
     const b = detect(
-      'cloudflare check. Enter the verification code.',
+      'Cloudflare is checking your browser. Enter the verification code.',
       'https://example.com/2fa',
     );
     expect(b?.kind).toBe('captcha');
@@ -267,9 +274,7 @@ describe('No-blocker cases return null', () => {
 
   it('does not match login on a generic mention of "sign in to comment"', () => {
     // "sign in" IS one of the patterns, so this matches login. The
-    // sensitivity bias is intentional — false-positive cost is a
-    // spurious manual-blocker card; false-negative cost is the bug.
-    expect(detect('Please sign in to comment.')?.kind).toBe('login');
+    expect(detect('Please sign in to comment.')).toBeNull();
   });
 });
 

@@ -57,7 +57,11 @@ import {
   type ToolResultArtifactStore,
 } from './toolResultBoundary';
 import { selectEconomyTools } from './usagePolicy';
-import { currentJobExecutionContext, recordDurableToolVerification } from './daemon/jobExecutionContext';
+import {
+  currentJobExecutionContext,
+  recordDurableResearchEvidence,
+  recordDurableToolVerification,
+} from './daemon/jobExecutionContext';
 import {
   createLogicalProviderCallId,
   currentProviderAttemptLedger,
@@ -1998,6 +2002,12 @@ export class AidenAgent {
               source,
               ok: result.error == null,
               attempt: attemptNo,
+            });
+            recordDurableResearchEvidence({
+              toolCallId: call.id,
+              toolName: call.name,
+              args: call.arguments,
+              result: result.result,
             });
             if (process.env.AIDEN_PERF_DIAG === '1') {
               writeNonInteractiveDiagnostic(

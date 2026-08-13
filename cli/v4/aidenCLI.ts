@@ -519,6 +519,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createWorkbenchJobCommands } = await import('../../core/v4/workbench/jobCommands');
       const { createWorkbenchExecutionHost } = await import('../../core/v4/workbench/executionHost');
       const { listWorkbenchActiveJobs } = await import('../../core/v4/workbench/activeJobs');
+      const { createWorkbenchFileBridge } = await import('../../core/v4/workbench/fileBridge');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
       const { randomBytes } = await import('node:crypto');
       const paths    = resolveAidenPaths();
@@ -543,11 +544,16 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const actionAuthority = createActionAuthority({ db, jobEngine });
       const jobControlAuthority = createJobControlAuthority({ db, jobEngine });
       const { enqueue, cancel, input, control, approval, continuity, continueTask } = createWorkbenchJobCommands({
-        db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId,
+        db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId, sessionStore,
         actionAuthority, controlAuthority: jobControlAuthority,
       });
       let workbenchRuntime: AgentRuntime | null = null;
       let executionHost: ReturnType<typeof createWorkbenchExecutionHost> | null = null;
+      let workbenchSkills: Awaited<ReturnType<SkillLoader['list']>> = [];
+      let workbenchPlugins: Array<{
+        name: string; version: string; description: string; author?: string;
+        status: string; permissions: string[];
+      }> = [];
       try {
         workbenchRuntime = await buildAgentRuntime({ headless: true }, opts);
         executionHost = createWorkbenchExecutionHost({
@@ -555,7 +561,10 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           triggerBus,
           runStore,
           jobEngine,
-          taskStore: createTaskStore({ db }),
+           taskStore: createTaskStore({ db }),
+           sessionStore,
+           artifactStore: workbenchRuntime.replArtifactStore,
+          approvalAuthority: actionAuthority,
           instanceId: workbenchInstanceId,
           agentBuilder: workbenchRuntime.daemonAgentBuilder,
           persistedDefault: {
@@ -565,6 +574,15 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           workerCount: 4,
         });
         executionHost.start();
+        workbenchSkills = await workbenchRuntime.skillLoader.list();
+        workbenchPlugins = workbenchRuntime.pluginLoader.getRegistry().list().map((plugin) => ({
+          name: plugin.manifest.name,
+          version: plugin.manifest.version,
+          description: plugin.manifest.description,
+          ...(plugin.manifest.author ? { author: plugin.manifest.author } : {}),
+          status: plugin.status,
+          permissions: [...plugin.manifest.permissions],
+        }));
       } catch {
         workbenchRuntime = null;
         executionHost = null;
@@ -584,6 +602,11 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       ].filter((d): d is string => Boolean(d));
       const staticDir = staticCandidates.find((d) => existsSync(nodePath.join(d, 'index.html')));
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
+      const workbenchFiles = createWorkbenchFileBridge({
+        root: nodePath.join(paths.root, 'workbench'),
+        artifacts: workbenchRuntime?.replArtifactStore,
+        artifactCwd: process.cwd(),
+      });
       const bridge   = await startWorkbenchBridge({
         reader: runStore,
         sessions,
@@ -592,7 +615,49 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         input,
         control,
         approval,
+        attachments: workbenchFiles,
+        artifacts: workbenchFiles,
         jobs: jobEngine,
+        browser: {
+          get(jobId: string) {
+            const job = jobEngine.getJob(jobId);
+            if (!job?.activeAttemptId) return null;
+            const attempt = jobEngine.getAttempt(job.activeAttemptId);
+            return attempt
+              ? jobEngine.browser.getSessionForAttempt(jobId, attempt.id, attempt.generation)
+              : null;
+          },
+          take(jobId: string) {
+            const job = jobEngine.getJob(jobId);
+            const attempt = job?.activeAttemptId ? jobEngine.getAttempt(job.activeAttemptId) : null;
+            if (!job || !attempt || !attempt.fenceToken) throw new Error('Active browser Attempt is unavailable');
+            return jobEngine.browser.takeUserControl({
+              jobId, attemptId: attempt.id, generation: attempt.generation,
+              fenceToken: attempt.fenceToken, workspaceId: job.workspaceId,
+            });
+          },
+          return(jobId: string) {
+            const job = jobEngine.getJob(jobId);
+            const attempt = job?.activeAttemptId ? jobEngine.getAttempt(job.activeAttemptId) : null;
+            if (!job || !attempt || !attempt.fenceToken) throw new Error('Active browser Attempt is unavailable');
+            return jobEngine.browser.returnControl({
+              jobId, attemptId: attempt.id, generation: attempt.generation,
+              fenceToken: attempt.fenceToken, workspaceId: job.workspaceId,
+            });
+          },
+          clear(jobId: string) {
+            const job = jobEngine.getJob(jobId);
+            const attempt = job?.activeAttemptId ? jobEngine.getAttempt(job.activeAttemptId) : null;
+            if (!job || !attempt || !attempt.fenceToken) return null;
+            if (!['cancelled', 'completed', 'failed', 'dead_letter'].includes(job.status)) {
+              throw new Error('An active browser session cannot be cleared; cancel or finish the Job first');
+            }
+            return jobEngine.browser.settleSession({
+              jobId, attemptId: attempt.id, generation: attempt.generation,
+              fenceToken: attempt.fenceToken, workspaceId: job.workspaceId,
+            }, 'lost', 'cleared from Workbench');
+          },
+        },
         runtime: () => {
           if (workbenchRuntime && executionHost) {
             return {
@@ -626,6 +691,21 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           pending: triggerBus.stats().pending, claimed: triggerBus.stats().claimed,
           inflight: 0, oldestPendingMs: triggerBus.stats().oldestPendingMs, processed: 0,
         },
+        capabilities: () => ({
+          modelSwitch: {
+            available: false,
+            reason: 'Use the Aiden model command to change the runtime default for newly admitted Jobs.',
+          },
+          skills: workbenchSkills.map((skill) => ({
+            name: skill.name,
+            description: skill.description,
+            version: skill.version,
+            ...(skill.category ? { category: skill.category } : {}),
+            ...(skill.trustLevel ? { trustLevel: skill.trustLevel } : {}),
+            ...(skill.readiness ? { readiness: skill.readiness } : {}),
+          })),
+          plugins: workbenchPlugins,
+        }),
         continuity,
         continueTask,
         token,
@@ -640,7 +720,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         (executionHost
           ? `    tasks:  enabled (local token — only this browser can send tasks)\n`
           : `    tasks:  unavailable until a provider is configured\n`) +
-        `    policy: safe-mode; risky actions are auto-denied from web\n` +
+        `    policy: exact-action approvals are available in Workbench\n` +
         (executionHost
           ? `    queue:  ready (4 concurrent durable workers)\n`
           : `    queue:  unavailable (configure a provider before sending tasks)\n`) +

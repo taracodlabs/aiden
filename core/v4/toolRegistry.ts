@@ -61,6 +61,7 @@ import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
 import { analyzeCommandIntent, isReadOnlyCommand } from '../../moat/dangerousPatterns';
 import { classifyBrowserAction } from './browserState';
+import { currentBrowserLeaseStore } from './browser/browserLeaseScope';
 import { pwBrowserStatus, pwDialogPendingTier } from '../playwrightBridge';
 import type { SkillLoader } from './skillLoader';
 import type { BundledManifest } from './skillBundledManifest';
@@ -699,6 +700,28 @@ export class ToolRegistry {
             }
           }
         }
+        const pathList = Array.isArray(args.paths) ? args.paths : [];
+        for (const value of pathList) {
+          if (typeof value !== 'string' || value.length === 0) continue;
+          let capabilityPath: string;
+          try {
+            capabilityPath = resolvePath(context.cwd ?? process.cwd(), value);
+          } catch (error) {
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: error instanceof Error ? error.message : 'Path is not valid for this Job capability',
+            }, 'blocked');
+          }
+          if (!resourceAuthority.authorize({
+            jobId: durableJobContext.jobId,
+            kind: 'path',
+            value: capabilityPath,
+          })) {
+            return finish({ id: call.id, name: call.name, result: null, error: 'Path is outside this Job capability boundary' }, 'blocked');
+          }
+        }
         if (
           effectiveMutates
           && !resourceAuthority.authorize({ jobId: durableJobContext.jobId, kind: 'effect', value: preliminaryEffect.kind })
@@ -721,7 +744,23 @@ export class ToolRegistry {
           }
         }
       }
-      const approvalGated = effectiveMutates && preliminaryEffect.approvalRequirement !== 'none' && (
+      let browserApprovalRequired = false;
+      if (effectiveMutates && handler.category === 'browser') {
+        if (call.name === 'browser_upload') {
+          browserApprovalRequired = true;
+        } else if (call.name === 'browser_dialog') {
+          const action = String(args.action ?? '');
+          browserApprovalRequired = (action === 'accept' || action === 'respond')
+            && pwDialogPendingTier() !== null;
+        } else {
+          browserApprovalRequired = classifyBrowserAction(call.name, args, {
+            attached: pwBrowserStatus().mode === 'attached',
+            leaseStore: currentBrowserLeaseStore(),
+          }) !== undefined;
+        }
+      }
+      const approvalGated = effectiveMutates
+        && (preliminaryEffect.approvalRequirement !== 'none' || browserApprovalRequired) && (
         context.approvalEngine !== undefined || (context.actionAuthority !== undefined && durableJobContext !== undefined)
       );
       effectDescriptor = preliminaryEffect;
@@ -838,7 +877,7 @@ export class ToolRegistry {
       }
       if (
         effectiveMutates && durableJobContext &&
-        (!effectDescriptor.trusted || effectDescriptor.approvalRequirement === 'always') &&
+        (browserApprovalRequired || !effectDescriptor.trusted || effectDescriptor.approvalRequirement === 'always') &&
         !context.approvalEngine && !context.actionAuthority
       ) {
         try { recordDurableToolApproval({ prepared: preparedToolCall ?? null, state: 'blocked' }); } catch { /* durable conflict is reported below */ }
@@ -846,7 +885,7 @@ export class ToolRegistry {
           id: call.id,
           name: call.name,
           result: null,
-          error: effectDescriptor.trusted
+          error: browserApprovalRequired || effectDescriptor.trusted
             ? 'Interactive approval is required for this mutation'
             : 'Mutating tool has no trusted effect contract and cannot run unattended',
         }, 'blocked');
@@ -870,7 +909,10 @@ export class ToolRegistry {
           // v4.12 B3.2a — when attached to the user's REAL browser, also confirm
           // ANY external navigation (conservative default for live sessions).
           const attached = pwBrowserStatus().mode === 'attached';
-          const c = classifyBrowserAction(call.name, args, { attached });
+          const c = classifyBrowserAction(call.name, args, {
+            attached,
+            leaseStore: currentBrowserLeaseStore(),
+          });
           if (c) {
             riskTier = c.tier;
             reason = c.reason;
@@ -977,6 +1019,7 @@ export class ToolRegistry {
             riskTier: effectiveTier ?? 'caution',
             effectId: preparedToolCall?.effectId ?? null,
           };
+          approvalReq.durableApprovalId = record.approvalId;
           if (preparedRepositoryChange && durableApproval.effectId) {
             context.repositoryChange!.authority.bindApproval({
               jobId: jobContext.jobId,
@@ -1213,6 +1256,29 @@ export class ToolRegistry {
       // short-circuits BEFORE the daemon span / hooks fire — those
       // surfaces are pre-flight observability for actual execution,
       // and a cache-hit is by definition not a fresh execution.
+      // A cache hit is still a logical ToolCall. Bind that identity before
+      // consulting the cache so verification and Evidence attach to the
+      // current Job/Attempt rather than to an unpersisted model call.
+      if (durableJobContext && preparedToolCall === undefined) {
+        try {
+          preparedToolCall = prepareDurableToolCall({
+            toolCallId: call.id,
+            toolName: call.name,
+            args,
+            riskTier: handler.riskTier ?? (effectiveMutates ? 'caution' : 'safe'),
+            mutates: effectiveMutates,
+            effect: effectDescriptor,
+            approvalState: 'not_required',
+          });
+        } catch (error) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: error instanceof Error ? error.message : String(error),
+          }, 'failed');
+        }
+      }
       const _cached = responseCache.get(call.name, args);
       if (_cached !== null) {
         // The cache stores a serialised string. Tools that produce
@@ -1220,7 +1286,27 @@ export class ToolRegistry {
         // below; we keep the cached envelope shape (no JSON.parse) so
         // the consumer (aidenAgent dispatch) sees the same
         // ToolCallResult shape it would on a fresh run.
-        return finish({ id: call.id, name: call.name, result: _cached }, 'completed');
+        try {
+          const cachedResult = await executeWithDurableToolCall({
+            toolCallId: call.id,
+            toolName: call.name,
+            args,
+            riskTier: handler.riskTier ?? (effectiveMutates ? 'caution' : 'safe'),
+            mutates: effectiveMutates,
+            effect: effectDescriptor,
+            prepared: preparedToolCall,
+            captureFilesystemProof: false,
+            execute: async () => _cached,
+          });
+          return finish({ id: call.id, name: call.name, result: cachedResult }, 'completed');
+        } catch (error) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: error instanceof Error ? error.message : String(error),
+          }, preparedToolCall?.mutates ? 'unknown' : 'failed');
+        }
       }
       // v4.9.0 Slice 6 — wrap the handler call in a tool span when the
       // daemon foundation is up AND an ExecutionContext is active. NOOP

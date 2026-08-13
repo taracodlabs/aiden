@@ -90,4 +90,16 @@ describe('canonical Workbench projection', () => {
     const value = projectWorkbenchJob(fixture({ status: jobStatus, terminalAt: terminal ? 20 : null }), { jobId: 'job_1' })!;
     expect(value.receipt).toMatchObject({ status: expected, terminal });
   });
+
+  it('B15 preserves a bounded durable failure reason in the receipt', () => {
+    const reader = fixture({ status: 'failed', terminalAt: 20, finishReason: 'error' });
+    reader.listEvents = () => [{
+      eventId: 3, jobSequence: 3, jobId: 'job_1', attemptId: 'attempt_1',
+      type: 'dispatcher.completed',
+      payload: { invocationError: 'DurableToolCallConflictError: stale_fence' },
+      producer: 'daemon', generation: 1, idempotencyKey: '3', createdAt: 3,
+    }];
+    expect(projectWorkbenchJob(reader, { jobId: 'job_1' })?.receipt.summary)
+      .toBe('DurableToolCallConflictError: stale_fence');
+  });
 });

@@ -29,6 +29,7 @@
 
 import { spawn } from 'node:child_process';
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { currentJobExecutionContext } from '../../../core/v4/daemon/jobExecutionContext';
 
 /** Resolve the launch command for the current platform. */
 export function resolveOpenCommand(
@@ -97,6 +98,12 @@ export const openUrlTool: ToolHandler = {
       return {
         success: false,
         error: `Invalid URL: ${JSON.stringify(args.url)}. Must be http: or https:.`,
+      };
+    }
+    if (currentJobExecutionContext()) {
+      return {
+        success: false,
+        error: 'The external-browser launcher is unavailable inside a durable Job. Use browser_navigate so the exact Browser Session, tab, action receipt, and verification remain authoritative.',
       };
     }
     const { cmd, args: spawnArgs } = resolveOpenCommand(process.platform, url);

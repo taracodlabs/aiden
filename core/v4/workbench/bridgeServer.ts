@@ -36,6 +36,11 @@ import {
   type WorkbenchJobProjectionReader,
 } from './projection';
 import { summarizeWorkbenchActiveJobs } from './activeJobs';
+import type {
+  WorkbenchAttachment,
+  WorkbenchArtifactContent,
+} from './fileBridge';
+import type { Artifact } from '../daemon/artifactStore';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -151,6 +156,28 @@ export interface WorkbenchActiveJob {
   queue?: { pending: number; claimed: number; oldestPendingMs: number | null };
 }
 
+export interface WorkbenchAttachmentPort {
+  saveAttachment(input: { name: string; mime?: string; bytes: Buffer }): WorkbenchAttachment;
+  resolveAttachments(ids: readonly string[]): WorkbenchAttachment[];
+}
+
+export interface WorkbenchArtifactPort {
+  listArtifacts(input: { runId?: number; sessionId?: string; limit?: number }): Artifact[];
+  readArtifact(id: string): WorkbenchArtifactContent | null;
+}
+
+export interface WorkbenchCapabilitiesProjection {
+  modelSwitch: { available: boolean; reason?: string };
+  skills: Array<{
+    name: string; description: string; version: string; category?: string;
+    trustLevel?: string; readiness?: unknown;
+  }>;
+  plugins: Array<{
+    name: string; version: string; description: string; author?: string;
+    status: string; permissions: string[];
+  }>;
+}
+
 export interface ContinuityReader {
   get(checkpointId: string): unknown | null;
   getLatest(jobId: string): unknown | null;
@@ -160,6 +187,13 @@ export interface ContinuityReader {
 
 export interface ContinuityController {
   continue(checkpointId: string, idempotencyKey: string): unknown | Promise<unknown>;
+}
+
+export interface WorkbenchBrowserController {
+  get(jobId: string): unknown | null;
+  take(jobId: string): unknown | Promise<unknown>;
+  return(jobId: string): unknown | Promise<unknown>;
+  clear(jobId: string): unknown | Promise<unknown>;
 }
 
 export interface WorkbenchBridgeOptions {
@@ -175,9 +209,13 @@ export interface WorkbenchBridgeOptions {
   input?:      TaskInputReceiver;
   control?:    TaskController;
   approval?:   ApprovalDecider;
+  attachments?: WorkbenchAttachmentPort;
+  artifacts?: WorkbenchArtifactPort;
+  capabilities?: () => WorkbenchCapabilitiesProjection;
   jobs?:       DurableJobReader;
   continuity?: ContinuityReader;
   continueTask?: ContinuityController;
+  browser?: WorkbenchBrowserController;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -297,6 +335,20 @@ function sendJson(res: http.ServerResponse, code: number, body: unknown): void {
   res.end(s);
 }
 
+function sendArtifact(res: http.ServerResponse, content: WorkbenchArtifactContent): void {
+  res.writeHead(200, {
+    'Content-Type': content.mime,
+    'Content-Length': content.bytes.length,
+    'Content-Disposition': `inline; filename=${JSON.stringify(content.name)}`,
+    'Cache-Control': 'no-store',
+    'X-Content-Type-Options': 'nosniff',
+    ...(content.mime === 'image/svg+xml'
+      ? { 'Content-Security-Policy': "default-src 'none'; img-src data:; style-src 'unsafe-inline'; sandbox" }
+      : {}),
+  });
+  res.end(content.bytes);
+}
+
 // ── static dashboard serving (the built React app) ─────────────────────────────
 
 const STATIC_MIME: Record<string, string> = {
@@ -389,6 +441,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     // The write endpoints — both token-gated (see passesWriteGate). Every other
     // non-GET is rejected.
     if (req.method === 'POST' && url.pathname === '/api/tasks') { handlePostTask(req, res); return; }
+    if (req.method === 'POST' && url.pathname === '/api/attachments') { handleAttachmentUpload(req, res); return; }
     const cancelMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/cancel$/);
     if (req.method === 'POST' && cancelMatch) { handleCancelTask(req, res, cancelMatch[1]); return; }
     const inputMatch = url.pathname.match(/^\/api\/tasks\/([^/]+)\/input$/);
@@ -402,6 +455,11 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && approvalMatch) { handleApprovalDecision(req, res, approvalMatch[1]); return; }
     const continueMatch = url.pathname.match(/^\/api\/checkpoints\/([^/]+)\/continue$/);
     if (req.method === 'POST' && continueMatch) { handleContinueTask(req, res, continueMatch[1]); return; }
+    const browserControlMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/browser\/(take|return|clear)$/);
+    if (req.method === 'POST' && browserControlMatch) {
+      handleBrowserControl(req, res, browserControlMatch[1], browserControlMatch[2] as 'take' | 'return' | 'clear');
+      return;
+    }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The built-in self-contained dark page. The per-launch write token is
@@ -446,6 +504,39 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       sendJson(res, 200, opts.jobs.listEvents(decodeURIComponent(jobEventsMatch[1]), after));
       return;
     }
+
+    if (url.pathname === '/api/artifacts') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.artifacts) { sendJson(res, 503, { error: 'artifact projection unavailable' }); return; }
+      const runRaw = url.searchParams.get('runId');
+      const runId = runRaw === null ? undefined : Number(runRaw);
+      if (runRaw !== null && !Number.isSafeInteger(runId)) { sendJson(res, 400, { error: 'runId must be an integer' }); return; }
+      const sessionId = url.searchParams.get('sessionId') ?? undefined;
+      const artifacts = opts.artifacts.listArtifacts({ runId, sessionId, limit: 100 }).map((artifact) => ({
+        id: artifact.id,
+        name: path.basename(artifact.path.replace(/\\/g, '/')),
+        kind: artifact.kind,
+        tool: artifact.tool,
+        action: artifact.action,
+        runId: artifact.runId,
+        taskId: artifact.taskId,
+        sessionId: artifact.sessionId,
+        createdAt: artifact.createdAt,
+        bytes: artifact.bytes,
+        preview: artifact.preview,
+      }));
+      sendJson(res, 200, artifacts);
+      return;
+    }
+    const artifactContentMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/content$/);
+    if (artifactContentMatch) {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.artifacts) { sendJson(res, 503, { error: 'artifact projection unavailable' }); return; }
+      const content = opts.artifacts.readArtifact(decodeURIComponent(artifactContentMatch[1]));
+      if (!content) { sendJson(res, 404, { error: 'artifact not found' }); return; }
+      sendArtifact(res, content);
+      return;
+    }
     const jobProjectionMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/projection$/);
     if (jobProjectionMatch) {
       if (!opts.jobs) { sendJson(res, 503, { error: 'durable Job query unavailable' }); return; }
@@ -461,6 +552,12 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       sendJson(res, projection ? 200 : 404, projection
         ? { ...projection, assistantOutput: projectAssistantOutput(opts.reader, projection.identity.runId) }
         : { error: 'durable projection not found' });
+      return;
+    }
+    const browserStateMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/browser$/);
+    if (browserStateMatch) {
+      if (!opts.browser) { sendJson(res, 503, { error: 'browser authority unavailable' }); return; }
+      sendJson(res, 200, { browser: opts.browser.get(decodeURIComponent(browserStateMatch[1])) });
       return;
     }
 
@@ -503,6 +600,15 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         })),
         readOnly: !Boolean(opts.token && opts.enqueue),
       });
+      return;
+    }
+    if (url.pathname === '/api/workbench/capabilities') {
+      const capabilities = opts.capabilities?.() ?? {
+        modelSwitch: { available: false, reason: 'Runtime capability projection unavailable.' },
+        skills: [],
+        plugins: [],
+      };
+      sendJson(res, 200, capabilities);
       return;
     }
     const jobContinuityMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/continuity$/);
@@ -574,7 +680,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue'],
     });
   });
 
@@ -640,7 +746,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
   //
   // Returns true when the request cleared the gate; otherwise it has already
   // written the rejection and the caller must return.
-  function passesWriteGate(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+  function passesTokenGate(req: http.IncomingMessage, res: http.ServerResponse): boolean {
     if (!opts.token) { sendJson(res, 503, { error: 'write path not enabled' }); return false; }
     const raw = req.headers['x-workbench-token'];
     const hdr = Array.isArray(raw) ? raw[0] : raw;
@@ -659,6 +765,35 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     return true;
   }
 
+  function passesWriteGate(req: http.IncomingMessage, res: http.ServerResponse): boolean {
+    return passesTokenGate(req, res);
+  }
+
+  function handleAttachmentUpload(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.attachments) { sendJson(res, 503, { error: 'attachment upload unavailable' }); return; }
+    readJsonBody(req, 12 * 1024 * 1024).then((body) => {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      const mime = typeof body.mime === 'string' ? body.mime.trim() : undefined;
+      const base64 = typeof body.base64 === 'string' ? body.base64 : '';
+      if (!name || !base64 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) {
+        sendJson(res, 400, { error: 'body requires a valid file name and base64 content' });
+        return;
+      }
+      try {
+        const attachment = opts.attachments!.saveAttachment({ name, mime, bytes: Buffer.from(base64, 'base64') });
+        sendJson(res, 201, {
+          id: attachment.id,
+          name: attachment.name,
+          mime: attachment.mime,
+          size: attachment.size,
+        });
+      } catch (error) {
+        sendJson(res, 400, { error: error instanceof Error ? error.message : 'attachment upload failed' });
+      }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
   function handlePostTask(req: http.IncomingMessage, res: http.ServerResponse): void {
     if (!passesWriteGate(req, res)) return;
     readJsonBody(req, 64 * 1024).then((body) => {
@@ -667,7 +802,22 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       if (!opts.enqueue) { sendJson(res, 503, { error: 'task execution unavailable (daemon not wired)' }); return; }
       const sessionId = typeof body?.sessionId === 'string' ? body.sessionId : undefined;
       try {
-        const result = opts.enqueue.enqueue({ message, sessionId });
+        const attachmentIds = Array.isArray(body.attachmentIds)
+          ? body.attachmentIds.filter((id): id is string => typeof id === 'string').slice(0, 20)
+          : [];
+        if (attachmentIds.length > 0 && !opts.attachments) {
+          sendJson(res, 400, { error: 'attachments are unavailable' }); return;
+        }
+        let attachments: WorkbenchAttachment[] = [];
+        try {
+          attachments = attachmentIds.length > 0 ? opts.attachments!.resolveAttachments(attachmentIds) : [];
+        } catch {
+          sendJson(res, 400, { error: 'one or more attachment identities are invalid' }); return;
+        }
+        const durableMessage = attachments.length > 0
+          ? `${message}\n\nWorkbench attachments (runtime-mediated local references):\n${attachments.map((item) => `- ${item.name}: ${item.path}`).join('\n')}`
+          : message;
+        const result = opts.enqueue.enqueue({ message: durableMessage, sessionId });
         sendJson(res, 202, {
           accepted: result.accepted,
           triggerEventId: result.triggerEventId,
@@ -778,6 +928,25 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         sendJson(res, 409, { accepted: false, error: error instanceof Error ? error.message : String(error) });
       }
     }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleBrowserControl(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawJobId: string,
+    action: 'take' | 'return' | 'clear',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    req.resume();
+    if (!opts.browser) { sendJson(res, 503, { error: 'browser authority unavailable' }); return; }
+    const jobId = decodeURIComponent(rawJobId);
+    Promise.resolve(opts.browser[action](jobId)).then((browser) => {
+      sendJson(res, 202, { accepted: true, browser });
+    }).catch((error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`browser ${action} failed: ${message}`);
+      sendJson(res, 409, { accepted: false, error: message });
+    });
   }
 
   return new Promise<WorkbenchBridge>((resolve, reject) => {

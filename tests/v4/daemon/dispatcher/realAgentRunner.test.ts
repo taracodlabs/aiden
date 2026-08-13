@@ -14,6 +14,7 @@ import Database from 'better-sqlite3';
 import { runMigrations } from '../../../../core/v4/daemon/db/migrations';
 import { createRunStore } from '../../../../core/v4/daemon/runStore';
 import { createTaskStore } from '../../../../core/v4/daemon/taskStore';
+import { createArtifactStore } from '../../../../core/v4/daemon/artifactStore';
 import { createJobEngine } from '../../../../core/v4/daemon/jobEngine';
 import { createJobControlAuthority } from '../../../../core/v4/daemon/jobControlAuthority';
 import {
@@ -26,6 +27,7 @@ import type {
   DaemonAgentInput,
 } from '../../../../core/v4/daemon/dispatcher/agentRunner';
 import type { AidenAgent, AidenAgentResult } from '../../../../core/v4/aidenAgent';
+import { SessionStore } from '../../../../core/v4/sessionStore';
 
 let db: Database.Database;
 let runStore: ReturnType<typeof createRunStore>;
@@ -86,6 +88,96 @@ function mkResult(over: Partial<{ finishReason: string; usage: { totalTokens: nu
 }
 
 describe('createRealAgentRunner durable identity', () => {
+  it('loads the durable Workbench conversation and records one authoritative reply', async () => {
+    const sessionStore = new SessionStore(':memory:');
+    try {
+      const sessionId = 'session_workbench_history';
+      sessionStore.ensureSession(sessionId, { title: 'History' });
+      sessionStore.appendMessage(sessionId, { role: 'user', content: 'earlier question', turnNumber: 4 });
+      sessionStore.appendMessage(sessionId, { role: 'assistant', content: 'earlier answer', turnNumber: 4 });
+      sessionStore.appendMessage(sessionId, { role: 'user', content: 'current question', turnNumber: 5 });
+      let seenHistory: unknown[] = [];
+      const agent = {
+        runConversation: async (history: unknown) => {
+          seenHistory = history as unknown[];
+          return { ...mkResult(), finalContent: 'current answer', turnCount: 1 } as AidenAgentResult;
+        },
+      } as unknown as AidenAgent;
+      const runner = createRealAgentRunner({
+        db, runStore, jobEngine: createJobEngine({ db }),
+        taskStore: createTaskStore({ db }), sessionStore,
+        agentBuilder: () => agent, persistedDefault: PERSISTED,
+      });
+
+      await runner.invoke(mkInput({ sessionId, triggerEventId: 5, initialMessage: 'current question' }));
+
+      expect((seenHistory as Array<{ role: string; content: string }>).map((message) => message.content))
+        .toEqual(['earlier question', 'earlier answer', 'current question']);
+      expect(sessionStore.getMessages(sessionId).filter((message) => message.turnNumber === 5))
+        .toMatchObject([
+          { role: 'user', content: 'current question' },
+          { role: 'assistant', content: 'current answer' },
+        ]);
+    } finally {
+      sessionStore.close();
+    }
+  });
+
+  it('persists a bounded safe failure turn for immediate follow-up context', async () => {
+    const sessionStore = new SessionStore(':memory:');
+    try {
+      const sessionId = 'session_workbench_failure';
+      sessionStore.ensureSession(sessionId, { title: 'Failure' });
+      sessionStore.appendMessage(sessionId, { role: 'user', content: 'perform the task', turnNumber: 7 });
+      const runner = createRealAgentRunner({
+        db, runStore, jobEngine: createJobEngine({ db }),
+        taskStore: createTaskStore({ db }), sessionStore,
+        agentBuilder: () => stubAgent(new Error('provider authorization: token=private-value')),
+        persistedDefault: PERSISTED,
+      });
+
+      const result = await runner.invoke(mkInput({
+        sessionId, triggerEventId: 7, initialMessage: 'perform the task',
+      }));
+
+      expect(result.finishReason).toBe('error');
+      expect(sessionStore.getMessages(sessionId)).toMatchObject([
+        { role: 'user', content: 'perform the task', turnNumber: 7 },
+        { role: 'assistant', turnNumber: 7 },
+      ]);
+      const failure = sessionStore.getMessages(sessionId).find((message) => message.role === 'assistant')!;
+      expect(failure.content).toContain('authorization: [redacted]');
+      expect(failure.content).not.toContain('private-value');
+      expect(failure.content.length).toBeLessThanOrEqual(505);
+    } finally {
+      sessionStore.close();
+    }
+  });
+
+  it('registers verifier-approved file artifacts under the exact durable run', async () => {
+    const jobEngine = createJobEngine({ db });
+    const taskStore = createTaskStore({ db });
+    const artifactStore = createArtifactStore({ db });
+    const agent = stubAgent({
+      finishReason: 'stop', finalContent: 'created', turnCount: 1,
+      toolCallTrace: [{
+        name: 'file_write',
+        result: { success: true, path: 'C:\\Temp\\sun.svg', bytes: 128 },
+        verification: { ok: true },
+      }],
+    } as unknown as AidenAgentResult);
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine, taskStore, artifactStore,
+      agentBuilder: () => agent, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput());
+    const job = jobEngine.listJobs({ sessionId: 'trigger:file:t1:abc' })[0]!;
+    expect(artifactStore.listRecent({ sessionId: 'trigger:file:t1:abc' })).toMatchObject([{
+      path: 'C:\\Temp\\sun.svg', tool: 'file_write', runId: result.runId, taskId: job.id,
+    }]);
+  });
+
   it('creates and starts the Job and Attempt before invoking the agent', async () => {
     const jobEngine = createJobEngine({ db });
     const agent = stubAgent({

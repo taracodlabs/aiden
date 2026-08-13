@@ -7,7 +7,9 @@ import type { Db } from '../daemon/db/connection';
 import type { JobEngine } from '../daemon/jobEngine';
 import type { RunStore } from '../daemon/runStore';
 import type { TaskStore } from '../daemon/taskStore';
+import type { ArtifactStore } from '../daemon/artifactStore';
 import type { TriggerBus } from '../daemon/triggerBus';
+import type { SessionStore } from '../sessionStore';
 import {
   createDispatcher as createDurableDispatcher,
   createRealAgentRunner,
@@ -16,6 +18,8 @@ import {
 } from '../daemon/dispatcher';
 import { sweepDurableJobRecovery } from '../daemon/jobRecoverySweep';
 import { reconcileWorkbenchQueue } from './queueReconciliation';
+import type { ActionAuthority } from '../actionAuthority';
+import { buildWorkbenchApprovalCallbacks } from './approvalBridge';
 
 export interface WorkbenchExecutionSnapshot {
   available: boolean;
@@ -40,6 +44,9 @@ export interface CreateWorkbenchExecutionHostOptions {
   runStore: RunStore;
   jobEngine: JobEngine;
   taskStore: TaskStore;
+  artifactStore?: ArtifactStore;
+  approvalAuthority?: ActionAuthority;
+  sessionStore?: SessionStore;
   instanceId: string;
   agentBuilder: AgentBuilder;
   persistedDefault: { provider: string; model: string };
@@ -80,10 +87,25 @@ export function createWorkbenchExecutionHost(
         db: options.db,
         runStore: options.runStore,
         jobEngine: options.jobEngine,
-        taskStore: options.taskStore,
+         taskStore: options.taskStore,
+         artifactStore: options.artifactStore,
+         sessionStore: options.sessionStore,
         agentBuilder: options.agentBuilder,
         persistedDefault: options.persistedDefault,
         log: options.log,
+        ...(options.approvalAuthority ? {
+          approvalCallbacksFactory: ({ admission, signal, fallback }) => {
+            if (!admission) return fallback;
+            return buildWorkbenchApprovalCallbacks({
+              authority: options.approvalAuthority!,
+              jobId: admission.jobId,
+              attemptId: admission.attemptId,
+              generation: admission.generation,
+              ...(signal ? { signal } : {}),
+              ...(fallback.onDecision ? { onDecision: fallback.onDecision } : {}),
+            });
+          },
+        } : {}),
       });
       dispatcher = makeDispatcher({
         triggerBus: options.triggerBus,

@@ -15,6 +15,7 @@
  */
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwRespondDialog, pwDialogPending } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
 const _browserDialogTool: ToolHandler = {
   schema: {
@@ -55,4 +56,4 @@ const _browserDialogTool: ToolHandler = {
   },
 };
 
-export const browserDialogTool = _browserDialogTool;
+export const browserDialogTool = withBrowserState(_browserDialogTool);

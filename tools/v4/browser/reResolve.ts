@@ -24,11 +24,11 @@
  * isDestructiveAction) lives in core/v4/browserState; this module orchestrates.
  */
 import {
-  getLeaseStore,
   matchLeaseBySignature,
   isDestructiveAction,
   type ElementLease,
 } from '../../../core/v4/browserState';
+import { currentBrowserLeaseStore } from '../../../core/v4/browser/browserLeaseScope';
 import { pwAxSnapshot, pwActByLease } from '../../../core/playwrightBridge';
 
 /** Strong, action-took-effect evidence (a weak dom_hash change is not enough). */
@@ -64,7 +64,7 @@ export interface ReResolveParams {
 export async function reResolveAndRetry(p: ReResolveParams): Promise<ReResolveResult> {
   const snapshotFn = p.snapshotFn ?? pwAxSnapshot;
   const actFn = p.actFn ?? pwActByLease;
-  const store = getLeaseStore();
+  const store = currentBrowserLeaseStore();
   const oldLease = store.get(p.ref);
   const base = { reason: p.staleReason, state_delta: p.state_delta };
 

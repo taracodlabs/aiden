@@ -54,7 +54,13 @@ describe('minimal Workbench continuity surface', () => {
     expect(page).toContain('projection.identity.jobId} · {projection.identity.attemptId}');
     expect(page).toContain('generation {projection.identity.generation ?? 0} · run {projection.identity.runId}');
   });
-  it('E8 exposes the exact Attempt timeline', () => expect(source()).toContain('Attempt Timeline:'));
+  it('E8 exposes the exact durable event timeline without showing a false empty state', () => {
+    const page = source();
+    expect(page).toContain('Timeline: {projection.timeline?.length ?? 0}');
+    expect(page).toContain('Durable timeline restored');
+    expect(page).toContain('projection.job?.status ?? projection.receipt.status');
+    expect(page).not.toContain('Attempt Timeline:');
+  });
   it('E9 exposes the Worker tree', () => expect(source()).toContain('Worker Tree:'));
   it('E10 exposes pending approvals and Evidence counts', () => {
     expect(source()).toContain('Pending Approvals:'); expect(source()).toContain('Evidence:');
@@ -167,7 +173,7 @@ describe('minimal Workbench continuity surface', () => {
   });
   it('E27 keeps task submission explicitly unavailable when execution authority is absent', () => {
     const page = source();
-    expect(page).toContain('disabled={!input.trim() || isStreaming || !executionAvailable || workbenchReadOnly}');
+    expect(page).toContain('disabled={(!input.trim() && attachments.length === 0) || (isStreaming && hasSelectedWork) || !executionAvailable || workbenchReadOnly}');
     expect(page).toContain('Task execution is unavailable. Configure a provider with the Aiden CLI');
   });
   it('E28 binds a delayed admission only when its original empty conversation is still selected', () => {

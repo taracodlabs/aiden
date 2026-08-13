@@ -33,6 +33,7 @@ export interface TabMeta {
   controlled: boolean;
   lastSnapshotHash: string | null;
   dirtyForm: boolean;
+  browserSessionId: string | null;
 }
 
 class TabRegistry {
@@ -44,7 +45,12 @@ class TabRegistry {
    * 'aiden' upgrades an event-classified entry — this is how the bridge's
    * explicit Aiden-newPage registration wins regardless of event ordering.
    */
-  track(page: unknown, createdBy: 'aiden' | 'user', openerId: string | null): TabMeta {
+  track(
+    page: unknown,
+    createdBy: 'aiden' | 'user',
+    openerId: string | null,
+    browserSessionId: string | null = null,
+  ): TabMeta {
     let meta = this.byPage.get(page);
     if (!meta) {
       this.counter += 1;
@@ -56,11 +62,18 @@ class TabRegistry {
         controlled: false,
         lastSnapshotHash: null,
         dirtyForm: false,
+        browserSessionId,
       };
       this.byPage.set(page, meta);
     } else {
       if (createdBy === 'aiden') meta.createdBy = 'aiden'; // upgrade only
       if (openerId !== null) meta.opener_id = openerId;
+      if (browserSessionId !== null) {
+        if (meta.browserSessionId !== null && meta.browserSessionId !== browserSessionId) {
+          throw new Error('Browser tab is already assigned to another durable session');
+        }
+        meta.browserSessionId = browserSessionId;
+      }
     }
     return meta;
   }
@@ -77,8 +90,10 @@ class TabRegistry {
   idOf(page: unknown): string | null { return this.byPage.get(page)?.tab_id ?? null; }
 
   /** Mark exactly one page as the controlled tab (the rest cleared). */
-  markControlled(page: unknown): void {
-    for (const [pg, m] of this.byPage) m.controlled = pg === page;
+  markControlled(page: unknown, browserSessionId: string | null = null): void {
+    for (const [pg, m] of this.byPage) {
+      if (browserSessionId === null || m.browserSessionId === browserSessionId) m.controlled = pg === page;
+    }
   }
 
   isAidenCreated(page: unknown): boolean { return this.byPage.get(page)?.createdBy === 'aiden'; }
@@ -87,7 +102,10 @@ class TabRegistry {
   canClose(page: unknown): boolean { return this.isAidenCreated(page); }
 
   entries(): Array<[unknown, TabMeta]> { return [...this.byPage.entries()]; }
-  list(): TabMeta[] { return [...this.byPage.values()]; }
+  list(browserSessionId?: string): TabMeta[] {
+    const tabs = [...this.byPage.values()];
+    return browserSessionId === undefined ? tabs : tabs.filter((tab) => tab.browserSessionId === browserSessionId);
+  }
 }
 
 let _registry: TabRegistry | null = null;

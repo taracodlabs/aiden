@@ -16,7 +16,7 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwClick, pwClickFirstResult, pwActByLease } from '../../../core/playwrightBridge';
-import { getLeaseStore } from '../../../core/v4/browserState';
+import { currentBrowserLeaseStore } from '../../../core/v4/browser/browserLeaseScope';
 import { withBrowserState } from './_observer';
 
 /** Shared @eN→lease error (B1.2). */
@@ -63,7 +63,7 @@ const _browserClickTool: ToolHandler = {
     // B1.2 — ref-based addressing (additive; CSS/text path below is unchanged).
     const ref = String(args.ref ?? '').trim();
     if (ref) {
-      const lease = getLeaseStore().get(ref);
+      const lease = currentBrowserLeaseStore().get(ref);
       if (!lease) return { success: false, error: staleRefError(ref) };
       const r = await pwActByLease(lease, { kind: 'click' });
       if (r.ok) return { success: true, ref };

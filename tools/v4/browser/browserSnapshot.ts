@@ -18,7 +18,8 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwAxSnapshot, pwDialogPending, pwDialogRecent, pwFileEvents } from '../../../core/playwrightBridge';
-import { getLeaseStore, formatAxSnapshot } from '../../../core/v4/browserState';
+import { formatAxSnapshot, projectStructuredForms } from '../../../core/v4/browserState';
+import { currentBrowserLeaseStore } from '../../../core/v4/browser/browserLeaseScope';
 import { sanitizeExtracted } from './redactContent';
 import { withBrowserState } from './_observer';
 
@@ -36,13 +37,14 @@ const _browserSnapshotTool: ToolHandler = {
   async execute() {
     const r = await pwAxSnapshot();
     if (!r.ok) return { success: false, error: r.error };
-    const leases = getLeaseStore().refresh(Date.now(), r.url ?? '', r.elements ?? []);
+    const leases = currentBrowserLeaseStore().refresh(Date.now(), r.url ?? '', r.elements ?? []);
     // B5.1 — element names are page-derived: redact secrets + fence as untrusted.
     // The @eN refs stay intact (act-by-ref uses the store, not this text).
     const out: Record<string, unknown> = {
       success: true,
       count: leases.length,
       snapshot: sanitizeExtracted(formatAxSnapshot(leases)),
+      forms: projectStructuredForms(leases),
     };
     // B4.2a — surface dialog + file-event state alongside the element list.
     const pending = pwDialogPending();

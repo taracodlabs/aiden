@@ -18,6 +18,7 @@ const outfit = Outfit({
 export const metadata: Metadata = {
   title: 'Aiden Workbench',
   description: 'Aiden — local-first agent · Taracod',
+  icons: { icon: '/favicon.png' },
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

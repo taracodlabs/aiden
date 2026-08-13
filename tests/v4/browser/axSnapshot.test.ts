@@ -11,13 +11,16 @@
  * these tests cover the TS semantics: role mapping, accessible-name precedence,
  * @eN assignment, full lease population, store refresh, and frame-grouped output.
  */
+import path from 'node:path';
 import { describe, it, expect } from 'vitest';
+import { resolveBrowserProfileDirectory } from '../../../core/playwrightBridge';
 import {
   axRoleFor,
   accessibleName,
   LeaseStore,
   getLeaseStore,
   formatAxSnapshot,
+  projectStructuredForms,
   sha256Hex,
   type AxRawDescriptor,
 } from '../../../core/v4/browserState';
@@ -30,6 +33,21 @@ function desc(over: Partial<AxRawDescriptor> = {}): AxRawDescriptor {
     ...over,
   };
 }
+
+describe('browser profile isolation', () => {
+  it('keeps the persistent browser profile inside the isolated Aiden home', () => {
+    expect(resolveBrowserProfileDirectory({ AIDEN_HOME: 'C:\\isolated-aiden' })).toBe(
+      path.resolve('C:\\isolated-aiden', 'browser-profile'),
+    );
+  });
+
+  it('honours an explicit browser-profile directory', () => {
+    expect(resolveBrowserProfileDirectory({
+      AIDEN_HOME: 'C:\\isolated-aiden',
+      AIDEN_BROWSER_PROFILE_DIR: 'C:\\disposable-browser-profile',
+    })).toBe(path.resolve('C:\\disposable-browser-profile'));
+  });
+});
 
 describe('axRoleFor — role mapping', () => {
   it('explicit role attr wins', () => {
@@ -45,6 +63,44 @@ describe('axRoleFor — role mapping', () => {
     expect(axRoleFor({ tag: 'input', roleAttr: '', inputType: 'radio' })).toBe('radio');
     expect(axRoleFor({ tag: 'input', roleAttr: '', inputType: 'submit' })).toBe('button');
     expect(axRoleFor({ tag: 'span', roleAttr: '', inputType: '' })).toBe('generic');
+  });
+});
+
+describe('structured form projection', () => {
+  it('projects bounded field state and keeps password values redacted', () => {
+    const store = new LeaseStore();
+    const leases = store.refresh(9, 'https://form.example.test', [
+      desc({
+        tag: 'input', inputType: 'email', ariaLabel: 'Email', formId: 'profile',
+        required: true, value: 'user@example.test', autocomplete: 'email',
+      }),
+      desc({
+        tag: 'input', inputType: 'password', ariaLabel: 'Password', formId: 'profile',
+        value: 'must-not-appear', autocomplete: 'current-password',
+      }),
+      desc({
+        tag: 'select', ariaLabel: 'Country', formId: 'profile', value: 'ee',
+        options: [
+          { value: 'in', label: 'India', selected: false },
+          { value: 'ee', label: 'Estonia', selected: true },
+        ],
+      }),
+      desc({ tag: 'button', textContent: 'Save', formId: 'profile', submit: true }),
+    ]);
+    const projected = projectStructuredForms(leases);
+    expect(projected).toEqual([{
+      formId: 'profile',
+      fields: [
+        expect.objectContaining({ ref: '@e1', type: 'email', required: true, value: 'user@example.test' }),
+        expect.objectContaining({ ref: '@e2', type: 'password', value: '' }),
+        expect.objectContaining({ ref: '@e3', type: 'select', options: [
+          { value: 'in', label: 'India', selected: false },
+          { value: 'ee', label: 'Estonia', selected: true },
+        ] }),
+      ],
+      submitRefs: ['@e4'],
+    }]);
+    expect(JSON.stringify(projected)).not.toContain('must-not-appear');
   });
 });
 

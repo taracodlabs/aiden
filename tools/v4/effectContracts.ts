@@ -118,10 +118,10 @@ const PROCESS_CONTROL = contract({
   redactionRules: ['digest_arguments', 'omit_sensitive_values'], targetFields: ['pid'],
 });
 const BROWSER_ACTION = contract({
-  classification: 'unsafe_mutation', kind: 'browser.action',
-  retrySafety: 'never_automatic', idempotencySupported: false,
-  reconciliationSupported: false, verificationSupported: true,
-  approvalRequirement: 'policy', sensitiveFields: ['text', 'value', 'values', 'files'],
+  classification: 'reconcilable_mutation', kind: 'browser.action',
+  retrySafety: 'reconcile_before_retry', idempotencySupported: false,
+  reconciliationSupported: true, verificationSupported: true,
+  approvalRequirement: 'none', sensitiveFields: ['text', 'value', 'values', 'files'],
   redactionRules: ['digest_arguments', 'omit_sensitive_values'], targetFields: ['selector', 'ref', 'url'],
 });
 const INTERNAL_STATE = contract({
@@ -167,6 +167,8 @@ const CONTRACTS: Readonly<Record<string, ToolEffectContract>> = Object.freeze({
   browser_close: BROWSER_ACTION,
   browser_dialog: BROWSER_ACTION,
   browser_upload: BROWSER_ACTION,
+  browser_control: BROWSER_ACTION,
+  browser_download: ARTIFACT_WRITE,
   memory_add: INTERNAL_STATE,
   memory_replace: INTERNAL_STATE,
   memory_remove: INTERNAL_STATE,
