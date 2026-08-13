@@ -31,7 +31,7 @@ describe('repository snapshot migration v32', () => {
       migration.apply!(db!);
       db!.prepare('INSERT OR REPLACE INTO schema_version (id,version,applied_at) VALUES (1,32,?)').run(Date.now());
     }).immediate();
-    expect(LATEST_SCHEMA_VERSION).toBe(44);
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(32);
     expect(db.prepare('SELECT id,status,repository_snapshot_id FROM tasks WHERE id=?').get('job')).toEqual({ id: 'job', status: 'queued', repository_snapshot_id: null });
     expect(db.prepare('SELECT attempt_id,status,repository_snapshot_id FROM runs WHERE attempt_id=?').get('attempt')).toEqual({ attempt_id: 'attempt', status: 'queued', repository_snapshot_id: null });
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'repository_%' ORDER BY name").all()).toEqual([

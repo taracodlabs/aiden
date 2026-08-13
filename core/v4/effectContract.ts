@@ -31,6 +31,13 @@ export interface EffectReconciliationData {
   };
   sourceBefore?: { exists: boolean; size?: number; mtimeMs?: number; contentSha256?: string };
   destinationBefore?: { exists: boolean; size?: number; mtimeMs?: number; contentSha256?: string };
+  providerId?: string;
+  toolkitId?: string;
+  actionId?: string;
+  accountId?: string;
+  schemaVersion?: string;
+  providerActionVersion?: string;
+  requestId?: string;
 }
 
 export interface ToolEffectContract {

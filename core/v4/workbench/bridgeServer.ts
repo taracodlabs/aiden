@@ -41,6 +41,7 @@ import type {
   WorkbenchArtifactContent,
 } from './fileBridge';
 import type { Artifact } from '../daemon/artifactStore';
+import type { WorkbenchAppsPort } from './appsPort';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -216,6 +217,8 @@ export interface WorkbenchBridgeOptions {
   continuity?: ContinuityReader;
   continueTask?: ContinuityController;
   browser?: WorkbenchBrowserController;
+  /** Safe connected-account projection and commands over the shared integration authority. */
+  apps?: WorkbenchAppsPort;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -460,6 +463,18 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       handleBrowserControl(req, res, browserControlMatch[1], browserControlMatch[2] as 'take' | 'return' | 'clear');
       return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/apps/connect') {
+      handleAppsConnect(req, res); return;
+    }
+    const appConnectionMatch = url.pathname.match(/^\/api\/apps\/connections\/([^/]+)\/complete$/);
+    if (req.method === 'POST' && appConnectionMatch) {
+      handleAppsComplete(req, res, appConnectionMatch[1]); return;
+    }
+    const appAccountMatch = url.pathname.match(/^\/api\/apps\/accounts\/([^/]+)\/(refresh|reconnect|disconnect)$/);
+    if (req.method === 'POST' && appAccountMatch) {
+      handleAppsAccount(req, res, appAccountMatch[1], appAccountMatch[2] as 'refresh' | 'reconnect' | 'disconnect');
+      return;
+    }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The built-in self-contained dark page. The per-launch write token is
@@ -526,6 +541,18 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         preview: artifact.preview,
       }));
       sendJson(res, 200, artifacts);
+      return;
+    }
+
+    if (url.pathname === '/api/apps') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.apps) { sendJson(res, 503, { error: 'Apps are unavailable' }); return; }
+      void opts.apps.snapshot()
+        .then((snapshot) => sendJson(res, 200, snapshot))
+        .catch((error) => {
+          log(`Apps snapshot failed: ${error instanceof Error ? error.message : 'request failed'}`);
+          sendJson(res, 503, { error: 'Apps are temporarily unavailable' });
+        });
       return;
     }
     const artifactContentMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/content$/);
@@ -680,7 +707,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/apps', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/apps/connect', 'POST /api/apps/connections/:connectionId/complete', 'POST /api/apps/accounts/:accountId/refresh', 'POST /api/apps/accounts/:accountId/reconnect', 'POST /api/apps/accounts/:accountId/disconnect'],
     });
   });
 
@@ -767,6 +794,72 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
   function passesWriteGate(req: http.IncomingMessage, res: http.ServerResponse): boolean {
     return passesTokenGate(req, res);
+  }
+
+  function sendAppsError(res: http.ServerResponse, error: unknown): void {
+    const message = error instanceof Error ? error.message : 'Apps request failed';
+    const status = /outside the current workspace|not available|not found/i.test(message) ? 404 : 400;
+    sendJson(res, status, { error: message.slice(0, 500) });
+  }
+
+  function handleAppsConnect(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.apps) { sendJson(res, 503, { error: 'Apps are unavailable' }); return; }
+    readJsonBody(req, 16 * 1024).then(async (body) => {
+      const providerId = typeof body.providerId === 'string' ? body.providerId.trim() : '';
+      const toolkitId = typeof body.toolkitId === 'string' ? body.toolkitId.trim() : '';
+      const label = typeof body.label === 'string' ? body.label.trim() : undefined;
+      if (!providerId || !toolkitId) {
+        sendJson(res, 400, { error: 'providerId and toolkitId are required' }); return;
+      }
+      try {
+        sendJson(res, 202, await opts.apps!.connect({
+          providerId,
+          toolkitId,
+          ...(label ? { label } : {}),
+        }));
+      } catch (error) { sendAppsError(res, error); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleAppsComplete(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawConnectionId: string,
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.apps) { sendJson(res, 503, { error: 'Apps are unavailable' }); return; }
+    req.resume();
+    void opts.apps.complete(decodeURIComponent(rawConnectionId))
+      .then((account) => sendJson(res, 200, { account }))
+      .catch((error) => sendAppsError(res, error));
+  }
+
+  function handleAppsAccount(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawAccountId: string,
+    action: 'refresh' | 'reconnect' | 'disconnect',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.apps) { sendJson(res, 503, { error: 'Apps are unavailable' }); return; }
+    const accountId = decodeURIComponent(rawAccountId);
+    if (action === 'disconnect') {
+      readJsonBody(req, 4 * 1024).then(async (body) => {
+        if (body.confirmed !== true) {
+          sendJson(res, 400, { error: 'disconnect requires confirmed=true' }); return;
+        }
+        try { sendJson(res, 200, { account: await opts.apps!.disconnect(accountId) }); }
+        catch (error) { sendAppsError(res, error); }
+      }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+      return;
+    }
+    req.resume();
+    const operation = action === 'refresh'
+      ? opts.apps.refresh(accountId).then((account) => ({ account }))
+      : opts.apps.reconnect(accountId);
+    void operation.then((result) => sendJson(res, action === 'reconnect' ? 202 : 200, result))
+      .catch((error) => sendAppsError(res, error));
   }
 
   function handleAttachmentUpload(req: http.IncomingMessage, res: http.ServerResponse): void {

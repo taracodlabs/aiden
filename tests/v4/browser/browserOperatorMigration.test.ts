@@ -12,7 +12,7 @@ describe('browser operator migration', () => {
     const db = new Database(':memory:');
     try {
       expect(runMigrations(db)).toEqual({ from: 0, to: LATEST_SCHEMA_VERSION });
-      expect(LATEST_SCHEMA_VERSION).toBe(44);
+      expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(44);
       const tables = (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>)
         .map((row) => row.name);
       expect(tables).toEqual(expect.arrayContaining([
@@ -21,8 +21,9 @@ describe('browser operator migration', () => {
         'browser_action_receipts',
         'browser_navigation_history',
       ]));
-      expect(MIGRATIONS_FOR_TESTS.at(-1)?.name).toContain('browser operator');
-      expect(runMigrations(db)).toEqual({ from: 44, to: 44 });
+      expect(MIGRATIONS_FOR_TESTS.find((migration) => migration.version === 44)?.name)
+        .toContain('browser operator');
+      expect(runMigrations(db)).toEqual({ from: LATEST_SCHEMA_VERSION, to: LATEST_SCHEMA_VERSION });
     } finally {
       db.close();
     }

@@ -105,6 +105,7 @@ const STANDARD_TOOLSETS: readonly string[] = [
   'sessions',
   'subagent',
   'trace',
+  'apps',
 ];
 
 /**

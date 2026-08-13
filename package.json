@@ -294,6 +294,7 @@
     "ws": "^8.20.1"
   },
   "optionalDependencies": {
+    "@composio/core": "0.14.1",
     "decibri": "*",
     "node-record-lpcm16": "*"
   },

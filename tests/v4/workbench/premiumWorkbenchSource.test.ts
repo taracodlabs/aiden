@@ -10,6 +10,7 @@ import { describe, expect, it } from 'vitest';
 
 const root = path.resolve(__dirname, '../../..');
 const page = fs.readFileSync(path.join(root, 'dashboard-next/app/page.tsx'), 'utf8');
+const styles = fs.readFileSync(path.join(root, 'dashboard-next/app/globals.css'), 'utf8');
 const layout = fs.readFileSync(path.join(root, 'dashboard-next/app/layout.tsx'), 'utf8');
 const assets = fs.readFileSync(path.join(root, 'dashboard-next/scripts/copy-standalone-assets.js'), 'utf8');
 
@@ -81,6 +82,68 @@ describe('premium Workbench source contracts', () => {
     expect(page).toContain('className="history-sidebar sidebar-rail"');
     expect(page).toContain("setMainView('artifacts')");
     expect(page).toContain("setMainView('sponsors')");
+  });
+
+  it('provides one functional Apps surface without accepting provider credentials in browser state', () => {
+    expect(page).toContain("setMainView('apps')");
+    expect(page).toContain('function AppsView()');
+    expect(page).toContain('aiden.loadApps()');
+    expect(page).toContain('aiden.connectApp');
+    expect(page).toContain('aiden.completeAppConnection');
+    expect(page).toContain('aiden.refreshAppAccount');
+    expect(page).toContain('aiden.reconnectAppAccount');
+    expect(page).toContain('aiden.disconnectAppAccount');
+    expect(page).toContain('Credentials never enter Workbench');
+    const apps = page.slice(page.indexOf('function AppsView()'), page.indexOf('function SponsorsView()'));
+    expect(apps).not.toContain('apiKey');
+    expect(apps).not.toContain('secretHandle');
+    expect(apps).toContain('Account label');
+    expect(apps).toContain('label: accountLabels[`${toolkit.providerId}:${toolkit.toolkitId}`]?.trim()');
+  });
+
+  it('keeps the collapsed navigation rail reachable at responsive widths', () => {
+    const responsive = styles.slice(
+      styles.indexOf('@media (max-width: 980px)'),
+      styles.indexOf('@media (max-width: 620px)'),
+    );
+    expect(responsive).toMatch(
+      /\.workbench-grid\.sidebar-closed \.history-sidebar\.sidebar-rail\s*\{[^}]*transform:\s*translateX\(0\)/,
+    );
+    expect(responsive).toMatch(
+      /\.workbench-grid\.sidebar-closed \.history-sidebar\.sidebar-rail\s*\{[^}]*width:\s*58px/,
+    );
+  });
+
+  it('reserves responsive shell width so collapsed navigation cannot cover main content', () => {
+    const responsive = styles.slice(
+      styles.indexOf('@media (max-width: 980px)'),
+      styles.indexOf('@media (max-width: 620px)'),
+    );
+    const columns = responsive.match(
+      /\.workbench-grid\.sidebar-closed\s*\{[^}]*grid-template-columns:\s*(\d+)px\s+minmax\(0,\s*1fr\)/,
+    );
+    const rail = responsive.match(
+      /\.workbench-grid\.sidebar-closed \.history-sidebar\.sidebar-rail\s*\{([^}]*)\}/,
+    );
+    const main = responsive.match(
+      /\.workbench-grid\.sidebar-closed\s*>\s*\.workbench-main\s*\{([^}]*)\}/,
+    );
+
+    expect(page).toContain('className="workbench-main"');
+    expect(columns?.[1]).toBe('58');
+    expect(rail?.[1]).toMatch(/position:\s*relative/);
+    expect(rail?.[1]).toMatch(/grid-column:\s*1/);
+    expect(main?.[1]).toMatch(/grid-column:\s*2/);
+    expect(main?.[1]).toMatch(/min-width:\s*0/);
+    expect(main?.[1]).toMatch(/max-width:\s*100%/);
+
+    const railWidth = Number(columns?.[1]);
+    for (const viewportWidth of [480, 900, 1366, 1920]) {
+      const railBounds = { left: 0, right: railWidth };
+      const mainBounds = { left: railWidth, right: viewportWidth };
+      expect(mainBounds.left).toBeGreaterThanOrEqual(railBounds.right);
+      expect(mainBounds.right).toBeLessThanOrEqual(viewportWidth);
+    }
   });
 
   it('renders a restrained sponsor surface with the exact safe external destination', () => {

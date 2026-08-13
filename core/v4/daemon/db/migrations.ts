@@ -2479,6 +2479,169 @@ function applyV44(db: Database.Database): void {
   `);
 }
 
+/** Provider-neutral Apps identities, version pins and opaque secret metadata. */
+function applyV45(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS integration_secret_handles (
+      secret_handle TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      account_id TEXT,
+      label TEXT NOT NULL,
+      backend TEXT NOT NULL,
+      storage_ref TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      revoked_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_secrets_scope
+      ON integration_secret_handles(workspace_id, owner_id, provider_id, status);
+
+    CREATE TABLE IF NOT EXISTS integration_provider_credentials (
+      provider_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      secret_handle TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (provider_id, workspace_id, owner_id),
+      FOREIGN KEY (secret_handle) REFERENCES integration_secret_handles(secret_handle) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS connected_accounts (
+      account_id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL,
+      toolkit_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      label TEXT NOT NULL,
+      provider_account_ref TEXT NOT NULL,
+      provider_user_ref TEXT,
+      secret_handle TEXT,
+      hosted_auth_ref TEXT,
+      status TEXT NOT NULL CHECK(status IN ('connecting','active','degraded','expired','revoked')),
+      health TEXT NOT NULL CHECK(health IN (
+        'unknown','healthy','degraded','insufficient_scope','expired','revoked'
+      )),
+      scopes_json TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_checked_at INTEGER,
+      revoked_at INTEGER,
+      FOREIGN KEY (secret_handle) REFERENCES integration_secret_handles(secret_handle) ON DELETE SET NULL,
+      UNIQUE (provider_id, provider_account_ref, workspace_id, owner_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_connected_accounts_selection
+      ON connected_accounts(workspace_id, owner_id, provider_id, toolkit_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS integration_job_account_bindings (
+      job_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      toolkit_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      bound_attempt_id TEXT,
+      bound_generation INTEGER,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (job_id, toolkit_id),
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (account_id) REFERENCES connected_accounts(account_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_job_account
+      ON integration_job_account_bindings(account_id, job_id);
+
+    CREATE TABLE IF NOT EXISTS integration_connection_sessions (
+      connection_id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL,
+      toolkit_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      label TEXT,
+      state TEXT NOT NULL CHECK(state IN ('pending','completed','failed','expired','cancelled')),
+      authorization_url TEXT,
+      user_code TEXT,
+      expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      completed_account_id TEXT,
+      reconnect_account_id TEXT,
+      FOREIGN KEY (completed_account_id) REFERENCES connected_accounts(account_id) ON DELETE SET NULL,
+      FOREIGN KEY (reconnect_account_id) REFERENCES connected_accounts(account_id) ON DELETE SET NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_connections_scope
+      ON integration_connection_sessions(workspace_id, owner_id, provider_id, state, created_at);
+
+    CREATE TABLE IF NOT EXISTS integration_action_schemas (
+      provider_id TEXT NOT NULL,
+      toolkit_id TEXT NOT NULL,
+      action_id TEXT NOT NULL,
+      schema_version TEXT NOT NULL,
+      provider_action_version TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK(operation IN ('read','mutation')),
+      risk TEXT NOT NULL,
+      schema_digest TEXT NOT NULL,
+      input_schema_json TEXT NOT NULL,
+      output_schema_json TEXT,
+      discovered_at INTEGER NOT NULL,
+      PRIMARY KEY (provider_id, toolkit_id, action_id, schema_version, provider_action_version)
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_action_current
+      ON integration_action_schemas(provider_id, toolkit_id, action_id, discovered_at DESC);
+
+    CREATE TABLE IF NOT EXISTS integration_action_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      provider_id TEXT NOT NULL,
+      toolkit_id TEXT NOT NULL,
+      action_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      schema_version TEXT NOT NULL,
+      provider_action_version TEXT NOT NULL,
+      request_id TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      reconciliation_json TEXT NOT NULL DEFAULT '{}',
+      job_id TEXT,
+      attempt_id TEXT,
+      generation INTEGER,
+      tool_call_id TEXT,
+      effect_id TEXT,
+      state TEXT NOT NULL CHECK(state IN (
+        'prepared','dispatched','succeeded','failed','unknown','reconciling',
+        'verified','not_applied','cancelled','stale_rejected'
+      )),
+      external_ref TEXT,
+      result_digest TEXT,
+      error_category TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      settled_at INTEGER,
+      FOREIGN KEY (account_id) REFERENCES connected_accounts(account_id) ON DELETE RESTRICT,
+      FOREIGN KEY (effect_id) REFERENCES side_effect_ledger(key) ON DELETE SET NULL,
+      UNIQUE (provider_id, account_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_integration_receipts_effect
+      ON integration_action_receipts(effect_id, state) WHERE effect_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_integration_receipts_job
+      ON integration_action_receipts(job_id, attempt_id, generation, created_at);
+
+    CREATE TABLE IF NOT EXISTS integration_trigger_cursors (
+      provider_id TEXT NOT NULL,
+      toolkit_id TEXT NOT NULL,
+      account_id TEXT NOT NULL,
+      trigger_id TEXT NOT NULL,
+      cursor TEXT NOT NULL,
+      cursor_digest TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (provider_id, toolkit_id, account_id, trigger_id),
+      FOREIGN KEY (account_id) REFERENCES connected_accounts(account_id) ON DELETE CASCADE
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2524,6 +2687,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 42, name: 'exact Claim Effect bindings', apply: applyV42 },
   { version: 43, name: 'durable continuity checkpoints', apply: applyV43 },
   { version: 44, name: 'durable browser operator authority', apply: applyV44 },
+  { version: 45, name: 'provider-neutral Apps authority', apply: applyV45 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2571,7 +2735,11 @@ function validateLatestSchema(db: Database.Database): void {
     'job_budget_reservation_reconciliations', 'worker_groups', 'worker_group_members',
     'worker_provider_concurrency_reservations', 'continuity_checkpoints',
     'continuity_actions', 'browser_sessions', 'browser_tabs',
-    'browser_action_receipts', 'browser_navigation_history'];
+    'browser_action_receipts', 'browser_navigation_history',
+    'integration_secret_handles', 'integration_provider_credentials',
+    'connected_accounts', 'integration_job_account_bindings',
+    'integration_connection_sessions', 'integration_action_schemas',
+    'integration_action_receipts', 'integration_trigger_cursors'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

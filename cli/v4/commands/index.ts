@@ -86,6 +86,7 @@ import { approvals, attempts, effects, evidence, job, jobs, proof } from './oper
 import { cls } from './cls';
 import { newSession } from './newSession';
 import { session } from './session';
+import { apps } from './apps';
 
 export {
   help,
@@ -163,6 +164,7 @@ export {
   cls,
   newSession,
   session,
+  apps,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -247,6 +249,7 @@ export const allCommands: SlashCommand[] = [
   cls,
   newSession,
   session,
+  apps,
   clear,
   quit,
 ];

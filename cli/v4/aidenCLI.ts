@@ -47,6 +47,7 @@ import { runSetupWizard, isFreshInstall, setupRequiresRecoveryMode } from './set
 import { runDoctorCli } from './doctor';
 import { runModelPicker } from './commands/modelPicker';
 import { allCommands } from './commands';
+import { runAppsCli } from './appsCli';
 // v4.12 /commands slice — inline /activity roll-up + /home cwd invalidation + history source.
 import { makeActivityCommand } from './commands/activity';
 import { loadRecent, HISTORY_MAX_ENTRIES } from './historyStore';
@@ -73,6 +74,7 @@ import { resolveAutonomyPolicy, type AutonomyLevel } from '../../moat/autonomy';
 import { SessionStore } from '../../core/v4/sessionStore';
 import { SessionManager } from '../../core/v4/sessionManager';
 import { ToolRegistry } from '../../core/v4/toolRegistry';
+import { createIntegrationRuntime, integrationLocalScope } from '../../core/v4/integrations/runtime';
 import { SkillLoader } from '../../core/v4/skillLoader';
 import { makeSubagentFanoutTool } from '../../tools/v4/index';
 import type { ProviderOption } from '../../core/v4/subagent/providerRotation';
@@ -330,6 +332,8 @@ export interface MainOptions {
   runMcpHook?: (action: string) => Promise<void>;
   /** Override for test injection — headless one-shot (`aiden -q`). Returns exit code. */
   runQueryHook?: (opts: any) => Promise<number>;
+  /** Override for parser-level Apps command tests. Returns exit code. */
+  runAppsHook?: (input: Parameters<typeof runAppsCli>[0]) => Promise<number>;
   /** Path override for tests. */
   pathsOverride?: AidenPaths;
   /** Stub stdout writer (defaults to process.stdout.write). */
@@ -502,6 +506,51 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         : await runQuery(merged.query, merged, opts);
     });
 
+  const runAppsAction = async (input: Parameters<typeof runAppsCli>[0]): Promise<void> => {
+    if (opts.runAppsHook) {
+      actionExitCode = await opts.runAppsHook(input);
+      return;
+    }
+    const paths = opts.pathsOverride ?? resolveAidenPaths();
+    actionExitCode = await runAppsCli(input, {
+      rootDir: paths.root,
+      ...(opts.writeOut ? { write: opts.writeOut } : {}),
+    });
+  };
+
+  const appsCommand = program
+    .command('apps')
+    .description('Connect and manage app accounts')
+    .action(async () => runAppsAction({ action: 'list' }));
+  appsCommand.command('list').description('List available apps and connected accounts')
+    .action(async () => runAppsAction({ action: 'list' }));
+  appsCommand.command('accounts [toolkit]').description('List connected accounts')
+    .action(async (toolkit?: string) => runAppsAction({ action: 'accounts', ...(toolkit ? { toolkitId: toolkit } : {}) }));
+  appsCommand.command('status [account]').description('Check provider or account health')
+    .action(async (account?: string) => runAppsAction({ action: 'status', ...(account ? { accountId: account } : {}) }));
+  appsCommand.command('configure <provider>').description('Store an integration provider credential securely')
+    .action(async (provider: string) => runAppsAction({ action: 'configure', providerId: provider }));
+  appsCommand.command('connect <app> [label]').description('Connect an app account')
+    .option('--provider <provider>', 'Integration provider', 'composio')
+    .option('--no-open', 'Do not open the authorization URL')
+    .action(async (app: string, label: string | undefined, command: { provider?: string; open?: boolean }) => runAppsAction({
+      action: 'connect', toolkitId: app, ...(label ? { label } : {}),
+      providerId: (program.opts() as { provider?: string }).provider ?? command.provider ?? 'composio',
+      open: command.open !== false,
+    }));
+  appsCommand.command('complete <connection>').description('Complete an authorized connection')
+    .action(async (connection: string) => runAppsAction({ action: 'complete', connectionId: connection }));
+  appsCommand.command('reconnect <account>').description('Reconnect an account')
+    .option('--no-open', 'Do not open the authorization URL')
+    .action(async (account: string, command: { open?: boolean }) => runAppsAction({
+      action: 'reconnect', accountId: account, open: command.open !== false,
+    }));
+  appsCommand.command('disconnect <account>').description('Disconnect an account while preserving audit history')
+    .option('--yes', 'Confirm the disconnect without an interactive prompt')
+    .action(async (account: string, command: { yes?: boolean }) => runAppsAction({
+      action: 'disconnect', accountId: account, yes: command.yes === true,
+    }));
+
   // v4.14.6 — Aiden Workbench launcher. Serves a read-only live dashboard page
   // (dark, orange) backed by the shared daemon run_events store over SSE, binds
   // 127.0.0.1, auto-opens the browser, and prints the URL. (Also `npm run web`.)
@@ -520,6 +569,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createWorkbenchExecutionHost } = await import('../../core/v4/workbench/executionHost');
       const { listWorkbenchActiveJobs } = await import('../../core/v4/workbench/activeJobs');
       const { createWorkbenchFileBridge } = await import('../../core/v4/workbench/fileBridge');
+      const { createWorkbenchAppsPort } = await import('../../core/v4/workbench/appsPort');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
       const { randomBytes } = await import('node:crypto');
       const paths    = resolveAidenPaths();
@@ -587,6 +637,11 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         workbenchRuntime = null;
         executionHost = null;
       }
+      const workbenchIntegrationRuntime = workbenchRuntime?.integrationRuntime ?? createIntegrationRuntime({
+        db,
+        rootDir: paths.root,
+        scope: integrationLocalScope(process.cwd()),
+      });
       // STEER path: the stop button cancels a running job by run id. We record
       // the stop durably — mark the run `cancelled` (so the dispatcher won't
       // dispatch it again) and emit a `task_cancelled` event so it shows in the
@@ -658,6 +713,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
             }, 'lost', 'cleared from Workbench');
           },
         },
+        apps: createWorkbenchAppsPort(workbenchIntegrationRuntime),
         runtime: () => {
           if (workbenchRuntime && executionHost) {
             return {
@@ -1892,6 +1948,12 @@ export async function buildAgentRuntime(
   // Tool registry + executor.
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
+  const integrationRuntime = createIntegrationRuntime({
+    db: replDb,
+    rootDir: paths.root,
+    toolRegistry,
+    scope: integrationLocalScope(process.cwd()),
+  });
   const resolveToolInteraction = (name: string) =>
     toolRegistry.get(name)?.interaction;
 
@@ -3867,6 +3929,7 @@ export async function buildAgentRuntime(
     resolver,
     adapter,
     toolRegistry,
+    integrationRuntime,
     skillLoader,
     memoryManager,
     memoryGuard,
@@ -3944,6 +4007,7 @@ export interface AgentRuntime {
   resolver: RuntimeResolver;
   adapter: any;
   toolRegistry: ToolRegistry;
+  integrationRuntime: import('../../core/v4/integrations/runtime').IntegrationRuntime;
   skillLoader: SkillLoader;
   memoryManager: MemoryManager;
   memoryGuard: MemoryGuard;
@@ -4348,6 +4412,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     mcpClient: runtime.mcpClient ?? undefined,
     skin: runtime.skin,
     toolRegistry: runtime.toolRegistry,
+    integrationRuntime: runtime.integrationRuntime,
     skillLoader: runtime.skillLoader,
     resolver: runtime.resolver,
     config: runtime.config,

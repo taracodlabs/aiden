@@ -210,6 +210,44 @@ export interface WorkbenchCapabilities {
   plugins: Array<{ name: string; version: string; description: string; author?: string; status: string; permissions: string[] }>;
 }
 
+export interface WorkbenchAppProvider {
+  id: string;
+  label: string;
+  health: string;
+  detail?: string;
+}
+
+export interface WorkbenchAppToolkit {
+  providerId: string;
+  toolkitId: string;
+  label: string;
+}
+
+export interface WorkbenchConnectedAccount {
+  accountId: string;
+  providerId: string;
+  toolkitId: string;
+  label: string;
+  status: string;
+  health: string;
+  scopes: string[];
+  lastCheckedAt: number | null;
+}
+
+export interface WorkbenchAppsSnapshot {
+  providers: WorkbenchAppProvider[];
+  toolkits: WorkbenchAppToolkit[];
+  accounts: WorkbenchConnectedAccount[];
+  configuration: { command: string };
+}
+
+export interface WorkbenchAppConnection {
+  connectionId: string;
+  authorizationUrl?: string;
+  userCode?: string;
+  expiresAt?: number;
+}
+
 export interface WorkbenchBrowserSession {
   browserSessionId: string;
   jobId: string;
@@ -543,6 +581,67 @@ export async function loadWorkbenchCapabilities(): Promise<WorkbenchCapabilities
     skills: Array.isArray(body.skills) ? body.skills : [],
     plugins: Array.isArray(body.plugins) ? body.plugins : [],
   };
+}
+
+async function appsRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    cache: 'no-store',
+    ...init,
+    headers: {
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      'x-workbench-token': token(),
+      ...(init?.headers ?? {}),
+    },
+  });
+  const body = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(body.error || `Apps request failed (HTTP ${response.status})`);
+  return body;
+}
+
+export function loadApps(): Promise<WorkbenchAppsSnapshot> {
+  return appsRequest<WorkbenchAppsSnapshot>('/api/apps');
+}
+
+export function connectApp(input: {
+  providerId: string;
+  toolkitId: string;
+  label?: string;
+}): Promise<WorkbenchAppConnection> {
+  return appsRequest<WorkbenchAppConnection>('/api/apps/connect', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  });
+}
+
+export async function completeAppConnection(connectionId: string): Promise<WorkbenchConnectedAccount> {
+  const result = await appsRequest<{ account: WorkbenchConnectedAccount }>(
+    `/api/apps/connections/${encodeURIComponent(connectionId)}/complete`,
+    { method: 'POST' },
+  );
+  return result.account;
+}
+
+export async function refreshAppAccount(accountId: string): Promise<WorkbenchConnectedAccount> {
+  const result = await appsRequest<{ account: WorkbenchConnectedAccount }>(
+    `/api/apps/accounts/${encodeURIComponent(accountId)}/refresh`,
+    { method: 'POST' },
+  );
+  return result.account;
+}
+
+export function reconnectAppAccount(accountId: string): Promise<WorkbenchAppConnection> {
+  return appsRequest<WorkbenchAppConnection>(
+    `/api/apps/accounts/${encodeURIComponent(accountId)}/reconnect`,
+    { method: 'POST' },
+  );
+}
+
+export async function disconnectAppAccount(accountId: string): Promise<WorkbenchConnectedAccount> {
+  const result = await appsRequest<{ account: WorkbenchConnectedAccount }>(
+    `/api/apps/accounts/${encodeURIComponent(accountId)}/disconnect`,
+    { method: 'POST', body: JSON.stringify({ confirmed: true }) },
+  );
+  return result.account;
 }
 
 export async function loadBrowserSession(jobId: string): Promise<WorkbenchBrowserSession | null> {

@@ -254,6 +254,8 @@ export interface ToolHandler {
   category: ToolCategory;
   /** True for any tool that mutates state (disk, processes, network writes). */
   mutates: boolean;
+  /** Fail-closed validation that runs before hooks, approval, persistence or execution. */
+  validateArguments?: (args: Readonly<Record<string, unknown>>) => string | null;
   /** Group label — `web`, `files`, `browser`, `sessions`, `skills`, etc. */
   toolset?: string;
   /**
@@ -613,6 +615,15 @@ export class ToolRegistry {
           result: null,
           error: `Invalid arguments for ${call.name}: ${argShapeError}`,
         }, 'failed');
+      }
+      const handlerArgumentError = handler.validateArguments?.(args) ?? null;
+      if (handlerArgumentError) {
+        return finish({
+          id: call.id,
+          name: call.name,
+          result: null,
+          error: `Invalid arguments for ${call.name}: ${handlerArgumentError}`,
+        }, 'blocked');
       }
 
       // Action-changing hooks run before policy evaluation and approval. The

@@ -104,9 +104,10 @@ describe('barrel exports', () => {
     // v4.14 added /auto (one-command Partner opt-in) (56 → 57).
     // v4.14 added /mode (friendly trust-level viewer/switcher) (57 → 58).
     // Operator views and conversation/screen controls add eleven commands.
-    expect(allCommands.length).toBe(69);
+    // v4.20 Apps adds /apps (69 → 70).
+    expect(allCommands.length).toBe(70);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(69);
+    expect(names.size).toBe(70);
   });
 
   it('every command exposes name, description, category', () => {

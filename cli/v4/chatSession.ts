@@ -343,6 +343,7 @@ export interface ChatSessionOptions {
   mcpClient?: McpClient;
   skin: SkinEngine;
   toolRegistry: ToolRegistry;
+  integrationRuntime?: import('../../core/v4/integrations/runtime').IntegrationRuntime;
   skillLoader: SkillLoader;
   resolver: RuntimeResolver;
   config: ConfigManager;
@@ -1257,6 +1258,7 @@ export class ChatSession implements ChatSessionLike {
             session: this,
             resolver: this.opts.resolver,
             toolRegistry: this.opts.toolRegistry,
+            integrationRuntime: this.opts.integrationRuntime,
             sessionManager: this.opts.sessionManager,
             skillLoader: this.opts.skillLoader,
             config: this.opts.config,

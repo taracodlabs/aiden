@@ -35,6 +35,7 @@ describe('aiden CLI', () => {
     expect(text).toMatch(/doctor/);
     expect(text).toMatch(/sessions/);
     expect(text).toMatch(/skills/);
+    expect(text).toMatch(/apps/);
     expect(text).toMatch(/mcp/);
   });
 
@@ -87,6 +88,21 @@ describe('aiden CLI', () => {
     const { argv, hooks } = captureMain(['sessions', 'list'], { runSessionsHook: sessions });
     await main(argv, hooks);
     expect(sessions).toHaveBeenCalledWith('list', undefined);
+  });
+
+  it('routes Apps subcommand options without losing provider, browser, or confirmation choices', async () => {
+    const apps = vi.fn(async () => 0);
+    await main(['node', 'aiden', 'apps', 'connect', 'github', 'Personal', '--provider', 'fake', '--no-open'], {
+      runAppsHook: apps,
+    });
+    await main(['node', 'aiden', 'apps', 'reconnect', 'account-1', '--no-open'], { runAppsHook: apps });
+    await main(['node', 'aiden', 'apps', 'disconnect', 'account-1', '--yes'], { runAppsHook: apps });
+
+    expect(apps.mock.calls).toEqual([
+      [{ action: 'connect', toolkitId: 'github', label: 'Personal', providerId: 'fake', open: false }],
+      [{ action: 'reconnect', accountId: 'account-1', open: false }],
+      [{ action: 'disconnect', accountId: 'account-1', yes: true }],
+    ]);
   });
 
   it('aiden skills view <name> threads the arg', async () => {

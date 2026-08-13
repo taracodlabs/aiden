@@ -35,7 +35,7 @@ import {
 
 type UIMode   = 'focus' | 'execution' | 'power' | 'watch'
 type ExecMode = 'auto'  | 'plan'      | 'chat'  | 'react'
-type MainView = 'chat' | 'activity' | 'artifacts' | 'sponsors'
+type MainView = 'chat' | 'activity' | 'artifacts' | 'apps' | 'sponsors'
 type WorkbenchAppearance = 'dark' | 'system'
 
 interface AutomationPattern {
@@ -1930,6 +1930,7 @@ function HistorySidebar() {
       <button type="button" className={mainView === 'activity' ? 'rail-action is-active' : 'rail-action'} title={`Active Work (${activeJobs.length})`} aria-label="Active Work" onClick={() => setMainView('activity')}>◉</button>
       <button type="button" className={mainView === 'artifacts' ? 'rail-action is-active' : 'rail-action'} title="Artifacts" aria-label="Artifacts" onClick={() => setMainView('artifacts')}>◇</button>
       <button type="button" className="rail-action" title="Skills" aria-label="Skills" onClick={() => openSettings('skills')}>⌁</button>
+      <button type="button" className={mainView === 'apps' ? 'rail-action is-active' : 'rail-action'} title="Apps" aria-label="Apps" onClick={() => setMainView('apps')}>+</button>
       <span className="rail-spacer" />
       <button type="button" className={mainView === 'sponsors' ? 'rail-action is-active' : 'rail-action'} title="Sponsors" aria-label="Sponsors" onClick={() => setMainView('sponsors')}>♥</button>
       <button type="button" className="rail-action" title="Settings" aria-label="Settings" onClick={() => openSettings('runtime')}>⚙</button>
@@ -1958,6 +1959,7 @@ function HistorySidebar() {
         <button type="button" className={mainView === 'artifacts' ? 'is-active' : ''} onClick={() => setMainView('artifacts')}><span>◇</span>Artifacts</button>
         <button type="button" onClick={() => openSettings('skills')}><span>⌁</span>Skills</button>
         <button type="button" onClick={() => openSettings('plugins')}><span>◆</span>Plugins</button>
+        <button type="button" className={mainView === 'apps' ? 'is-active' : ''} onClick={() => setMainView('apps')}><span>+</span>Apps</button>
       </nav>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px' }}>
@@ -2297,6 +2299,187 @@ function ArtifactsView() {
       ) : (
         <div className="artifact-gallery">
           {runArtifacts.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function AppsView() {
+  const [snapshot, setSnapshot] = useState<aiden.WorkbenchAppsSnapshot | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [pending, setPending] = useState<aiden.WorkbenchAppConnection | null>(null)
+  const [disconnecting, setDisconnecting] = useState<aiden.WorkbenchConnectedAccount | null>(null)
+  const [accountLabels, setAccountLabels] = useState<Record<string, string>>({})
+
+  const reload = useCallback(async () => {
+    try {
+      setError(null)
+      setSnapshot(await aiden.loadApps())
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Apps are unavailable')
+    }
+  }, [])
+
+  useEffect(() => { void reload() }, [reload])
+
+  const connect = async (toolkit: aiden.WorkbenchAppToolkit) => {
+    setBusy(`connect:${toolkit.providerId}:${toolkit.toolkitId}`)
+    setError(null)
+    try {
+      const connection = await aiden.connectApp({
+        providerId: toolkit.providerId,
+        toolkitId: toolkit.toolkitId,
+        label: accountLabels[`${toolkit.providerId}:${toolkit.toolkitId}`]?.trim(),
+      })
+      setPending(connection)
+      if (connection.authorizationUrl) window.open(connection.authorizationUrl, '_blank', 'noopener,noreferrer')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Connection could not start')
+    } finally { setBusy(null) }
+  }
+
+  const complete = async () => {
+    if (!pending) return
+    setBusy(`complete:${pending.connectionId}`)
+    setError(null)
+    try {
+      await aiden.completeAppConnection(pending.connectionId)
+      setPending(null)
+      await reload()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Connection is not ready')
+    } finally { setBusy(null) }
+  }
+
+  const accountAction = async (
+    account: aiden.WorkbenchConnectedAccount,
+    action: 'refresh' | 'reconnect' | 'disconnect',
+  ) => {
+    setBusy(`${action}:${account.accountId}`)
+    setError(null)
+    try {
+      if (action === 'refresh') await aiden.refreshAppAccount(account.accountId)
+      else if (action === 'disconnect') await aiden.disconnectAppAccount(account.accountId)
+      else {
+        const connection = await aiden.reconnectAppAccount(account.accountId)
+        setPending(connection)
+        if (connection.authorizationUrl) window.open(connection.authorizationUrl, '_blank', 'noopener,noreferrer')
+      }
+      setDisconnecting(null)
+      await reload()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Account action failed')
+    } finally { setBusy(null) }
+  }
+
+  const healthLabel = (health: string) => ({
+    healthy: 'Healthy', degraded: 'Needs attention', expired: 'Reconnect required',
+    insufficient_scope: 'Insufficient access',
+    revoked: 'Disconnected', unknown: 'Not checked', not_configured: 'Not configured',
+    unavailable: 'Unavailable',
+  }[health] ?? health.replace(/_/g, ' '))
+
+  return (
+    <section className="workspace-surface" aria-labelledby="apps-title">
+      <header className="workspace-surface-header">
+        <div>
+          <span className="eyebrow">Connected accounts</span>
+          <h2 id="apps-title">Apps</h2>
+          <p>Choose the exact account Aiden may use. External changes still require Aiden approval.</p>
+        </div>
+        <button type="button" className="nav-btn" onClick={() => { void reload() }} disabled={busy !== null}>Refresh</button>
+      </header>
+
+      {error && <div className="workspace-empty-state" role="alert"><strong>Apps need attention</strong><span>{error}</span></div>}
+
+      {pending && (
+        <article className="surface-card" style={{ padding: 18, marginBottom: 18 }}>
+          <span className="eyebrow">Authorization in progress</span>
+          <h3 style={{ margin: '6px 0' }}>Finish connecting your account</h3>
+          <p style={{ color: 'var(--muted2)' }}>Complete authorization in the provider window, then confirm here.</p>
+          {pending.userCode && <code>{pending.userCode}</code>}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {pending.authorizationUrl && <a className="sponsor-button" href={pending.authorizationUrl} target="_blank" rel="noopener noreferrer">Open authorization</a>}
+            <button type="button" className="nav-btn" onClick={() => { void complete() }} disabled={busy !== null}>Complete connection</button>
+            <button type="button" className="nav-btn" onClick={() => setPending(null)} disabled={busy !== null}>Cancel</button>
+          </div>
+        </article>
+      )}
+
+      {!snapshot && !error ? <div className="workspace-empty-state"><strong>Loading Apps</strong><span>Checking local connected-account authority.</span></div> : null}
+
+      {snapshot && (
+        <>
+          <div className="artifact-gallery" aria-label="Connected accounts">
+            {snapshot.accounts.length === 0 ? (
+              <div className="workspace-empty-state">
+                <strong>No connected accounts</strong>
+                <span>Configure the provider locally, then connect GitHub or Gmail.</span>
+                <code>{snapshot.configuration.command}</code>
+              </div>
+            ) : snapshot.accounts.map((account) => (
+              <article className="surface-card" key={account.accountId} style={{ padding: 18 }}>
+                <span className="eyebrow">{account.toolkitId}</span>
+                <h3 style={{ margin: '6px 0' }}>{account.label}</h3>
+                <p style={{ color: account.health === 'healthy' ? 'var(--green)' : account.health === 'revoked' ? 'var(--red)' : 'var(--orange)' }}>
+                  {healthLabel(account.health)}
+                </p>
+                <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+                  {account.status !== 'revoked' && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void accountAction(account, 'refresh') }}>Check health</button>}
+                  {(account.status === 'revoked' || account.health === 'expired' || account.health === 'degraded') && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void accountAction(account, 'reconnect') }}>Reconnect</button>}
+                  {account.status !== 'revoked' && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => setDisconnecting(account)}>Disconnect</button>}
+                </div>
+              </article>
+            ))}
+          </div>
+
+          <header className="workspace-surface-header" style={{ marginTop: 24 }}>
+            <div><span className="eyebrow">Available</span><h3>Connect an app</h3></div>
+          </header>
+          <div className="artifact-gallery">
+            {snapshot.toolkits.length === 0 ? (
+              <div className="workspace-empty-state"><strong>No provider is configured</strong><span>Run <code>{snapshot.configuration.command}</code> in a private terminal. Credentials never enter Workbench.</span></div>
+            ) : snapshot.toolkits.map((toolkit) => (
+              <article className="surface-card" key={`${toolkit.providerId}:${toolkit.toolkitId}`} style={{ padding: 18 }}>
+                <span className="eyebrow">{toolkit.providerId}</span>
+                <h3 style={{ margin: '6px 0' }}>{toolkit.label}</h3>
+                <label style={{ display: 'grid', gap: 6, margin: '12px 0', color: 'var(--muted2)', fontSize: 13 }}>
+                  Account label
+                  <input
+                    value={accountLabels[`${toolkit.providerId}:${toolkit.toolkitId}`] ?? ''}
+                    onChange={(event) => setAccountLabels((current) => ({
+                      ...current,
+                      [`${toolkit.providerId}:${toolkit.toolkitId}`]: event.target.value,
+                    }))}
+                    placeholder="Personal or Work"
+                    maxLength={120}
+                    style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)', color: 'var(--text)', padding: '9px 10px' }}
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="nav-btn"
+                  disabled={busy !== null || !accountLabels[`${toolkit.providerId}:${toolkit.toolkitId}`]?.trim()}
+                  onClick={() => { void connect(toolkit) }}
+                >Connect</button>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+
+      {disconnecting && (
+        <div className="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="disconnect-app-title">
+          <div className="surface-card" style={{ maxWidth: 460, padding: 22 }}>
+            <h3 id="disconnect-app-title">Disconnect {disconnecting.label}?</h3>
+            <p style={{ color: 'var(--muted2)' }}>Future actions will be blocked. Durable Evidence and history remain.</p>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+              <button type="button" className="nav-btn" onClick={() => setDisconnecting(null)} disabled={busy !== null}>Keep connected</button>
+              <button type="button" className="nav-btn" onClick={() => { void accountAction(disconnecting, 'disconnect') }} disabled={busy !== null}>Disconnect</button>
+            </div>
+          </div>
         </div>
       )}
     </section>
@@ -6382,7 +6565,7 @@ export default function Home() {
           transition: 'grid-template-columns 0.3s cubic-bezier(0.22,1,0.36,1)',
         }}>
           <HistorySidebar />
-          <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
+          <div className="workbench-main" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
             {/* Chat | Activity — the conversation stays clean; tools live in Activity */}
             <div style={{ display: 'flex', gap: 4, padding: '8px 14px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
               {(['chat', 'activity'] as const).map(v => (
@@ -6419,6 +6602,7 @@ export default function Home() {
               />
             )}
             {mainView === 'artifacts' && <ArtifactsView />}
+            {mainView === 'apps' && <AppsView />}
             {mainView === 'sponsors' && <SponsorsView />}
           </div>
         </div>

@@ -90,6 +90,7 @@ export interface SlashCommandContext {
   session?: ChatSessionLike;
   resolver?: RuntimeResolver;
   toolRegistry?: ToolRegistry;
+  integrationRuntime?: import('../../core/v4/integrations/runtime').IntegrationRuntime;
   sessionManager?: SessionManager;
   skillLoader?: SkillLoader;
   config?: ConfigManager;

@@ -500,11 +500,27 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, summary:focus
 
 @media (max-width: 980px) {
   .workbench-grid, .workbench-grid.sidebar-open, .workbench-grid.sidebar-closed { grid-template-columns: minmax(0, 1fr); position: relative; }
+  .workbench-grid.sidebar-closed { grid-template-columns: 58px minmax(0, 1fr); }
   .workbench-grid .history-sidebar {
     position: absolute; inset: 0 auto 0 0; z-index: 120; width: min(86vw, 300px);
     box-shadow: 16px 0 40px rgba(0,0,0,0.6); transform: translateX(0); transition: transform 0.2s ease;
   }
   .workbench-grid.sidebar-closed .history-sidebar { transform: translateX(-105%); }
+  .workbench-grid.sidebar-closed .history-sidebar.sidebar-rail {
+    position: relative;
+    inset: auto;
+    grid-column: 1;
+    grid-row: 1;
+    width: 58px;
+    box-shadow: none;
+    transform: translateX(0);
+  }
+  .workbench-grid.sidebar-closed > .workbench-main {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    max-width: 100%;
+  }
   .topbar-connection, .topbar-work-state { display: none !important; }
   .model-control { max-width: 170px; }
 }
