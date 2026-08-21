@@ -282,4 +282,32 @@ describe('Worker logical provider-call authority', () => {
       outcomeKnowledge: 'outcome_unknown', retrySafety: 'blocked_unknown',
     });
   });
+
+  it('records a bounded human-readable parent cancellation reason for every active call', () => {
+    const { current, command } = prepared();
+    current.engine.workerProviderCalls.markAttempting(command);
+    expect(() => current.engine.workerProviderCalls.recordCancellationIntent({
+      ...command,
+      reason: 'invalid\nreason',
+      idempotencyKey: 'cancel-invalid-control',
+    })).toThrowError(expect.objectContaining({ code: 'invalid_contract' }));
+    expect(() => current.engine.workerProviderCalls.recordCancellationIntent({
+      ...command,
+      reason: 'x'.repeat(513),
+      idempotencyKey: 'cancel-invalid-length',
+    })).toThrowError(expect.objectContaining({ code: 'invalid_contract' }));
+    const [cancelled] = current.engine.workerProviderCalls.recordInterruptionForAttempt({
+      ...current.childAuthority,
+      kind: 'cancellation',
+      reason: 'parent cancel: stopped from workbench web',
+      idempotencyKey: 'cancel-parent-worker-call',
+      now: 33,
+    });
+    expect(cancelled).toMatchObject({
+      logicalCallId: command.logicalCallId,
+      interruptionKind: 'cancellation',
+      cancellationRequestedAt: 33,
+      reconciliationReason: 'parent cancel: stopped from workbench web',
+    });
+  });
 });

@@ -161,6 +161,67 @@ describe('durable Job recovery', () => {
     expect(engine.getJob(expired.jobId)).toMatchObject({ status: 'blocked', finishReason: 'unknown_side_effect' });
   });
 
+  it('adopts an exact completed result only through an explicit recovery contract', () => {
+    const expired = expiredAttempt();
+    engine.prepareToolCall({
+      toolCallId: 'tool_adopted', jobId: expired.jobId, attemptId: expired.attemptId,
+      generation: expired.generation!, fenceToken: expired.fenceToken!,
+      toolName: 'shell_exec', normalizedArgsDigest: 'adopted-digest', riskTier: 'caution',
+      mutates: true, effect, producer: 'test', now: expired.base + 1,
+    });
+    engine.startToolCall({
+      toolCallId: 'tool_adopted', attemptId: expired.attemptId,
+      generation: expired.generation!, fenceToken: expired.fenceToken!, producer: 'test',
+      now: expired.base + 2,
+    });
+    engine.completeToolCall({
+      toolCallId: 'tool_adopted', attemptId: expired.attemptId,
+      generation: expired.generation!, fenceToken: expired.fenceToken!,
+      state: 'completed', sideEffectState: 'committed', resultRef: 'validation_run:known',
+      producer: 'test', now: expired.base + 3,
+    });
+
+    expect(engine.recoverExpiredAttempts({
+      now: expired.base + 11, instanceId: 'recovery_instance', producer: 'recovery', maxCrashes: 3,
+      reconcileWorkerAttempt: () => ({
+        calls: 1,
+        retrySafety: 'safe',
+        outcomeKnowledge: ['completed_result_available'],
+        recoveryMode: 'adopt_completed_result',
+      }),
+    })).toEqual([expect.objectContaining({ decision: 'retry' })]);
+    expect(engine.listAttempts(expired.jobId)).toHaveLength(2);
+    expect(db.prepare(
+      'SELECT effect_state,reconciliation_required FROM side_effect_ledger WHERE tool_call_id=?',
+    ).get('tool_adopted')).toEqual({ effect_state: 'committed', reconciliation_required: 0 });
+  });
+
+  it('does not adopt a nonterminal mutating effect through the completed-result contract', () => {
+    const expired = expiredAttempt();
+    engine.prepareToolCall({
+      toolCallId: 'tool_still_running', jobId: expired.jobId, attemptId: expired.attemptId,
+      generation: expired.generation!, fenceToken: expired.fenceToken!,
+      toolName: 'shell_exec', normalizedArgsDigest: 'running-digest', riskTier: 'caution',
+      mutates: true, effect, producer: 'test', now: expired.base + 1,
+    });
+    engine.startToolCall({
+      toolCallId: 'tool_still_running', attemptId: expired.attemptId,
+      generation: expired.generation!, fenceToken: expired.fenceToken!, producer: 'test',
+      now: expired.base + 2,
+    });
+
+    expect(engine.recoverExpiredAttempts({
+      now: expired.base + 11, instanceId: 'recovery_instance', producer: 'recovery', maxCrashes: 3,
+      reconcileWorkerAttempt: () => ({
+        calls: 1,
+        retrySafety: 'safe',
+        outcomeKnowledge: ['invalid_completed_result_claim'],
+        recoveryMode: 'adopt_completed_result',
+      }),
+    })).toEqual([expect.objectContaining({ decision: 'ask_user' })]);
+    expect(engine.listAttempts(expired.jobId)).toHaveLength(1);
+  });
+
   it('can retry after a completed read-only tool result but before terminal Job state', () => {
     const expired = expiredAttempt();
     engine.prepareToolCall({

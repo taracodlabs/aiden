@@ -48,7 +48,12 @@ describe('minimal Workbench continuity surface', () => {
   });
 
   const source = () => fs.readFileSync(path.resolve('dashboard-next/app/page.tsx'), 'utf8');
-  it('E6 exposes Active Work in the existing Activity view', () => expect(source()).toContain('<strong>Active Work '));
+  it('E6 exposes Active Work as an operator-facing destination', () => {
+    const page = source();
+    expect(page).toContain('<h1>Active Work</h1>');
+    expect(page).toContain("['Needs you', workGroups.needsYou]");
+    expect(page).toContain("['Ready for review', workGroups.readyForReview]");
+  });
   it('E7 exposes exact Job, Attempt generation, and run identity', () => {
     const page = source();
     expect(page).toContain('projection.identity.jobId} · {projection.identity.attemptId}');
@@ -63,7 +68,10 @@ describe('minimal Workbench continuity surface', () => {
   });
   it('E9 exposes the Worker tree', () => expect(source()).toContain('Worker Tree:'));
   it('E10 exposes pending approvals and Evidence counts', () => {
-    expect(source()).toContain('Pending Approvals:'); expect(source()).toContain('Evidence:');
+    const page = source();
+    expect(page).toContain('Pending Approvals: {pendingApprovals.length}');
+    expect(page).not.toContain('Pending Approvals: {projection.approvals?.length ?? 0}');
+    expect(page).toContain('Evidence:');
   });
   it('E11 exposes the canonical result receipt status', () => expect(source()).toContain('projection.receipt.status'));
   it('E12 exposes continuity reason and blocked truth without a new shell', () => {
@@ -98,6 +106,16 @@ describe('minimal Workbench continuity surface', () => {
     expect(stop).toContain('await aiden.cancelTask(rid)');
     expect(stop).not.toContain('setIsStreaming(false)');
     expect(stop).not.toContain('setIsExecuting(false)');
+  });
+  it('E16b binds Stop to the exact admitted run before any streamed callback', () => {
+    const page = source();
+    const admission = page.slice(page.indexOf('onAdmission: (admission)'), page.indexOf('onRunId:'));
+    expect(admission).toContain('activeRunIdRef.current = admission.runId');
+  });
+  it('E16c resolves Stop from the exact selected durable run if the mutable callback ref is stale', () => {
+    const page = source();
+    const stop = page.slice(page.indexOf('const stopExecution'), page.indexOf('// ── Send message'));
+    expect(stop).toContain('workbenchControllerRef.current.snapshot().selected.runId');
   });
   it('E17 cleans up canonical projection polling when the view changes or settles', () => {
     expect(source()).toContain('window.clearInterval(poll)');
@@ -137,6 +155,21 @@ describe('minimal Workbench continuity surface', () => {
     expect(restore).toContain('maxUncertainMs:');
     expect(restore).toContain('saved activity could not be restored');
   });
+  it('E20b fences every deferred restoration path to its original selection generation', () => {
+    const page = source();
+    const restore = page.slice(page.indexOf('let restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    expect(restore).toContain('let restorationSelectionGeneration = workbenchControllerRef.current.snapshot().selectionGeneration');
+    expect(restore).toContain('workbenchControllerRef.current.isCurrent(restorationSelectionGeneration)');
+    expect(restore.match(/if \(!restorationStillOwnsSelection\(\)\) return/g)?.length).toBeGreaterThanOrEqual(3);
+  });
+  it('releases the composer for a durable inactive unknown projection without erasing its truth', () => {
+    const page = source();
+    const restore = page.slice(page.indexOf('let restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    expect(restore).toContain("resolution.kind === 'inactive'");
+    expect(restore).toContain('aiden.clearRunHandle(restored.admission)');
+    expect(restore).toContain('settle()');
+    expect(page).toContain('isForegroundExecutionStatus(projected.status)');
+  });
   it('E21 renders the backend runtime version instead of a hard-coded release', () => {
     const page = source();
     expect(page).not.toContain("const AIDEN_VERSION = '3.7.0'");
@@ -149,6 +182,14 @@ describe('minimal Workbench continuity surface', () => {
     expect(page).not.toContain('if (urlSelection.jobId || urlSelection.attemptId || urlSelection.runId !== null) return');
     expect(page).toContain('let restored = aiden.restoreRunHandle()');
     expect(page).toContain('aiden.reconcileRestoredRunHandle(restored)');
+  });
+  it('does not append a second assistant projection when the exact terminal run is already persisted', () => {
+    const page = source();
+    const restore = page.slice(page.indexOf('let restored = aiden.restoreRunHandle()'), page.indexOf('// ── Plus menu state'));
+    expect(page).toContain('if (!conversationsHydrated) return');
+    expect(restore).toContain('conversationForExactRun(');
+    expect(restore).toContain('conversationsRef.current');
+    expect(restore).toContain('durableConversation.messages.at(-1)');
   });
   it('E23 scopes foreground output by exact Job identity when sessions share a context', () => {
     const page = source();

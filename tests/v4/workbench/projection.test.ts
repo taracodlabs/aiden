@@ -91,7 +91,7 @@ describe('canonical Workbench projection', () => {
     expect(value.receipt).toMatchObject({ status: expected, terminal });
   });
 
-  it('B15 preserves a bounded durable failure reason in the receipt', () => {
+  it('B15 translates an internal stale-fence conflict without hiding reconciliation truth', () => {
     const reader = fixture({ status: 'failed', terminalAt: 20, finishReason: 'error' });
     reader.listEvents = () => [{
       eventId: 3, jobSequence: 3, jobId: 'job_1', attemptId: 'attempt_1',
@@ -100,6 +100,12 @@ describe('canonical Workbench projection', () => {
       producer: 'daemon', generation: 1, idempotencyKey: '3', createdAt: 3,
     }];
     expect(projectWorkbenchJob(reader, { jobId: 'job_1' })?.receipt.summary)
-      .toBe('DurableToolCallConflictError: stale_fence');
+      .toBe('Execution authority changed before verification. Review or reconcile the retained work before continuing.');
+  });
+
+  it('B16 translates verification_incomplete into an operator-safe incomplete result', () => {
+    const reader = fixture({ status: 'unknown', terminalAt: 20, finishReason: 'verification_incomplete' });
+    expect(projectWorkbenchJob(reader, { jobId: 'job_1' })?.receipt.summary)
+      .toBe('Verification did not complete. Review the retained result before continuing.');
   });
 });

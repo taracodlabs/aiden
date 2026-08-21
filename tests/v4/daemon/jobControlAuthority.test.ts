@@ -402,6 +402,17 @@ describe('durable Job input and control authority', () => {
   });
 
   it('persists cancellation before physically aborting and makes races idempotent', () => {
+    const lease = jobs.claimAttempt({ attemptId: admission.attemptId, ownerId: 'worker', ttlMs: 30_000 });
+    jobs.transitionAttempt({
+      attemptId: admission.attemptId, expectedStateVersion: lease.stateVersion!,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, to: 'running',
+      producer: 'test', eventIdempotencyKey: 'cancel-attempt-running',
+    });
+    jobs.transitionJob({
+      jobId: admission.jobId, attemptId: admission.attemptId, expectedStateVersion: 0,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, to: 'running',
+      producer: 'test', eventIdempotencyKey: 'cancel-job-running',
+    });
     const abort = new AbortController();
     controls.runtime.attach(admission.attemptId, abort);
     const result = controls.commands.request({
@@ -416,7 +427,14 @@ describe('durable Job input and control authority', () => {
     });
     expect(result.persisted).toBe(true);
     expect(abort.signal.aborted).toBe(true);
-    expect(jobs.getJob(admission.jobId)?.status).toBe('cancelled');
+    expect(jobs.getJob(admission.jobId)?.status).toBe('cancelling');
+    expect(jobs.getAttempt(admission.attemptId)?.status).toBe('running');
+    expect(jobs.transitionAttempt({
+      attemptId: admission.attemptId,
+      expectedStateVersion: jobs.getAttempt(admission.attemptId)!.stateVersion,
+      generation: lease.generation!, fenceToken: lease.fenceToken!, to: 'succeeded',
+      producer: 'test', eventIdempotencyKey: 'cancel-late-success',
+    })).toMatchObject({ applied: false, conflict: 'illegal_transition' });
     expect(controls.commands.request({
       jobId: admission.jobId,
       attemptId: admission.attemptId,
@@ -441,6 +459,19 @@ describe('durable Job input and control authority', () => {
       parentJobId: admission.jobId,
       rootJobId: admission.jobId,
     });
+    for (const item of [admission, child]) {
+      const lease = jobs.claimAttempt({ attemptId: item.attemptId, ownerId: 'worker', ttlMs: 30_000 });
+      jobs.transitionAttempt({
+        attemptId: item.attemptId, expectedStateVersion: lease.stateVersion!, generation: 1,
+        fenceToken: lease.fenceToken!, to: 'running', producer: 'test',
+        eventIdempotencyKey: `family-attempt-running:${item.attemptId}`,
+      });
+      jobs.transitionJob({
+        jobId: item.jobId, attemptId: item.attemptId, expectedStateVersion: 0, generation: 1,
+        fenceToken: lease.fenceToken!, to: 'running', producer: 'test',
+        eventIdempotencyKey: `family-job-running:${item.jobId}`,
+      });
+    }
     const parentAbort = new AbortController();
     const childAbort = new AbortController();
     controls.runtime.attach(admission.attemptId, parentAbort);
@@ -456,8 +487,8 @@ describe('durable Job input and control authority', () => {
       idempotencyNamespace: 'api-control',
       idempotencyKey: 'cancel-family',
     }).applied).toBe(true);
-    expect(jobs.getJob(admission.jobId)?.status).toBe('cancelled');
-    expect(jobs.getJob(child.jobId)?.status).toBe('cancelled');
+    expect(jobs.getJob(admission.jobId)?.status).toBe('cancelling');
+    expect(jobs.getJob(child.jobId)?.status).toBe('cancelling');
     expect(parentAbort.signal.aborted).toBe(true);
     expect(childAbort.signal.aborted).toBe(true);
   });

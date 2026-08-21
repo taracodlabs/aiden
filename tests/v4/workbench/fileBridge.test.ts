@@ -66,6 +66,52 @@ describe('Workbench mediated files', () => {
     expect(bridge.readArtifact('C:\\Windows\\win.ini')).toBeNull();
   });
 
+  it('serves a verified archived artifact after its disposable source path is removed', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-workbench-file-'));
+    roots.push(root);
+    const removedSource = path.join(root, 'removed-candidate', 'result.txt');
+    const artifact = {
+      id: 'art_archived', path: removedSource, kind: 'file' as const, tool: 'file_write', action: 'create' as const,
+      runId: 9, taskId: 'job_archived', sessionId: 'session_archived', createdAt: 1, bytes: 18, preview: null,
+    };
+    const bridge = createWorkbenchFileBridge({
+      root,
+      artifactCwd: root,
+      artifacts: {
+        get: (id: string) => id === artifact.id ? artifact : null,
+        listRecent: () => [artifact],
+        readContent: (id: string) => id === artifact.id
+          ? { bytes: Buffer.from('durable result\n'), sourceName: 'result.txt' }
+          : null,
+      },
+    });
+
+    expect(fs.existsSync(removedSource)).toBe(false);
+    const content = bridge.readArtifact(artifact.id);
+    expect(content?.name).toBe('result.txt');
+    expect(content?.mime).toBe('text/plain');
+    expect(content?.bytes.toString('utf8')).toBe('durable result\n');
+  });
+
+  it('classifies common source artifacts as safe text previews', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-workbench-file-'));
+    roots.push(root);
+    const artifact = {
+      id: 'art_source', path: 'slow.js', kind: 'file' as const, tool: 'file_write', action: 'create' as const,
+      runId: 10, taskId: 'job_source', sessionId: 'session_source', createdAt: 1, bytes: 18, preview: null,
+    };
+    const bridge = createWorkbenchFileBridge({
+      root,
+      artifacts: {
+        get: (id: string) => id === artifact.id ? artifact : null,
+        listRecent: () => [artifact],
+        readContent: () => ({ bytes: Buffer.from('export default 1;\n'), sourceName: 'slow.js' }),
+      },
+    });
+
+    expect(bridge.readArtifact(artifact.id)).toMatchObject({ name: 'slow.js', mime: 'text/plain' });
+  });
+
   it('rejects a durable artifact identity whose file is outside the active workspace', () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-workbench-file-'));
     const foreign = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-workbench-foreign-'));

@@ -415,10 +415,58 @@ describe('executeDurableJob', () => {
     });
 
     expect(cancelled).toMatchObject({ persisted: true, applied: true });
+    expect(engine.getJob(active.jobId)?.status).toBe('cancelling');
+    expect(engine.getAttempt(active.attemptId)?.status).toBe('running');
     await expect(running).rejects.toBeTruthy();
     expect(sawAbort).toBe(true);
     expect(engine.getJob(active.jobId)?.status).toBe('cancelled');
     expect(controlAuthority.runtime.isAttached(active.attemptId)).toBe(false);
+  });
+
+  it('settles cancellation as unknown when physical process cleanup cannot be verified', async () => {
+    const controlAuthority = createJobControlAuthority({ db, jobEngine: engine });
+    let active: { jobId: string; attemptId: string; generation: number } | null = null;
+    const running = executeDurableJob({
+      engine,
+      ownerId: 'instance_lifecycle',
+      controlAuthority,
+      admission: {
+        entryPoint: 'test', source: 'test', sessionId: 'session_cancel_unverified',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'lifecycle',
+        idempotencyKey: 'request_cancel_unverified', goal: 'cancel unsafe process',
+      },
+      execute: async (handle) => {
+        active = handle;
+        await new Promise<void>((_resolve, reject) => {
+          handle.signal.addEventListener('abort', () => {
+            const error = new Error('physical cleanup unverified');
+            error.name = 'PhysicalCancellationUnverifiedError';
+            reject(error);
+          }, { once: true });
+        });
+        return 'unreachable';
+      },
+      finalize: () => ({ status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {} }),
+    });
+
+    while (!active) await new Promise((resolve) => setTimeout(resolve, 0));
+    const identity = active as { jobId: string; attemptId: string; generation: number };
+    expect(controlAuthority.commands.request({
+      jobId: identity.jobId,
+      attemptId: identity.attemptId,
+      generation: identity.generation,
+      kind: 'cancel',
+      source: 'test',
+      idempotencyNamespace: 'lifecycle-control',
+      idempotencyKey: 'cancel-unverified',
+    })).toMatchObject({ persisted: true, applied: true });
+
+    await expect(running).rejects.toMatchObject({ name: 'PhysicalCancellationUnverifiedError' });
+    expect(engine.getJob(identity.jobId)).toMatchObject({
+      status: 'unknown', terminalOutcome: 'cancellation_cleanup_unverified',
+      finishReason: 'Physical process cleanup could not be verified',
+    });
+    expect(engine.getAttempt(identity.attemptId)?.status).toBe('unknown');
   });
 
   it('disposes and drains a running lifecycle before durable storage closes', async () => {

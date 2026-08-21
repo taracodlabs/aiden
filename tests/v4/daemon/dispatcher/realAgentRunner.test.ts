@@ -19,7 +19,9 @@ import { createJobEngine } from '../../../../core/v4/daemon/jobEngine';
 import { createJobControlAuthority } from '../../../../core/v4/daemon/jobControlAuthority';
 import {
   createRealAgentRunner,
+  readTriggerEventModelBinding,
 } from '../../../../core/v4/daemon/dispatcher/realAgentRunner';
+import { createTriggerBus } from '../../../../core/v4/daemon/triggerBus';
 import type {
   AgentBuilder,
 } from '../../../../core/v4/daemon/dispatcher/realAgentRunner';
@@ -87,6 +89,19 @@ function mkResult(over: Partial<{ finishReason: string; usage: { totalTokens: nu
   } as unknown as AidenAgentResult;
 }
 
+it('reads the immutable admitted provider/model binding instead of later mutable settings', () => {
+  const event = createTriggerBus({ db }).insert({
+    source: 'manual', sourceKey: 'workbench-web', idempotencyKey: 'exact-model-binding',
+    payload: {
+      body: { prompt: 'inspect once' },
+      model_binding: { provider: 'anthropic', model: 'claude-sonnet-4-6', source: 'session' },
+    },
+  });
+  expect(readTriggerEventModelBinding(db, event.id)).toEqual({
+    provider: 'anthropic', model: 'claude-sonnet-4-6',
+  });
+});
+
 describe('createRealAgentRunner durable identity', () => {
   it('loads the durable Workbench conversation and records one authoritative reply', async () => {
     const sessionStore = new SessionStore(':memory:');
@@ -149,6 +164,31 @@ describe('createRealAgentRunner durable identity', () => {
       expect(failure.content).toContain('authorization: [redacted]');
       expect(failure.content).not.toContain('private-value');
       expect(failure.content.length).toBeLessThanOrEqual(505);
+    } finally {
+      sessionStore.close();
+    }
+  });
+
+  it('persists operator-safe reconciliation guidance instead of an internal stale-fence error', async () => {
+    const sessionStore = new SessionStore(':memory:');
+    try {
+      const sessionId = 'session_workbench_reconciliation';
+      sessionStore.ensureSession(sessionId, { title: 'Reconciliation' });
+      sessionStore.appendMessage(sessionId, { role: 'user', content: 'try another coding task', turnNumber: 8 });
+      const runner = createRealAgentRunner({
+        db, runStore, jobEngine: createJobEngine({ db }),
+        taskStore: createTaskStore({ db }), sessionStore,
+        agentBuilder: () => stubAgent(new Error('DurableToolCallConflictError: Durable ToolCall verification rejected: stale_fence')),
+        persistedDefault: PERSISTED,
+      });
+
+      await runner.invoke(mkInput({
+        sessionId, triggerEventId: 8, initialMessage: 'try another coding task',
+      }));
+
+      const failure = sessionStore.getMessages(sessionId).find((message) => message.role === 'assistant')!;
+      expect(failure.content).toBe('⚠ Execution authority changed before verification. Review or reconcile the retained work before continuing.');
+      expect(failure.content).not.toMatch(/DurableToolCallConflictError|stale_fence/u);
     } finally {
       sessionStore.close();
     }

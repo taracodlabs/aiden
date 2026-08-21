@@ -15,13 +15,18 @@ import {
 export interface WorkerFixture {
   db: Database.Database;
   engine: JobEngine;
+  workerDefinitionId: string;
   parent: ReturnType<JobEngine['submitJob']>;
   child: ReturnType<JobEngine['submitJob']>;
   parentAuthority: { parentJobId: string; parentAttemptId: string; parentGeneration: number; parentFenceToken: string };
   childAuthority: { childJobId: string; childAttemptId: string; childGeneration: number; childFenceToken: string };
 }
 
-export function createWorkerFixture(databasePath = ':memory:'): WorkerFixture {
+export function createWorkerFixture(
+  databasePath = ':memory:',
+  leaseNow = 10,
+  workerId = 'repository-reader',
+): WorkerFixture {
   const db = new Database(databasePath);
   db.pragma('foreign_keys = ON');
   runMigrations(db);
@@ -35,20 +40,20 @@ export function createWorkerFixture(databasePath = ':memory:'): WorkerFixture {
     entryPoint: 'test', source: 'test', sessionId: 'worker-session', instanceId: 'worker-instance',
     idempotencyNamespace: 'worker-parent', idempotencyKey: 'parent', goal: 'coordinate worker',
   });
-  const parentLease = engine.claimAttempt({ attemptId: parent.attemptId, ownerId: 'parent-owner', ttlMs: 60_000, now: 10 });
+  const parentLease = engine.claimAttempt({ attemptId: parent.attemptId, ownerId: 'parent-owner', ttlMs: 60_000, now: leaseNow });
   const child = engine.submitJob({
     entryPoint: 'worker', source: 'worker', sessionId: 'worker-session', instanceId: 'worker-instance',
     idempotencyNamespace: 'worker-child', idempotencyKey: 'child', goal: 'inspect repository',
     parentJobId: parent.jobId,
     childContract: {
       required: true,
-      workerId: 'repository-reader',
+      workerId,
       capabilities: ['repository_snapshot_read'],
       allowedResources: { repository: 'snapshot' },
       budget: { modelCalls: 1 },
     },
   });
-  const childLease = engine.claimAttempt({ attemptId: child.attemptId, ownerId: 'child-owner', ttlMs: 60_000, now: 10 });
+  const childLease = engine.claimAttempt({ attemptId: child.attemptId, ownerId: 'child-owner', ttlMs: 60_000, now: leaseNow });
   engine.graph.create({
     jobId: parent.jobId,
     planDigest: 'worker-plan',
@@ -60,6 +65,7 @@ export function createWorkerFixture(databasePath = ':memory:'): WorkerFixture {
   return {
     db,
     engine,
+    workerDefinitionId: workerId,
     parent,
     child,
     parentAuthority: {
@@ -119,7 +125,7 @@ export function createAssignment(fixture: WorkerFixture, suffix = 'one') {
     ...parentAuthority,
     assignmentId,
     schemaVersion: 1,
-    workerDefinitionId: 'repository-reader',
+    workerDefinitionId: fixture.workerDefinitionId,
     workerDefinitionVersion: 1,
     childContractId: childAuthority.childJobId,
     childJobId: childAuthority.childJobId,

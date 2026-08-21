@@ -14,6 +14,44 @@ const writeReq = (over: Partial<ApprovalRequest> = {}): ApprovalRequest => ({
 });
 
 describe('ApprovalEngine — manual mode', () => {
+  it('accepts the exact durable browser decision and cancels the losing terminal prompt', async () => {
+    let promptAborted = false;
+    const promptUser = vi.fn(async (request: ApprovalRequest) => await new Promise<ApprovalDecision>((resolve) => {
+      request.decisionSignal?.addEventListener('abort', () => {
+        promptAborted = true;
+        resolve('interrupted');
+      }, { once: true });
+    }));
+    const engine = new ApprovalEngine('manual', {
+      promptUser,
+      waitForDurableDecision: async () => 'deny',
+    });
+
+    await expect(engine.checkApprovalDetailed(writeReq({ durableApprovalId: 'approval_exact' })))
+      .resolves.toMatchObject({ state: 'denied', approved: false });
+    expect(promptUser).toHaveBeenCalledOnce();
+    expect(promptAborted).toBe(true);
+  });
+
+  it('cancels the losing durable waiter when the terminal decision wins', async () => {
+    let durableWaitAborted = false;
+    const engine = new ApprovalEngine('manual', {
+      promptUser: async () => 'allow',
+      waitForDurableDecision: async (_request, signal) => await new Promise<ApprovalDecision>((_resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          durableWaitAborted = true;
+          const error = new Error('aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      }),
+    });
+
+    await expect(engine.checkApprovalDetailed(writeReq({ durableApprovalId: 'approval_exact' })))
+      .resolves.toMatchObject({ state: 'approved', approved: true });
+    expect(durableWaitAborted).toBe(true);
+  });
+
   it('preserves an interrupted prompt as a detailed non-approval while the boolean seam stays false', async () => {
     const engine = new ApprovalEngine('manual', {
       promptUser: async () => 'interrupted',
@@ -136,6 +174,18 @@ describe('ApprovalEngine — manual mode', () => {
 });
 
 describe('ApprovalEngine — smart mode', () => {
+  it('routes an always-required dangerous action to the exact interactive approval', async () => {
+    const promptUser = vi.fn().mockResolvedValue('allow' as ApprovalDecision);
+    const engine = new ApprovalEngine('smart', { promptUser });
+
+    await expect(engine.checkApprovalDetailed(writeReq({
+      toolName: 'external_coding',
+      riskTier: 'dangerous',
+      approvalRequirement: 'always',
+    }))).resolves.toMatchObject({ state: 'approved', approved: true, scope: 'once' });
+    expect(promptUser).toHaveBeenCalledOnce();
+  });
+
   it('7. safe-rated commands auto-approve', async () => {
     const riskAssess = vi
       .fn()
@@ -181,6 +231,18 @@ describe('ApprovalEngine — smart mode', () => {
 });
 
 describe('ApprovalEngine — off / mode switching', () => {
+  it('does not let auto mode bypass an always-required security approval', async () => {
+    const promptUser = vi.fn().mockResolvedValue('deny' as ApprovalDecision);
+    const engine = new ApprovalEngine('off', { promptUser });
+
+    await expect(engine.checkApprovalDetailed(writeReq({
+      toolName: 'external_coding',
+      riskTier: 'dangerous',
+      approvalRequirement: 'always',
+    }))).resolves.toMatchObject({ state: 'denied', approved: false });
+    expect(promptUser).toHaveBeenCalledOnce();
+  });
+
   it('11. off mode auto-allows ordinary tools; logs decisions', async () => {
     const onDecision = vi.fn();
     const engine = new ApprovalEngine('off', { onDecision });

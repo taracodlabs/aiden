@@ -467,6 +467,29 @@ describe('Attempt leases and fencing', () => {
 });
 
 describe('ToolCall and SideEffect identity', () => {
+  it('distinguishes a never-admitted ToolCall from stale Attempt authority', () => {
+    const admitted = submit();
+    const lease = engine.claimAttempt({ attemptId: admitted.attemptId, ownerId: 'owner_a', ttlMs: 30_000 });
+
+    expect(engine.attachToolVerification({
+      toolCallId: 'tool_call_never_admitted',
+      attemptId: admitted.attemptId,
+      generation: lease.generation!,
+      fenceToken: lease.fenceToken!,
+      verificationRef: 'tool-verification:sha256:missing',
+      producer: 'test',
+    })).toMatchObject({ applied: false, conflict: 'not_found' });
+
+    expect(engine.attachToolVerification({
+      toolCallId: 'tool_call_never_admitted',
+      attemptId: admitted.attemptId,
+      generation: lease.generation!,
+      fenceToken: 'stale-fence-token',
+      verificationRef: 'tool-verification:sha256:stale',
+      producer: 'test',
+    })).toMatchObject({ applied: false, conflict: 'stale_fence' });
+  });
+
   const effect = {
     classification: 'reconcilable_mutation' as const,
     kind: 'filesystem.write',

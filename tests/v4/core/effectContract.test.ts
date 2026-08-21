@@ -57,6 +57,19 @@ describe('durable tool effect contracts', () => {
     expect(JSON.stringify(descriptor)).not.toContain('also-secret');
   });
 
+  it('keeps external coding on exact per-occurrence approval in every mode', () => {
+    const registry = new ToolRegistry();
+    registerAllTools(registry);
+    expect(describeToolEffect(registry.get('external_coding')!, {
+      goal: 'Fix the failing test.',
+      allowed_scope: ['src/value.js'],
+    })).toMatchObject({
+      kind: 'worker.external_coding',
+      approvalRequirement: 'always',
+      trusted: true,
+    });
+  });
+
   it('removes URL credentials, query values, and fragments from durable targets', () => {
     const descriptor = describeToolEffect({
       mutates: true,

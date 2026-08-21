@@ -71,6 +71,18 @@ describe('Workbench active Job projection', () => {
     }
   });
 
+  it('uses safe reconciliation language instead of internal authority and verification codes', () => {
+    const staleFence = fixture('unknown');
+    (staleFence.jobs.listJobs()[0] as { finishReason: string | null }).finishReason = 'DurableToolCallConflictError: stale_fence';
+    expect(listWorkbenchActiveJobs(staleFence)[0]?.statusDetail)
+      .toBe('Execution authority changed before verification. Review or reconcile the retained work before continuing.');
+
+    const incomplete = fixture('unknown');
+    (incomplete.jobs.listJobs()[0] as { finishReason: string | null }).finishReason = 'verification_incomplete';
+    expect(listWorkbenchActiveJobs(incomplete)[0]?.statusDetail)
+      .toBe('Verification did not complete. Review the retained result before continuing.');
+  });
+
   it('reports bounded queue diagnostics without exposing payload data', () => {
     const value = listWorkbenchActiveJobs(fixture('queued'))[0]!;
     expect(value).toMatchObject({

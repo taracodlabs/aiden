@@ -4,17 +4,30 @@ import {
   admitTask,
   assistantOutputText,
   cancelTask,
+  configureAppsProvider,
+  configureExternalCoding,
+  connectProvider,
   controlBrowserSession,
+  decideCodingPromotion,
   clearRunHandle,
   followRun,
   loadRuntimeInfo,
+  loadBrowserSetup,
   loadBrowserSession,
+  loadLiveExecution,
+  loadCodingReview,
+  loadCodingSessions,
+  listArtifacts,
   loadWorkbenchBootstrap,
+  loadProviderSetup,
+  loadSystemReadiness,
   parseTaskAdmission,
   persistRunHandle,
   reconcileRestoredRunHandle,
   restoreRunHandle,
   runTask,
+  setDefaultModel,
+  setSessionModel,
   type ActivityItem,
   type TaskAdmission,
   type TurnHandlers,
@@ -97,6 +110,30 @@ describe('Workbench exact task admission and run following', () => {
       activeJobCount: 1,
       activeJobs: [{ jobId: 'job_a', runId: 7, status: 'approval_required', title: 'Inspect package.json' }],
     });
+  });
+
+  it('loads either the global artifact index or one exact run projection', async () => {
+    const fetchMock = vi.fn(async () => response([], true, 200));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await listArtifacts();
+    await listArtifacts(41);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, '/api/artifacts', expect.objectContaining({ cache: 'no-store' }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, '/api/artifacts?runId=41', expect.objectContaining({ cache: 'no-store' }));
+  });
+
+  it('loads Live Execution only through the exact durable identity query', async () => {
+    const fetchMock = vi.fn(async () => response({ schemaVersion: 1, surfaces: [] }, true, 200));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(loadLiveExecution({
+      jobId: 'job exact', attemptId: 'attempt exact', generation: 3, runId: 41,
+    })).resolves.toMatchObject({ schemaVersion: 1, surfaces: [] });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/jobs/job%20exact/live-execution?attemptId=attempt+exact&generation=3&runId=41',
+      { cache: 'no-store' },
+    );
   });
   beforeEach(() => {
     FakeEventSource.instances = [];
@@ -768,6 +805,17 @@ describe('Workbench exact task admission and run following', () => {
     expect(FakeEventSource.instances).toHaveLength(0);
   });
 
+  it.each(['unknown', 'blocked'])('releases a restored %s projection without opening a run stream', async (status) => {
+    vi.stubGlobal('fetch', vi.fn(async () => response({
+      identity: { jobId: 'job_exact', attemptId: 'attempt_exact', runId: 41 },
+      receipt: { terminal: false, status, summary: 'durable reconciliation required' },
+    }, true, 200)));
+
+    await expect(reconcileRestoredRunHandle({ admission: admission(), lastEventId: 0 }))
+      .resolves.toMatchObject({ kind: 'inactive', projection: { receipt: { status } } });
+    expect(FakeEventSource.instances).toHaveLength(0);
+  });
+
   it('reattaches a restored Job to its current recovery Attempt instead of following the crashed run', async () => {
     const fetchMock = vi.fn(async (url: string) => response(url.includes('attempt_current') ? {
       identity: { jobId: 'job_exact', attemptId: 'attempt_current', runId: 42, generation: 2 },
@@ -923,5 +971,81 @@ describe('Workbench exact task admission and run following', () => {
       '/api/jobs/job_exact/browser/take',
       expect.objectContaining({ method: 'POST', headers: { 'x-workbench-token': 'token_exact' } }),
     );
+  });
+
+  it('projects coding review state and sends an exact confirmed promotion decision', async () => {
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === '/api/jobs/job_exact/coding') {
+        return response({ sessions: [{
+          codingSessionId: 'coding_exact', childJobId: 'child_exact', childAttemptId: 'attempt_child',
+          generation: 2, state: 'ready_for_review', changedPaths: ['src/result.ts'],
+          promotion: { promotionId: 'promotion_exact', state: 'prepared' },
+        }] }, true, 200);
+      }
+      if (url === '/api/coding/promotions/promotion_exact/review') {
+        return response({
+          promotionId: 'promotion_exact', codingSessionId: 'coding_exact', state: 'prepared',
+          files: [{ path: 'src/result.ts', operation: 'update', before: 'old', after: 'new', truncated: false }],
+          truncated: false,
+        }, true, 200);
+      }
+      return response({ accepted: true, result: { disposition: 'applied' } }, true, 202);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await expect(loadCodingSessions('job_exact')).resolves.toMatchObject([{
+      codingSessionId: 'coding_exact', state: 'ready_for_review', changedPaths: ['src/result.ts'],
+    }]);
+    await expect(loadCodingReview('promotion_exact')).resolves.toMatchObject({
+      promotionId: 'promotion_exact', files: [{ path: 'src/result.ts', before: 'old', after: 'new' }],
+    });
+    await expect(decideCodingPromotion('promotion_exact', 'apply')).resolves.toEqual({ disposition: 'applied' });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      '/api/coding/promotions/promotion_exact/apply',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-workbench-token': 'token_exact' },
+        body: JSON.stringify({ confirmed: true }),
+      }),
+    );
+  });
+
+  it('uses same-origin token-gated setup APIs without persisting submitted credentials', async () => {
+    const calls: Array<[string, RequestInit | undefined]> = [];
+    const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+      calls.push([url, init]);
+      if (url.startsWith('/api/providers?')) return response({ providers: [], defaultSelection: null, sessionSelection: null, secretStorage: { backend: 'dpapi', available: true, protectedByOs: true, detail: 'ready' } }, true, 200);
+      if (url.startsWith('/api/workbench/readiness')) return response({ overall: 'ready', items: [], issues: [], checkedAt: 1 }, true, 200);
+      if (url === '/api/browser/setup') return response({ ready: true, detail: 'ready', grantRequired: false, permissions: [] }, true, 200);
+      return response({ id: 'openai', displayName: 'OpenAI', models: [] }, true, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await loadProviderSetup('session exact');
+    await connectProvider({ providerId: 'openai', modelId: 'gpt-5.4', credential: 'provider_private_value' });
+    await setSessionModel({ sessionId: 'session exact', providerId: 'openai', modelId: 'gpt-5.4' });
+    await setDefaultModel({ providerId: 'openai', modelId: 'gpt-5.4' });
+    await loadSystemReadiness('session exact');
+    await loadBrowserSetup();
+    await configureAppsProvider({ providerId: 'composio', credential: 'apps_private_value' });
+    await configureExternalCoding('gpt-coding-exact');
+
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/providers?sessionId=session%20exact',
+      '/api/providers/openai/connect',
+      '/api/providers/model/session',
+      '/api/providers/model/default',
+      '/api/workbench/readiness?sessionId=session%20exact',
+      '/api/browser/setup',
+      '/api/apps/providers/composio/configure',
+      '/api/coding/configure',
+    ]);
+    for (const [, init] of calls) {
+      expect(init?.headers).toMatchObject({ 'x-workbench-token': 'token_exact' });
+    }
+    expect(JSON.parse(String(calls[1][1]?.body))).toEqual({ modelId: 'gpt-5.4', credential: 'provider_private_value' });
+    expect(JSON.parse(String(calls[6][1]?.body))).toEqual({ credential: 'apps_private_value' });
+    expect(JSON.parse(String(calls[7][1]?.body))).toEqual({ model: 'gpt-coding-exact' });
+    expect((window as any).localStorage).toBeUndefined();
   });
 });

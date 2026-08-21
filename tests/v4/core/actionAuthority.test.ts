@@ -442,6 +442,89 @@ describe('final action and durable Approval authority', () => {
     ]);
   });
 
+  it('wakes the exact durable waiter after a browser denial and cleans up an aborted waiter', async () => {
+    const normalized = normalizeExecutionPlan({
+      toolName: 'file_write', args: { path: 'browser-denied.txt' }, cwd: 'C:/workspace',
+      mutates: true, riskTier: 'caution', policy,
+    });
+    const approval = actions.request({
+      ...admission, generation: 1, fenceToken,
+      toolCallId: 'tool-browser-denied', toolName: 'file_write', riskTier: 'caution',
+      riskReasons: [], normalized,
+    });
+    const waiting = actions.waitForDecision(approval.approvalId, { pollMs: 20 });
+    actions.decide({
+      approvalId: approval.approvalId, jobId: admission.jobId, attemptId: admission.attemptId,
+      generation: 1, actionDigest: approval.actionDigest, policySnapshotId: approval.policySnapshotId,
+      decision: 'denied', decidedBy: 'user', decisionChannel: 'workbench',
+    });
+    await expect(waiting).resolves.toMatchObject({ state: 'denied', decision: 'denied' });
+
+    const second = actions.request({
+      ...admission, generation: 1, fenceToken,
+      toolCallId: 'tool-aborted-wait', toolName: 'file_write', riskTier: 'caution',
+      riskReasons: [], normalized,
+    });
+    const controller = new AbortController();
+    const aborted = actions.waitForDecision(second.approvalId, { signal: controller.signal, pollMs: 20 });
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ name: 'AbortError' });
+    expect(actions.get(second.approvalId)?.state).toBe('created');
+  });
+
+  it('durably cancels every pending approval when its Job cancellation begins', () => {
+    const normalized = normalizeExecutionPlan({
+      toolName: 'file_write', args: { path: 'cancelled.txt' }, cwd: 'C:/workspace',
+      mutates: true, riskTier: 'caution', policy,
+    });
+    const first = actions.request({
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
+      toolCallId: 'tool-cancel-first', toolName: 'file_write', riskTier: 'caution',
+      riskReasons: [], normalized,
+    });
+    const second = actions.request({
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
+      toolCallId: 'tool-cancel-second', toolName: 'file_write', riskTier: 'caution',
+      riskReasons: [], normalized,
+    });
+    actions.markDisplayed(second.approvalId, 2_000);
+
+    expect(actions.cancelPendingForJob(admission.jobId, 'operator cancelled', 3_000))
+      .toMatchObject({ changed: 2, approvals: [
+        { approvalId: first.approvalId, state: 'cancelled', decision: 'cancelled' },
+        { approvalId: second.approvalId, state: 'cancelled', decision: 'cancelled' },
+      ] });
+    expect(actions.listPending(admission.jobId)).toEqual([]);
+    expect(actions.cancelPendingForJob(admission.jobId, 'operator cancelled', 4_000))
+      .toMatchObject({ changed: 0, approvals: [] });
+  });
+
+  it('rejects approval decisions after the Job enters cancelling', () => {
+    const normalized = normalizeExecutionPlan({
+      toolName: 'file_write', args: { path: 'too-late.txt' }, cwd: 'C:/workspace',
+      mutates: true, riskTier: 'caution', policy,
+    });
+    const approval = actions.request({
+      jobId: admission.jobId, attemptId: admission.attemptId, generation: 1, fenceToken,
+      toolCallId: 'tool-too-late', toolName: 'file_write', riskTier: 'caution',
+      riskReasons: [], normalized,
+    });
+    const job = jobs.getJob(admission.jobId)!;
+    expect(jobs.transitionJob({
+      jobId: admission.jobId, attemptId: admission.attemptId,
+      expectedStateVersion: job.stateVersion, generation: 1, fenceToken,
+      to: 'cancelling', eventIdempotencyKey: 'approval-job-cancelling', producer: 'test',
+    }).applied).toBe(true);
+
+    expect(() => actions.decide({
+      approvalId: approval.approvalId, jobId: admission.jobId,
+      attemptId: admission.attemptId, generation: 1,
+      actionDigest: normalized.actionDigest, policySnapshotId: approval.policySnapshotId,
+      decision: 'approved', decidedBy: 'user', decisionChannel: 'workbench',
+    })).toThrow(/active Job/i);
+    expect(actions.get(approval.approvalId)?.state).toBe('created');
+  });
+
   it('preserves denial and exact approved identity across authority restart', () => {
     const normalized = normalizeExecutionPlan({
       toolName: 'file_write', args: { path: 'restart-decision.txt' }, cwd: 'C:/workspace',

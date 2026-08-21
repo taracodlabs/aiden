@@ -3,6 +3,8 @@ import { parseTaskAdmission } from '../../../dashboard-next/lib/aidenClient';
 import {
   WorkbenchController,
   emptySelection,
+  foregroundExecutionCount,
+  isForegroundExecutionStatus,
   normalizeActiveJobStatus,
   selectionFromSearch,
   selectionToSearch,
@@ -76,6 +78,22 @@ describe('Workbench foreground controller', () => {
   it('maps an unrecognized backend state to honest uncertainty', () => {
     expect(normalizeActiveJobStatus('future_state')).toBe('state_unknown');
     expect(normalizeActiveJobStatus('approval_required')).toBe('approval_required');
+  });
+
+  it('keeps uncertain and blocked work inspectable without owning the foreground execution lock', () => {
+    expect(isForegroundExecutionStatus('running')).toBe(true);
+    expect(isForegroundExecutionStatus('approval_required')).toBe(true);
+    expect(isForegroundExecutionStatus('state_unknown')).toBe(false);
+    expect(isForegroundExecutionStatus('blocked')).toBe(false);
+    expect(isForegroundExecutionStatus('terminal')).toBe(false);
+  });
+
+  it('does not report uncertain or blocked work as running', () => {
+    const views = (['running', 'approval_required', 'state_unknown', 'blocked'] as const).map((status, index) => ({
+      sessionId: null, jobId: `job-${index}`, attemptId: `attempt-${index}`, runId: index,
+      status, updatedAt: index,
+    }));
+    expect(foregroundExecutionCount(views)).toBe(2);
   });
 
   it('settles three Jobs out of order without stealing foreground selection', () => {

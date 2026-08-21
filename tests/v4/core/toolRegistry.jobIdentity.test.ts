@@ -426,6 +426,49 @@ describe('ToolRegistry durable execution identity', () => {
       .toBe(true);
   });
 
+  it('does not convert pre-admission argument rejection into a stale-fence verification error', async () => {
+    const engine = {
+      ...resourceAuthorityMock(),
+      prepareToolCall: vi.fn(),
+      attachToolVerification: vi.fn(() => ({ applied: false, conflict: 'not_found' as const })),
+    } as unknown as JobEngine;
+    const registry = new ToolRegistry();
+    registry.register({
+      schema: {
+        name: 'validated_read',
+        description: 'reads only validated input',
+        inputSchema: { type: 'object' },
+      },
+      category: 'read',
+      riskTier: 'safe',
+      mutates: false,
+      toolset: 'misc',
+      validateArguments: () => 'path must identify one readable file',
+      async execute() { return { ok: true }; },
+    });
+    const execute = registry.buildExecutor({
+      cwd: process.cwd(),
+      paths: resolveAidenPaths({ rootOverride: 'C:/tmp/aiden-pre-admission-verification' }),
+    });
+
+    await runWithJobExecutionContext({
+      engine,
+      jobId: 'job_pre_admission',
+      attemptId: 'attempt_pre_admission',
+      generation: 1,
+      fenceToken: 'fence_pre_admission',
+      producer: 'test',
+    }, async () => {
+      const result = await execute({ id: 'rejected-call', name: 'validated_read', arguments: {} });
+      expect(result.error).toContain('path must identify one readable file');
+      expect(() => recordDurableToolVerification('rejected-call', { ok: false }))
+        .not.toThrow();
+    });
+
+    expect(engine.prepareToolCall).not.toHaveBeenCalled();
+    expect(engine.attachToolVerification).toHaveBeenCalledOnce();
+  });
+
   it('does not execute when durable preparation rejects a stale fence', async () => {
     const handler = vi.fn(async () => ({ ok: true }));
     const engine = {

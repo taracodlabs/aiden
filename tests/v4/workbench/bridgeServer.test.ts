@@ -206,12 +206,19 @@ describe('Workbench bridge — ordered replay + live tail', () => {
 
 // ── The dashboard page + the browser feed ────────────────────────────────────
 
-function httpGet(port: number, path: string, headers: Record<string, string> = {}): Promise<{ status: number; contentType: string; body: string }> {
+function httpGet(port: number, path: string, headers: Record<string, string> = {}): Promise<{
+  status: number; contentType: string; cacheControl: string; body: string;
+}> {
   return new Promise((resolve) => {
     http.get({ host: '127.0.0.1', port, path, headers }, (res) => {
       let b = ''; res.setEncoding('utf8');
       res.on('data', (c) => (b += c));
-      res.on('end', () => resolve({ status: res.statusCode ?? 0, contentType: String(res.headers['content-type'] ?? ''), body: b }));
+      res.on('end', () => resolve({
+        status: res.statusCode ?? 0,
+        contentType: String(res.headers['content-type'] ?? ''),
+        cacheControl: String(res.headers['cache-control'] ?? ''),
+        body: b,
+      }));
     });
   });
 }
@@ -495,6 +502,89 @@ describe('Workbench durable input, pause, resume, and approval commands', () => 
   });
 });
 
+describe('Workbench provider setup bridge', () => {
+  it('keeps management token-gated and never returns submitted credentials', async () => {
+    const calls: Array<{ command: string; value: unknown }> = [];
+    const providerSetup = {
+      snapshot: async (sessionId?: string) => ({
+        providers: [{
+          id: 'openai', label: 'OpenAI', authKinds: ['api_key'], configured: false,
+          connected: false, models: [{ id: 'gpt-5.4', label: 'GPT-5.4' }],
+        }],
+        current: { providerId: 'openai', modelId: 'gpt-5.4', source: sessionId ? 'session' : 'default' },
+      }),
+      connectApiKey: async (input: unknown) => {
+        if ((input as { credential?: string }).credential === 'unpatterned_private_value') {
+          throw new Error('Provider rejected unpatterned_private_value');
+        }
+        calls.push({ command: 'connect', value: input });
+        return { providerId: 'openai', connected: true, tested: true };
+      },
+      replaceCredential: async () => ({ providerId: 'openai', connected: true, tested: true }),
+      test: async () => ({ providerId: 'openai', connected: true, tested: true }),
+      disconnect: async () => ({ providerId: 'openai', connected: false }),
+      refreshModels: async () => ({ providerId: 'openai', models: [{ id: 'gpt-5.4', label: 'GPT-5.4' }] }),
+      startOAuth: async () => ({ id: 'auth_1', providerId: 'chatgpt-plus', state: 'pending' }),
+      authSession: () => null,
+      setSessionModel: async (input: unknown) => {
+        calls.push({ command: 'session', value: input });
+        return { providerId: 'openai', modelId: 'gpt-5.4', source: 'session' };
+      },
+      setDefaultModel: async (input: unknown) => {
+        calls.push({ command: 'default', value: input });
+        return { providerId: 'openai', modelId: 'gpt-5.4', source: 'default' };
+      },
+    };
+    const managed = await startWorkbenchBridge({
+      reader: runStore, port: 0, pollMs: 30, token: 'workbench-local-token',
+      providerSetup: providerSetup as any,
+      coding: {
+        configure: async (input: unknown) => {
+          calls.push({ command: 'coding', value: input });
+          return { ready: true, state: 'ready', model: 'gpt-coding-exact' };
+        },
+      } as any,
+    });
+    try {
+      expect((await httpGet(managed.port, '/api/providers?sessionId=session-a')).status).toBe(401);
+      const projected = await httpGet(managed.port, '/api/providers?sessionId=session-a', {
+        'x-workbench-token': 'workbench-local-token',
+      });
+      expect(projected.status).toBe(200);
+      expect(JSON.parse(projected.body).current).toMatchObject({ source: 'session' });
+
+      const connected = await httpPost(managed.port, '/api/providers/openai/connect', {
+        modelId: 'gpt-5.4', credential: 'provider_private_value',
+      }, { 'x-workbench-token': 'workbench-local-token' });
+      expect(connected.status).toBe(200);
+      expect(connected.body).not.toContain('provider_private_value');
+      expect(calls).toContainEqual({
+        command: 'connect',
+        value: { providerId: 'openai', modelId: 'gpt-5.4', credential: 'provider_private_value' },
+      });
+      const rejected = await httpPost(managed.port, '/api/providers/openai/connect', {
+        modelId: 'gpt-5.4', credential: 'unpatterned_private_value',
+      }, { 'x-workbench-token': 'workbench-local-token' });
+      expect(rejected.status).toBe(400);
+      expect(rejected.body).toContain('[redacted]');
+      expect(rejected.body).not.toContain('unpatterned_private_value');
+
+      expect((await httpPost(managed.port, '/api/providers/model/session', {
+        sessionId: 'session-a', providerId: 'openai', modelId: 'gpt-5.4',
+      }, { 'x-workbench-token': 'workbench-local-token' })).status).toBe(200);
+      expect((await httpPost(managed.port, '/api/providers/model/default', {
+        providerId: 'openai', modelId: 'gpt-5.4',
+      }, { 'x-workbench-token': 'workbench-local-token' })).status).toBe(200);
+      expect((await httpPost(managed.port, '/api/coding/configure', {
+        model: 'gpt-coding-exact',
+      }, { 'x-workbench-token': 'workbench-local-token' })).status).toBe(200);
+      expect(calls.map((item) => item.command)).toEqual(['connect', 'session', 'default', 'coding']);
+    } finally {
+      await managed.close();
+    }
+  });
+});
+
 describe('Workbench attachment and artifact mediation', () => {
   const TOKEN = 'file-bridge-token';
 
@@ -573,6 +663,24 @@ describe('Workbench attachment and artifact mediation', () => {
     expect(content.contentType).toContain('image/svg+xml');
     expect(content.body).toBe('<svg/>');
     expect((await httpGet(b.port, '/api/artifacts/C%3A%5CWindows%5Cwin.ini/content', headers)).status).toBe(404);
+    await b.close();
+  });
+
+  it('reports an approval authority conflict truthfully instead of calling valid JSON invalid', async () => {
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: TOKEN,
+      approval: {
+        decide: () => { throw new Error('Approval is no longer actionable'); },
+      },
+      port: 0,
+    });
+    const response = await httpPost(b.port, '/api/approvals/approval_stale/decision', {
+      decision: 'approved',
+    }, { 'x-workbench-token': TOKEN });
+
+    expect(response.status).toBe(409);
+    expect(JSON.parse(response.body)).toEqual({ accepted: false, error: 'Approval is no longer actionable' });
     await b.close();
   });
 });
@@ -775,6 +883,102 @@ describe('Workbench durable Job projections', () => {
     expect(actions).toEqual(['take:job_exact']);
     await b.close();
   });
+
+  it('projects coding sessions and gates exact promotion decisions', async () => {
+    const decisions: string[] = [];
+    const session = {
+      codingSessionId: 'coding_exact', childJobId: 'child_exact', childAttemptId: 'attempt_exact',
+      generation: 2, state: 'ready_for_review', changedPaths: ['src/result.ts'],
+      promotion: { promotionId: 'promotion_exact', state: 'prepared' },
+    } as any;
+    const b = await startWorkbenchBridge({
+      reader: runStore,
+      token: 'coding-token',
+      coding: {
+        list: (jobId) => jobId === 'parent_exact' ? [session] : [],
+        review: async (promotionId) => ({
+          promotionId,
+          codingSessionId: 'coding_exact',
+          state: 'prepared',
+          files: [{
+            path: 'src/result.ts', operation: 'update', before: 'old', after: 'new',
+            beforeHash: 'before', afterHash: 'after', truncated: false,
+          }],
+          truncated: false,
+        }),
+        apply: async (promotionId) => { decisions.push(`apply:${promotionId}`); return { disposition: 'applied' }; },
+        discard: async (promotionId) => { decisions.push(`discard:${promotionId}`); return { disposition: 'rejected' }; },
+        discardUnknown: async (codingSessionId) => {
+          decisions.push(`discard-unknown:${codingSessionId}`);
+          return { codingSessionId, state: 'failed', reconciliationState: 'reconciled', workspaceState: 'released' };
+        },
+      },
+      port: 0,
+    });
+
+    const projected = await httpGet(b.port, '/api/jobs/parent_exact/coding');
+    expect(projected.status).toBe(200);
+    expect(JSON.parse(projected.body)).toMatchObject({
+      sessions: [{ codingSessionId: 'coding_exact', state: 'ready_for_review', changedPaths: ['src/result.ts'] }],
+    });
+    expect((await httpGet(b.port, '/api/coding/promotions/promotion_exact/review')).status).toBe(401);
+    const review = await httpGet(
+      b.port,
+      '/api/coding/promotions/promotion_exact/review',
+      { 'x-workbench-token': 'coding-token' },
+    );
+    expect(review.status).toBe(200);
+    expect(JSON.parse(review.body)).toMatchObject({
+      promotionId: 'promotion_exact',
+      files: [{ path: 'src/result.ts', before: 'old', after: 'new' }],
+    });
+    expect((await httpPost(b.port, '/api/coding/promotions/promotion_exact/apply', { confirmed: true })).status).toBe(401);
+    expect((await httpPost(
+      b.port,
+      '/api/coding/promotions/promotion_exact/apply',
+      { confirmed: false },
+      { 'x-workbench-token': 'coding-token' },
+    )).status).toBe(400);
+    const applied = await httpPost(
+      b.port,
+      '/api/coding/promotions/promotion_exact/apply',
+      { confirmed: true },
+      { 'x-workbench-token': 'coding-token' },
+    );
+    expect(applied.status).toBe(202);
+    expect(JSON.parse(applied.body)).toMatchObject({ accepted: true, result: { disposition: 'applied' } });
+    const discarded = await httpPost(
+      b.port,
+      '/api/coding/promotions/promotion_exact/discard',
+      { confirmed: true },
+      { 'x-workbench-token': 'coding-token' },
+    );
+    expect(discarded.status).toBe(202);
+    expect((await httpPost(
+      b.port,
+      '/api/coding/sessions/coding_exact/discard',
+      { confirmed: true },
+    )).status).toBe(401);
+    expect((await httpPost(
+      b.port,
+      '/api/coding/sessions/coding_exact/discard',
+      { confirmed: false },
+      { 'x-workbench-token': 'coding-token' },
+    )).status).toBe(400);
+    const unknownDiscarded = await httpPost(
+      b.port,
+      '/api/coding/sessions/coding_exact/discard',
+      { confirmed: true },
+      { 'x-workbench-token': 'coding-token' },
+    );
+    expect(unknownDiscarded.status).toBe(202);
+    expect(JSON.parse(unknownDiscarded.body)).toMatchObject({
+      accepted: true,
+      result: { codingSessionId: 'coding_exact', reconciliationState: 'reconciled', workspaceState: 'released' },
+    });
+    expect(decisions).toEqual(['apply:promotion_exact', 'discard:promotion_exact', 'discard-unknown:coding_exact']);
+    await b.close();
+  });
 });
 
 // ── Serving the built React dashboard (dashboard-next/out) ────────────────────
@@ -793,9 +997,10 @@ describe('Workbench bridge — static React dashboard', () => {
 
   it('★ serves the built index.html at / with the write token injected', async () => {
     const b = await startWorkbenchBridge({ reader: runStore, token: TOKEN, staticDir: dir, port: 0 });
-    const { status, contentType, body } = await httpGet(b.port, '/');
+    const { status, contentType, cacheControl, body } = await httpGet(b.port, '/');
     expect(status).toBe(200);
     expect(contentType).toMatch(/text\/html/);
+    expect(cacheControl).toBe('no-store');
     expect(body).toContain('Aiden React Dashboard');
     expect(body).toContain('window.__WB_TOKEN__="' + TOKEN + '"');   // only the served page holds the token
     await b.close();

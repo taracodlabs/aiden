@@ -28,6 +28,7 @@ import { fileMoveTool } from '../../../tools/v4/files/fileMove';
 import { fileDeleteTool } from '../../../tools/v4/files/fileDelete';
 import { fileWriteTool } from '../../../tools/v4/files/fileWrite';
 import { planApprovalTool } from '../../../tools/v4/approval/planApproval';
+import { withBuiltInEffectContract } from '../../../tools/v4/effectContracts';
 import { ApprovalEngine } from '../../../moat/approvalEngine';
 import { computeTaskFinalization } from '../../../core/v4/taskVerification';
 import type { HonestyTraceEntry } from '../../../moat/honestyEnforcement';
@@ -69,7 +70,7 @@ it('mini demo: list+hash → batch → partial approve → gated execute → rep
     '1,2,4');
   const registry = new ToolRegistry();
   for (const t of [fileListTool, fileMoveTool, fileDeleteTool, fileWriteTool, planApprovalTool]) {
-    registry.register(t);
+    registry.register(withBuiltInEffectContract(t));
   }
   const context: ToolContext = {
     cwd: downloads,

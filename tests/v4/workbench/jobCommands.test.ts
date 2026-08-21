@@ -29,7 +29,7 @@ describe('Workbench durable Job commands', () => {
 
   afterEach(() => db.close());
 
-  function commands() {
+  function commands(workspacePath?: string) {
     const jobEngine = createJobEngine({ db });
     const runStore = createRunStore({ db });
     const value = createWorkbenchJobCommands({
@@ -39,6 +39,7 @@ describe('Workbench durable Job commands', () => {
       runStore,
       instanceId: 'workbench_test',
       idFactory: () => 'workbench-idempotency-key',
+      ...(workspacePath ? { workspacePath } : {}),
     });
     return { ...value, jobEngine, runStore };
   }
@@ -97,8 +98,8 @@ describe('Workbench durable Job commands', () => {
     });
 
     expect(cancel.cancel(admitted.runId)).toEqual({ accepted: true, runId: admitted.runId });
-    expect(jobEngine.getJob(admitted.jobId)).toMatchObject({ status: 'cancelled', activeAttemptId: null });
-    expect(jobEngine.getAttempt(admitted.attemptId)?.status).toBe('cancelled');
+    expect(jobEngine.getJob(admitted.jobId)).toMatchObject({ status: 'cancelling', activeAttemptId: admitted.attemptId });
+    expect(jobEngine.getAttempt(admitted.attemptId)?.status).toBe('running');
     expect(jobEngine.transitionAttempt({
       attemptId: admitted.attemptId,
       expectedStateVersion: attemptRunning.stateVersion!,
@@ -108,7 +109,35 @@ describe('Workbench durable Job commands', () => {
       eventIdempotencyKey: 'workbench-late-success',
       producer: 'test',
     }).applied).toBe(false);
-    expect(jobEngine.listEvents(admitted.jobId).map((event) => event.type)).toContain('job.cancelled');
+    expect(jobEngine.listEvents(admitted.jobId).map((event) => event.type)).toContain('job.cancelling');
+  });
+
+  it('freezes the current session provider/model into the admitted trigger payload', () => {
+    const jobEngine = createJobEngine({ db });
+    const runStore = createRunStore({ db });
+    let selected = { provider: 'anthropic', model: 'claude-sonnet-4-6', source: 'session' as const };
+    const { enqueue } = createWorkbenchJobCommands({
+      db, triggerBus: createTriggerBus({ db }), jobEngine, runStore,
+      instanceId: 'workbench_test', idFactory: () => 'model-binding-key',
+      resolveModelBinding: () => selected,
+    });
+    const admitted = enqueue.enqueue({ message: 'inspect once', sessionId: 'session-model' });
+    selected = { provider: 'openai', model: 'gpt-5.4', source: 'session' };
+
+    const trigger = db.prepare('SELECT payload_json FROM trigger_events WHERE id = ?')
+      .get(admitted.triggerEventId) as { payload_json: string };
+    expect(JSON.parse(trigger.payload_json).model_binding).toEqual({
+      provider: 'anthropic', model: 'claude-sonnet-4-6', source: 'session',
+    });
+  });
+
+  it('binds admitted Workbench Jobs to the exact repository workspace', () => {
+    const workspacePath = 'C:\\fixture\\repository';
+    const { enqueue, jobEngine } = commands(workspacePath);
+
+    const result = enqueue.enqueue({ message: 'use external coding for this repository' });
+
+    expect(jobEngine.getJob(result.jobId)?.workspaceId).toBe(workspacePath);
   });
 
   it('removes a cancelled queued Job from the durable trigger queue', () => {
@@ -202,6 +231,42 @@ describe('Workbench durable Job commands', () => {
     expect(() => commandsWithApproval.input.receive(admitted.runId, 'yes', 'ordinary-yes'))
       .not.toThrow();
     expect(actionAuthority.get(pending.approvalId)?.state).toBe('approved');
+  });
+
+  it('persists an exact browser denial idempotently', () => {
+    const value = commands();
+    const admitted = value.enqueue.enqueue({ message: 'write a denied file', sessionId: 'workbench-session' });
+    const lease = value.jobEngine.claimAttempt({
+      attemptId: admitted.attemptId, ownerId: 'workbench_test', ttlMs: 60_000,
+    });
+    const authority = createActionAuthority({ db, jobEngine: value.jobEngine });
+    const normalized = normalizeExecutionPlan({
+      toolName: 'file_write', args: { path: 'denied.txt' }, cwd: process.cwd(),
+      mutates: true, riskTier: 'caution',
+      policy: {
+        trustLevel: 'Assistant', autonomyPolicy: 'ask_for_mutations', approvalMode: 'smart',
+        toolMetadataVersion: 'test', sandboxPolicy: {}, networkPolicy: {}, pluginGrants: [],
+        mcpGrants: [], workspaceOverrides: {}, jobOverrides: {},
+      },
+    });
+    const pending = authority.request({
+      jobId: admitted.jobId, attemptId: admitted.attemptId, generation: 1, fenceToken: lease.fenceToken!,
+      toolCallId: 'workbench-deny', toolName: 'file_write', riskTier: 'caution',
+      riskReasons: [], normalized,
+    });
+    const commandsWithApproval = createWorkbenchJobCommands({
+      db, triggerBus: createTriggerBus({ db }), jobEngine: value.jobEngine,
+      runStore: value.runStore, instanceId: 'workbench_test', actionAuthority: authority,
+      idFactory: () => 'approval-deny-key',
+    });
+
+    expect(commandsWithApproval.approval.decide(pending.approvalId, 'denied')).toMatchObject({
+      accepted: true, approvalId: pending.approvalId, state: 'denied',
+    });
+    expect(commandsWithApproval.approval.decide(pending.approvalId, 'denied')).toMatchObject({
+      accepted: true, approvalId: pending.approvalId, state: 'denied',
+    });
+    expect(authority.get(pending.approvalId)).toMatchObject({ state: 'denied', decision: 'denied' });
   });
 
   it('continues a paused Job with bounded durable context on one fresh Attempt', async () => {

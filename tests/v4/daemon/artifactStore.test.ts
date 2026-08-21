@@ -32,7 +32,7 @@ beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-artifacts-'));
   db = new Database(path.join(tmp, 'daemon.db'));
   runMigrations(db);
-  store = createArtifactStore({ db });
+  store = createArtifactStore({ db, contentRoot: path.join(tmp, 'content'), sourceRoot: tmp });
 });
 
 afterEach(async () => {
@@ -108,6 +108,35 @@ describe('extractFileArtifact', () => {
   });
   it('skill_manage success → skill kind', () => {
     expect(extractFileArtifact('skill_manage', { success: true, path: '/skills/x' })?.kind).toBe('skill');
+  });
+
+  it('keeps verified file content reviewable after a disposable source is removed', async () => {
+    const source = path.join(tmp, 'candidate', 'result.txt');
+    await fs.mkdir(path.dirname(source), { recursive: true });
+    await fs.writeFile(source, 'verified candidate\n', 'utf8');
+    const id = store.create({
+      path: source, kind: 'file', tool: 'file_write', action: 'create', sessionId: 'session-content',
+    });
+    await fs.rm(path.dirname(source), { recursive: true, force: true });
+
+    expect(store.readContent(id)).toEqual({
+      bytes: Buffer.from('verified candidate\n'),
+      sourceName: 'result.txt',
+    });
+  });
+
+  it('does not archive content from outside the producing workspace root', async () => {
+    const foreignRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-artifact-foreign-'));
+    try {
+      const foreignFile = path.join(foreignRoot, 'private.txt');
+      await fs.writeFile(foreignFile, 'outside workspace\n', 'utf8');
+      const id = store.create({
+        path: foreignFile, kind: 'file', tool: 'file_write', action: 'create', sessionId: 'session-foreign',
+      });
+      expect(store.readContent(id)).toBeNull();
+    } finally {
+      await fs.rm(foreignRoot, { recursive: true, force: true });
+    }
   });
 
   it('verified browser download becomes a local file artifact', () => {

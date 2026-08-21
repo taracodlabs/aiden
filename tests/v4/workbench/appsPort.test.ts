@@ -31,6 +31,23 @@ afterEach(async () => {
 });
 
 describe('Workbench Apps authority port', () => {
+  it('configures the Apps provider through secure backend authority without projecting the credential', async () => {
+    const runtime = createIntegrationRuntime({
+      db,
+      rootDir: root,
+      includeFake: true,
+      scope: { ownerId: 'owner-a', workspaceId: 'workspace-a' },
+      secretBackend: new MachineBoundSecretBackend(root),
+    });
+    const port = createWorkbenchAppsPort(runtime);
+
+    await expect(port.configureProvider({ providerId: 'fake', credential: 'apps_private_value' }))
+      .resolves.toMatchObject({ id: 'fake', health: 'healthy' });
+    const snapshot = await port.snapshot();
+    expect(JSON.stringify(snapshot)).not.toContain('apps_private_value');
+    expect(snapshot.configuration).toMatchObject({ workbench: true });
+  });
+
   it('projects safe account metadata and supports connect, health, reconnect and revoke', async () => {
     const runtime = createIntegrationRuntime({
       db,

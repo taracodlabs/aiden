@@ -3,11 +3,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { createWorkbenchExecutionHost } from '../../../core/v4/workbench/executionHost';
 
 describe('Workbench execution host', () => {
+  const jobControlAuthority = () => ({
+    runtime: { attach: vi.fn(), cancel: vi.fn(), isAttached: vi.fn() },
+  }) as never;
+
   it('starts the existing durable dispatcher with the real runner and bounded concurrency', async () => {
     const start = vi.fn();
     const stop = vi.fn(async () => undefined);
     const reclaimExpired = vi.fn(() => ({ reclaimed: 2 }));
     const createRunner = vi.fn(() => ({ invoke: vi.fn() }));
+    const sharedJobControlAuthority = jobControlAuthority();
     const artifactStore = { create: vi.fn(), get: vi.fn(), listRecent: vi.fn() } as never;
     const createDispatcher = vi.fn(() => ({
       start, stop, inflight: () => [], stats: () => ({ claimed: 0, succeeded: 0, failed: 0, deadLetter: 0, deliverOnly: 0, misconfigured: 0 }),
@@ -20,6 +25,7 @@ describe('Workbench execution host', () => {
       jobEngine: { listJobs: () => [], getAttempt: vi.fn(), cancelJob: vi.fn() } as never,
       taskStore: {} as never,
       artifactStore,
+      jobControlAuthority: sharedJobControlAuthority,
       instanceId: 'workbench_1',
       agentBuilder: vi.fn() as never,
       persistedDefault: { provider: 'custom_openai', model: 'custom-default' },
@@ -31,7 +37,10 @@ describe('Workbench execution host', () => {
     expect(host.start()).toMatchObject({ reclaimed: 2, workerCount: 4 });
     expect(reclaimExpired).toHaveBeenCalledOnce();
     expect(createRunner).toHaveBeenCalledOnce();
-    expect(createRunner).toHaveBeenCalledWith(expect.objectContaining({ artifactStore }));
+    expect(createRunner).toHaveBeenCalledWith(expect.objectContaining({
+      artifactStore,
+      jobControlAuthority: sharedJobControlAuthority,
+    }));
     expect(createDispatcher).toHaveBeenCalledWith(expect.objectContaining({
       workerCount: 4, ownerId: 'workbench_1', instanceId: 'workbench_1', initialRunnerKind: 'real',
     }));
@@ -52,6 +61,7 @@ describe('Workbench execution host', () => {
       db: {} as never, triggerBus: { reclaimExpired: () => ({ reclaimed: 0 }), stats: () => ({ pending: 0, claimed: 0, running: 0, deadLetter: 0, oldestPendingMs: null }) } as never,
       runStore: { get: vi.fn() } as never,
       jobEngine: { listJobs: () => [], getAttempt: vi.fn(), cancelJob: vi.fn() } as never,
+      jobControlAuthority: jobControlAuthority(),
       instanceId: 'workbench_1', agentBuilder: vi.fn() as never,
       persistedDefault: { provider: 'p', model: 'm' },
       createRunner: () => ({ invoke: vi.fn() }) as never, createDispatcher,
@@ -60,6 +70,40 @@ describe('Workbench execution host', () => {
     await host.stop(); await host.stop();
     expect(createDispatcher).toHaveBeenCalledOnce();
     expect(start).toHaveBeenCalledOnce();
+    expect(stop).toHaveBeenCalledOnce();
+  });
+
+  it('invalidates pending approvals before shutdown cancels active lifecycle work', async () => {
+    const stop = vi.fn(async () => undefined);
+    const cancelPendingForJob = vi.fn(() => []);
+    const host = createWorkbenchExecutionHost({
+      db: {} as never,
+      triggerBus: { reclaimExpired: () => ({ reclaimed: 0 }), stats: () => ({ pending: 0, claimed: 0, running: 0, deadLetter: 0, oldestPendingMs: null }) } as never,
+      runStore: { get: vi.fn() } as never,
+      jobEngine: {
+        listJobs: vi.fn(({ terminal }: { terminal?: boolean } = {}) => terminal === false
+          ? [{ id: 'job_waiting' }, { id: 'job_running' }]
+          : []),
+        getAttempt: vi.fn(), cancelJob: vi.fn(),
+      } as never,
+      approvalAuthority: { cancelPendingForJob } as never,
+      jobControlAuthority: jobControlAuthority(),
+      taskStore: {} as never,
+      instanceId: 'workbench_shutdown', agentBuilder: vi.fn() as never,
+      persistedDefault: { provider: 'p', model: 'm' },
+      createRunner: () => ({ invoke: vi.fn() }) as never,
+      createDispatcher: () => ({
+        start: vi.fn(), stop, inflight: () => [], stats: () => ({ claimed: 0, succeeded: 0, failed: 0, deadLetter: 0, deliverOnly: 0, misconfigured: 0 }),
+        installRunner: vi.fn(), runnerKind: () => 'real' as const, _pumpOnce: vi.fn(),
+      }),
+    });
+
+    host.start();
+    await host.stop();
+    expect(cancelPendingForJob.mock.calls).toEqual([
+      ['job_waiting', 'Workbench execution host shutdown'],
+      ['job_running', 'Workbench execution host shutdown'],
+    ]);
     expect(stop).toHaveBeenCalledOnce();
   });
 
@@ -74,6 +118,7 @@ describe('Workbench execution host', () => {
       triggerBus: { reclaimExpired: () => ({ reclaimed: 0 }), stats: () => ({ pending: 0, claimed: 0, running: 0, deadLetter: 0, oldestPendingMs: null }) } as never,
       runStore: { get: vi.fn() } as never,
       jobEngine: { listJobs: () => [], getAttempt: vi.fn(), cancelJob: vi.fn() } as never,
+      jobControlAuthority: jobControlAuthority(),
       taskStore: {} as never,
       instanceId: 'workbench_2',
       agentBuilder: vi.fn() as never,

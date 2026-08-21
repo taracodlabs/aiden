@@ -5,7 +5,7 @@
  *   1. Every registered ToolHandler has an explicit `riskTier` OR
  *      can be inferred via `inferDefaultRiskTier(mutates)`.
  *   2. Tier distribution is within expected ranges (catches drift).
- *   3. The 5 known-dangerous tools are annotated `dangerous` —
+ *   3. The 7 known-dangerous tools are annotated `dangerous` —
  *      regression sentinel against accidental demotion.
  *   4. The high-trust read-only tools are annotated `safe`.
  */
@@ -28,6 +28,16 @@ function effectiveTier(name: string, reg: ToolRegistry): RiskTier {
   if (!handler) throw new Error(`unknown tool: ${name}`);
   return handler.riskTier ?? inferDefaultRiskTier(handler.mutates);
 }
+
+const DANGEROUS_TOOLS = [
+  'shell_exec',
+  'file_delete',
+  'process_kill',
+  'process_spawn',
+  'aiden_self_update',
+  'browser_upload',
+  'external_coding',
+];
 
 describe('Risk-tier annotation coverage', () => {
   const reg = buildRegistry();
@@ -56,13 +66,6 @@ describe('Risk-tier annotation coverage', () => {
 
 describe('Dangerous-tier sentinel (regression guard)', () => {
   const reg = buildRegistry();
-  const DANGEROUS_TOOLS = [
-    'shell_exec',
-    'file_delete',
-    'process_kill',
-    'process_spawn',
-    'aiden_self_update',
-  ];
 
   for (const name of DANGEROUS_TOOLS) {
     it(`${name} MUST be annotated 'dangerous'`, () => {
@@ -100,9 +103,11 @@ describe('Tier distribution', () => {
     counts[effectiveTier(name, reg)] += 1;
   }
 
-  it('dangerous tier has exactly 6 tools (the canonical set)', () => {
-    // v4.12 B4.2a — browser_upload (sends local files to the page) joins the set.
-    expect(counts.dangerous).toBe(6);
+  it('dangerous tier matches the canonical set', () => {
+    const dangerous = reg.list()
+      .filter((name) => effectiveTier(name, reg) === 'dangerous')
+      .sort();
+    expect(dangerous).toEqual([...DANGEROUS_TOOLS].sort());
   });
 
   it('safe tier has at least 15 tools (read-only majority)', () => {
