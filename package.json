@@ -1,9 +1,7 @@
 {
   "name": "aiden-runtime",
   "version": "4.20.0",
-  "publishConfig": {
-    "access": "public"
-  },
+  "private": true,
   "description": "Local-first AI agent for Windows/WSL/Linux. Autonomous tool chaining across 14+ providers, offline via Ollama.",
   "author": "Shiva Deore (Taracod) <hello@taracod.com>",
   "license": "AGPL-3.0-only",
@@ -68,12 +66,14 @@
     "build": "tsc --outDir dist && npm run build:cli && npm run build:api",
     "build:cli": "esbuild cli/aiden.ts --bundle --platform=node --target=node18 --outfile=dist-bundle/cli.js --external:electron --external:cpu-features --external:ssh2 --external:bcrypt --external:playwright --external:playwright-core --external:@aws-sdk/client-s3",
     "build:api": "esbuild api/entry.ts --bundle --platform=node --target=node18 --outfile=dist-bundle/index.js --external:electron --external:cpu-features --external:ssh2 --external:bcrypt --external:playwright --external:playwright-core --external:@aws-sdk/client-s3",
-    "prepublishOnly": "npm run typecheck && npm run build",
+    "prepublishOnly": "node scripts/verify-commercial-publish.mjs && npm run typecheck && npm run build",
+    "verify:commercial-remote": "node scripts/verify-commercial-remote.mjs",
+    "verify:commercial-publish": "node scripts/verify-commercial-publish.mjs",
     "typecheck": "tsc --noEmit",
-    "publish:beta": "npm publish --tag beta",
-    "publish:stable": "npm publish --tag latest",
+    "publish:beta": "node scripts/verify-commercial-publish.mjs",
+    "publish:stable": "node scripts/verify-commercial-publish.mjs",
     "test:install-performance": "node scripts/test-install-performance.mjs",
-    "release": "node scripts/release.mjs",
+    "release": "node scripts/verify-commercial-publish.mjs",
     "postinstall": "node scripts/postinstall.js",
     "start": "node dist-bundle/index.js serve",
     "web": "node dist/cli/v4/aidenCLI.js web",
@@ -111,7 +111,7 @@
     "uninstall": "powershell -ExecutionPolicy Bypass -File scripts\\uninstall.ps1",
     "livepulse": "powershell -ExecutionPolicy Bypass -File scripts\\livepulse.ps1",
     "obfuscate": "javascript-obfuscator dist/ --output dist/ --compact true --string-array true --rotate-string-array true --string-array-threshold 0.75",
-    "release:npm": "powershell -ExecutionPolicy Bypass -File scripts/release-npm.ps1"
+    "release:npm": "node scripts/verify-commercial-publish.mjs"
   },
   "build": {
     "appId": "com.taracod.aiden",
