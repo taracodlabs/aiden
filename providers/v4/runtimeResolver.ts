@@ -116,6 +116,13 @@ export interface RuntimeResolverOptions {
   fetchImpl?: typeof fetch;
   /** Short cache used between picker discovery and adapter resolution. */
   localModelCacheTtlMs?: number;
+  /** Optional OS-backed credential seam used by local management surfaces.
+   * The resolver receives plaintext only for the exact selected provider and
+   * never persists or projects it. */
+  secureCredentialResolver?: (input: {
+    providerId: string;
+    config?: ConfigProvider;
+  }) => Promise<{ apiKey: string } | null>;
 }
 
 interface ResolvedCredentials {
@@ -449,6 +456,30 @@ export class RuntimeResolver {
           `${entry.id} requires OAuth login. Run \`/auth login ${entry.id}\`.`,
           entry.id,
         );
+      }
+    }
+
+    // 2. OS-backed secret authority. This sits ahead of legacy inline/env
+    // configuration because an explicit Workbench-managed credential is the
+    // operator's current selection. OAuth remains ahead of it for providers
+    // whose registry contract is subscription authentication.
+    if (this.resolverOptions.secureCredentialResolver) {
+      const secure = await this.resolverOptions.secureCredentialResolver({
+        providerId: entry.id,
+        config: options.config,
+      });
+      if (secure?.apiKey) {
+        return {
+          apiKey: secure.apiKey,
+          source: 'config',
+          endpoint: direct.endpoint,
+          effective: {
+            ...direct.effective,
+            credentialSource: 'secure_store',
+            credentialFingerprint: credentialFingerprint(secure.apiKey),
+            configured: true,
+          },
+        };
       }
     }
 

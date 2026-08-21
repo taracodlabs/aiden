@@ -48,6 +48,9 @@ export function createIntegrationRuntime(options: {
   includeFake?: boolean;
   clientFactory?: ComposioClientFactory;
   secretBackend?: SecretBackend;
+  /** Reuse an already-created secret authority when the host also exposes
+   * provider setup. This keeps one credential authority per process. */
+  secrets?: SecretAuthority;
 }): IntegrationRuntime {
   const scope = options.scope ?? integrationLocalScope();
   const providers = new IntegrationProviderRegistry();
@@ -59,7 +62,7 @@ export function createIntegrationRuntime(options: {
   }
   const accounts = new ConnectedAccountAuthority({ db: options.db });
   const schemas = new IntegrationActionSchemaAuthority({ db: options.db });
-  const secrets = new SecretAuthority({
+  const secrets = options.secrets ?? new SecretAuthority({
     db: options.db,
     rootDir: path.join(options.rootDir, 'secrets'),
     backend: options.secretBackend,

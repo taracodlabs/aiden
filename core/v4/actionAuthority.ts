@@ -92,6 +92,11 @@ export interface ActionAuthority {
   }): ApprovalRecord;
   get(approvalId: string): ApprovalRecord | null;
   listPending(jobId: string): ApprovalRecord[];
+  waitForDecision(approvalId: string, options?: { signal?: AbortSignal; pollMs?: number }): Promise<ApprovalRecord>;
+  cancelPendingForJob(jobId: string, reason: string, now?: number): {
+    changed: number;
+    approvals: ApprovalRecord[];
+  };
   markDisplayed(approvalId: string, now?: number): ApprovalRecord;
   decide(command: {
     approvalId: string;
@@ -371,7 +376,7 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
         !job || !attempt || job.activeAttemptId !== command.attemptId ||
         attempt.jobId !== command.jobId || attempt.generation !== command.generation ||
         attempt.fenceToken !== command.fenceToken || attempt.leaseExpiresAt === null || attempt.leaseExpiresAt <= now ||
-        ['cancelled', 'completed', 'failed', 'dead_letter', 'completed_unverified', 'verification_failed', 'abandoned'].includes(job.status)
+        ['cancelling', 'cancelled', 'completed', 'failed', 'dead_letter', 'completed_unverified', 'verification_failed', 'abandoned'].includes(job.status)
       ) {
         throw new Error('Approval target has a stale generation or fence');
       }
@@ -436,6 +441,67 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
           ORDER BY request_sequence`,
       ).all(jobId) as ApprovalRow[]).map(mapApproval);
     },
+    waitForDecision(approvalId, waitOptions = {}) {
+      const pollMs = Math.max(20, Math.min(1_000, waitOptions.pollMs ?? 50));
+      return new Promise<ApprovalRecord>((resolve, reject) => {
+        let timer: NodeJS.Timeout | null = null;
+        let settled = false;
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          timer = null;
+          waitOptions.signal?.removeEventListener('abort', onAbort);
+        };
+        const finish = (record: ApprovalRecord) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(record);
+        };
+        const fail = (error: Error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+        const onAbort = () => {
+          const error = new Error('Approval decision wait was interrupted');
+          error.name = 'AbortError';
+          fail(error);
+        };
+        const inspect = () => {
+          if (waitOptions.signal?.aborted) { onAbort(); return; }
+          const record = get(approvalId);
+          if (!record) { fail(new Error('Approval not found')); return; }
+          if (!['created', 'displayed'].includes(record.state)) { finish(record); return; }
+          timer = setTimeout(inspect, pollMs);
+        };
+        waitOptions.signal?.addEventListener('abort', onAbort, { once: true });
+        inspect();
+      });
+    },
+    cancelPendingForJob(jobId, reason, now = Date.now()) {
+      return db.transaction(() => {
+        const pending = (db.prepare(
+          `SELECT * FROM approvals
+            WHERE job_id = ? AND state IN ('created','displayed','approved')
+            ORDER BY request_sequence`,
+        ).all(jobId) as ApprovalRow[]).map(mapApproval);
+        const approvals: ApprovalRecord[] = [];
+        for (const record of pending) {
+          const changed = db.prepare(
+            `UPDATE approvals
+                SET state = 'cancelled', decision = 'cancelled', decided_at = ?,
+                    invalidation_reason = ?
+              WHERE approval_id = ? AND state IN ('created','displayed','approved')`,
+          ).run(now, reason, record.approvalId);
+          if (changed.changes !== 1) continue;
+          const updated = get(record.approvalId)!;
+          appendApprovalEvent(updated, 'approval.cancelled', 'approval');
+          approvals.push(updated);
+        }
+        return { changed: approvals.length, approvals };
+      }).immediate();
+    },
     markDisplayed(approvalId, now = Date.now()) {
       return db.transaction(() => {
         db.prepare(
@@ -455,8 +521,8 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
         if (!record) throw new Error('Approval not found');
         const job = jobEngine.getJob(command.jobId);
         const attempt = jobEngine.getAttempt(command.attemptId);
-        if (!job || ['cancelled', 'completed', 'failed', 'dead_letter', 'completed_unverified', 'verification_failed', 'abandoned'].includes(job.status)) {
-          throw new Error('Terminal Job rejects approval decisions');
+        if (!job || ['cancelling', 'cancelled', 'completed', 'failed', 'dead_letter', 'completed_unverified', 'verification_failed', 'abandoned'].includes(job.status)) {
+          throw new Error('Approval decisions require an active Job; a terminal Job or cancellation state rejects them');
         }
         if (
           !attempt || job.activeAttemptId !== command.attemptId ||

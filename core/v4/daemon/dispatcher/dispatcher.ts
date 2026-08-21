@@ -365,6 +365,17 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       const workerAssignmentId = typeof event.payload.worker_assignment_id === 'string'
         ? event.payload.worker_assignment_id
         : undefined;
+      const codingRecoveryRaw = (event.payload as {
+        external_coding_recovery?: { coding_session_id?: unknown; recovery_of_attempt_id?: unknown };
+      } | null)?.external_coding_recovery;
+      const externalCodingRecovery = codingRecoveryRaw
+        && typeof codingRecoveryRaw.coding_session_id === 'string'
+        && typeof codingRecoveryRaw.recovery_of_attempt_id === 'string'
+          ? {
+              codingSessionId: codingRecoveryRaw.coding_session_id,
+              recoveryOfAttemptId: codingRecoveryRaw.recovery_of_attempt_id,
+            }
+          : undefined;
       const existingAdmission = durable
         && typeof durable.job_id === 'string'
         && typeof durable.attempt_id === 'string'
@@ -392,6 +403,7 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         ...(admission ? { admission } : {}),
         ...(workerAssignmentId ? { workerAssignmentId } : {}),
         ...(resume ? { resume } : {}),
+        ...(externalCodingRecovery ? { externalCodingRecovery } : {}),
       };
 
       let result: DaemonAgentResult;

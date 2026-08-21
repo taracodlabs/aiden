@@ -15,6 +15,7 @@ import {
   projectReadOnlyRepositoryWorkerGroups,
   reconcileInterruptedReadOnlyRepositoryWorkerGroups,
 } from '../worker/workerParallel';
+import { recoverableCompletedExternalCodingSession } from '../coding/recovery';
 
 export interface DurableRecoverySweepResult {
   expired: number;
@@ -40,13 +41,14 @@ export function sweepDurableJobRecovery(input: {
   now?: number;
 }): DurableRecoverySweepResult {
   const providerLedger = currentProviderAttemptLedger();
+  const recoverableCoding = new Map<string, { codingSessionId: string; predecessorAttemptId: string }>();
   const decisions = input.jobEngine.recoverExpiredAttempts({
     now: input.now,
     instanceId: input.instanceId,
     producer: input.producer,
     maxCrashes: input.maxCrashes ?? 3,
-    reconcileWorkerAttempt: ({ childJobId, childAttemptId, childGeneration, now }) =>
-      reconcileWorkerProviderAttempt({
+    reconcileWorkerAttempt: ({ childJobId, childAttemptId, childGeneration, now }) => {
+      const provider = reconcileWorkerProviderAttempt({
         engine: input.jobEngine,
         ledger: providerLedger,
         childJobId,
@@ -56,7 +58,37 @@ export function sweepDurableJobRecovery(input: {
         producer: input.producer,
         reason: 'attempt_lease_expired',
         now,
-      }),
+      });
+      const coding = input.jobEngine.coding.recoverAfterLeaseLoss({
+        childJobId,
+        childAttemptId,
+        childGeneration,
+        reason: 'attempt_lease_expired',
+        producer: input.producer,
+        idempotencyKey: `external-coding-recovery:${childAttemptId}:${childGeneration}`,
+        now,
+      });
+      const continuation = recoverableCompletedExternalCodingSession({
+        engine: input.jobEngine,
+        childJobId,
+        predecessorAttemptId: childAttemptId,
+      });
+      if (continuation) {
+        recoverableCoding.set(childJobId, continuation);
+        return {
+          calls: provider.calls,
+          retrySafety: 'safe',
+          outcomeKnowledge: [...provider.outcomeKnowledge, 'external_coding_provider_terminal'],
+          recoveryMode: 'adopt_completed_result',
+        };
+      }
+      if (!coding || ['terminal', 'failed', 'ready_for_review'].includes(coding.state)) return provider;
+      return {
+        calls: provider.calls,
+        retrySafety: 'blocked_unknown',
+        outcomeKnowledge: [...provider.outcomeKnowledge, 'external_coding_session_requires_reconciliation'],
+      };
+    },
   });
   const result: DurableRecoverySweepResult = {
     expired: decisions.length,
@@ -125,6 +157,14 @@ export function sweepDurableJobRecovery(input: {
       ? input.jobEngine.getAttempt(job.activeAttemptId)
       : null;
     if (!attempt || attempt.jobId !== job.id || attempt.status !== 'queued') continue;
+    const codingRecovery = recoverableCoding.get(job.id)
+      ?? (attempt.recoveryOfAttemptId
+        ? recoverableCompletedExternalCodingSession({
+            engine: input.jobEngine,
+            childJobId: job.id,
+            predecessorAttemptId: attempt.recoveryOfAttemptId,
+          })
+        : null);
 
     const queued = input.triggerBus.insert({
       source: 'manual',
@@ -142,6 +182,12 @@ export function sweepDurableJobRecovery(input: {
           attempt_id: attempt.id,
           run_id: attempt.rowId,
         },
+        ...(codingRecovery ? {
+          external_coding_recovery: {
+            coding_session_id: codingRecovery.codingSessionId,
+            recovery_of_attempt_id: codingRecovery.predecessorAttemptId,
+          },
+        } : {}),
       },
     });
     if (queued.inserted) result.enqueued += 1;

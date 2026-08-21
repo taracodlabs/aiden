@@ -12,7 +12,38 @@ import fs     from 'fs'
 import path   from 'path'
 import crypto from 'crypto'
 
-const CACHE_PATH = path.join(process.cwd(), 'workspace', 'cache', 'response-cache.json')
+import { resolveRuntimeStorageRoot } from './v4/runtimeStorage'
+
+export interface ResponseCacheOptions {
+  /** Workspace identity whose cache entries must remain isolated. */
+  workspaceRoot?: string
+  /** Aiden-owned runtime root. Defaults to AIDEN_USER_DATA/AIDEN_HOME. */
+  runtimeRoot?: string
+  /** Explicit test/embedding override for the complete cache file path. */
+  cachePath?: string
+  cleanupIntervalMs?: number
+}
+
+function normalizedWorkspaceIdentity(workspaceRoot: string): string {
+  const absolute = path.resolve(workspaceRoot)
+  return process.platform === 'win32' ? absolute.toLowerCase() : absolute
+}
+
+/**
+ * Cache files are runtime state, never repository content. The workspace digest
+ * prevents cache collisions without exposing a source path in the state tree.
+ */
+export function responseCachePathForWorkspace(
+  workspaceRoot = process.cwd(),
+  runtimeRoot = resolveRuntimeStorageRoot(),
+): string {
+  const workspaceId = crypto
+    .createHash('sha256')
+    .update(normalizedWorkspaceIdentity(workspaceRoot))
+    .digest('hex')
+    .slice(0, 32)
+  return path.join(path.resolve(runtimeRoot), 'cache', 'workspaces', workspaceId, 'response-cache.json')
+}
 
 interface CacheEntry {
   key:       string
@@ -46,13 +77,23 @@ const NO_CACHE_TOOLS = new Set([
 
 export class ResponseCache {
   private cache: Map<string, CacheEntry> = new Map()
+  private readonly cachePath: string
+  private readonly cleanupTimer: NodeJS.Timeout
 
-  constructor() {
+  constructor(options: ResponseCacheOptions = {}) {
+    this.cachePath = path.resolve(options.cachePath ?? responseCachePathForWorkspace(
+      options.workspaceRoot ?? process.cwd(),
+      options.runtimeRoot ?? resolveRuntimeStorageRoot(),
+    ))
     this.load()
     // Cleanup expired entries every 5 minutes. `.unref()` so this background
     // timer never keeps the event loop alive — otherwise every CLI command has
     // to hard-quit instead of exiting cleanly once its work is done.
-    setInterval(() => this.cleanup(), 5 * 60 * 1000).unref()
+    this.cleanupTimer = setInterval(
+      () => this.cleanup(),
+      options.cleanupIntervalMs ?? 5 * 60 * 1000,
+    )
+    this.cleanupTimer.unref()
   }
 
   // ── Key hashing ───────────────────────────────────────────────
@@ -113,25 +154,34 @@ export class ResponseCache {
 
   clear(): void {
     this.cache.clear()
-    this.save()
+    try { fs.rmSync(this.cachePath, { force: true }) } catch {}
+  }
+
+  /** Release the maintenance timer for short-lived embeddings and tests. */
+  dispose(): void {
+    clearInterval(this.cleanupTimer)
   }
 
   // ── Expired entry cleanup ─────────────────────────────────────
 
   private cleanup(): void {
     const now = Date.now()
+    let changed = false
     for (const [key, entry] of this.cache) {
-      if (now > entry.expiresAt) this.cache.delete(key)
+      if (now > entry.expiresAt) {
+        this.cache.delete(key)
+        changed = true
+      }
     }
-    this.save()
+    if (changed) this.save()
   }
 
   // ── Persistence ───────────────────────────────────────────────
 
   private load(): void {
     try {
-      if (!fs.existsSync(CACHE_PATH)) return
-      const data = JSON.parse(fs.readFileSync(CACHE_PATH, 'utf-8'))
+      if (!fs.existsSync(this.cachePath)) return
+      const data = JSON.parse(fs.readFileSync(this.cachePath, 'utf-8'))
       this.cache = new Map(Object.entries(data) as [string, CacheEntry][])
       this.cleanup()  // Remove expired entries on load
     } catch {}
@@ -139,10 +189,11 @@ export class ResponseCache {
 
   private save(): void {
     try {
-      fs.mkdirSync(path.dirname(CACHE_PATH), { recursive: true })
+      fs.mkdirSync(path.dirname(this.cachePath), { recursive: true })
       fs.writeFileSync(
-        CACHE_PATH,
+        this.cachePath,
         JSON.stringify(Object.fromEntries(this.cache), null, 2),
+        { mode: 0o600 },
       )
     } catch {}
   }

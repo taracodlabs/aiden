@@ -765,6 +765,80 @@ export function createJobControlAuthority(options: CreateJobControlAuthorityOpti
     return { controlId, duplicate: false, state: 'persisted', attemptId, generation };
   };
 
+  const beginCancellation = (command: {
+    jobId: string;
+    reason: string;
+    producer: string;
+    eventIdempotencyKey: string;
+    now?: number;
+  }) => {
+    const job = jobEngine.getJob(command.jobId);
+    const attempt = job?.activeAttemptId ? jobEngine.getAttempt(job.activeAttemptId) : null;
+    if (job?.status === 'cancelling') return { applied: true, duplicate: true };
+    if (
+      job
+      && attempt
+      && ['running', 'waiting'].includes(job.status)
+      && attempt.fenceToken
+      && attempt.leaseExpiresAt !== null
+      && attempt.leaseExpiresAt > (command.now ?? Date.now())
+    ) {
+      const now = command.now ?? Date.now();
+      const codingSession = jobEngine.coding.getForChildJob(job.id);
+      if (codingSession
+        && codingSession.childAttemptId === attempt.id
+        && codingSession.childGeneration === attempt.generation) {
+        jobEngine.coding.requestCancellation({
+          childJobId: job.id,
+          childAttemptId: attempt.id,
+          childGeneration: attempt.generation,
+          childFenceToken: attempt.fenceToken,
+          codingSessionId: codingSession.codingSessionId,
+          reason: command.reason,
+          producer: command.producer,
+          idempotencyKey: `job-cancel:${command.eventIdempotencyKey}`,
+          now,
+        });
+      }
+      jobEngine.worker.requestWorkerGroupInterruptionForParent({
+        parentJobId: job.id,
+        parentAttemptId: attempt.id,
+        parentGeneration: attempt.generation,
+        parentFenceToken: attempt.fenceToken,
+        kind: 'cancellation',
+        reason: command.reason,
+        producer: command.producer,
+        idempotencyKey: `worker-groups:${command.eventIdempotencyKey}`,
+        now,
+      });
+      jobEngine.workerProviderCalls.recordInterruptionForAttempt({
+        childJobId: job.id,
+        childAttemptId: attempt.id,
+        childGeneration: attempt.generation,
+        childFenceToken: attempt.fenceToken,
+        kind: 'cancellation',
+        reason: command.reason,
+        idempotencyKey: `worker-cancel:${command.eventIdempotencyKey}`,
+        now,
+      });
+      return jobEngine.transitionJob({
+        jobId: job.id,
+        attemptId: attempt.id,
+        generation: attempt.generation,
+        fenceToken: attempt.fenceToken,
+        expectedStateVersion: job.stateVersion,
+        to: 'cancelling',
+        finishReason: command.reason,
+        producer: command.producer,
+        eventIdempotencyKey: `${command.eventIdempotencyKey}:requested`,
+        now,
+      });
+    }
+    // A queued, paused, or otherwise non-executing Job has no attached
+    // physical operation to verify before reaching its terminal state.
+    return jobEngine.cancelJob(command);
+  };
+
   return {
     inputs,
     waits,
@@ -794,7 +868,7 @@ export function createJobControlAuthority(options: CreateJobControlAuthorityOpti
               attemptIds: persisted.attemptId ? [persisted.attemptId] : [],
             };
           }
-          const result = jobEngine.cancelJob({
+          const result = beginCancellation({
             jobId: command.jobId,
             reason,
             producer: command.source,
@@ -825,7 +899,7 @@ export function createJobControlAuthority(options: CreateJobControlAuthorityOpti
               for (const child of family.filter((job) => isDescendant(job.id))) {
                 if (!child.activeAttemptId) continue;
                 const childAttemptId = child.activeAttemptId;
-                const cancelled = jobEngine.cancelJob({
+                const cancelled = beginCancellation({
                   jobId: child.id,
                   reason: `parent ${command.kind}: ${reason}`,
                   producer: command.source,

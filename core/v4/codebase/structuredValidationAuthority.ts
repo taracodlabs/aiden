@@ -142,6 +142,7 @@ export interface StructuredValidationAuthority {
     producer: string; now?: number;
   }): Promise<{ run: StructuredValidationRun; diagnostics: ValidationDiagnosticRecord[] }>;
   getRun(runId: string): StructuredValidationRun | undefined;
+  getRunForToolCall(toolCallId: string): StructuredValidationRun | undefined;
   getArtifact(artifactId: string): ValidationArtifactRecord | undefined;
   readLogArtifact(artifactId: string): string;
   listDiagnostics(runId: string): ValidationDiagnosticRecord[];
@@ -660,6 +661,12 @@ export function createStructuredValidationAuthority(deps: Deps): StructuredValid
     },
 
     getRun,
+    getRunForToolCall(toolCallId) {
+      const row = db.prepare(
+        'SELECT run_id FROM validation_runs WHERE tool_call_id=? ORDER BY started_at,run_id LIMIT 1',
+      ).get(toolCallId) as { run_id: string } | undefined;
+      return row ? getRun(row.run_id) : undefined;
+    },
     getArtifact,
     readLogArtifact(artifactId) {
       const row = db.prepare('SELECT kind,compression,content_blob FROM validation_artifacts WHERE artifact_id=?')

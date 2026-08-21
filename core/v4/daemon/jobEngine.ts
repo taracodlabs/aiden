@@ -54,6 +54,23 @@ import {
   createBrowserSessionAuthority,
   type BrowserSessionAuthority,
 } from '../browser/browserSessionAuthority';
+import {
+  createExternalCodingSessionAuthority,
+  type ExternalCodingSessionAuthority,
+} from '../coding/sessionAuthority';
+import { terminatePersistedExternalCodingProcess } from '../coding/processHost';
+import {
+  createExternalCodingWorkspaceAuthority,
+  type ExternalCodingWorkspaceAuthority,
+} from '../coding/workspaceAuthority';
+import {
+  createExternalCodingMutationAuthority,
+  type ExternalCodingMutationAuthority,
+} from '../coding/mutationAuthority';
+import {
+  createExternalCodingPromotionAuthority,
+  type ExternalCodingPromotionAuthority,
+} from '../coding/promotionAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -215,6 +232,14 @@ export interface JobEngine {
   readonly graph: ExecutionGraphAuthority;
   readonly worker: WorkerAuthority;
   readonly workerProviderCalls: WorkerProviderCallAuthority;
+  /** Durable external coding sessions bound to exact Worker and child Attempt authority. */
+  readonly coding: ExternalCodingSessionAuthority;
+  /** Isolated Git worktree leases for external coding sessions. */
+  readonly codingWorkspaces: ExternalCodingWorkspaceAuthority;
+  /** Independent post-execution workspace reconciliation. */
+  readonly codingMutations: ExternalCodingMutationAuthority;
+  /** Human-reviewed, target-revalidated promotion of isolated coding changes. */
+  readonly codingPromotions: ExternalCodingPromotionAuthority;
   readonly resources: JobResourceAuthority;
   readonly proof: JobProofAuthority;
   readonly projection: JobEventProjectionAuthority;
@@ -465,6 +490,7 @@ export interface WorkerAttemptReconciliationSummary {
   calls: number;
   retrySafety: 'safe' | 'unsafe' | 'blocked_unknown' | 'not_applicable';
   outcomeKnowledge: string[];
+  recoveryMode?: 'adopt_completed_result';
 }
 
 export interface CreateJobEngineOptions {
@@ -738,6 +764,10 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   };
   let worker!: WorkerAuthority;
   let workerProviderCalls!: WorkerProviderCallAuthority;
+  let coding!: ExternalCodingSessionAuthority;
+  let codingWorkspaces!: ExternalCodingWorkspaceAuthority;
+  let codingMutations!: ExternalCodingMutationAuthority;
+  let codingPromotions!: ExternalCodingPromotionAuthority;
 
   const existingEvent = (jobId: string, key: string): { id: number; job_sequence: number } | undefined => db.prepare(
     'SELECT id, job_sequence FROM run_events WHERE job_id = ? AND idempotency_key = ?',
@@ -1117,6 +1147,10 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     if (attempt.state_version !== command.expectedStateVersion) {
       return { applied: false, conflict: 'state_version', stateVersion: attempt.state_version };
     }
+    const owningJob = getJobRow(attempt.task_id);
+    if (owningJob?.status === 'cancelling' && !['cancelled', 'failed', 'unknown'].includes(command.to)) {
+      return { applied: false, conflict: 'illegal_transition', stateVersion: attempt.state_version };
+    }
     if (!isLegal(ATTEMPT_TRANSITIONS, attempt.status, command.to)) {
       return { applied: false, conflict: 'illegal_transition', stateVersion: attempt.state_version };
     }
@@ -1302,7 +1336,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       runId: attempt.id,
       attemptId: attempt.attempt_id,
       generation: attempt.generation,
-      type: 'job.finalized',
+      type: command.status === 'cancelled' ? 'job.cancelled' : 'job.finalized',
       payload: { status: command.status, outcome: command.outcome, finishReason: command.finishReason },
       producer: command.producer,
       idempotencyKey: command.eventIdempotencyKey,
@@ -1323,6 +1357,22 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     if (!attempt) return { applied: false, conflict: 'not_found' };
     const now = command.now ?? Date.now();
     if (!ATTEMPT_TERMINAL.has(attempt.status) && attempt.fence_token) {
+      const codingSession = coding.getForChildJob(job.id);
+      if (codingSession
+        && codingSession.childAttemptId === attempt.attempt_id
+        && codingSession.childGeneration === attempt.generation) {
+        coding.requestCancellation({
+          childJobId: job.id,
+          childAttemptId: attempt.attempt_id,
+          childGeneration: attempt.generation,
+          childFenceToken: attempt.fence_token,
+          codingSessionId: codingSession.codingSessionId,
+          reason: command.reason,
+          producer: command.producer,
+          idempotencyKey: `job-cancel:${command.eventIdempotencyKey}`,
+          now,
+        });
+      }
       worker.requestWorkerGroupInterruptionForParent({
         parentJobId: job.id,
         parentAttemptId: attempt.attempt_id,
@@ -2055,8 +2105,10 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     command: Parameters<JobEngine['attachToolVerification']>[0],
   ): TransitionResult => {
     const attempt = activeFence(command.attemptId, command.generation, command.fenceToken, command.now);
+    if (!attempt) return { applied: false, conflict: 'stale_fence' };
     const toolCall = getToolCallRow(command.toolCallId);
-    if (!attempt || !toolCall || toolCall.attempt_id !== command.attemptId || toolCall.generation !== command.generation) {
+    if (!toolCall) return { applied: false, conflict: 'not_found' };
+    if (toolCall.attempt_id !== command.attemptId || toolCall.generation !== command.generation) {
       return { applied: false, conflict: 'stale_fence' };
     }
     if (!['completed', 'failed', 'cancelled', 'unknown'].includes(toolCall.state)) {
@@ -2190,17 +2242,25 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     const job = getJobRow(attempt.task_id);
     if (!job || job.active_attempt_id !== attempt.attempt_id || JOB_TERMINAL.has(job.status)) return null;
 
-    const ambiguous = db.prepare(
-      `SELECT 1
+    const ambiguousEffects = db.prepare(
+      `SELECT tc.tool_call_id, tc.state AS tool_call_state, tc.result_ref,
+              se.effect_state, se.reconciliation_required
          FROM tool_calls tc
          LEFT JOIN side_effect_ledger se ON se.tool_call_id = tc.tool_call_id
         WHERE tc.attempt_id = ? AND tc.generation = ? AND tc.mutates = 1
           AND (tc.state = 'started' OR se.effect_state IN ('started', 'committed', 'partial', 'unknown'))
-        LIMIT 1`,
-    ).get(attempt.attempt_id, attempt.generation) !== undefined;
+        ORDER BY tc.created_at, tc.tool_call_id`,
+    ).all(attempt.attempt_id, attempt.generation) as Array<{
+      tool_call_id: string;
+      tool_call_state: string;
+      result_ref: string | null;
+      effect_state: string | null;
+      reconciliation_required: number | null;
+    }>;
+    const initiallyAmbiguous = ambiguousEffects.length > 0;
     const crashRow = db.prepare('SELECT crash_count FROM tasks WHERE id = ?').get(job.id) as { crash_count: number };
     const crashCount = crashRow.crash_count + 1;
-    let attemptStatus: 'unknown' | 'crashed' = ambiguous ? 'unknown' : 'crashed';
+    let attemptStatus: 'unknown' | 'crashed' = initiallyAmbiguous ? 'unknown' : 'crashed';
     const attemptVersion = attempt.state_version + 1;
     const cleared = db.prepare(
       `UPDATE runs
@@ -2213,7 +2273,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     ).run(
       attemptStatus,
       attemptVersion,
-      ambiguous ? 'unknown_side_effect' : 'lease_expired',
+      initiallyAmbiguous ? 'unknown_side_effect' : 'lease_expired',
       command.now,
       command.now,
       attempt.attempt_id,
@@ -2223,40 +2283,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       command.now,
     );
     if (cleared.changes !== 1) return null;
-    if (ambiguous) {
-      const effects = db.prepare(
-        `SELECT key, tool_call_id, effect_state FROM side_effect_ledger
-          WHERE attempt_id = ? AND generation = ?
-            AND effect_state IN ('started','committed','partial','unknown')`,
-      ).all(attempt.attempt_id, attempt.generation) as Array<{
-        key: string; tool_call_id: string; effect_state: string;
-      }>;
-      db.prepare(
-        `UPDATE side_effect_ledger
-            SET effect_state = CASE WHEN effect_state = 'started' THEN 'unknown' ELSE effect_state END,
-                status = CASE WHEN effect_state = 'started' THEN 'unknown' ELSE status END,
-                reconciliation_required = 1, updated_at = ?
-          WHERE attempt_id = ? AND generation = ?
-            AND effect_state IN ('started','committed','partial','unknown')`,
-      ).run(command.now, attempt.attempt_id, attempt.generation);
-      db.prepare(
-        `UPDATE tool_calls SET state = 'unknown', ended_at = COALESCE(ended_at, ?), updated_at = ?
-          WHERE attempt_id = ? AND generation = ? AND state = 'started'`,
-      ).run(command.now, command.now, attempt.attempt_id, attempt.generation);
-      for (const effect of effects.filter((candidate) => candidate.effect_state === 'started')) {
-        appendEvent({
-          jobId: job.id,
-          runId: attempt.id,
-          attemptId: attempt.attempt_id,
-          generation: attempt.generation,
-          type: 'effect.unknown',
-          payload: { effectId: effect.key, toolCallId: effect.tool_call_id, reason: 'lease_expired_during_execution' },
-          producer: command.producer,
-          idempotencyKey: `effect-crash-unknown:${effect.key}:${attempt.generation}`,
-        });
-      }
-    }
-    const workerReconciliation = command.reconcileWorkerAttempt
+    const workerReconciliation: WorkerAttemptReconciliationSummary = command.reconcileWorkerAttempt
       ? command.reconcileWorkerAttempt({
         childJobId: job.id,
         childAttemptId: attempt.attempt_id,
@@ -2298,6 +2325,52 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
           outcomeKnowledge: reconciled.map((entry) => entry.outcomeKnowledge),
         } satisfies WorkerAttemptReconciliationSummary;
       })();
+    const adoptsCompletedResult = workerReconciliation.recoveryMode === 'adopt_completed_result'
+      && ambiguousEffects.every((effect) => effect.tool_call_state === 'completed'
+        && effect.result_ref !== null
+        && effect.effect_state === 'committed'
+        && effect.reconciliation_required === 0);
+    const ambiguous = initiallyAmbiguous && !adoptsCompletedResult;
+    if (adoptsCompletedResult && attemptStatus === 'unknown') {
+      db.prepare(
+        `UPDATE runs SET status = 'crashed', finish_reason = 'lease_expired_after_completed_result'
+          WHERE attempt_id = ? AND generation = ? AND state_version = ?`,
+      ).run(attempt.attempt_id, attempt.generation, attemptVersion);
+      attemptStatus = 'crashed';
+    }
+    if (ambiguous) {
+      const effects = db.prepare(
+        `SELECT key, tool_call_id, effect_state FROM side_effect_ledger
+          WHERE attempt_id = ? AND generation = ?
+            AND effect_state IN ('started','committed','partial','unknown')`,
+      ).all(attempt.attempt_id, attempt.generation) as Array<{
+        key: string; tool_call_id: string; effect_state: string;
+      }>;
+      db.prepare(
+        `UPDATE side_effect_ledger
+            SET effect_state = CASE WHEN effect_state = 'started' THEN 'unknown' ELSE effect_state END,
+                status = CASE WHEN effect_state = 'started' THEN 'unknown' ELSE status END,
+                reconciliation_required = 1, updated_at = ?
+          WHERE attempt_id = ? AND generation = ?
+            AND effect_state IN ('started','committed','partial','unknown')`,
+      ).run(command.now, attempt.attempt_id, attempt.generation);
+      db.prepare(
+        `UPDATE tool_calls SET state = 'unknown', ended_at = COALESCE(ended_at, ?), updated_at = ?
+          WHERE attempt_id = ? AND generation = ? AND state = 'started'`,
+      ).run(command.now, command.now, attempt.attempt_id, attempt.generation);
+      for (const effect of effects.filter((candidate) => candidate.effect_state === 'started')) {
+        appendEvent({
+          jobId: job.id,
+          runId: attempt.id,
+          attemptId: attempt.attempt_id,
+          generation: attempt.generation,
+          type: 'effect.unknown',
+          payload: { effectId: effect.key, toolCallId: effect.tool_call_id, reason: 'lease_expired_during_execution' },
+          producer: command.producer,
+          idempotencyKey: `effect-crash-unknown:${effect.key}:${attempt.generation}`,
+        });
+      }
+    }
     const workerBlocksRetry = workerReconciliation.retrySafety === 'blocked_unknown'
       || workerReconciliation.retrySafety === 'unsafe';
     if (workerBlocksRetry && attemptStatus !== 'unknown') {
@@ -2523,11 +2596,166 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     });
   });
 
+  const validateCodingFence = (command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+    fenceToken: string;
+    now?: number;
+  }): boolean => {
+    const attempt = activeFence(command.attemptId, command.generation, command.fenceToken, command.now);
+    const job = attempt ? getJobRow(command.jobId) : undefined;
+    return Boolean(
+      attempt
+      && attempt.task_id === command.jobId
+      && job?.active_attempt_id === command.attemptId
+      && !JOB_TERMINAL.has(job.status),
+    );
+  };
+  const validateLostCodingAuthority = (command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+  }): boolean => {
+    const attempt = getAttemptRow(command.attemptId);
+    const job = attempt ? getJobRow(command.jobId) : undefined;
+    return Boolean(
+      attempt
+      && attempt.task_id === command.jobId
+      && attempt.generation === command.generation
+      && ['crashed', 'unknown'].includes(attempt.status)
+      && job?.active_attempt_id === command.attemptId
+      && !JOB_TERMINAL.has(job.status),
+    );
+  };
+  const validateCancelledCodingAuthority = (command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+    fenceToken: string;
+  }): boolean => {
+    const attempt = getAttemptRow(command.attemptId);
+    const job = attempt ? getJobRow(command.jobId) : undefined;
+    return Boolean(
+      attempt
+      && attempt.task_id === command.jobId
+      && attempt.generation === command.generation
+      && attempt.fence_token === command.fenceToken
+      && (
+        (job?.status === 'cancelling'
+          && job.active_attempt_id === command.attemptId
+          && !ATTEMPT_TERMINAL.has(attempt.status))
+        || (attempt.status === 'cancelled'
+          && job?.status === 'cancelled'
+          && job.active_attempt_id === null)
+      ),
+    );
+  };
+  const validateDiscardCodingAuthority = (command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+  }): boolean => {
+    const attempt = getAttemptRow(command.attemptId);
+    const job = attempt ? getJobRow(command.jobId) : undefined;
+    const latest = attempt ? db.prepare(
+      'SELECT MAX(generation) AS generation FROM runs WHERE task_id=?',
+    ).get(command.jobId) as { generation: number | null } : null;
+    return Boolean(
+      attempt
+      && attempt.task_id === command.jobId
+      && attempt.generation === command.generation
+      && ['crashed', 'unknown', 'failed'].includes(attempt.status)
+      && job
+      && ['blocked', 'crashed', 'unknown', 'failed'].includes(job.status)
+      && (job.active_attempt_id === null || job.active_attempt_id === command.attemptId)
+      && latest?.generation === command.generation,
+    );
+  };
+  const validateCodingRecoveryAuthority = (command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+    fenceToken: string;
+    recoveryOfAttemptId: string;
+    recoveryOfGeneration: number;
+    now?: number;
+  }): boolean => {
+    if (!validateCodingFence(command)) return false;
+    const recovery = getAttemptRow(command.attemptId);
+    const predecessor = getAttemptRow(command.recoveryOfAttemptId);
+    return Boolean(
+      recovery
+      && predecessor
+      && recovery.task_id === command.jobId
+      && predecessor.task_id === command.jobId
+      && recovery.recovery_of_attempt_id === predecessor.attempt_id
+      && predecessor.generation === command.recoveryOfGeneration
+      && ['crashed', 'unknown'].includes(predecessor.status),
+    );
+  };
+  const appendCodingEvent = (command: {
+    childJobId: string;
+    childAttemptId: string;
+    childGeneration: number;
+    type: string;
+    payload: Record<string, unknown>;
+    producer: string;
+    idempotencyKey: string;
+  }): void => {
+    const attempt = getAttemptRow(command.childAttemptId);
+    if (!attempt
+      || attempt.task_id !== command.childJobId
+      || attempt.generation !== command.childGeneration) {
+      throw new Error('External coding event lineage is invalid');
+    }
+    appendEvent({
+      jobId: command.childJobId,
+      runId: attempt.id,
+      attemptId: command.childAttemptId,
+      generation: command.childGeneration,
+      type: command.type,
+      payload: command.payload,
+      producer: command.producer,
+      idempotencyKey: command.idempotencyKey,
+    });
+  };
+  codingWorkspaces = createExternalCodingWorkspaceAuthority({
+    db,
+    validateActiveFence: validateCodingFence,
+    validateLostAuthority: validateLostCodingAuthority,
+    validateCancelledAuthority: validateCancelledCodingAuthority,
+    validateDiscardAuthority: validateDiscardCodingAuthority,
+    appendEvent: appendCodingEvent,
+  });
+  coding = createExternalCodingSessionAuthority({
+    db,
+    worker,
+    workspaces: codingWorkspaces,
+    validateActiveFence: validateCodingFence,
+    validateLostAuthority: validateLostCodingAuthority,
+    validateCancelledAuthority: validateCancelledCodingAuthority,
+    validateRecoveryAuthority: validateCodingRecoveryAuthority,
+    terminateLostProcess: terminatePersistedExternalCodingProcess,
+    appendOrderedEvent: appendCodingEvent,
+  });
+  codingMutations = createExternalCodingMutationAuthority({
+    db,
+    sessions: coding,
+    workspaces: codingWorkspaces,
+    repository,
+    proof,
+  });
+
   let continuity: ContinuityCheckpointAuthority;
   const engine: JobEngine = {
     graph,
     worker,
     workerProviderCalls,
+    coding,
+    codingWorkspaces,
+    codingMutations,
+    get codingPromotions() { return codingPromotions; },
     resources,
     proof,
     projection,
@@ -2735,6 +2963,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       return decisions;
     },
   };
+  codingPromotions = createExternalCodingPromotionAuthority({ db, engine });
   continuity = createContinuityCheckpointAuthority({ db, engine });
   return engine;
 }

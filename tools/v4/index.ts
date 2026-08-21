@@ -112,6 +112,7 @@ import {
 // v4.6 Phase 1 — spawn_sub_agent stub registered alongside the
 // fanout stub so the schema is visible at agent construction.
 import { makeSpawnSubAgentStub } from './subagent/spawnSubAgentTool';
+import { makeExternalCodingStub } from './coding/externalCoding';
 import { makeClarifyTool } from './clarify/clarifyTool';
 
 /**
@@ -320,6 +321,7 @@ export function registerWriteTools(registry: ToolRegistry): void {
   // (escape hatch when GSMTC doesn't enumerate the surface).
   register(mediaTransportTool);
   register(appInputTool);
+  register(makeExternalCodingStub());
 }
 
 /** Register every v4 tool. Most callers want this. */
@@ -419,6 +421,12 @@ export {
   makeSubagentFanoutTool,
   type SubagentFanoutFactoryOptions,
 } from './subagent/subagentFanout';
+export {
+  EXTERNAL_CODING_SCHEMA,
+  makeExternalCodingStub,
+  makeExternalCodingTool,
+  type ExternalCodingToolOptions,
+} from './coding/externalCoding';
 
 export { webSearchTool } from './web/webSearch';
 export { webFetchTool } from './web/webFetch';

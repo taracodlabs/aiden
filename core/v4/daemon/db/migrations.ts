@@ -2642,6 +2642,251 @@ function applyV45(db: Database.Database): void {
   `);
 }
 
+/** Durable authority for isolated external coding sessions. */
+function applyV46(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS external_coding_capability_snapshots (
+      capability_digest TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+      capability_id TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      provider_version TEXT NOT NULL,
+      protocol_mode TEXT NOT NULL CHECK(protocol_mode IN ('structured','pty')),
+      protocol_version TEXT NOT NULL,
+      capability_json TEXT NOT NULL,
+      captured_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS external_coding_workspace_leases (
+      workspace_lease_id TEXT PRIMARY KEY,
+      coding_session_id TEXT NOT NULL UNIQUE,
+      repository_identity TEXT NOT NULL,
+      source_workspace_id TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      worktree_path TEXT NOT NULL UNIQUE,
+      base_head TEXT NOT NULL,
+      base_branch TEXT,
+      state TEXT NOT NULL CHECK(state IN (
+        'allocating','ready','review_pending','promotion_pending',
+        'reconciliation_required','released','failed'
+      )),
+      child_job_id TEXT NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      protected_paths_json TEXT NOT NULL DEFAULT '[]',
+      created_at INTEGER NOT NULL,
+      last_validated_at INTEGER NOT NULL,
+      released_at INTEGER,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (child_attempt_id) REFERENCES runs(attempt_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_external_coding_workspaces_state
+      ON external_coding_workspace_leases(state, created_at, workspace_lease_id);
+
+    CREATE TABLE IF NOT EXISTS external_coding_repository_locks (
+      repository_identity TEXT PRIMARY KEY,
+      workspace_lease_id TEXT NOT NULL UNIQUE,
+      coding_session_id TEXT NOT NULL UNIQUE,
+      state TEXT NOT NULL CHECK(state IN ('held','released')),
+      acquired_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      released_at INTEGER,
+      FOREIGN KEY (workspace_lease_id) REFERENCES external_coding_workspace_leases(workspace_lease_id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS external_coding_sessions (
+      coding_session_id TEXT PRIMARY KEY,
+      schema_version INTEGER NOT NULL CHECK(schema_version = 1),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      input_digest TEXT NOT NULL,
+      parent_job_id TEXT NOT NULL,
+      assignment_id TEXT NOT NULL UNIQUE,
+      worker_run_id TEXT NOT NULL UNIQUE,
+      child_job_id TEXT NOT NULL UNIQUE,
+      child_attempt_id TEXT NOT NULL UNIQUE,
+      child_generation INTEGER NOT NULL,
+      workspace_lease_id TEXT NOT NULL UNIQUE,
+      capability_digest TEXT NOT NULL,
+      provider_id TEXT NOT NULL,
+      provider_version TEXT NOT NULL,
+      protocol_mode TEXT NOT NULL CHECK(protocol_mode IN ('structured','pty')),
+      protocol_version TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN (
+        'preparing','starting','running','waiting_for_input','waiting_for_approval',
+        'cancelling','process_terminal','reconciliation_required','verification_pending',
+        'ready_for_review','terminal','failed','unknown'
+      )),
+      reconciliation_state TEXT NOT NULL CHECK(reconciliation_state IN (
+        'not_required','required','inspecting','reconciled','blocked_unknown'
+      )),
+      next_event_sequence INTEGER NOT NULL DEFAULT 1,
+      next_input_sequence INTEGER NOT NULL DEFAULT 1,
+      provider_session_id TEXT,
+      session_home_path TEXT NOT NULL,
+      process_identity_json TEXT,
+      task_envelope_json TEXT NOT NULL,
+      pre_snapshot_id TEXT,
+      post_snapshot_id TEXT,
+      result_ref TEXT,
+      validation_refs_json TEXT NOT NULL DEFAULT '[]',
+      cancellation_requested_at INTEGER,
+      created_at INTEGER NOT NULL,
+      started_at INTEGER,
+      last_activity_at INTEGER NOT NULL,
+      terminal_at INTEGER,
+      FOREIGN KEY (parent_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (assignment_id) REFERENCES worker_assignments(assignment_id) ON DELETE RESTRICT,
+      FOREIGN KEY (worker_run_id) REFERENCES worker_runs(worker_run_id) ON DELETE RESTRICT,
+      FOREIGN KEY (child_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (child_attempt_id) REFERENCES runs(attempt_id) ON DELETE RESTRICT,
+      FOREIGN KEY (workspace_lease_id) REFERENCES external_coding_workspace_leases(workspace_lease_id) ON DELETE RESTRICT,
+      FOREIGN KEY (capability_digest) REFERENCES external_coding_capability_snapshots(capability_digest) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_external_coding_sessions_parent
+      ON external_coding_sessions(parent_job_id, created_at, coding_session_id);
+    CREATE INDEX IF NOT EXISTS idx_external_coding_sessions_state
+      ON external_coding_sessions(state, reconciliation_state, last_activity_at);
+
+    CREATE TABLE IF NOT EXISTS external_coding_events (
+      event_id TEXT PRIMARY KEY,
+      coding_session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      type TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      payload_digest TEXT NOT NULL,
+      producer TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      authoritative INTEGER NOT NULL DEFAULT 1 CHECK(authoritative IN (0,1)),
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (coding_session_id) REFERENCES external_coding_sessions(coding_session_id) ON DELETE CASCADE,
+      UNIQUE (coding_session_id, sequence),
+      UNIQUE (coding_session_id, idempotency_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS external_coding_inputs (
+      input_id TEXT PRIMARY KEY,
+      coding_session_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      request_id TEXT NOT NULL,
+      child_attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN ('task','clarification','approval','control')),
+      content TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('accepted','delivered','rejected_stale')),
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      delivered_at INTEGER,
+      FOREIGN KEY (coding_session_id) REFERENCES external_coding_sessions(coding_session_id) ON DELETE CASCADE,
+      UNIQUE (coding_session_id, sequence),
+      UNIQUE (coding_session_id, idempotency_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS external_coding_processes (
+      process_record_id TEXT PRIMARY KEY,
+      coding_session_id TEXT NOT NULL UNIQUE,
+      child_attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      pid INTEGER NOT NULL,
+      start_time INTEGER,
+      executable TEXT NOT NULL,
+      executable_version TEXT NOT NULL,
+      cwd TEXT NOT NULL,
+      protocol_mode TEXT NOT NULL CHECK(protocol_mode IN ('structured','pty')),
+      state TEXT NOT NULL CHECK(state IN ('starting','running','stopping','exited','unknown')),
+      exit_code INTEGER,
+      exit_signal TEXT,
+      tree_dead_verified INTEGER NOT NULL DEFAULT 0 CHECK(tree_dead_verified IN (0,1)),
+      created_at INTEGER NOT NULL,
+      exited_at INTEGER,
+      FOREIGN KEY (coding_session_id) REFERENCES external_coding_sessions(coding_session_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS external_coding_raw_output (
+      coding_session_id TEXT NOT NULL,
+      chunk_sequence INTEGER NOT NULL,
+      stream TEXT NOT NULL CHECK(stream IN ('stdout','stderr','pty')),
+      content TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      byte_count INTEGER NOT NULL,
+      truncated INTEGER NOT NULL DEFAULT 0 CHECK(truncated IN (0,1)),
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (coding_session_id, chunk_sequence),
+      FOREIGN KEY (coding_session_id) REFERENCES external_coding_sessions(coding_session_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS external_coding_mutation_receipts (
+      receipt_id TEXT PRIMARY KEY,
+      coding_session_id TEXT NOT NULL,
+      workspace_lease_id TEXT NOT NULL,
+      pre_snapshot_id TEXT NOT NULL,
+      post_snapshot_id TEXT,
+      changed_paths_json TEXT NOT NULL DEFAULT '[]',
+      protected_path_violations_json TEXT NOT NULL DEFAULT '[]',
+      unexpected_paths_json TEXT NOT NULL DEFAULT '[]',
+      reported_files_json TEXT NOT NULL DEFAULT '[]',
+      report_mismatch INTEGER NOT NULL DEFAULT 0 CHECK(report_mismatch IN (0,1)),
+      reported_result_digest TEXT,
+      observed_diff_digest TEXT,
+      state TEXT NOT NULL CHECK(state IN (
+        'prepared','observed','verified','rejected','unknown','reconciliation_required'
+      )),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (coding_session_id) REFERENCES external_coding_sessions(coding_session_id) ON DELETE RESTRICT,
+      FOREIGN KEY (workspace_lease_id) REFERENCES external_coding_workspace_leases(workspace_lease_id) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS external_coding_promotion_plans (
+      promotion_id TEXT PRIMARY KEY,
+      coding_session_id TEXT NOT NULL UNIQUE,
+      workspace_lease_id TEXT NOT NULL,
+      parent_job_id TEXT NOT NULL,
+      parent_attempt_id TEXT NOT NULL,
+      parent_generation INTEGER NOT NULL,
+      promotion_job_id TEXT,
+      promotion_attempt_id TEXT,
+      promotion_generation INTEGER,
+      mutation_receipt_id TEXT NOT NULL,
+      target_snapshot_id TEXT NOT NULL,
+      candidate_snapshot_id TEXT NOT NULL,
+      target_head TEXT NOT NULL,
+      candidate_head TEXT NOT NULL,
+      target_state_digest TEXT NOT NULL,
+      plan_digest TEXT NOT NULL,
+      changed_paths_json TEXT NOT NULL,
+      blocked_reason TEXT,
+      change_record_ids_json TEXT NOT NULL,
+      validation_refs_json TEXT NOT NULL,
+      approval_id TEXT,
+      state TEXT NOT NULL CHECK(state IN (
+        'prepared','approval_required','approved','applying','applied','blocked_drift','rejected','unknown'
+      )),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      applied_at INTEGER,
+      FOREIGN KEY (coding_session_id) REFERENCES external_coding_sessions(coding_session_id) ON DELETE RESTRICT,
+      FOREIGN KEY (workspace_lease_id) REFERENCES external_coding_workspace_leases(workspace_lease_id) ON DELETE RESTRICT,
+      FOREIGN KEY (parent_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (parent_attempt_id) REFERENCES runs(attempt_id) ON DELETE RESTRICT,
+      FOREIGN KEY (promotion_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (promotion_attempt_id) REFERENCES runs(attempt_id) ON DELETE RESTRICT,
+      FOREIGN KEY (mutation_receipt_id) REFERENCES external_coding_mutation_receipts(receipt_id) ON DELETE RESTRICT,
+      FOREIGN KEY (target_snapshot_id) REFERENCES repository_snapshots(snapshot_id) ON DELETE RESTRICT,
+      FOREIGN KEY (candidate_snapshot_id) REFERENCES repository_snapshots(snapshot_id) ON DELETE RESTRICT
+    );
+  `);
+}
+
+/** Keep the provider's terminal candidate distinct from its mutation receipt. */
+function applyV47(db: Database.Database): void {
+  addMissingColumns(db, 'external_coding_sessions', [
+    ['candidate_result_ref', 'TEXT'],
+  ]);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2688,6 +2933,8 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 43, name: 'durable continuity checkpoints', apply: applyV43 },
   { version: 44, name: 'durable browser operator authority', apply: applyV44 },
   { version: 45, name: 'provider-neutral Apps authority', apply: applyV45 },
+  { version: 46, name: 'durable external coding session authority', apply: applyV46 },
+  { version: 47, name: 'durable external coding candidate recovery', apply: applyV47 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2739,7 +2986,12 @@ function validateLatestSchema(db: Database.Database): void {
     'integration_secret_handles', 'integration_provider_credentials',
     'connected_accounts', 'integration_job_account_bindings',
     'integration_connection_sessions', 'integration_action_schemas',
-    'integration_action_receipts', 'integration_trigger_cursors'];
+    'integration_action_receipts', 'integration_trigger_cursors',
+    'external_coding_capability_snapshots', 'external_coding_workspace_leases',
+    'external_coding_repository_locks', 'external_coding_sessions',
+    'external_coding_events', 'external_coding_inputs', 'external_coding_processes',
+    'external_coding_raw_output', 'external_coding_mutation_receipts',
+    'external_coding_promotion_plans'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

@@ -74,6 +74,7 @@ import {
   recordDurableToolApproval,
   type PreparedDurableToolCall,
 } from './daemon/jobExecutionContext';
+import { DockerCancellationUnverifiedError } from './dockerSession';
 import { describeToolEffect, type DurableEffectDescriptor } from './effectContract';
 import {
   normalizeExecutionPlan,
@@ -963,6 +964,7 @@ export class ToolRegistry {
           toolName: call.name,
           category: handler.category,
           args,
+          approvalRequirement: effectDescriptor.approvalRequirement,
           // v4.12.1 Pillar 2 — pass the EFFECTIVE tier (handler-declared floor
           // OR classifier escalation) so the autonomy gate + smart mode see a
           // tool's real risk (e.g. file_delete → 'dangerous' always asks),
@@ -1689,6 +1691,15 @@ export class ToolRegistry {
             result: null,
             error: err.modelMessage ?? err.message,
           }, 'blocked');
+        }
+        if (err instanceof DockerCancellationUnverifiedError) {
+          return finish({
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: 'Sandbox cancellation could not verify that the exact process stopped',
+            cleanupUnverified: true,
+          }, 'unknown');
         }
         const message = err instanceof Error ? err.message : String(err);
         const terminal = signal?.aborted

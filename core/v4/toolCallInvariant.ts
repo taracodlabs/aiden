@@ -47,7 +47,9 @@ import type { Message, ToolCallRequest } from '../../providers/v4/types';
  */
 export type SuppressReason =
   | 'tool_loop_surface'    // TurnState recovery controller surfaced
-  | 'cancelled';           // abort signal fired (Ctrl+C, /quit, programmatic)
+  | 'cancelled'            // abort signal fired (Ctrl+C, /quit, programmatic)
+  | 'explicit_capability_required' // user required one exact execution capability
+  | 'explicit_capability_completed'; // one authoritative invocation already ran for this user turn
 
 export interface SynthesizeOpts {
   /**
@@ -156,7 +158,11 @@ export function synthesizeBlockedToolResult(
   opts:   SynthesizeOpts = {},
 ): Message {
   const variant = opts.variant ?? 'skipped';
-  const humanMessage = variant === 'interrupted'
+  const humanMessage = reason === 'explicit_capability_required'
+    ? 'This call was blocked because the user required the external coding capability; alternate execution paths are not permitted.'
+    : reason === 'explicit_capability_completed'
+    ? 'This call was blocked because the explicitly required capability already completed one authoritative invocation for this user turn.'
+    : variant === 'interrupted'
     ? `This call was interrupted before execution. (reason: ${reason})`
     : `This call was skipped because the turn was cancelled. (reason: ${reason})`;
   // tool_loop_surface variant is always 'skipped' semantically (we

@@ -96,6 +96,11 @@ export interface DaemonAgentInput {
     ofRunId: number;
     attempt: number;
   };
+  /** Recovery-only continuation for a provider-terminal coding session. */
+  externalCodingRecovery?: {
+    codingSessionId: string;
+    recoveryOfAttemptId: string;
+  };
 }
 
 /** What the runner returns to the dispatcher. */

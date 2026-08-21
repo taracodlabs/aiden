@@ -22,6 +22,10 @@
  * taskStore / runStore.emitEventRich).
  */
 
+import fs from 'node:fs';
+import path from 'node:path';
+
+import { runtimeArtifactDirectory } from '../runtimeStorage';
 import type { Db } from './db/connection';
 
 /** What kind of thing the artifact is. Mirrors the ui_artifact_created enum. */
@@ -104,10 +108,17 @@ export interface ArtifactStore {
   get(id: string): Artifact | null;
   /** Listing surface for /artifacts. Newest-first by created_at. */
   listRecent(opts?: ListRecentArtifactsOptions): Artifact[];
+  /** Exact durable bytes captured after the verified producing tool settled. */
+  readContent(id: string): { bytes: Buffer; sourceName: string } | null;
 }
 
 export interface CreateArtifactStoreOptions {
   db: Db;
+  /** Aiden-owned durable content root; never defaults inside the workspace. */
+  contentRoot?: string;
+  /** Base for relative tool-result paths. */
+  sourceRoot?: string;
+  maxContentBytes?: number;
 }
 
 /** Shape returned by extractFileArtifact — the registerable fields. */
@@ -185,9 +196,42 @@ function newArtifactId(): string {
 
 /** Preview cap — keep rows small under repeat writes. */
 const PREVIEW_CAP = 200;
+const DEFAULT_CONTENT_LIMIT = 12 * 1024 * 1024;
+
+function isInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
+}
 
 export function createArtifactStore(opts: CreateArtifactStoreOptions): ArtifactStore {
   const db = opts.db;
+  const contentRoot = path.resolve(opts.contentRoot ?? runtimeArtifactDirectory('files'));
+  const sourceRoot = path.resolve(opts.sourceRoot ?? process.cwd());
+  const maxContentBytes = Math.max(1, opts.maxContentBytes ?? DEFAULT_CONTENT_LIMIT);
+
+  const archiveContent = (id: string, sourcePath: string): void => {
+    try {
+      const candidate = path.resolve(sourceRoot, sourcePath);
+      const stat = fs.lstatSync(candidate);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxContentBytes) return;
+      const realSourceRoot = fs.realpathSync(sourceRoot);
+      const realCandidate = fs.realpathSync(candidate);
+      if (!isInside(realSourceRoot, realCandidate)) return;
+      const directory = path.join(contentRoot, id);
+      const destination = path.join(directory, 'content');
+      fs.mkdirSync(directory, { recursive: true });
+      fs.copyFileSync(realCandidate, destination, fs.constants.COPYFILE_EXCL);
+    } catch {
+      // Artifact metadata remains useful when a bounded durable copy cannot be
+      // captured. Older records continue through the safe workspace fallback.
+    }
+  };
+
+  const getArtifact = (id: string): Artifact | null => {
+    const row = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(id) as ArtifactRowSql | undefined;
+    return row ? rowToArtifact(row) : null;
+  };
+
   return {
     create({ path, kind, tool, action, sessionId, runId, taskId, bytes, preview }) {
       const now = Date.now();
@@ -210,11 +254,11 @@ export function createArtifactStore(opts: CreateArtifactStoreOptions): ArtifactS
         typeof bytes === 'number' ? bytes : null,
         preview ? preview.slice(0, PREVIEW_CAP) : null,
       );
+      if (kind === 'file') archiveContent(id, path);
       return id;
     },
     get(id) {
-      const r = db.prepare('SELECT * FROM artifacts WHERE id = ?').get(id) as ArtifactRowSql | undefined;
-      return r ? rowToArtifact(r) : null;
+      return getArtifact(id);
     },
     listRecent(qOpts = {}) {
       const limit = Math.max(1, Math.min(qOpts.limit ?? 50, 5000));
@@ -230,6 +274,19 @@ export function createArtifactStore(opts: CreateArtifactStoreOptions): ArtifactS
         `SELECT * FROM artifacts ${whereSql} ORDER BY created_at DESC LIMIT ?`,
       ).all(...params) as ArtifactRowSql[];
       return rows.map(rowToArtifact);
+    },
+    readContent(id) {
+      const artifact = getArtifact(id);
+      if (!artifact || artifact.kind !== 'file') return null;
+      const candidate = path.join(contentRoot, id, 'content');
+      try {
+        const stat = fs.lstatSync(candidate);
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size > maxContentBytes) return null;
+        const realRoot = fs.realpathSync(contentRoot);
+        const realCandidate = fs.realpathSync(candidate);
+        if (!isInside(realRoot, realCandidate)) return null;
+        return { bytes: fs.readFileSync(realCandidate), sourceName: path.basename(artifact.path.replace(/\\/g, '/')) };
+      } catch { return null; }
     },
   };
 }

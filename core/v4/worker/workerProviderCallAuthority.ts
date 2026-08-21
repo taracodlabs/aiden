@@ -18,6 +18,7 @@ import type {
 
 const HASH = /^[a-f0-9]{64}$/u;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/u;
+const REASON_CONTROL = /[\u0000-\u001F\u007F]/u;
 const TERMINAL = new Set<WorkerLogicalProviderCallState>(['completed', 'failed', 'cancelled', 'unknown']);
 
 export class WorkerProviderCallError extends Error {
@@ -222,7 +223,9 @@ export function classifyWorkerProviderCall(
     if (call.state === 'prepared' && physicalAttempts.length === 0) {
       return { outcomeKnowledge: 'no_request_started', retrySafety: 'unsafe', unknownSpend: false };
     }
-    const known = call.outcomeKnown && physicalAttempts.every((attempt) => attempt.status === 'interrupted');
+    const known = physicalAttempts.length > 0 && physicalAttempts.every((attempt) => (
+      attempt.status === 'interrupted' && attempt.noResponseProven === true
+    ));
     return known
       ? { outcomeKnowledge: 'provider_cancelled_known', retrySafety: 'unsafe', unknownSpend: false }
       : { outcomeKnowledge: 'outcome_unknown', retrySafety: 'blocked_unknown', unknownSpend: call.state !== 'prepared' };
@@ -252,6 +255,12 @@ export function classifyWorkerProviderCall(
 
 function safeId(value: string, label: string): void {
   if (!ID.test(value)) throw new WorkerProviderCallError('invalid_contract', `${label} is invalid`);
+}
+
+function safeReason(value: string, label: string): void {
+  if (value.trim().length === 0 || value.length > 512 || REASON_CONTROL.test(value)) {
+    throw new WorkerProviderCallError('invalid_contract', `${label} is invalid`);
+  }
 }
 
 function safeHash(value: string, label: string): void {
@@ -306,7 +315,7 @@ export function createWorkerProviderCallAuthority(
       throw new WorkerProviderCallError('lineage_mismatch', 'Logical provider reconciliation lineage is invalid');
     }
     safeId(command.idempotencyKey, 'Reconciliation idempotency key');
-    safeId(command.reason, 'Reconciliation reason');
+    safeReason(command.reason, 'Reconciliation reason');
     return call;
   };
 
@@ -547,7 +556,7 @@ export function createWorkerProviderCallAuthority(
     logicalCallId: string; kind: 'cancellation' | 'timeout'; reason: string; idempotencyKey: string;
   }) => {
     const call = requireCall(command);
-    safeId(command.reason, 'Interruption reason');
+    safeReason(command.reason, 'Interruption reason');
     safeId(command.idempotencyKey, 'Interruption idempotency key');
     const existingAt = command.kind === 'cancellation'
       ? call.cancellationRequestedAt
@@ -748,11 +757,19 @@ export function createWorkerProviderCallAuthority(
       `UPDATE worker_logical_provider_calls
           SET reconciliation_state=?,outcome_knowledge=?,retry_safety=?,
               reconciliation_started_at=COALESCE(reconciliation_started_at,?),reconciled_at=?,
-              reconciliation_reason=?,reconciliation_version=reconciliation_version+1,updated_at=?
+              reconciliation_reason=?,reconciliation_version=reconciliation_version+1,
+              state=CASE WHEN ?='provider_cancelled_known' THEN 'cancelled' ELSE state END,
+              outcome_known=CASE WHEN ?='provider_cancelled_known' THEN 1 ELSE outcome_known END,
+              failure_kind=CASE WHEN ?='provider_cancelled_known' THEN 'cancelled' ELSE failure_kind END,
+              completed_at=CASE WHEN ?='provider_cancelled_known' THEN COALESCE(completed_at,?) ELSE completed_at END,
+              updated_at=?
         WHERE logical_call_id=?`,
     ).run(
       state, classification.outcomeKnowledge, classification.retrySafety,
-      now, now, command.reason, now, call.logicalCallId,
+      now, now, command.reason,
+      classification.outcomeKnowledge, classification.outcomeKnowledge,
+      classification.outcomeKnowledge, classification.outcomeKnowledge, now,
+      now, call.logicalCallId,
     );
     const updated = get(call.logicalCallId)!;
     emit(updated, 'worker.provider_reconciliation_completed', {

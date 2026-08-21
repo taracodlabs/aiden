@@ -423,14 +423,18 @@ export function recordDurableToolVerification(toolCallId: string, verification: 
   const context = currentJobExecutionContext();
   if (!context) return;
   const persistedToolCallId = durableToolCallId(context, toolCallId);
-  requireApplied('verification', context.engine.attachToolVerification({
+  const result = context.engine.attachToolVerification({
     toolCallId: persistedToolCallId,
     attemptId: context.attemptId,
     generation: context.generation,
     fenceToken: context.fenceToken,
     verificationRef: opaqueReference('tool-verification', verification),
     producer: context.producer,
-  }));
+  });
+  // Argument/capability gates may return before durable ToolCall admission.
+  // Their verifier output remains observational; absence is not lost authority.
+  if (!result.applied && !result.duplicate && result.conflict === 'not_found') return;
+  requireApplied('verification', result);
 }
 
 const RESEARCH_EVIDENCE_TOOLS = new Set([

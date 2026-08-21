@@ -72,6 +72,8 @@ export interface BuildDaemonAgentBuilderInput {
   /** v4.8.0 — resolves uiOnly flag for the dispatch-loop bypass. */
   resolveUiOnly?:       AidenAgentOptions['resolveUiOnly'];
   resolveToolInteraction?: AidenAgentOptions['resolveToolInteraction'];
+  externalCodingRequirement?: AidenAgentOptions['externalCodingRequirement'];
+  recoverExternalCoding?: AgentBuilder['recoverExternalCoding'];
   /**
    * v4.7.0 Phase 2.4 — honesty-mode plumbed in from the REPL's config
    * resolution at boot, so daemon turns honour the same setting the
@@ -168,6 +170,7 @@ export function buildDaemonAgentBuilder(
       resolveMutates:       deps.resolveMutates,
       resolveUiOnly:        deps.resolveUiOnly,
       resolveToolInteraction: deps.resolveToolInteraction,
+      externalCodingRequirement: deps.externalCodingRequirement,
       // Memory snapshot refresh — daemon agent doesn't track dirty
       // bits because each instance is short-lived; we provide the
       // refresh callback so honestyEnforcement (and any future
@@ -222,5 +225,6 @@ export function buildDaemonAgentBuilder(
     credentialReference: binding.credentialReference,
     endpointReference: binding.endpointReference,
   });
+  builder.recoverExternalCoding = deps.recoverExternalCoding;
   return builder;
 }

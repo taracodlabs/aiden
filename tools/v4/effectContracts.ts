@@ -182,6 +182,14 @@ const CONTRACTS: Readonly<Record<string, ToolEffectContract>> = Object.freeze({
   clipboard_write: SYSTEM_CONTROL,
   media_transport: SYSTEM_CONTROL,
   app_input: SYSTEM_CONTROL,
+  external_coding: {
+    ...LOCAL_PROCESS,
+    kind: 'worker.external_coding',
+    reconciliationSupported: true,
+    verificationSupported: true,
+    approvalRequirement: 'always',
+    target: (args) => typeof args.goal === 'string' ? `isolated-candidate:${args.goal.slice(0, 120)}` : 'isolated-candidate',
+  },
 });
 
 export function withBuiltInEffectContract(handler: ToolHandler): ToolHandler {

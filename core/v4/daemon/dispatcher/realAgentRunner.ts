@@ -78,6 +78,7 @@ import { buildInitialHistory } from './agentRunner';
 import { computeTaskFinalization } from '../../taskVerification';
 import { mapTaskOutcomePresentation, taskOutcomeInputFromFinalization } from '../../taskOutcomePresentation';
 import { emitArtifactVerified, emitCostUpdated, type PillarEventSink } from '../../pillarEvents';
+import { operatorStatusMessage } from '../../operatorStatusMessage';
 import type { TaskStore } from '../taskStore';
 import type { SessionStore, MessageRecord } from '../../sessionStore';
 import {
@@ -117,6 +118,7 @@ import {
   executeReadOnlyRepositoryWorker,
   type ReadOnlyWorkerProviderResolver,
 } from '../../worker/readOnlyRepositoryWorker';
+import type { RecoverExternalCodingSessionRequest, RecoveredExternalCodingSession } from '../../coding/recovery';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -152,6 +154,9 @@ export type AgentBuilder = ((input: {
   abortSignal:      AbortSignal;
 }) => Promise<AidenAgent> | AidenAgent) & {
   resolveReadOnlyWorkerProvider?: ReadOnlyWorkerProviderResolver;
+  recoverExternalCoding?: (
+    input: Omit<RecoverExternalCodingSessionRequest, 'verify'>,
+  ) => Promise<RecoveredExternalCodingSession>;
 };
 
 export interface CreateRealAgentRunnerOptions {
@@ -304,10 +309,11 @@ export function createRealAgentRunner(
 
       // ── 2: resolve model from chain ───────────────────────────────────
       const triggerSpec = readTriggerSpec(opts.db, input.triggerContext.triggerId);
+      const admittedBinding = readTriggerEventModelBinding(opts.db, input.triggerEventId);
       const resolved = resolveDaemonModel({
         triggerSpec: {
-          provider: triggerSpec?.provider ?? null,
-          model:    triggerSpec?.model    ?? null,
+          provider: admittedBinding?.provider ?? triggerSpec?.provider ?? null,
+          model:    admittedBinding?.model ?? triggerSpec?.model ?? null,
         },
         envOverride: process.env[ENV_DAEMON_MODEL],
         persistedDefault: opts.persistedDefault ?? { provider: '', model: '' },
@@ -525,6 +531,10 @@ export function createRealAgentRunner(
         const tokens = extractLedgerTokens(runId) ?? extractTokens(result);
         if (tokens > 0) perTurnWatcher.tally(tokens);
       } catch (e) {
+        // Physical cancellation cleanup is part of durable outcome authority.
+        // Let the outer lifecycle classify it as unknown instead of reducing it
+        // to an ordinary invocation failure inside this projection adapter.
+        if (e instanceof Error && e.name === 'PhysicalCancellationUnverifiedError') throw e;
         invocationError = e instanceof Error ? (e.stack ?? e.message) : String(e);
         log('error', `[real-runner] runConversation threw eventId=${input.triggerEventId}: ${invocationError.slice(0, 500)}`);
       }
@@ -753,11 +763,7 @@ function loadDurableHistory(store: SessionStore | undefined, input: DaemonAgentI
 }
 
 function durableConversationError(error: string): string {
-  const firstLine = error.split(/\r?\n/, 1)[0] ?? error;
-  return firstLine
-    .replace(/\s+/g, ' ')
-    .replace(/\b(api[_-]?key|token|authorization)\s*[:=]\s*\S+/ig, '$1: [redacted]')
-    .slice(0, 500);
+  return operatorStatusMessage(error, 'Execution failed before a durable result was available.');
 }
 
 function persistDurableAssistantReply(
@@ -845,6 +851,26 @@ async function invokeDurableDaemon(
       },
       execute: async (handle) => {
         activeHandle = handle;
+        if (input.externalCodingRecovery) {
+          const recover = opts.agentBuilder.recoverExternalCoding;
+          if (!recover) throw new Error('External coding recovery authority is unavailable');
+          const recovered = await recover({
+            engine: opts.jobEngine,
+            handle,
+            codingSessionId: input.externalCodingRecovery.codingSessionId,
+            recoveryOfAttemptId: input.externalCodingRecovery.recoveryOfAttemptId,
+          });
+          projectedResult = {
+            runId: handle.runId,
+            finishReason: recovered.finalization.status === 'completed' ? 'stop'
+              : recovered.finalization.status === 'cancelled' ? 'interrupted' : 'error',
+            ...(recovered.finalization.status === 'failed' || recovered.finalization.status === 'unknown'
+              ? { error: recovered.finalization.finishReason }
+              : {}),
+            finalization: recovered.finalization,
+          };
+          return projectedResult;
+        }
         const workerAssignment = opts.jobEngine.worker.getWorkerAssignmentForChild(handle.jobId);
         if (workerAssignment) {
           if (input.workerAssignmentId && input.workerAssignmentId !== workerAssignment.assignmentId) {
@@ -903,7 +929,8 @@ async function invokeDurableDaemon(
             fenceToken: handle.fenceToken,
           },
         });
-        if (opts.jobEngine.getJob(handle.jobId)?.status === 'cancelled') {
+        const durableStatus = opts.jobEngine.getJob(handle.jobId)?.status;
+        if (durableStatus === 'cancelling' || durableStatus === 'cancelled') {
           projectedResult = {
             ...projectedResult,
             finishReason: 'interrupted',
@@ -980,6 +1007,28 @@ function registerArtifacts(
       });
       if (taskId && opts.taskStore) opts.taskStore.appendArtifactId(taskId, artifactId);
     } catch { /* artifact projection must never rewrite durable Job truth */ }
+  }
+}
+
+/** Exact Workbench/session binding captured before Job admission. This is read
+ * from the immutable trigger event, never from mutable browser state. */
+export function readTriggerEventModelBinding(db: Db, triggerEventId: number): {
+  provider: string;
+  model: string;
+} | null {
+  try {
+    const row = db.prepare('SELECT payload_json FROM trigger_events WHERE id = ?')
+      .get(triggerEventId) as { payload_json: string } | undefined;
+    if (!row) return null;
+    const payload = JSON.parse(row.payload_json) as { model_binding?: unknown };
+    const binding = payload.model_binding && typeof payload.model_binding === 'object'
+      ? payload.model_binding as Record<string, unknown>
+      : null;
+    const provider = typeof binding?.provider === 'string' ? binding.provider.trim() : '';
+    const model = typeof binding?.model === 'string' ? binding.model.trim() : '';
+    return provider && model ? { provider, model } : null;
+  } catch {
+    return null;
   }
 }
 

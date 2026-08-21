@@ -717,6 +717,9 @@ export async function executeDurableJob<T>(
     if (disposalError) throw disposalError;
     if (runtimeBudgetExpired) throw new DurableJobBudgetExceededError('runtime_ms', handle);
     if (leaseLost) throw leaseLost;
+    if (options.engine.getJob(handle.jobId)?.status === 'cancelling') {
+      throw new Error('Durable Job cancellation completed at the execution boundary');
+    }
     assertAuthority(options.engine, handle);
 
     notifyPhase(options, 'verifying', handle, handle.generation);
@@ -735,12 +738,27 @@ export async function executeDurableJob<T>(
     const attempt = options.engine.getAttempt(handle.attemptId);
     const job = options.engine.getJob(handle.jobId);
     if (!isAttemptTerminal(attempt) && !isJobTerminal(job)) {
-      const disposition = await options.classifyError?.(error, handle) ?? {
-        status: 'failed' as const,
-        outcome: 'failed',
-        finishReason: 'error',
-        evidence: { errorClass: error instanceof Error ? error.name : 'Error' },
-      };
+      const disposition = job?.status === 'cancelling'
+        ? error instanceof Error && error.name === 'PhysicalCancellationUnverifiedError'
+          ? {
+            status: 'unknown' as const,
+            outcome: 'cancellation_cleanup_unverified',
+            finishReason: 'Physical process cleanup could not be verified',
+            evidence: { cancellationObservedAfterExecutionCleanup: false },
+          }
+          : {
+          status: 'cancelled' as const,
+          attemptStatus: 'cancelled' as const,
+          outcome: 'cancelled',
+          finishReason: job.finishReason ?? 'cancelled',
+          evidence: { cancellationObservedAfterExecutionCleanup: true },
+          }
+        : await options.classifyError?.(error, handle) ?? {
+          status: 'failed' as const,
+          outcome: 'failed',
+          finishReason: 'error',
+          evidence: { errorClass: error instanceof Error ? error.name : 'Error' },
+        };
       const authority = assertAuthority(options.engine, handle);
       settle(
         options.engine,

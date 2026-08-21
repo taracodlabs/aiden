@@ -8,6 +8,7 @@ export type EffectiveCredentialSource =
   | 'inline_config'
   | 'managed_environment'
   | 'process_environment'
+  | 'secure_store'
   | 'oauth_store'
   | 'legacy_store'
   | 'local_runtime'

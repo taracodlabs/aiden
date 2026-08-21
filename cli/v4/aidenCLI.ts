@@ -38,6 +38,7 @@ import { SkinEngine } from './skinEngine';
 import { isVerbose } from './design/tokens';
 import { initializeEffectiveTheme } from './themeCompatibility';
 import { CommandRegistry } from './commandRegistry';
+import { makeCodingCommand } from './commands/coding';
 import { CliCallbacks } from './callbacks';
 // Tier-3.1 (v4.1-tier3.1) — re-export the build fingerprint so the
 // runtime smoke can find it in the bundled artifact.
@@ -75,8 +76,15 @@ import { SessionStore } from '../../core/v4/sessionStore';
 import { SessionManager } from '../../core/v4/sessionManager';
 import { ToolRegistry } from '../../core/v4/toolRegistry';
 import { createIntegrationRuntime, integrationLocalScope } from '../../core/v4/integrations/runtime';
+import { SecretAuthority } from '../../core/v4/integrations/secretAuthority';
+import {
+  createSecureProviderCredentialResolver,
+  createWorkbenchProviderSetupAuthority,
+} from '../../core/v4/workbench/providerSetupAuthority';
+import { createSystemReadinessAuthority } from '../../core/v4/workbench/systemReadiness';
+import { createWorkbenchBrowserSetupPort } from '../../core/v4/workbench/browserSetupPort';
 import { SkillLoader } from '../../core/v4/skillLoader';
-import { makeSubagentFanoutTool } from '../../tools/v4/index';
+import { makeExternalCodingTool, makeSubagentFanoutTool } from '../../tools/v4/index';
 import type { ProviderOption } from '../../core/v4/subagent/providerRotation';
 // v4.6 Phase 1 — spawn_sub_agent: always-on runStore + LLM-callable tool.
 import { randomUUID } from 'node:crypto';
@@ -87,7 +95,17 @@ import { createRunStore } from '../../core/v4/daemon/runStore';
 import { createJobEngine } from '../../core/v4/daemon/jobEngine';
 import type { JobEngine } from '../../core/v4/daemon/jobEngine';
 import { createJobControlAuthority } from '../../core/v4/daemon/jobControlAuthority';
-import { createActionAuthority } from '../../core/v4/actionAuthority';
+import { createActionAuthority, type ActionAuthority } from '../../core/v4/actionAuthority';
+import { CodexCliExternalCodingProvider } from '../../core/v4/coding/codexCliProvider';
+import { ExternalCodingProviderRegistry } from '../../core/v4/coding/providerRegistry';
+import { DockerExternalCodingValidationExecutor } from '../../core/v4/coding/validationExecutor';
+import { createExternalCodingVerifier } from '../../core/v4/coding/verification';
+import { recoverCompletedExternalCodingSession } from '../../core/v4/coding/recovery';
+import {
+  createWorkbenchCodingPort,
+  type ExternalCodingHealthProjection,
+  projectExternalCodingHealth,
+} from '../../core/v4/workbench/codingPort';
 import { executeDurableJob } from '../../core/v4/daemon/jobLifecycle';
 import { computeTaskFinalization } from '../../core/v4/taskVerification';
 import { runWithProviderUsageContext } from '../../providers/v4/providerAttemptAccounting';
@@ -206,6 +224,8 @@ import { gateway } from '../../core/gateway';
 import { createBootLogger, CoreLogger, FileSink } from '../../core/v4/logger';
 
 import { registerAllTools } from '../../tools/v4';
+import { withBuiltInEffectContract } from '../../tools/v4/effectContracts';
+import { withDryRun } from '../../core/v4/dryRun';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
 import {
   buildMcpAuthNotice,
@@ -336,6 +356,14 @@ export interface MainOptions {
   runAppsHook?: (input: Parameters<typeof runAppsCli>[0]) => Promise<number>;
   /** Path override for tests. */
   pathsOverride?: AidenPaths;
+  /** Existing durable authority used by an embedded production host. */
+  jobEngineOverride?: JobEngine;
+  /** Exact-action authority paired with an embedded host's JobEngine. */
+  actionAuthorityOverride?: ActionAuthority;
+  /** Local management hosts may boot the full authority graph with a
+   * NullAdapter so first-run setup remains available without pretending chat
+   * execution is configured. One-shot/headless query callers still fail. */
+  allowUnconfiguredRecovery?: boolean;
   /** Stub stdout writer (defaults to process.stdout.write). */
   writeOut?: (text: string) => void;
   /**
@@ -570,6 +598,9 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { listWorkbenchActiveJobs } = await import('../../core/v4/workbench/activeJobs');
       const { createWorkbenchFileBridge } = await import('../../core/v4/workbench/fileBridge');
       const { createWorkbenchAppsPort } = await import('../../core/v4/workbench/appsPort');
+      const { createWorkbenchCodingPort } = await import('../../core/v4/workbench/codingPort');
+      const { createWorkbenchLiveExecutionPort } = await import('../../core/v4/workbench/liveExecution');
+      const { recoverCancelledExternalCodingSessions } = await import('../../core/v4/coding/cancellationRecovery');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
       const { randomBytes } = await import('node:crypto');
       const paths    = resolveAidenPaths();
@@ -595,7 +626,18 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const jobControlAuthority = createJobControlAuthority({ db, jobEngine });
       const { enqueue, cancel, input, control, approval, continuity, continueTask } = createWorkbenchJobCommands({
         db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId, sessionStore,
+        workspacePath: process.cwd(),
         actionAuthority, controlAuthority: jobControlAuthority,
+        resolveModelBinding(sessionId) {
+          const session = sessionId ? sessionStore.getSession(sessionId) : null;
+          if (session?.providerId && session.modelId) {
+            return { provider: session.providerId, model: session.modelId, source: 'session' };
+          }
+          const configured = new ConfigManager(paths).loadSync();
+          return configured.model?.provider && configured.model.modelId
+            ? { provider: configured.model.provider, model: configured.model.modelId, source: 'default' }
+            : null;
+        },
       });
       let workbenchRuntime: AgentRuntime | null = null;
       let executionHost: ReturnType<typeof createWorkbenchExecutionHost> | null = null;
@@ -605,25 +647,39 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         status: string; permissions: string[];
       }> = [];
       try {
-        workbenchRuntime = await buildAgentRuntime({ headless: true }, opts);
-        executionHost = createWorkbenchExecutionHost({
-          db,
-          triggerBus,
-          runStore,
-          jobEngine,
-           taskStore: createTaskStore({ db }),
-           sessionStore,
-           artifactStore: workbenchRuntime.replArtifactStore,
-          approvalAuthority: actionAuthority,
-          instanceId: workbenchInstanceId,
-          agentBuilder: workbenchRuntime.daemonAgentBuilder,
-          persistedDefault: {
-            provider: workbenchRuntime.providerId,
-            model: workbenchRuntime.modelId,
-          },
-          workerCount: 4,
+        workbenchRuntime = await buildAgentRuntime({ headless: true }, {
+          ...opts,
+          jobEngineOverride: jobEngine,
+          actionAuthorityOverride: actionAuthority,
+          allowUnconfiguredRecovery: true,
         });
-        executionHost.start();
+        if (!workbenchRuntime.exploreMode) {
+          executionHost = createWorkbenchExecutionHost({
+            db,
+            triggerBus,
+            runStore,
+            jobEngine,
+            jobControlAuthority,
+            taskStore: createTaskStore({ db }),
+            sessionStore,
+            artifactStore: workbenchRuntime.replArtifactStore,
+            approvalAuthority: actionAuthority,
+            instanceId: workbenchInstanceId,
+            agentBuilder: workbenchRuntime.daemonAgentBuilder,
+            persistedDefault: {
+              provider: workbenchRuntime.providerId,
+              model: workbenchRuntime.modelId,
+            },
+            workerCount: 4,
+          });
+          await recoverCancelledExternalCodingSessions({
+            engine: jobEngine,
+            sourcePath: process.cwd(),
+            sessionHomeParent: path.join(paths.root, 'coding', 'homes'),
+            producer: 'workbench-startup',
+          });
+          executionHost.start();
+        }
         workbenchSkills = await workbenchRuntime.skillLoader.list();
         workbenchPlugins = workbenchRuntime.pluginLoader.getRegistry().list().map((plugin) => ({
           name: plugin.manifest.name,
@@ -642,6 +698,49 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         rootDir: paths.root,
         scope: integrationLocalScope(process.cwd()),
       });
+      const appsPort = createWorkbenchAppsPort(workbenchIntegrationRuntime);
+      const codingPort = createWorkbenchCodingPort({
+        engine: jobEngine,
+        actions: actionAuthority,
+        instanceId: workbenchInstanceId,
+        sessionHomeParent: path.join(paths.root, 'coding', 'homes'),
+        health: workbenchRuntime?.externalCodingHealth,
+        configure: workbenchRuntime?.configureExternalCoding,
+      });
+      const liveExecution = createWorkbenchLiveExecutionPort({
+        jobs: jobEngine,
+        runs: runStore,
+        ...(workbenchRuntime?.replArtifactStore ? { artifacts: workbenchRuntime.replArtifactStore } : {}),
+      });
+      const providerSetup = workbenchRuntime ? createWorkbenchProviderSetupAuthority({
+        paths,
+        config: workbenchRuntime.config,
+        resolver: workbenchRuntime.resolver,
+        secrets: workbenchRuntime.providerSecretAuthority,
+        secretScope: workbenchRuntime.integrationRuntime.scope,
+        sessionStore,
+        oauthRegistry: workbenchRuntime.oauthRegistry,
+        openBrowser: async (url) => { await openBrowser(url); },
+      }) : undefined;
+      const browserSetup = workbenchRuntime
+        ? createWorkbenchBrowserSetupPort(workbenchRuntime.pluginLoader)
+        : undefined;
+      const readiness = providerSetup ? createSystemReadinessAuthority({
+        providers: (sessionId?: string) => providerSetup.snapshot(sessionId),
+        coding: () => codingPort.health(),
+        apps: () => appsPort.snapshot(),
+        browser: () => browserSetup!.snapshot(),
+        workspace: async () => {
+          try {
+            const stat = await fs.stat(process.cwd());
+            return { ready: stat.isDirectory(), detail: stat.isDirectory() ? 'Workspace is available.' : 'Workspace path is not a directory.' };
+          } catch {
+            return { ready: false, detail: 'Workspace is unavailable.' };
+          }
+        },
+        evidence: async () => ({ ready: true, detail: 'Durable Evidence storage is available.' }),
+        approvals: async () => ({ ready: true, detail: 'Exact-action approvals are protected.' }),
+      }) : undefined;
       // STEER path: the stop button cancels a running job by run id. We record
       // the stop durably — mark the run `cancelled` (so the dispatcher won't
       // dispatch it again) and emit a `task_cancelled` event so it shows in the
@@ -673,6 +772,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         attachments: workbenchFiles,
         artifacts: workbenchFiles,
         jobs: jobEngine,
+        liveExecution,
         browser: {
           get(jobId: string) {
             const job = jobEngine.getJob(jobId);
@@ -713,7 +813,11 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
             }, 'lost', 'cleared from Workbench');
           },
         },
-        apps: createWorkbenchAppsPort(workbenchIntegrationRuntime),
+        apps: appsPort,
+        coding: codingPort,
+        providerSetup,
+        readiness: readiness ? { snapshot: (sessionId?: string) => readiness.snapshot(sessionId) } : undefined,
+        browserSetup,
         runtime: () => {
           if (workbenchRuntime && executionHost) {
             return {
@@ -749,8 +853,8 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         },
         capabilities: () => ({
           modelSwitch: {
-            available: false,
-            reason: 'Use the Aiden model command to change the runtime default for newly admitted Jobs.',
+            available: Boolean(providerSetup),
+            ...(!providerSetup ? { reason: 'Provider setup authority is unavailable.' } : {}),
           },
           skills: workbenchSkills.map((skill) => ({
             name: skill.name,
@@ -1437,9 +1541,9 @@ export async function buildAgentRuntime(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
-  const jobEngine = createJobEngine({ db: replDb });
+  const jobEngine = opts.jobEngineOverride ?? createJobEngine({ db: replDb });
   const jobControlAuthority = createJobControlAuthority({ db: replDb, jobEngine });
-  const actionAuthority = createActionAuthority({ db: replDb, jobEngine });
+  const actionAuthority = opts.actionAuthorityOverride ?? createActionAuthority({ db: replDb, jobEngine });
   // v4.10 Slice 10.8 — durable Task-lite store. Shares the daemon.db
   // handle with replRunStore so /tasks listing + /adjust mutations
   // see the same WAL view chatSession's runAgentTurn writes through.
@@ -1627,9 +1731,11 @@ export async function buildAgentRuntime(
     // boot a NullAdapter explore session that would return a junk answer.
     // Bail with a typed error the caller maps to a clean "run `aiden setup`"
     // message + non-zero exit.
-    if (headless) {
+    if (headless && opts.allowUnconfiguredRecovery) {
+      exploreMode = true;
+    } else if (headless) {
       throw new NoProviderConfiguredError();
-    }
+    } else
     // v4.5 Phase 7c — TTY guard. The wizard uses inquirer prompts
     // which block on stdin. When stdin is NOT a TTY (systemd unit
     // start, launchd run, piped invocation, CI), there's no user
@@ -1823,7 +1929,17 @@ export async function buildAgentRuntime(
 
   // Resolver + adapter.
   const credentialResolver = new CredentialResolver(paths.authJson);
-  const resolver = new RuntimeResolver(credentialResolver);
+  const integrationScope = integrationLocalScope(process.cwd());
+  const providerSecretAuthority = new SecretAuthority({
+    db: replDb,
+    rootDir: path.join(paths.root, 'secrets'),
+  });
+  const resolver = new RuntimeResolver(credentialResolver, {
+    secureCredentialResolver: createSecureProviderCredentialResolver({
+      secrets: providerSecretAuthority,
+      scope: integrationScope,
+    }),
+  });
   let adapter;
   // Phase 6 — the provider decision trace. Populated at THIS single resolution
   // seam and hung on AgentRuntime + persisted, so doctor / boot / diagnostics
@@ -1948,11 +2064,118 @@ export async function buildAgentRuntime(
   // Tool registry + executor.
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
+  const codingCredential = await credentialResolver.loadCredentials('codex_responses').catch(() => null);
+  const codingApiKey = codingCredential?.apiKey
+    ?? process.env.AIDEN_CODING_OPENAI_API_KEY
+    ?? process.env.OPENAI_API_KEY;
+  const codingHealthEnvironment: Record<string, string> = {};
+  for (const key of ['PATH', 'SystemRoot', 'WINDIR', 'COMSPEC', 'PATHEXT', 'LANG', 'LC_ALL']) {
+    const value = process.env[key];
+    if (value) codingHealthEnvironment[key] = value;
+  }
+  if (codingApiKey) codingHealthEnvironment.OPENAI_API_KEY = codingApiKey;
+  const codingProviders = new ExternalCodingProviderRegistry();
+  const codingExecutable = process.env.AIDEN_CODING_CODEX_EXECUTABLE
+    ?? config.getValue<string>('coding.external_executable', '')
+    ?? '';
+  let codingCredentialFile = process.env.AIDEN_CODING_CODEX_AUTH_FILE;
+  if (!codingCredentialFile) {
+    const defaultCredentialFile = path.join(os.homedir(), '.codex', 'auth.json');
+    try {
+      const stat = await fs.lstat(defaultCredentialFile);
+      if (stat.isFile() && !stat.isSymbolicLink()) codingCredentialFile = defaultCredentialFile;
+    } catch { /* isolated coding authentication remains unconfigured */ }
+  }
+  const codingProvider = new CodexCliExternalCodingProvider({
+    ...(codingExecutable.trim() ? { executableName: codingExecutable.trim() } : {}),
+    healthEnvironment: codingHealthEnvironment,
+    credentialFile: codingCredentialFile,
+  });
+  codingProviders.register(codingProvider);
+  const codingValidationExecutor = new DockerExternalCodingValidationExecutor({
+    sourceEnvironment: process.env,
+  });
+  const codingVerifier = createExternalCodingVerifier({ executor: codingValidationExecutor });
+  const codingModelOverride = process.env.AIDEN_CODING_MODEL;
+  let codingModelId = codingModelOverride
+    ?? config.getValue<string>('coding.external_model', '')
+    ?? '';
+  const externalCodingHealth = async (): Promise<ExternalCodingHealthProjection> => {
+    const model = codingModelId.trim() || null;
+    const [detection, version, providerHealth, modelHealth] = await Promise.all([
+      codingProvider.detect(),
+      codingProvider.version(),
+      codingProvider.health(),
+      model ? codingProvider.validateModel(model) : Promise.resolve(null),
+    ]);
+    const isolation = codingValidationExecutor.available() ? 'available' as const : 'unavailable' as const;
+    return projectExternalCodingHealth({
+      provider: codingProvider.label,
+      detection,
+      version,
+      health: providerHealth,
+      model,
+      modelHealth,
+      isolation,
+    });
+  };
+  const configureExternalCoding = async (input: { model: string }): Promise<ExternalCodingHealthProjection> => {
+    if (codingModelOverride) {
+      throw new Error('External coding model is controlled by the AIDEN_CODING_MODEL override in this process.');
+    }
+    const model = input.model.trim();
+    if (!model || model.length > 256) throw new Error('A valid external coding model is required');
+    const [detection, version, providerHealth, modelHealth] = await Promise.all([
+      codingProvider.detect(), codingProvider.version(), codingProvider.health(), codingProvider.validateModel(model),
+    ]);
+    if (!detection.available) throw new Error(detection.reason ?? 'External coding runtime is unavailable.');
+    if (!version.supported) throw new Error(`Unsupported external coding CLI version ${version.raw || version.normalized}.`);
+    if (!providerHealth.healthy) throw new Error(providerHealth.detail);
+    if (!modelHealth.ready) throw new Error(modelHealth.detail);
+    config.set('coding.external_model', model);
+    await config.save();
+    codingModelId = model;
+    return projectExternalCodingHealth({
+      provider: codingProvider.label,
+      detection,
+      version,
+      health: providerHealth,
+      model,
+      modelHealth,
+      isolation: codingValidationExecutor.available() ? 'available' : 'unavailable',
+    });
+  };
+  const externalCodingRequirement: NonNullable<import('../../core/v4/aidenAgent').AidenAgentOptions['externalCodingRequirement']> = {
+    async health() {
+      try {
+        const health = await externalCodingHealth();
+        return { ready: health.ready, reason: health.reason };
+      } catch (error) {
+        return { ready: false, reason: error instanceof Error ? error.message : 'External coding provider is unavailable.' };
+      }
+    },
+  };
+  toolRegistry.register(withDryRun(withBuiltInEffectContract(makeExternalCodingTool({
+    engine: jobEngine,
+    actions: actionAuthority,
+    providers: codingProviders,
+    providerId: 'codex_cli',
+    modelId: () => codingModelId,
+    instanceId: replInstanceId,
+    worktreeParent: path.join(paths.root, 'coding', 'worktrees'),
+    sessionHomeParent: path.join(paths.root, 'coding', 'homes'),
+    validationExecutor: codingValidationExecutor,
+    sandboxAvailable: () => codingValidationExecutor.available(),
+    sourceEnvironment: process.env,
+    approvedEnvironment: codingApiKey ? { OPENAI_API_KEY: codingApiKey } : undefined,
+    approvedEnvironmentKeys: codingApiKey ? ['OPENAI_API_KEY'] : [],
+  }))));
   const integrationRuntime = createIntegrationRuntime({
     db: replDb,
     rootDir: paths.root,
     toolRegistry,
-    scope: integrationLocalScope(process.cwd()),
+    scope: integrationScope,
+    secrets: providerSecretAuthority,
   });
   const resolveToolInteraction = (name: string) =>
     toolRegistry.get(name)?.interaction;
@@ -2258,6 +2481,13 @@ export async function buildAgentRuntime(
   });
   approvalEngine['callbacks'] = {
     promptUser: callbacks.promptApproval,
+    waitForDurableDecision: async (req, signal) => {
+      if (!req.durableApprovalId) throw new Error('Durable approval identity is unavailable');
+      const record = await actionAuthority.waitForDecision(req.durableApprovalId, { signal });
+      if (record.state === 'approved') return 'allow';
+      if (record.state === 'denied') return 'deny';
+      return 'interrupted';
+    },
     riskAssess: callbacks.riskAssess,
     // v4.8.0 Phase 2.5 — paint the structured approval row before the
     // existing y/n prompt runs. Additive; promptApproval flow unchanged.
@@ -2900,6 +3130,7 @@ export async function buildAgentRuntime(
     resolveMutates,
     resolveUiOnly,
     resolveToolInteraction,
+    externalCodingRequirement,
     providerId,
     modelId,
     // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.
@@ -3047,6 +3278,11 @@ export async function buildAgentRuntime(
     resolveMutates,
     resolveUiOnly,
     resolveToolInteraction,
+    externalCodingRequirement,
+    recoverExternalCoding: (input) => recoverCompletedExternalCodingSession({
+      ...input,
+      verify: codingVerifier,
+    }),
     // v4.7.0 Phase 2.4 — share the REPL's config-resolved honesty mode
     // with daemon-built agents so autonomous turns honour the same
     // setting interactive turns do.
@@ -3463,6 +3699,15 @@ export async function buildAgentRuntime(
   // Command registry.
   const commandRegistry = new CommandRegistry();
   for (const cmd of allCommands) commandRegistry.register(cmd);
+  commandRegistry.register(makeCodingCommand({
+    port: createWorkbenchCodingPort({
+      engine: jobEngine,
+      actions: actionAuthority,
+      instanceId: replInstanceId,
+      sessionHomeParent: path.join(paths.root, 'coding', 'homes'),
+      health: externalCodingHealth,
+    }),
+  }));
 
   // ── v4.10 Slice 10.2 — /trace recent slash command ────────────────
   //
@@ -3929,7 +4174,11 @@ export async function buildAgentRuntime(
     resolver,
     adapter,
     toolRegistry,
+    externalCodingHealth,
+    configureExternalCoding,
+    externalCodingRequirement,
     integrationRuntime,
+    providerSecretAuthority,
     skillLoader,
     memoryManager,
     memoryGuard,
@@ -3972,6 +4221,7 @@ export async function buildAgentRuntime(
     fallbackAdapter,
     personalityManager,
     pluginLoader,
+    oauthRegistry,
     exploreMode,
     channelManager,
     daemonAgentBuilder,
@@ -4007,7 +4257,11 @@ export interface AgentRuntime {
   resolver: RuntimeResolver;
   adapter: any;
   toolRegistry: ToolRegistry;
+  externalCodingHealth: () => Promise<ExternalCodingHealthProjection>;
+  configureExternalCoding: (input: { model: string }) => Promise<ExternalCodingHealthProjection>;
+  externalCodingRequirement: NonNullable<import('../../core/v4/aidenAgent').AidenAgentOptions['externalCodingRequirement']>;
   integrationRuntime: import('../../core/v4/integrations/runtime').IntegrationRuntime;
+  providerSecretAuthority: SecretAuthority;
   skillLoader: SkillLoader;
   memoryManager: MemoryManager;
   memoryGuard: MemoryGuard;
@@ -4071,6 +4325,8 @@ export interface AgentRuntime {
   personalityManager: PersonalityManager;
   /** Phase 17 Task 5: live plugin loader for /plugins commands + onTeardown on shutdown. */
   pluginLoader: PluginLoader;
+  /** OAuth providers contributed by the loaded plugin set. */
+  oauthRegistry: OAuthProviderRegistry;
   /**
    * Phase 30.2.1 — true when the wizard returned 'skipped' (recovery
    * option [4] or Ctrl+C). The REPL boots with a NullAdapter so slash

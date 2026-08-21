@@ -90,6 +90,8 @@ interface ContainerHandle {
   lastUsedAt:  number;
   starting?:   Promise<void>;
   reaped:      boolean;
+  reaping?:    Promise<boolean>;
+  cleanupUnverified?: boolean;
   /** Whether we already emitted the local-fallback warning. */
   warnedFallback: boolean;
 }
@@ -236,13 +238,35 @@ function execInContainer(
   }
   execArgs.push(handle.id, 'sh', '-c', args.command);
 
-  return new Promise<ShellExecResult>((resolve) => {
+  return new Promise<ShellExecResult>((resolve, reject) => {
     const child = spawn('docker', execArgs, {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let settled = false;
+    let cancelling = false;
+    let forceTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      if (forceTimer) clearTimeout(forceTimer);
+      forceTimer = null;
+      cb.signal?.removeEventListener('abort', onAbort);
+    };
+    const finish = (result: ShellExecResult): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+    const fail = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
 
     if (capture) {
       child.stdout?.on('data', (b: Buffer) => {
@@ -263,14 +287,58 @@ function execInContainer(
     const timer = setTimeout(() => {
       timedOut = true;
       try { child.kill('SIGTERM'); } catch { /* ignore */ }
-      setTimeout(() => {
+      forceTimer = setTimeout(() => {
         try { child.kill('SIGKILL'); } catch { /* ignore */ }
       }, 2000);
     }, timeoutMs);
 
-    child.on('error', (err) => {
+    let childClosed = false;
+    let resolveChildClosed!: () => void;
+    const childClosedPromise = new Promise<void>((resolveClosed) => { resolveChildClosed = resolveClosed; });
+    const noteChildClosed = (): void => {
+      if (childClosed) return;
+      childClosed = true;
+      resolveChildClosed();
+    };
+
+    const onAbort = (): void => {
+      if (settled || cancelling) return;
+      cancelling = true;
       clearTimeout(timer);
-      resolve({
+      if (forceTimer) clearTimeout(forceTimer);
+      try { child.kill('SIGKILL'); } catch { /* exact container teardown remains authoritative */ }
+      void (async () => {
+        const containerDead = await terminateContainer(handle);
+        const hostExecClosed = await Promise.race([
+          childClosedPromise.then(() => true),
+          new Promise<false>((resolveClosed) => {
+            const wait = setTimeout(() => resolveClosed(false), 5_000);
+            wait.unref?.();
+          }),
+        ]);
+        if (!containerDead || !hostExecClosed) {
+          fail(new DockerCancellationUnverifiedError(handle.id));
+          return;
+        }
+        finish({
+          exitCode: -1,
+          stdout,
+          stderr: stderr || 'interrupted after verified container shutdown',
+          durationMs: Date.now() - start,
+          timedOut: false,
+          backend: 'docker',
+        });
+      })().catch((error) => fail(
+        error instanceof Error ? error : new DockerCancellationUnverifiedError(handle.id),
+      ));
+    };
+    cb.signal?.addEventListener('abort', onAbort, { once: true });
+    if (cb.signal?.aborted) onAbort();
+
+    child.on('error', (err) => {
+      noteChildClosed();
+      if (cancelling) return;
+      finish({
         exitCode:   -1,
         stdout,
         stderr:     stderr || err.message,
@@ -281,8 +349,9 @@ function execInContainer(
     });
 
     child.on('close', (code) => {
-      clearTimeout(timer);
-      resolve({
+      noteChildClosed();
+      if (cancelling) return;
+      finish({
         exitCode:   typeof code === 'number' ? code : -1,
         stdout,
         stderr,
@@ -339,6 +408,22 @@ export async function dockerSessionExec(
 
   // Hot path — reuse existing container if any.
   let handle = _containers.get(sessionId);
+  if (handle?.reaping) {
+    const reaped = await handle.reaping;
+    if (!reaped) {
+      return {
+        exitCode: -1, stdout: '', stderr: 'Sandbox cleanup remains unverified for this session',
+        durationMs: 0, timedOut: false, backend: 'docker',
+      };
+    }
+    handle = _containers.get(sessionId);
+  }
+  if (handle?.cleanupUnverified) {
+    return {
+      exitCode: -1, stdout: '', stderr: 'Sandbox cleanup remains unverified for this session',
+      durationMs: 0, timedOut: false, backend: 'docker',
+    };
+  }
   if (handle && !handle.reaped) {
     if (handle.starting) {
       try { await handle.starting; }
@@ -447,36 +532,74 @@ function installShutdownHook(): void {
 
 // ── Reap APIs ───────────────────────────────────────────────────────────────
 
-function dockerStopRemove(id: string): Promise<void> {
-  return new Promise<void>((resolve) => {
-    // -t 2: 2-second grace period before SIGKILL.
-    const stop = spawn('docker', ['stop', '-t', '2', id], { stdio: 'ignore' });
-    const timer = setTimeout(() => {
-      try { stop.kill('SIGKILL'); } catch { /* ignore */ }
-    }, 5000);
-    stop.on('close', () => {
+interface DockerCommandResult { code: number; stdout: string; stderr: string; timedOut: boolean }
+
+function runDockerCommand(args: string[], timeoutMs: number): Promise<DockerCommandResult> {
+  return new Promise((resolve) => {
+    const child = spawn('docker', args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let done = false;
+    let timedOut = false;
+    child.stdout?.on('data', (value: Buffer) => { stdout += value.toString(); });
+    child.stderr?.on('data', (value: Buffer) => { stderr += value.toString(); });
+    const finish = (code: number): void => {
+      if (done) return;
+      done = true;
       clearTimeout(timer);
-      const rm = spawn('docker', ['rm', '-f', id], { stdio: 'ignore' });
-      const rmTimer = setTimeout(() => {
-        try { rm.kill('SIGKILL'); } catch { /* ignore */ }
-      }, 3000);
-      rm.on('close', () => { clearTimeout(rmTimer); resolve(); });
-      rm.on('error', () => { clearTimeout(rmTimer); resolve(); });
+      resolve({ code, stdout, stderr, timedOut });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch { /* resolved by close/error or fallback below */ }
+      const fallback = setTimeout(() => finish(-1), 1_000);
+      fallback.unref?.();
+    }, timeoutMs);
+    child.on('close', (code) => finish(typeof code === 'number' ? code : -1));
+    child.on('error', (error) => {
+      stderr ||= error.message;
+      finish(-1);
     });
-    stop.on('error', () => { clearTimeout(timer); resolve(); });
   });
+}
+
+async function dockerStopRemove(id: string): Promise<boolean> {
+  await runDockerCommand(['stop', '-t', '2', id], 5_000);
+  await runDockerCommand(['rm', '-f', id], 3_000);
+  const inspected = await runDockerCommand(['inspect', '--format', '{{.State.Running}}', id], 3_000);
+  if (inspected.code === 0) return false;
+  return /no such (?:object|container)/iu.test(inspected.stderr);
+}
+
+async function terminateContainer(handle: ContainerHandle): Promise<boolean> {
+  if (handle.reaping) return handle.reaping;
+  handle.reaped = true;
+  handle.reaping = (async () => {
+    if (!handle.id) return true;
+    const verified = await dockerStopRemove(handle.id);
+    if (verified) {
+      if (_containers.get(handle.sessionId) === handle) _containers.delete(handle.sessionId);
+    } else {
+      handle.cleanupUnverified = true;
+    }
+    return verified;
+  })();
+  return handle.reaping;
+}
+
+export class DockerCancellationUnverifiedError extends Error {
+  constructor(readonly containerId: string) {
+    super('Docker cancellation could not verify that the exact sandbox container stopped');
+    this.name = 'DockerCancellationUnverifiedError';
+  }
 }
 
 /** Reap one session's container. Idempotent + fire-and-forget safe. */
 export async function reapSessionContainer(sessionId: string): Promise<void> {
   const handle = _containers.get(sessionId);
   if (!handle) return;
-  if (handle.reaped) return;
-  handle.reaped = true;
-  _containers.delete(sessionId);
-  if (handle.id) {
-    try { await dockerStopRemove(handle.id); } catch { /* never throw on cleanup */ }
-  }
+  if (handle.cleanupUnverified) return;
+  try { await terminateContainer(handle); } catch { /* never throw on background cleanup */ }
 }
 
 /** Reap every cached container. Used by shutdown hooks. */

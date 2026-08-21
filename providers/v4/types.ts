@@ -192,6 +192,9 @@ export interface ToolCallResult {
   activityTiming?: ToolActivityTiming;
   /** Structured approval outcome retained when execution was gated. */
   approvalDecision?: ToolApprovalDecision;
+  /** Physical cancellation was requested, but descendant death could not be
+   * verified. The lifecycle must preserve an unknown outcome. */
+  cleanupUnverified?: boolean;
 }
 
 export type ToolApprovalDecisionState =

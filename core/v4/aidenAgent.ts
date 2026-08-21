@@ -188,6 +188,13 @@ export type ToolExecutor = (
   onActivity?: (update: ToolActivityUpdate) => void,
 ) => Promise<ToolCallResult>;
 
+export class PhysicalCancellationUnverifiedError extends Error {
+  constructor() {
+    super('Cancellation could not verify physical process cleanup');
+    this.name = 'PhysicalCancellationUnverifiedError';
+  }
+}
+
 async function invokeToolWithTiming(
   executor: ToolExecutor,
   call: ToolCallRequest,
@@ -445,6 +452,11 @@ export interface AidenAgentOptions {
   preflightWarn?: (message: string) => void;
   /** Stage-0 intent pre-arm: look up a skill's `required_tools`. */
   lookupSkillRequiredTools?: (skillName: string) => Promise<string[] | null>;
+  /** Fail-closed authority for user turns that explicitly require external coding. */
+  externalCodingRequirement?: {
+    health: () => Promise<{ ready: boolean; reason: string }>;
+    isRequired?: (userMessage: string) => boolean;
+  };
 }
 
 export interface AidenAgentResult {
@@ -518,6 +530,8 @@ export interface RunConversationOptions {
   entryPoint?:       string;
   purpose?:          import('./usageLedger').ProviderAttemptPurpose;
   selectedMode?:     import('./usageLedger').UsageMode;
+  /** Internal per-turn tool-policy fence installed by explicit capability authority. */
+  requiredToolName?: string;
   selectedProfile?:  string;
   deferredSchemaCount?: number;
   economySchemaSavings?: number;
@@ -626,6 +640,13 @@ const EMPTY_RETRY_NOTE =
   '[System note: your previous turn returned empty content with no tool calls. ' +
   'Either call a tool or write a real reply — silent turns are not acceptable.]';
 
+export function explicitlyRequiresExternalCoding(userMessage: string): boolean {
+  const normalized = userMessage.replace(/[_-]+/gu, ' ').replace(/\s+/gu, ' ').trim().toLowerCase();
+  if (!/\bexternal coding\b/u.test(normalized)) return false;
+  return /\b(?:use|using|must|required?|require|only|through|with)\b.{0,96}\bexternal coding\b/u.test(normalized)
+    || /\bexternal coding\b.{0,64}\b(?:agent|capability|worker|tool|required?|only)\b/u.test(normalized);
+}
+
 // ── Class ────────────────────────────────────────────────────────────────
 
 export class AidenAgent {
@@ -678,6 +699,7 @@ export class AidenAgent {
   private readonly onProviderRequestStart?:     AidenAgentOptions['onProviderRequestStart'];
   private readonly preflightWarn?:              AidenAgentOptions['preflightWarn'];
   private readonly lookupSkillRequiredTools?:   AidenAgentOptions['lookupSkillRequiredTools'];
+  private readonly externalCodingRequirement?: AidenAgentOptions['externalCodingRequirement'];
 
   // ── Cross-call state ─────────────────────────────────────────────────
   /**
@@ -782,6 +804,7 @@ export class AidenAgent {
     this.onProviderRequestStart   = opts.onProviderRequestStart;
     this.preflightWarn            = opts.preflightWarn;
     this.lookupSkillRequiredTools = opts.lookupSkillRequiredTools;
+    this.externalCodingRequirement = opts.externalCodingRequirement;
     // v4.5 Phase 7 — explicit sessionId. Existing access path
     // `(this as { sessionId?: string }).sessionId` at line 751–752
     // already reads from `this.sessionId`; setting it here keys
@@ -962,13 +985,55 @@ export class AidenAgent {
       this.plannerGuard.resetActivation();
     }
     const lastUserContent = lastUserMessageContent(history);
+    const externalCodingRequired = Boolean(
+      lastUserContent
+      && this.externalCodingRequirement
+      && (this.externalCodingRequirement.isRequired ?? explicitlyRequiresExternalCoding)(lastUserContent),
+    );
+    if (externalCodingRequired) {
+      let health: { ready: boolean; reason: string };
+      try {
+        health = await this.externalCodingRequirement!.health();
+      } catch (error) {
+        health = {
+          ready: false,
+          reason: error instanceof Error ? error.message : 'External coding health could not be established.',
+        };
+      }
+      const schemaAvailable = this.tools.some((tool) => tool.name === 'external_coding');
+      if (!health.ready || !schemaAvailable) {
+        const reason = health.ready && !schemaAvailable
+          ? 'External coding is not registered in this runtime.'
+          : health.reason;
+        const finalContent = `External coding is required for this request but is unavailable. ${reason} No alternative tool path was used.`;
+        const assistantMessage: Message = { role: 'assistant', content: finalContent };
+        return {
+          finalContent,
+          messages: [...history, assistantMessage],
+          turnMessages: [assistantMessage],
+          turnCount: 0,
+          toolCallCount: 0,
+          fallbackActivated: false,
+          finishReason: 'error',
+          totalUsage: { inputTokens: 0, outputTokens: 0 },
+          toolCallTrace: [],
+          compressionEvents: this.compressionEvents,
+          auxiliaryUsage: this.auxiliaryClient?.getUsage() ?? {},
+          skillEnforcement: { ...this.skillEnforcementMetrics },
+          urlProvenance: { ...this.urlProvenanceMetrics },
+          emptyResponse: { ...this.emptyResponseMetrics },
+        };
+      }
+    }
     if (
       this.pendingRequiredClarification &&
       resolvesPendingClarification(lastUserContent)
     ) {
       this.pendingRequiredClarification = null;
     }
-    const profiledTools = await this.narrowTools(lastUserContent, history);
+    const profiledTools = externalCodingRequired
+      ? this.tools.filter((tool) => tool.name === 'external_coding')
+      : await this.narrowTools(lastUserContent, history);
     const economySelection = selectEconomyTools(profiledTools, lastUserContent);
     const selectedMode = options.selectedMode ?? 'balanced';
     const narrowedTools = selectedMode === 'economy'
@@ -979,12 +1044,16 @@ export class AidenAgent {
       selectedMode,
       deferredSchemaCount: economySelection.deferredCount,
       economySchemaSavings: economySelection.estimatedSchemaSavings,
+      ...(externalCodingRequired ? { requiredToolName: 'external_coding' } : {}),
     };
 
     // 4. Build per-call trackers, then Stage-0 intent pre-arm.
     //    The tracker's preArm() bumps `preArmed` itself; the loop just
     //    plumbs the SkillLoader-resolved required-tools list into it.
     const trackers = this.makeTrackers();
+    if (externalCodingRequired) {
+      trackers.skill.preArm('external coding', ['external_coding']);
+    }
     if (lastUserContent && this.lookupSkillRequiredTools) {
       const decision = preArmIntent(lastUserContent);
       if (decision) {
@@ -1401,6 +1470,9 @@ export class AidenAgent {
     const toolResultMetrics = { rawBytes: 0, transmittedBytes: 0 };
     let   finishReason: 'stop' | 'budget_exhausted' | 'error' | 'tool_loop' | 'interrupted' = 'stop';
     let   finalContent      = '';
+    let   physicalCleanupUnverified = false;
+    let   requiredToolInvoked = false;
+    let   requiredToolCompletionNoted = false;
     let   resumeHandoff: AidenAgentResult['resumeHandoff'];
     // v4.1.6 spike (TCE) — per-turn loop detection + recovery state.
     // Default ON as of v4.2 Phase 6 — set AIDEN_TCE=0 to disable.
@@ -1473,11 +1545,22 @@ export class AidenAgent {
       // its cooldown counter decrements to zero via
       // `turnState.advanceIteration()`. No-op when TCE disabled
       // (`getCooledDownTools()` returns []).
-      let effectiveTools: ToolSchema[] = tools;
+      if (requiredToolInvoked && !requiredToolCompletionNoted && runOptions.requiredToolName) {
+        messages.push({
+          role: 'system',
+          content:
+            `[System note: ${runOptions.requiredToolName} already completed one authoritative invocation ` +
+            'for this user turn. Summarize that exact result and stop. A separate user request may start a new invocation.]',
+        });
+        requiredToolCompletionNoted = true;
+      }
+      let effectiveTools: ToolSchema[] = requiredToolInvoked && runOptions.requiredToolName
+        ? tools.filter((tool) => tool.name !== runOptions.requiredToolName)
+        : tools;
       const cooledDown = turnState.getCooledDownTools();
       if (cooledDown.length > 0) {
         const cdSet = new Set(cooledDown);
-        effectiveTools = tools.filter((t) => !cdSet.has(t.name));
+        effectiveTools = effectiveTools.filter((t) => !cdSet.has(t.name));
       }
 
       // ── v4.12 BE.1 — per-session TOKEN cap (money-safety), enforced BEFORE
@@ -1867,6 +1950,14 @@ export class AidenAgent {
           uiClaims.push({ name: call.name, args: call.arguments });
           continue;
         }
+        if (runOptions.requiredToolName && call.name !== runOptions.requiredToolName) {
+          turnToolMessages.push(synthesizeBlockedToolResult(call, 'explicit_capability_required'));
+          continue;
+        }
+        if (requiredToolInvoked && call.name === runOptions.requiredToolName) {
+          turnToolMessages.push(synthesizeBlockedToolResult(call, 'explicit_capability_completed'));
+          continue;
+        }
         const blockedByRequiredClarification =
           this.pendingRequiredClarification !== null &&
           this.resolveMutates?.(call.name) === true;
@@ -1991,6 +2082,7 @@ export class AidenAgent {
               });
             }
             aggregateTiming = mergeActivityTiming(aggregateTiming, result.activityTiming);
+            if (result.cleanupUnverified) physicalCleanupUnverified = true;
             if (aggregateTiming) result.activityTiming = aggregateTiming;
             const toolMs = Date.now() - _toolStartedAt;
             const source = attemptNo === 1 && _preComputed ? 'parallel' : 'live';
@@ -2045,7 +2137,12 @@ export class AidenAgent {
             // handler, so no durable ToolCall exists to receive verification.
             // Keep their verifier result in the normal trace, but do not turn a
             // deliberate non-execution into a stale-fence persistence error.
-            if (verification && result.approvalDecision?.approved !== false) {
+            if (
+              verification
+              && result.approvalDecision?.approved !== false
+              && !result.cleanupUnverified
+              && !this._currentSignal?.aborted
+            ) {
               recordDurableToolVerification(call.id, verification);
             }
             const verificationEndedAt = Date.now();
@@ -2330,6 +2427,9 @@ export class AidenAgent {
             });
           }
         }
+        if (!blockedByRequiredClarification && call.name === runOptions.requiredToolName) {
+          requiredToolInvoked = true;
+        }
         // v4.13 Gap 2 — the model SEES what the runtime did: retry
         // attempts, the failure class, and the chosen recovery action
         // are appended to the tool message (observable, never silent).
@@ -2579,6 +2679,12 @@ export class AidenAgent {
         });
       }
       // Loop continues — provider gets the tool results next iteration.
+    }
+
+    if (physicalCleanupUnverified) {
+      this._currentSignal = undefined;
+      this._currentTurnContext = undefined;
+      throw new PhysicalCancellationUnverifiedError();
     }
 
     // v4.6 Phase 1 — clear the per-turn signal exposure before returning.

@@ -82,10 +82,10 @@ export interface PromptApi {
     message: string;
     choices: { name: string; value: string }[];
     default?: string;
-  }, context?: { input?: ModalStdin }): Promise<string>;
-  confirm(opts: { message: string; default?: boolean }, context?: { input?: ModalStdin }): Promise<boolean>;
+  }, context?: { input?: ModalStdin; signal?: AbortSignal }): Promise<string>;
+  confirm(opts: { message: string; default?: boolean }, context?: { input?: ModalStdin; signal?: AbortSignal }): Promise<boolean>;
   /** v4.11 — free-text line input (for the clarify tool's open answers). */
-  input(opts: { message: string; default?: string }, context?: { input?: ModalStdin }): Promise<string>;
+  input(opts: { message: string; default?: string }, context?: { input?: ModalStdin; signal?: AbortSignal }): Promise<string>;
 }
 
 async function defaultPrompts(): Promise<PromptApi> {
@@ -632,12 +632,12 @@ export class CliCallbacks {
         message: 'Decision',
         choices: decisionChoicesFor(req),
         default: defaultDecisionFor(req),
-      }, stdin ? { input: stdin } : undefined);
+      }, stdin || req.decisionSignal ? { ...(stdin ? { input: stdin } : {}), signal: req.decisionSignal } : undefined);
 
       if (choice !== 'deny' && req.effects?.irreversible === true) {
         const confirmation = await prompts.input({
           message: 'Type ALLOW to confirm this irreversible action',
-        }, stdin ? { input: stdin } : undefined);
+        }, stdin || req.decisionSignal ? { ...(stdin ? { input: stdin } : {}), signal: req.decisionSignal } : undefined);
         if (confirmation !== 'ALLOW') return 'deny';
       }
     } catch {

@@ -103,6 +103,15 @@ export interface ApprovalRequest {
   args: Record<string, unknown>;
   /** Exact durable approval identity when the tool call belongs to a Job. */
   durableApprovalId?: string;
+  /** Cancels the interactive surface when the same exact durable approval is
+   * decided through another trusted local surface. */
+  decisionSignal?: AbortSignal;
+  /**
+   * Existing Effect-contract authority for actions that require an explicit
+   * per-occurrence decision. `always` cannot be bypassed by smart/off mode or
+   * a prior allowlist entry; the hard-block floor still runs first.
+   */
+  approvalRequirement?: 'none' | 'policy' | 'always';
   /** Pre-flagged risk tier from the dangerous-patterns catalog. */
   riskTier?: RiskTier;
   /** Why was this flagged? (description from the matching pattern) */
@@ -152,6 +161,8 @@ export interface AllowlistEntry {
 export interface ApprovalCallbacks {
   /** Called when the user must decide. CLI implements this with a prompt. */
   promptUser?: (req: ApprovalRequest) => Promise<ApprovalDecision>;
+  /** Await a decision committed by another surface for the exact durable ID. */
+  waitForDurableDecision?: (req: ApprovalRequest, signal: AbortSignal) => Promise<ApprovalDecision>;
   /** Smart-mode auxiliary risk assessment (auxiliary LLM). */
   riskAssess?: (req: ApprovalRequest) => Promise<{
     tier: RiskTier;
@@ -425,6 +436,12 @@ export class ApprovalEngine {
         `yourself outside Aiden.`
       );
     }
+    if (req.approvalRequirement === 'always') {
+      return (
+        `this action requires an explicit approval each time and was not approved. ` +
+        `Review the pending approval and choose Approve once or Deny.`
+      );
+    }
     if (this.autonomyPolicy && decideAutonomy(this.autonomyPolicy, req) === 'deny') {
       const tier = req.riskTier ? `${req.riskTier} ` : '';
       return (
@@ -605,13 +622,19 @@ export class ApprovalEngine {
       return false;
     }
 
-    if (req.category === 'read') {
+    // Effect contracts marked `always` are the non-bypassable interactive
+    // approval tier. They still respect the catastrophic hard-block above,
+    // but skip read/off/allowlist/autonomy/smart auto-decisions below and
+    // reach the exact durable prompt surface.
+    const requiresExplicitApproval = req.approvalRequirement === 'always';
+
+    if (!requiresExplicitApproval && req.category === 'read') {
       this.callbacks.onDecision?.(req, 'allow');
       return true;
     }
 
     // YOLO mode: auto-allow but log. (Hard-block already caught catastrophes.)
-    if (this.mode === 'off') {
+    if (!requiresExplicitApproval && this.mode === 'off') {
       this.callbacks.onDecision?.(req, 'allow');
       return true;
     }
@@ -629,7 +652,7 @@ export class ApprovalEngine {
     // dangerous calls, while a reviewed per-batch approval still executes.
     const sig = argSignature(req.toolName, req.args);
     const key = `${req.toolName}::${sig}`;
-    if (this.sessionAllow.has(key)) {
+    if (!requiresExplicitApproval && this.sessionAllow.has(key)) {
       this.lastApprovalScope = this.permanentAllow.has(key) ? 'permanent' : 'session';
       // v4.10 Slice 10.6 — refresh the audit timestamp for any
       // PERMANENT-tier match (session-only matches stay in memory
@@ -652,7 +675,7 @@ export class ApprovalEngine {
     // Phase 16f / v4.12.1: built-in safe policy short-circuit — reads,
     // memory, known-safe fetches auto-allow (applies under smart mode AND
     // when an autonomy policy is installed; both treat these as safe).
-    if ((this.mode === 'smart' || this.autonomyPolicy) && this.matchesBuiltinSafePolicy(req)) {
+    if (!requiresExplicitApproval && (this.mode === 'smart' || this.autonomyPolicy) && this.matchesBuiltinSafePolicy(req)) {
       this.callbacks.onDecision?.(req, 'allow');
       return true;
     }
@@ -661,7 +684,7 @@ export class ApprovalEngine {
     // the authority for the mutating decision (the generalised tier-gate).
     // allow → run; deny → block; ask → fall through to the shared prompt path
     // below (which for a subagent's engine is wired to escalate to the parent).
-    if (this.autonomyPolicy) {
+    if (!requiresExplicitApproval && this.autonomyPolicy) {
       const decision = decideAutonomy(this.autonomyPolicy, req);
       if (decision === 'allow') {
         this.callbacks.onDecision?.(req, 'allow');
@@ -677,7 +700,7 @@ export class ApprovalEngine {
 
     // Legacy smart-mode tier logic — skipped entirely when a dial policy is
     // installed (the policy is the authority above).
-    if (!this.autonomyPolicy && this.mode === 'smart') {
+    if (!requiresExplicitApproval && !this.autonomyPolicy && this.mode === 'smart') {
       // Smart mode: trust the pre-flagged tier, otherwise ask the LLM.
       // Phase 16f: when neither a pre-flagged tier nor a riskAssess callback
       // is available, the call did NOT match BUILTIN_SAFE_TOOLS or the
@@ -740,7 +763,23 @@ export class ApprovalEngine {
       risk_tier: uiTier,
       reason:    req.reason,
     });
-    const decision = await this.callbacks.promptUser(req);
+    const durableWait = req.durableApprovalId && this.callbacks.waitForDurableDecision
+      ? this.callbacks.waitForDurableDecision
+      : null;
+    let decision: ApprovalDecision;
+    if (durableWait) {
+      const controller = new AbortController();
+      const prompt = this.callbacks.promptUser({ ...req, decisionSignal: controller.signal })
+        .then((value) => ({ source: 'prompt' as const, value }));
+      const durable = durableWait(req, controller.signal)
+        .then((value) => ({ source: 'durable' as const, value }));
+      const winner = await Promise.race([prompt, durable]);
+      decision = winner.value;
+      controller.abort();
+      await Promise.allSettled([prompt, durable]);
+    } else {
+      decision = await this.callbacks.promptUser(req);
+    }
     // Record the ACTUAL prompt outcome so explainDenial reports it verbatim
     // rather than assuming the user declined.
     this.lastPromptDecision = decision;
