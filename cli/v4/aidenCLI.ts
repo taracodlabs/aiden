@@ -944,16 +944,22 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   program
     .command('doctor')
     .description('Run diagnostic checks')
+    .option('--json', 'Print a stable machine-readable report with secrets redacted')
+    .option('--fix', 'Apply low-risk local directory repairs before rechecking')
     .option(
       '--providers',
       'Also ping each configured / authed provider and report live status (deep check). Slower; useful before shipping or when a provider regression is suspected.',
     )
-    .action(async (cmdOpts: { providers?: boolean }) => {
+    .action(async (cmdOpts: { providers?: boolean; json?: boolean; fix?: boolean }) => {
       if (opts.runDoctorHook) {
         await opts.runDoctorHook();
         return;
       }
-      await runDoctorCli({ liveness: cmdOpts.providers === true });
+      await runDoctorCli({
+        liveness: cmdOpts.providers === true,
+        json: cmdOpts.json === true,
+        fix: cmdOpts.fix === true,
+      });
       // Non-interactive subcommand: exit cleanly instead of hanging on a
       // lingering handle. runDoctorCli already set process.exitCode honestly
       // (0 when healthy, 1 on failure) so scripts/CI can detect a failing
