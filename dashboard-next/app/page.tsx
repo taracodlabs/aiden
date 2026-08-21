@@ -361,6 +361,7 @@ interface DevOSCtxType {
   activeProvider: string
   runtimeConnection: 'connected' | 'reconnecting' | 'unavailable'
   runtimeVersion: string
+  runtimeEdition: 'community' | 'pro' | 'team' | 'enterprise'
   executionAvailable: boolean
   executionQueue: { pending: number; claimed: number; inflight: number; workerCount: number }
   workbenchReadOnly: boolean
@@ -1999,7 +2000,7 @@ function NavBar() {
 function HistorySidebar() {
   const {
     conversations, currentConvId, startNewChat, loadConversation, selectActiveJob,
-    runtimeVersion, activeJobs, historyOpen, setHistoryOpen, mainView, setMainView,
+    runtimeVersion, runtimeEdition, activeJobs, historyOpen, setHistoryOpen, mainView, setMainView,
     setSettingsOpen, setSettingsTab,
   } = useDevOS()
 
@@ -2141,7 +2142,7 @@ function HistorySidebar() {
         fontFamily: 'var(--mono)',
       }}>
         <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-        Aiden v{runtimeVersion} · local
+        Aiden v{runtimeVersion} · {runtimeEdition === 'community' ? 'Community' : runtimeEdition[0].toUpperCase() + runtimeEdition.slice(1)}
       </div>
     </aside>
   )
@@ -3649,7 +3650,7 @@ function LiveViewPanel() {
 // ── StatusBar (replaces ActivityBar + DisclaimerBar) ─────────
 
 function StatusBar() {
-  const { runtimeConnection, runtimeVersion, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
+  const { runtimeConnection, runtimeVersion, runtimeEdition, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
 
   return (
     <div className="system-awareness-strip" style={{
@@ -3660,6 +3661,8 @@ function StatusBar() {
       userSelect: 'none',
     }}>
       <span style={{ color: 'var(--muted3)' }}>Aiden v{runtimeVersion}</span>
+      <span style={{ color: 'var(--border2)' }}>·</span>
+      <span>{runtimeEdition === 'community' ? 'Community' : runtimeEdition[0].toUpperCase() + runtimeEdition.slice(1)}</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
       <span>Local</span>
       <span style={{ color: 'var(--border2)' }}>·</span>
@@ -5999,6 +6002,7 @@ function SettingsDrawer() {
 export default function Home() {
 
   const [runtimeVersion, setRuntimeVersion] = useState('unknown')
+  const [runtimeEdition, setRuntimeEdition] = useState<'community' | 'pro' | 'team' | 'enterprise'>('community')
 
   // ── Onboarding ──────────────────────────────────────────────
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null)
@@ -6134,6 +6138,7 @@ export default function Home() {
       const bootstrap = await aiden.loadWorkbenchBootstrap()
       if (!current) return
       setRuntimeVersion(bootstrap.runtime.version)
+      setRuntimeEdition(bootstrap.runtime.edition)
       setActiveProvider(bootstrap.provider.displayName || bootstrap.provider.id || '')
       setActiveModel(bootstrap.model.displayName || bootstrap.model.id || '')
       setRuntimeConnection(bootstrap.connection)
@@ -7302,7 +7307,7 @@ export default function Home() {
     historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen, collapseLiveExecution, reopenLiveExecution,
     activityOpen, setActivityOpen, settingsOpen, setSettingsOpen,
     settingsTab, setSettingsTab, mainView, setMainView, appearance, setAppearance,
-    isExecuting, isStreaming, thinking, budget, activeModel, activeProvider, runtimeConnection, runtimeVersion,
+    isExecuting, isStreaming, thinking, budget, activeModel, activeProvider, runtimeConnection, runtimeVersion, runtimeEdition,
     executionAvailable, executionQueue, workbenchReadOnly,
     runProjection, runArtifacts, capabilities, browserSession, controlBrowser,
     liveExecution, liveExecutionSelection, selectLiveExecutionSurface, toggleLiveExecutionPin,

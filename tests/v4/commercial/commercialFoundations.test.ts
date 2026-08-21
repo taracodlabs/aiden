@@ -6,6 +6,7 @@ import path from 'node:path';
 
 import {
   ALWAYS_AVAILABLE_CAPABILITIES,
+  detectProductEdition,
   EditionAuthority,
 } from '../../../core/v4/commercial/edition';
 import {
@@ -53,6 +54,17 @@ function signedClaim(overrides: Partial<EntitlementClaim> = {}): SignedEntitleme
 }
 
 describe('commercial edition authority', () => {
+  it('derives Community or Pro from the installed package manifest', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-edition-'));
+    roots.push(root);
+    const nested = path.join(root, 'dist', 'core', 'v4');
+    await fs.mkdir(nested, { recursive: true });
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'aiden-runtime', private: true }));
+    expect(detectProductEdition(nested)).toBe('pro');
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'aiden-runtime', private: false }));
+    expect(detectProductEdition(nested)).toBe('community');
+  });
+
   it('keeps every safety capability available in Community', () => {
     const authority = new EditionAuthority({ edition: 'community', grants: [] });
     for (const capability of ALWAYS_AVAILABLE_CAPABILITIES) expect(authority.can(capability)).toBe(true);

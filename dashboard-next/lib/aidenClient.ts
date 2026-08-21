@@ -494,7 +494,7 @@ export interface WorkbenchRuntimeInfo {
 }
 
 export interface WorkbenchBootstrap {
-  runtime: { version: string; status: string; local: boolean };
+  runtime: { version: string; status: string; local: boolean; edition: 'community' | 'pro' | 'team' | 'enterprise' };
   provider: { configured?: boolean; id?: string; displayName?: string };
   model: { id?: string; displayName?: string };
   connection: 'connected' | 'unavailable' | 'reconnecting';
@@ -1082,6 +1082,9 @@ export async function loadWorkbenchBootstrap(): Promise<WorkbenchBootstrap> {
       version: body.runtime.version,
       status: body.runtime.status ?? 'unknown',
       local: body.runtime.local === true,
+      edition: ['pro', 'team', 'enterprise'].includes(body.runtime.edition)
+        ? body.runtime.edition
+        : 'community',
     },
     provider: body.provider,
     model: body.model,

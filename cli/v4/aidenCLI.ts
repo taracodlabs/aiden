@@ -82,6 +82,7 @@ import {
   createWorkbenchProviderSetupAuthority,
 } from '../../core/v4/workbench/providerSetupAuthority';
 import { createSystemReadinessAuthority } from '../../core/v4/workbench/systemReadiness';
+import { detectProductEdition } from '../../core/v4/commercial/edition';
 import { createWorkbenchBrowserSetupPort } from '../../core/v4/workbench/browserSetupPort';
 import { SkillLoader } from '../../core/v4/skillLoader';
 import { makeExternalCodingTool, makeSubagentFanoutTool } from '../../tools/v4/index';
@@ -756,6 +757,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       ].filter((d): d is string => Boolean(d));
       const staticDir = staticCandidates.find((d) => existsSync(nodePath.join(d, 'index.html')));
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
+      const productEdition = detectProductEdition();
       const workbenchFiles = createWorkbenchFileBridge({
         root: nodePath.join(paths.root, 'workbench'),
         artifacts: workbenchRuntime?.replArtifactStore,
@@ -824,6 +826,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
               provider: workbenchRuntime.providerId,
               model: workbenchRuntime.modelId,
               local: true,
+              edition: productEdition,
               connection: 'connected' as const,
             };
           }
@@ -833,10 +836,11 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
               provider: cfg.model?.provider ?? null,
               model: cfg.model?.modelId ?? null,
               local: true,
+              edition: productEdition,
               connection: 'unavailable' as const,
             };
           } catch {
-            return { local: true, connection: 'unavailable' as const };
+            return { local: true, edition: productEdition, connection: 'unavailable' as const };
           }
         },
         activeJobs: () => listWorkbenchActiveJobs({

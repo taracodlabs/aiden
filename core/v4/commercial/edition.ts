@@ -3,6 +3,9 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  */
 
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+
 export type ProductEdition = 'community' | 'pro' | 'team' | 'enterprise';
 
 export const COMMERCIAL_CAPABILITIES = [
@@ -50,5 +53,25 @@ export class EditionAuthority {
     if (!(COMMERCIAL_CAPABILITIES as readonly string[]).includes(capability)) return false;
     return this.grants.has(capability);
   }
+}
+
+/** Resolve the installed build edition from the authoritative package manifest. */
+export function detectProductEdition(startDirectory: string = __dirname): ProductEdition {
+  let directory = startDirectory;
+  for (let depth = 0; depth < 7; depth += 1) {
+    const manifest = join(directory, 'package.json');
+    if (existsSync(manifest)) {
+      try {
+        const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string; private?: boolean };
+        if (parsed.name === 'aiden-runtime') return parsed.private === true ? 'pro' : 'community';
+      } catch {
+        // Keep walking until the installed Aiden manifest is found.
+      }
+    }
+    const parent = dirname(directory);
+    if (parent === directory) break;
+    directory = parent;
+  }
+  return 'community';
 }
 

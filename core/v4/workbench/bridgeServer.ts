@@ -45,6 +45,7 @@ import type { WorkbenchAppsPort } from './appsPort';
 import type { WorkbenchCodingPort } from './codingPort';
 import type { WorkbenchProviderSetupAuthority } from './providerSetupAuthority';
 import type { SystemReadinessProjection } from './systemReadiness';
+import type { ProductEdition } from '../commercial/edition';
 import type { WorkbenchLiveExecutionPort } from './liveExecution';
 
 /**
@@ -249,6 +250,7 @@ export interface WorkbenchBridgeOptions {
     model?: string | null;
     local?: boolean;
     connection?: 'connected' | 'unavailable' | 'reconnecting';
+    edition?: ProductEdition;
   };
   /** Bounded durable snapshot used to restore active jobs without treating
    * browser state as authoritative. */
@@ -734,7 +736,12 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         triggerStatus: job.triggerStatus ?? null,
       })));
       sendJson(res, 200, {
-        runtime: { version: VERSION, status: 'ready', local: runtime.local !== false },
+        runtime: {
+          version: VERSION,
+          status: 'ready',
+          local: runtime.local !== false,
+          edition: runtime.edition ?? 'community',
+        },
         provider: runtime.provider ? { id: runtime.provider, displayName: runtime.provider } : { configured: false },
         model: runtime.model ? { id: runtime.model, displayName: runtime.model } : {},
         connection: runtime.connection ?? 'unavailable',
