@@ -5,6 +5,7 @@ import path from 'node:path';
 describe('commercial Workbench onboarding source contract', () => {
   const component = readFileSync(path.resolve(__dirname, '../../../dashboard-next/components/OnboardingModal.tsx'), 'utf8');
   const page = readFileSync(path.resolve(__dirname, '../../../dashboard-next/app/page.tsx'), 'utf8');
+  const bridge = readFileSync(path.resolve(__dirname, '../../../core/v4/workbench/bridgeServer.ts'), 'utf8');
 
   it('uses the existing Workbench readiness endpoint rather than a second readiness implementation', () => {
     expect(component).toContain('aiden.loadSystemReadiness()');
@@ -25,6 +26,12 @@ describe('commercial Workbench onboarding source contract', () => {
     expect(component).toContain('What Aiden knows:');
     expect(component).toContain('Recheck');
     expect(page).toContain("window.localStorage.setItem('aiden:first-run:v1', 'complete')");
+  });
+
+  it('renders the authoritative runtime edition in Workbench chrome', () => {
+    expect(page).toContain('runtimeEdition');
+    expect(page).toContain("runtimeEdition === 'community' ? 'Community'");
+    expect(bridge).toContain("edition: runtime.edition ?? 'community'");
   });
 });
 
