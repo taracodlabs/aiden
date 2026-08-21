@@ -25,6 +25,12 @@ import { readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+const developmentManifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+if (developmentManifest.private === true) {
+  process.stderr.write('Commercial release guard: the private development workspace cannot run the public Community release pipeline.\n');
+  process.exit(1);
+}
+
 /** The release commit + tag must be authored by this identity. */
 const RELEASER = 'Shiva Deore';
 
