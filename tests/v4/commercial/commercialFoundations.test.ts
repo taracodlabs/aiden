@@ -164,6 +164,7 @@ describe('local product metrics and support matrix', () => {
 
   it('classifies Windows/Node 22 as supported, Unix as partially validated, and Node 24 as unsupported', () => {
     expect(classifyPlatform({ platform: 'win32', release: '10.0.26100', nodeVersion: '22.23.1' }).level).toBe('supported');
+    expect(classifyPlatform({ platform: 'win32', release: '10.0.19045', nodeVersion: '22.23.1' }).level).toBe('unsupported');
     expect(classifyPlatform({ platform: 'linux', release: '6.8', nodeVersion: '20.20.2' }).level).toBe('partially_validated');
     expect(classifyPlatform({ platform: 'win32', release: '10.0.26100', nodeVersion: '24.0.0' }).level).toBe('unsupported');
   });

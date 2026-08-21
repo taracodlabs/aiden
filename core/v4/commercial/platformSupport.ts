@@ -26,8 +26,9 @@ export function classifyPlatform(input: {
     return { platform, release, nodeMajor, level: 'unsupported', detail: `Node ${nodeMajor} is not certified; use Node 20 or 22.` };
   }
   if (platform === 'win32') {
-    const windowsMajor = Number.parseInt(release.split('.')[0], 10);
-    return windowsMajor >= 10
+    const [kernelMajor, kernelMinor, build] = release.split('.').map((part) => Number.parseInt(part, 10));
+    const windows11 = kernelMajor === 10 && kernelMinor === 0 && Number.isFinite(build) && build >= 22_000;
+    return windows11
       ? { platform, release, nodeMajor, level: 'supported', detail: 'Windows 11 is the primary supported platform.' }
       : { platform, release, nodeMajor, level: 'unsupported', detail: 'Windows 11 is required.' };
   }
