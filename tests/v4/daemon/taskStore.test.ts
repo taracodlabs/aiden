@@ -12,7 +12,7 @@
  * is tested separately in chatSessionUiPersist.test.ts so a future
  * regression in either layer fails the right test.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -22,19 +22,37 @@ import { createTaskStore, type TaskStore } from '../../../core/v4/daemon/taskSto
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 
 let tmp: string;
+let fixtureRoot: string;
+let templateDatabasePath: string;
 let db: Database.Database;
 let store: TaskStore;
 
+beforeAll(async () => {
+  fixtureRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-tasks-suite-'));
+  templateDatabasePath = path.join(fixtureRoot, 'template.db');
+  const template = new Database(templateDatabasePath);
+  try {
+    runMigrations(template);
+  } finally {
+    template.close();
+  }
+}, 60_000);
+
 beforeEach(async () => {
-  tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-tasks-'));
-  db = new Database(path.join(tmp, 'daemon.db'));
-  runMigrations(db);
+  tmp = await fs.mkdtemp(path.join(fixtureRoot, 'case-'));
+  const databasePath = path.join(tmp, 'daemon.db');
+  await fs.copyFile(templateDatabasePath, databasePath);
+  db = new Database(databasePath);
   store = createTaskStore({ db });
 }, 60_000);
 
 afterEach(async () => {
   db.close();
   await fs.rm(tmp, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  await fs.rm(fixtureRoot, { recursive: true, force: true });
 });
 
 describe('TaskStore.create', () => {
