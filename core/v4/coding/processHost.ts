@@ -191,7 +191,7 @@ function refreshOwnedTree(slot: Slot, force = false, allowExitedRoot = false): v
   const now = Date.now();
   if (!force && now - slot.lastTreeRefreshAt < 750) return;
   slot.lastTreeRefreshAt = now;
-  if (!processAlive(slot.handle.identity.pid, slot.handle.identity.startTime) && !allowExitedRoot) return;
+  if (!allowExitedRoot && !processAlive(slot.handle.identity.pid, slot.handle.identity.startTime)) return;
   for (const pid of descendantPids(slot.handle.identity.pid)) {
     if (slot.ownedTree.has(pid)) continue;
     const startedAt = getProcessCreationTime(pid);
@@ -202,7 +202,9 @@ function refreshOwnedTree(slot: Slot, force = false, allowExitedRoot = false): v
 }
 
 function ownedTreeDead(slot: Slot): boolean {
-  return [...slot.ownedTree].every(([pid, startedAt]) => !processAlive(pid, startedAt));
+  return [...slot.ownedTree].every(([pid, startedAt]) => (
+    (slot.settled && pid === slot.handle.identity.pid) || !processAlive(pid, startedAt)
+  ));
 }
 
 function killOwnedSurvivors(slot: Slot): void {
