@@ -5,6 +5,7 @@
 
 import path from 'node:path';
 
+import { realpathWithFallback } from '../sandboxFs';
 import type { AdmissionResult, JobEngine } from '../daemon/jobEngine';
 import {
   executeDurableJob,
@@ -85,7 +86,7 @@ export interface ExternalCodingWorkerExecution {
 }
 
 function canonicalPath(value: string): string {
-  const resolved = path.resolve(value).replace(/\\/gu, '/');
+  const resolved = realpathWithFallback(path.resolve(value)).replace(/\\/gu, '/');
   return process.platform === 'win32' ? resolved.toLocaleLowerCase('en-US') : resolved;
 }
 

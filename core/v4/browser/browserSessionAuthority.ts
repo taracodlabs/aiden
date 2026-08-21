@@ -664,12 +664,18 @@ export function createBrowserSessionAuthority(options: {
           ORDER BY created_at DESC LIMIT 1`,
       ).get(session.browserSessionId, actionSignature) as { action_id: string } | undefined;
       if (repeated) throw new BrowserAuthorityError('NO_PROGRESS', 'Repeated browser action produced no progress');
-      const now = Date.now();
-      const sequence = (db.prepare(
-        'SELECT COALESCE(MAX(action_sequence),0)+1 AS sequence FROM browser_action_receipts WHERE browser_session_id=?',
-      ).get(session.browserSessionId) as { sequence: number }).sequence;
+      const requestedAt = Date.now();
+      let now = requestedAt;
+      let sequence = 0;
       const actionId = `browser_action_${randomBytes(12).toString('hex')}`;
       db.transaction(() => {
+        const allocation = db.prepare(
+          `SELECT COALESCE(MAX(action_sequence),0)+1 AS sequence,
+                  COALESCE(MAX(created_at),0) AS latest_created_at
+             FROM browser_action_receipts WHERE browser_session_id=?`,
+        ).get(session.browserSessionId) as { sequence: number; latest_created_at: number };
+        sequence = allocation.sequence;
+        now = Math.max(requestedAt, allocation.latest_created_at + 1);
         db.prepare(
           `INSERT INTO browser_action_receipts (
              action_id,browser_session_id,action_sequence,job_id,attempt_id,generation,tool_call_id,effect_id,tab_id,

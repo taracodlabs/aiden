@@ -4,7 +4,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 
@@ -76,6 +76,37 @@ afterEach(async () => {
 });
 
 describe('external coding durable Worker bridge', () => {
+  it('accepts a source path alias only when it resolves to the exact captured repository', async () => {
+    const value = await fixture();
+    const aliasParent = await mkdtemp(path.join(os.tmpdir(), 'aiden-coding-worker-alias-'));
+    const sourceAlias = path.join(aliasParent, 'source-alias');
+    roots.push(aliasParent);
+    await symlink(value.root, sourceAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      const admission = await admitExternalCodingWorker({
+        engine: value.engine,
+        parent: value.parentAuthority,
+        idempotencyKey: 'external-alias-one',
+        repositorySnapshotId: value.snapshot.id,
+        sourcePath: sourceAlias,
+        instanceId: 'coding-worker-instance',
+        providers: value.providers,
+        providerId: value.provider.id,
+        modelId: 'fixture-coding-model',
+        task: {
+          goal: 'Inspect the exact repository.', allowedScope: [], protectedPaths: [],
+          forbiddenOperations: ['git.commit', 'git.push', 'agent.recursive'],
+          acceptanceCriteria: [], validationCommands: [], networkPolicy: 'disabled', packagePolicy: 'deny',
+          budgets: { runtimeMs: 30_000, outputBytes: 32_768, commandCount: 8 },
+          promotionPolicy: 'human_approval_required',
+        },
+      });
+      expect(admission.assignment.repositorySnapshotId).toBe(value.snapshot.id);
+    } finally {
+      value.db.close();
+    }
+  });
+
   it('admits one exact child Worker and executes it only through the canonical lifecycle', async () => {
     const value = await fixture();
     try {

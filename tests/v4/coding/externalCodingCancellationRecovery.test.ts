@@ -4,7 +4,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -24,15 +24,18 @@ describe('cancelled external coding restart recovery', () => {
   it('settles an exact legacy cancelled session and releases only its isolated repository lock', async () => {
     const storage = await mkdtemp(path.join(os.tmpdir(), 'aiden-coding-cancel-recovery-db-'));
     const source = await mkdtemp(path.join(os.tmpdir(), 'aiden-coding-cancel-recovery-source-'));
+    const sourceAliasParent = await mkdtemp(path.join(os.tmpdir(), 'aiden-coding-cancel-recovery-alias-'));
+    const sourceAlias = path.join(sourceAliasParent, 'source-alias');
     const worktrees = await mkdtemp(path.join(os.tmpdir(), 'aiden-coding-cancel-recovery-worktrees-'));
     const homes = await mkdtemp(path.join(os.tmpdir(), 'aiden-coding-cancel-recovery-homes-'));
-    roots.push(storage, source, worktrees, homes);
+    roots.push(storage, sourceAliasParent, source, worktrees, homes);
     execFileSync('git', ['init', '-q', source]);
     execFileSync('git', ['-C', source, 'config', 'user.name', 'Fixture']);
     execFileSync('git', ['-C', source, 'config', 'user.email', 'fixture@example.invalid']);
     await writeFile(path.join(source, 'source.txt'), 'baseline\n');
     execFileSync('git', ['-C', source, 'add', '.']);
     execFileSync('git', ['-C', source, 'commit', '-qm', 'fixture']);
+    await symlink(source, sourceAlias, process.platform === 'win32' ? 'junction' : 'dir');
 
     const fixture = createWorkerFixture(path.join(storage, 'aiden.db'), 10, 'external-coding-worker');
     const host = new ExternalCodingProcessHost();
@@ -111,7 +114,7 @@ describe('cancelled external coding restart recovery', () => {
       ).run(codingSessionId);
 
       const recovered = await recoverCancelledExternalCodingSessions({
-        engine: fixture.engine, sourcePath: source, sessionHomeParent: homes,
+        engine: fixture.engine, sourcePath: sourceAlias, sessionHomeParent: homes,
         producer: 'test-cancel-recovery', now: 30,
       });
 

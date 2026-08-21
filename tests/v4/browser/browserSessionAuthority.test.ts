@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
 import { createJobEngine, type JobEngine } from '../../../core/v4/daemon/jobEngine';
@@ -342,27 +342,32 @@ describe('BrowserSession authority', () => {
   });
 
   it('reuses exact equivalent source Evidence instead of creating uncontrolled copies', () => {
-    const binding = admit('evidence-dedup');
-    engine.browser.ensureSession(binding);
-    const complete = () => {
-      const action = engine.browser.beginAction(binding, {
-        toolCallId: 'tool-read', effectId: null, tabId: null,
-        actionType: 'browser_extract', args: { source: 'main' }, preStateDigest: 'same-pre',
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    try {
+      const binding = admit('evidence-dedup');
+      engine.browser.ensureSession(binding);
+      const complete = () => {
+        const action = engine.browser.beginAction(binding, {
+          toolCallId: 'tool-read', effectId: null, tabId: null,
+          actionType: 'browser_extract', args: { source: 'main' }, preStateDigest: 'same-pre',
+        });
+        engine.browser.markActionDispatched(binding, action.actionId);
+        return engine.browser.completeAction(binding, action.actionId, {
+          outcome: 'verified', commandOk: true, semanticOk: true, postStateDigest: 'same-post',
+          verification: { contentDigest: 'same-content' },
+          evidencePayload: { url: 'https://example.test/source', contentDigest: 'same-content' },
+        }).receipt;
+      };
+      const first = complete();
+      const second = complete();
+      expect(first.evidenceIds).toHaveLength(1);
+      expect(second.evidenceIds).toEqual(first.evidenceIds);
+      expect(engine.proof.listEvidence(binding.jobId)).toHaveLength(1);
+      expect(engine.proof.listEvidence(binding.jobId)[0].payload).toMatchObject({
+        browserActionId: first.actionId, toolCallId: 'tool-read',
       });
-      engine.browser.markActionDispatched(binding, action.actionId);
-      return engine.browser.completeAction(binding, action.actionId, {
-        outcome: 'verified', commandOk: true, semanticOk: true, postStateDigest: 'same-post',
-        verification: { contentDigest: 'same-content' },
-        evidencePayload: { url: 'https://example.test/source', contentDigest: 'same-content' },
-      }).receipt;
-    };
-    const first = complete();
-    const second = complete();
-    expect(first.evidenceIds).toHaveLength(1);
-    expect(second.evidenceIds).toEqual(first.evidenceIds);
-    expect(engine.proof.listEvidence(binding.jobId)).toHaveLength(1);
-    expect(engine.proof.listEvidence(binding.jobId)[0].payload).toMatchObject({
-      browserActionId: first.actionId, toolCallId: 'tool-read',
-    });
+    } finally {
+      clock.mockRestore();
+    }
   });
 });

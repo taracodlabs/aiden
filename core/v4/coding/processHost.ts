@@ -122,7 +122,15 @@ function processAlive(pid: number, expectedStartTime: number | null): boolean {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   if (expectedStartTime !== null) {
     const actual = getProcessCreationTime(pid);
-    return actual !== null && Math.abs(actual - expectedStartTime) < 2_000;
+    if (actual === null || Math.abs(actual - expectedStartTime) >= 2_000) return false;
+  }
+  if (process.platform !== 'win32') {
+    try {
+      const state = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+        encoding: 'utf8', timeout: 3_000, stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (state.startsWith('Z')) return false;
+    } catch { /* retain the kernel signal check when process-state inspection is unavailable */ }
   }
   try { process.kill(pid, 0); return true; } catch { return false; }
 }

@@ -500,7 +500,9 @@ export class CodexCliExternalCodingProvider implements ExternalCodingAgentProvid
       '-C', request.workspacePath,
       '-',
     ];
-    const isolatedConfigHome = path.join(request.sessionHome, '.codex');
+    const isolatedConfigHome = this.platform === 'win32'
+      ? path.win32.join(request.sessionHome, '.codex')
+      : path.join(request.sessionHome, '.codex');
     await mkdir(isolatedConfigHome, { recursive: true });
     if (this.credentialFile) {
       try {

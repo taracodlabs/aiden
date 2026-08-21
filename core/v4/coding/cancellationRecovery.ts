@@ -6,6 +6,7 @@
 import { rm } from 'node:fs/promises';
 import path from 'node:path';
 
+import { realpathWithFallback } from '../sandboxFs';
 import type { JobEngine } from '../daemon/jobEngine';
 
 export interface CancelledExternalCodingRecoveryResult {
@@ -16,8 +17,8 @@ export interface CancelledExternalCodingRecoveryResult {
 }
 
 function samePath(left: string, right: string): boolean {
-  const a = path.resolve(left);
-  const b = path.resolve(right);
+  const a = realpathWithFallback(path.resolve(left));
+  const b = realpathWithFallback(path.resolve(right));
   return process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 

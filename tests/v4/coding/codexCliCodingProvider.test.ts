@@ -3,7 +3,7 @@
  * Licensed under AGPL-3.0. See LICENSE for details.
  */
 
-import { mkdtemp, mkdir, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -43,9 +43,10 @@ describe('supported structured coding CLI provider', () => {
     await mkdir(path.dirname(compatible), { recursive: true });
     await writeFile(ambient, 'ambient', 'utf8');
     await writeFile(compatible, 'compatible', 'utf8');
+    const compatibleResolved = await realpath(compatible);
     const probe = vi.fn(async (executable: string, args: readonly string[]) => {
       if (args[0] === '--version') {
-        return executable === compatible
+        return executable === compatibleResolved
           ? { code: 0, stdout: 'codex-cli 0.147.0-alpha.6.6\n', stderr: '' }
           : { code: 0, stdout: 'codex-cli 0.130.0-alpha.5\n', stderr: '' };
       }
@@ -63,7 +64,7 @@ describe('supported structured coding CLI provider', () => {
 
       expect(await provider.detect()).toMatchObject({
         available: true,
-        executable: compatible,
+        executable: compatibleResolved,
         source: 'known_installation',
       });
       expect(await provider.version()).toMatchObject({ normalized: '0.147.0', supported: true });
