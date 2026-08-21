@@ -33,11 +33,12 @@ export interface WorkbenchAppsSnapshot {
   providers: WorkbenchAppProvider[];
   toolkits: WorkbenchAppToolkit[];
   accounts: WorkbenchConnectedAccount[];
-  configuration: { command: string };
+  configuration: { workbench: boolean; command?: string };
 }
 
 export interface WorkbenchAppsPort {
   snapshot(): Promise<WorkbenchAppsSnapshot>;
+  configureProvider(input: { providerId: string; credential: string }): Promise<WorkbenchAppProvider>;
   connect(input: { providerId: string; toolkitId: string; label?: string }): Promise<{
     connectionId: string;
     authorizationUrl?: string;
@@ -120,7 +121,19 @@ export function createWorkbenchAppsPort(runtime: IntegrationRuntime): WorkbenchA
         providers,
         toolkits,
         accounts: runtime.accounts.list({ ...scope, includeRevoked: true }).map(projectAccount),
-        configuration: { command: 'aiden apps configure composio' },
+        configuration: { workbench: true },
+      };
+    },
+    async configureProvider(input) {
+      const providerId = input.providerId.trim().toLowerCase();
+      await runtime.actions.configureProvider({ providerId, credential: input.credential, ...scope });
+      const provider = runtime.providers.require(providerId);
+      const health = await runtime.actions.providerHealth({ providerId, ...scope });
+      return {
+        id: provider.id,
+        label: provider.label,
+        health: health.state,
+        ...(health.detail ? { detail: health.detail } : {}),
       };
     },
     connect,

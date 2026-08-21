@@ -42,6 +42,10 @@ import type {
 } from './fileBridge';
 import type { Artifact } from '../daemon/artifactStore';
 import type { WorkbenchAppsPort } from './appsPort';
+import type { WorkbenchCodingPort } from './codingPort';
+import type { WorkbenchProviderSetupAuthority } from './providerSetupAuthority';
+import type { SystemReadinessProjection } from './systemReadiness';
+import type { WorkbenchLiveExecutionPort } from './liveExecution';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -197,6 +201,11 @@ export interface WorkbenchBrowserController {
   clear(jobId: string): unknown | Promise<unknown>;
 }
 
+export interface WorkbenchBrowserSetupPort {
+  snapshot(): Promise<{ ready: boolean; detail: string; grantRequired: boolean; permissions: string[] }>;
+  grant(input: { confirmed: boolean }): Promise<{ ready: boolean; detail: string; grantRequired: boolean; permissions: string[] }>;
+}
+
 export interface WorkbenchBridgeOptions {
   /** Read port over the shared run-event store (a RunStore satisfies this). */
   reader:      RunEventReader;
@@ -219,6 +228,16 @@ export interface WorkbenchBridgeOptions {
   browser?: WorkbenchBrowserController;
   /** Safe connected-account projection and commands over the shared integration authority. */
   apps?: WorkbenchAppsPort;
+  /** Durable external coding projection and explicit review decisions. */
+  coding?: WorkbenchCodingPort;
+  /** Safe provider/model management over runtime, config, OAuth and secret authorities. */
+  providerSetup?: WorkbenchProviderSetupAuthority;
+  /** Aggregate product-readiness projection; never owns execution. */
+  readiness?: { snapshot(sessionId?: string): Promise<SystemReadinessProjection> };
+  /** Read-only normalized projection over the exact selected durable execution. */
+  liveExecution?: WorkbenchLiveExecutionPort;
+  /** Exact browser-plugin grant adapter. */
+  browserSetup?: WorkbenchBrowserSetupPort;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -384,13 +403,20 @@ async function serveStatic(res: http.ServerResponse, staticDir: string, urlPath:
   if (full !== rootAbs && !full.startsWith(rootAbs + path.sep)) { sendJson(res, 403, { error: 'forbidden' }); return true; }
 
   const ext = path.extname(full).toLowerCase();
-  const writeFile = (buf: Buffer, type: string): void => {
-    res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length });
+  const writeFile = (buf: Buffer, type: string, dynamicHtml = false): void => {
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Content-Length': buf.length,
+      ...(dynamicHtml ? { 'Cache-Control': 'no-store' } : {}),
+    });
     res.end(buf);
   };
   try {
     const buf = await fs.promises.readFile(full);
-    if (ext === '.html') { writeFile(Buffer.from(injectToken(buf.toString('utf8'), token), 'utf8'), STATIC_MIME['.html']); return true; }
+    if (ext === '.html') {
+      writeFile(Buffer.from(injectToken(buf.toString('utf8'), token), 'utf8'), STATIC_MIME['.html'], true);
+      return true;
+    }
     writeFile(buf, STATIC_MIME[ext] ?? 'application/octet-stream');
     return true;
   } catch {
@@ -398,7 +424,7 @@ async function serveStatic(res: http.ServerResponse, staticDir: string, urlPath:
     if (!ext) {
       try {
         const idx = await fs.promises.readFile(path.join(rootAbs, 'index.html'));
-        writeFile(Buffer.from(injectToken(idx.toString('utf8'), token), 'utf8'), STATIC_MIME['.html']);
+        writeFile(Buffer.from(injectToken(idx.toString('utf8'), token), 'utf8'), STATIC_MIME['.html'], true);
         return true;
       } catch { return false; }
     }
@@ -463,8 +489,25 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       handleBrowserControl(req, res, browserControlMatch[1], browserControlMatch[2] as 'take' | 'return' | 'clear');
       return;
     }
+    const codingDecisionMatch = url.pathname.match(/^\/api\/coding\/promotions\/([^/]+)\/(apply|discard)$/);
+    if (req.method === 'POST' && codingDecisionMatch) {
+      handleCodingDecision(req, res, codingDecisionMatch[1], codingDecisionMatch[2] as 'apply' | 'discard');
+      return;
+    }
+    const codingUnknownDiscardMatch = url.pathname.match(/^\/api\/coding\/sessions\/([^/]+)\/discard$/);
+    if (req.method === 'POST' && codingUnknownDiscardMatch) {
+      handleUnknownCodingDiscard(req, res, codingUnknownDiscardMatch[1]);
+      return;
+    }
     if (req.method === 'POST' && url.pathname === '/api/apps/connect') {
       handleAppsConnect(req, res); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/coding/configure') {
+      handleCodingConfigure(req, res); return;
+    }
+    const appProviderConfigureMatch = url.pathname.match(/^\/api\/apps\/providers\/([^/]+)\/configure$/);
+    if (req.method === 'POST' && appProviderConfigureMatch) {
+      handleAppsProviderConfigure(req, res, appProviderConfigureMatch[1]); return;
     }
     const appConnectionMatch = url.pathname.match(/^\/api\/apps\/connections\/([^/]+)\/complete$/);
     if (req.method === 'POST' && appConnectionMatch) {
@@ -474,6 +517,24 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && appAccountMatch) {
       handleAppsAccount(req, res, appAccountMatch[1], appAccountMatch[2] as 'refresh' | 'reconnect' | 'disconnect');
       return;
+    }
+    const providerCommandMatch = url.pathname.match(/^\/api\/providers\/([^/]+)\/(connect|replace-credential|test|disconnect|refresh-models)$/);
+    if (req.method === 'POST' && providerCommandMatch) {
+      handleProviderCommand(req, res, providerCommandMatch[1], providerCommandMatch[2] as 'connect' | 'replace-credential' | 'test' | 'disconnect' | 'refresh-models');
+      return;
+    }
+    const providerOAuthMatch = url.pathname.match(/^\/api\/providers\/([^/]+)\/oauth\/start$/);
+    if (req.method === 'POST' && providerOAuthMatch) {
+      handleProviderOAuth(req, res, providerOAuthMatch[1]); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/providers/model/session') {
+      handleProviderModelChange(req, res, 'session'); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/providers/model/default') {
+      handleProviderModelChange(req, res, 'default'); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/browser/setup/grant') {
+      handleBrowserGrant(req, res); return;
     }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
@@ -555,6 +616,39 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         });
       return;
     }
+    if (url.pathname === '/api/providers') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.providerSetup) { sendJson(res, 503, { error: 'provider setup is unavailable' }); return; }
+      const sessionId = url.searchParams.get('sessionId') ?? undefined;
+      void opts.providerSetup.snapshot(sessionId)
+        .then((snapshot) => sendJson(res, 200, snapshot))
+        .catch(() => sendJson(res, 503, { error: 'provider setup is temporarily unavailable' }));
+      return;
+    }
+    const authSessionMatch = url.pathname.match(/^\/api\/providers\/auth-sessions\/([^/]+)$/);
+    if (authSessionMatch) {
+      if (!passesTokenGate(req, res)) return;
+      const session = opts.providerSetup?.authSession(decodeURIComponent(authSessionMatch[1]));
+      sendJson(res, session ? 200 : 404, session ?? { error: 'authentication session not found' });
+      return;
+    }
+    if (url.pathname === '/api/workbench/readiness') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.readiness) { sendJson(res, 503, { error: 'readiness projection is unavailable' }); return; }
+      const sessionId = url.searchParams.get('sessionId') ?? undefined;
+      void opts.readiness.snapshot(sessionId)
+        .then((snapshot) => sendJson(res, 200, snapshot))
+        .catch(() => sendJson(res, 503, { error: 'readiness projection is temporarily unavailable' }));
+      return;
+    }
+    if (url.pathname === '/api/browser/setup') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.browserSetup) { sendJson(res, 503, { error: 'browser setup is unavailable' }); return; }
+      void opts.browserSetup.snapshot()
+        .then((snapshot) => sendJson(res, 200, snapshot))
+        .catch(() => sendJson(res, 503, { error: 'browser setup is temporarily unavailable' }));
+      return;
+    }
     const artifactContentMatch = url.pathname.match(/^\/api\/artifacts\/([^/]+)\/content$/);
     if (artifactContentMatch) {
       if (!passesTokenGate(req, res)) return;
@@ -581,10 +675,49 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         : { error: 'durable projection not found' });
       return;
     }
+    const liveExecutionMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/live-execution$/);
+    if (liveExecutionMatch) {
+      if (!opts.liveExecution) { sendJson(res, 503, { error: 'live execution projection unavailable' }); return; }
+      const jobId = decodeURIComponent(liveExecutionMatch[1]);
+      const attemptId = url.searchParams.get('attemptId')?.trim() ?? '';
+      const generation = Number(url.searchParams.get('generation'));
+      const runId = Number(url.searchParams.get('runId'));
+      if (!attemptId || !Number.isSafeInteger(generation) || generation < 1
+        || !Number.isSafeInteger(runId) || runId < 0) {
+        sendJson(res, 400, { error: 'exact attemptId, generation, and runId are required' }); return;
+      }
+      const projection = opts.liveExecution.get({ jobId, attemptId, generation, runId });
+      sendJson(res, projection ? 200 : 404, projection ?? { error: 'exact live execution projection not found' });
+      return;
+    }
     const browserStateMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/browser$/);
     if (browserStateMatch) {
       if (!opts.browser) { sendJson(res, 503, { error: 'browser authority unavailable' }); return; }
       sendJson(res, 200, { browser: opts.browser.get(decodeURIComponent(browserStateMatch[1])) });
+      return;
+    }
+    const codingStateMatch = url.pathname.match(/^\/api\/jobs\/([^/]+)\/coding$/);
+    if (codingStateMatch) {
+      if (!opts.coding) { sendJson(res, 503, { error: 'coding session projection unavailable' }); return; }
+      sendJson(res, 200, { sessions: opts.coding.list(decodeURIComponent(codingStateMatch[1])) });
+      return;
+    }
+    if (url.pathname === '/api/coding/health') {
+      if (!opts.coding) { sendJson(res, 503, { error: 'coding health unavailable' }); return; }
+      void opts.coding.health()
+        .then((health) => sendJson(res, 200, health))
+        .catch((error) => sendJson(res, 503, { error: error instanceof Error ? error.message : 'coding health unavailable' }));
+      return;
+    }
+    const codingReviewMatch = url.pathname.match(/^\/api\/coding\/promotions\/([^/]+)\/review$/);
+    if (codingReviewMatch) {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.coding) { sendJson(res, 503, { error: 'coding review unavailable' }); return; }
+      void opts.coding.review(decodeURIComponent(codingReviewMatch[1]))
+        .then((review) => sendJson(res, 200, review))
+        .catch((error) => sendJson(res, 404, {
+          error: error instanceof Error ? error.message : String(error),
+        }));
       return;
     }
 
@@ -707,7 +840,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/apps', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/apps/connect', 'POST /api/apps/connections/:connectionId/complete', 'POST /api/apps/accounts/:accountId/refresh', 'POST /api/apps/accounts/:accountId/reconnect', 'POST /api/apps/accounts/:accountId/disconnect'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect'],
     });
   });
 
@@ -800,6 +933,114 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     const message = error instanceof Error ? error.message : 'Apps request failed';
     const status = /outside the current workspace|not available|not found/i.test(message) ? 404 : 400;
     sendJson(res, status, { error: message.slice(0, 500) });
+  }
+
+  function managementError(error: unknown, sensitive: readonly string[] = []): string {
+    let message = error instanceof Error ? error.message : 'Request failed';
+    for (const value of sensitive) {
+      if (value) message = message.split(value).join('[redacted]');
+    }
+    return message
+      .replace(/(?:sk|gsk|key|token|secret)[-_][A-Za-z0-9._-]{4,}/gi, '[redacted]')
+      .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+      .slice(0, 500);
+  }
+
+  function handleProviderCommand(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawProviderId: string,
+    command: 'connect' | 'replace-credential' | 'test' | 'disconnect' | 'refresh-models',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.providerSetup) { sendJson(res, 503, { error: 'provider setup is unavailable' }); return; }
+    const providerId = decodeURIComponent(rawProviderId);
+    readJsonBody(req, 300 * 1024).then(async (body) => {
+      const modelId = typeof body.modelId === 'string' ? body.modelId.trim() : '';
+      const credential = typeof body.credential === 'string' ? body.credential : undefined;
+      try {
+        if (command === 'disconnect') {
+          sendJson(res, 200, await opts.providerSetup!.disconnect(providerId)); return;
+        }
+        if (command === 'refresh-models') {
+          sendJson(res, 200, await opts.providerSetup!.refreshModels(providerId)); return;
+        }
+        if (!modelId) { sendJson(res, 400, { error: 'modelId is required' }); return; }
+        if (command === 'test') {
+          sendJson(res, 200, await opts.providerSetup!.test({ providerId, modelId, ...(credential ? { credential } : {}) }));
+          return;
+        }
+        if (!credential) { sendJson(res, 400, { error: 'credential is required' }); return; }
+        const result = command === 'connect'
+          ? await opts.providerSetup!.connectApiKey({ providerId, modelId, credential })
+          : await opts.providerSetup!.replaceCredential({ providerId, modelId, credential });
+        sendJson(res, 200, result);
+      } catch (error) { sendJson(res, 400, { error: managementError(error, credential ? [credential] : []) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleCodingConfigure(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.coding) { sendJson(res, 503, { error: 'External coding is unavailable' }); return; }
+    readJsonBody(req, 8 * 1024).then(async (body) => {
+      const model = typeof body.model === 'string' ? body.model.trim() : '';
+      if (!model) { sendJson(res, 400, { error: 'model is required' }); return; }
+      try { sendJson(res, 200, await opts.coding!.configure({ model })); }
+      catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleProviderOAuth(req: http.IncomingMessage, res: http.ServerResponse, rawProviderId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.providerSetup) { sendJson(res, 503, { error: 'provider setup is unavailable' }); return; }
+    req.resume();
+    void opts.providerSetup.startOAuth(decodeURIComponent(rawProviderId))
+      .then((session) => sendJson(res, 202, session))
+      .catch((error) => sendJson(res, 400, { error: managementError(error) }));
+  }
+
+  function handleProviderModelChange(req: http.IncomingMessage, res: http.ServerResponse, scope: 'session' | 'default'): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.providerSetup) { sendJson(res, 503, { error: 'provider setup is unavailable' }); return; }
+    readJsonBody(req, 16 * 1024).then(async (body) => {
+      const providerId = typeof body.providerId === 'string' ? body.providerId.trim() : '';
+      const modelId = typeof body.modelId === 'string' ? body.modelId.trim() : '';
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : '';
+      if (!providerId || !modelId || (scope === 'session' && !sessionId)) {
+        sendJson(res, 400, { error: scope === 'session' ? 'sessionId, providerId and modelId are required' : 'providerId and modelId are required' });
+        return;
+      }
+      try {
+        const result = scope === 'session'
+          ? await opts.providerSetup!.setSessionModel({ sessionId, providerId, modelId })
+          : await opts.providerSetup!.setDefaultModel({ providerId, modelId });
+        sendJson(res, 200, result);
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleAppsProviderConfigure(req: http.IncomingMessage, res: http.ServerResponse, rawProviderId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.apps) { sendJson(res, 503, { error: 'Apps are unavailable' }); return; }
+    readJsonBody(req, 300 * 1024).then(async (body) => {
+      const credential = typeof body.credential === 'string' ? body.credential : '';
+      if (!credential.trim()) { sendJson(res, 400, { error: 'credential is required' }); return; }
+      try {
+        sendJson(res, 200, await opts.apps!.configureProvider({
+          providerId: decodeURIComponent(rawProviderId), credential,
+        }));
+      } catch (error) { sendJson(res, 400, { error: managementError(error, [credential]) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleBrowserGrant(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.browserSetup) { sendJson(res, 503, { error: 'browser setup is unavailable' }); return; }
+    readJsonBody(req, 4 * 1024).then(async (body) => {
+      if (body.confirmed !== true) { sendJson(res, 400, { error: 'browser permission grant requires confirmed=true' }); return; }
+      try { sendJson(res, 200, await opts.browserSetup!.grant({ confirmed: true })); }
+      catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 
   function handleAppsConnect(req: http.IncomingMessage, res: http.ServerResponse): void {
@@ -993,8 +1234,12 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         sendJson(res, 400, { error: 'decision must be approved, denied, or cancelled' });
         return;
       }
-      const result = opts.approval!.decide(approvalId, decision);
-      sendJson(res, result.accepted ? 202 : 409, result);
+      try {
+        const result = opts.approval!.decide(approvalId, decision);
+        sendJson(res, result.accepted ? 202 : 409, result);
+      } catch {
+        sendJson(res, 409, { accepted: false, error: 'Approval is no longer actionable' });
+      }
     }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 
@@ -1040,6 +1285,56 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       log(`browser ${action} failed: ${message}`);
       sendJson(res, 409, { accepted: false, error: message });
     });
+  }
+
+  function handleCodingDecision(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawPromotionId: string,
+    decision: 'apply' | 'discard',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.coding) { sendJson(res, 503, { error: 'coding review unavailable' }); return; }
+    readJsonBody(req, 4 * 1024).then(async (body) => {
+      if (body.confirmed !== true) {
+        sendJson(res, 400, { error: `${decision} requires confirmed=true` });
+        return;
+      }
+      try {
+        const promotionId = decodeURIComponent(rawPromotionId);
+        const result = decision === 'apply'
+          ? await opts.coding!.apply(promotionId)
+          : await opts.coding!.discard(promotionId);
+        sendJson(res, 202, { accepted: true, result });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`coding ${decision} failed: ${message}`);
+        sendJson(res, 409, { accepted: false, error: message });
+      }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleUnknownCodingDiscard(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawCodingSessionId: string,
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.coding) { sendJson(res, 503, { error: 'coding reconciliation unavailable' }); return; }
+    readJsonBody(req, 4 * 1024).then(async (body) => {
+      if (body.confirmed !== true) {
+        sendJson(res, 400, { error: 'discard requires confirmed=true' });
+        return;
+      }
+      try {
+        const result = await opts.coding!.discardUnknown(decodeURIComponent(rawCodingSessionId));
+        sendJson(res, 202, { accepted: true, result });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        log(`coding reconciliation discard failed: ${message}`);
+        sendJson(res, 409, { accepted: false, error: message });
+      }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 
   return new Promise<WorkbenchBridge>((resolve, reject) => {

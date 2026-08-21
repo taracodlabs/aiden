@@ -13,6 +13,7 @@ import type {
   EvidenceRecord,
   JobVerdictRecord,
 } from '../daemon/jobProofAuthority';
+import { operatorStatusMessage } from '../operatorStatusMessage';
 
 export type WorkbenchProjectionStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -97,15 +98,6 @@ export function projectWorkbenchStatus(job: JobRecord, verdict: JobVerdictRecord
 
 function array(value: unknown): unknown[] { return Array.isArray(value) ? value : []; }
 
-function safeFailureText(value: unknown): string | null {
-  if (typeof value !== 'string' || !value.trim()) return null;
-  const firstLine = value.split(/\r?\n/u)[0]!.trim();
-  return firstLine
-    .replace(/\b(?:bearer|api[_-]?key|token|authorization)\s*[:=]\s*\S+/ig, '$1: [redacted]')
-    .replace(/\s+/g, ' ')
-    .slice(0, 320);
-}
-
 function failureSummary(
   status: WorkbenchProjectionStatus,
   job: JobRecord,
@@ -117,12 +109,10 @@ function failureSummary(
   }
   for (const event of [...timeline].reverse()) {
     const payload = event.payload ?? {};
-    const detail = safeFailureText(
-      payload.error ?? payload.invocationError ?? payload.reason ?? payload.lastError,
-    );
-    if (detail) return detail;
+    const raw = payload.error ?? payload.invocationError ?? payload.reason ?? payload.lastError;
+    if (typeof raw === 'string' && raw.trim()) return operatorStatusMessage(raw, status);
   }
-  return job.finishReason ?? verdict?.verdict ?? status;
+  return operatorStatusMessage(job.finishReason, verdict?.verdict ?? status);
 }
 
 /** Build a read-only projection from existing durable authorities. */

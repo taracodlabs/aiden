@@ -33,6 +33,17 @@ export function normalizeActiveJobStatus(value: string): ActiveJobView['status']
     : 'state_unknown';
 }
 
+/** Only durable states that can still produce foreground execution updates may
+ * own the composer lock. Blocked and uncertain Jobs remain visible in Active
+ * Work, but they are not evidence that a process is still executing. */
+export function isForegroundExecutionStatus(status: ActiveJobView['status']): boolean {
+  return status !== 'blocked' && status !== 'state_unknown' && status !== 'terminal';
+}
+
+export function foregroundExecutionCount(jobs: readonly ActiveJobView[]): number {
+  return jobs.filter((job) => isForegroundExecutionStatus(job.status)).length;
+}
+
 export interface WorkbenchControllerSnapshot {
   selected: WorkbenchSelection;
   activeJobs: ActiveJobView[];

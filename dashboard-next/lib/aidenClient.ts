@@ -183,6 +183,56 @@ export interface WorkbenchRunProjection {
   assistantOutput?: Array<{ eventId: number; sequence: number; text: string }>;
 }
 
+export type ExecutionSurfaceKind = 'terminal' | 'browser' | 'workspace' | 'changes' | 'validation' | 'artifact' | 'app_action';
+export type ExecutionSurfaceStatus = 'declared' | 'attaching' | 'live' | 'waiting' | 'paused' | 'disconnected' | 'closed' | 'failed';
+
+export interface WorkbenchExecutionSurface {
+  surfaceId: string;
+  jobId: string;
+  attemptId: string;
+  generation: number;
+  runId: number;
+  kind: ExecutionSurfaceKind;
+  title: string;
+  status: ExecutionSurfaceStatus;
+  interactive: boolean;
+  owner: Record<string, string | number | null>;
+  eventCursor: number;
+  streamCursor: number;
+  snapshotRef: string | null;
+  createdAt: number;
+  updatedAt: number;
+  terminal?: {
+    terminalId: string; processState: string; mode: 'structured' | 'pty'; cwd: string | null;
+    readOnly: true; latestStreamSeq: number; truncated: boolean;
+    chunks: Array<{ streamSeq: number; stream: 'stdout' | 'stderr' | 'pty'; data: string; timestamp: number }>;
+  };
+  browser?: {
+    browserSessionId: string; tabId: string | null; url: string | null; title: string | null;
+    navigationStatus: string; snapshotId: string | null; captureAgeMs: number | null; stale: boolean;
+    frame: { artifactId: string; capturedAt: number } | null;
+  };
+  workspace?: { workspaceId: string | null; leaseId: string; baseHead: string; baseBranch: string | null; state: string };
+  changes?: { paths: string[]; count: number; source: 'reconciliation' };
+  validation?: { refs: string[]; count: number; verified: boolean };
+  artifact?: { ids: string[]; names: string[]; count: number };
+  appAction?: { eventId: number; provider: string; action: string; state: string };
+}
+
+export interface WorkbenchLiveExecutionProjection {
+  schemaVersion: 1;
+  job: { jobId: string; attemptId: string; generation: number; runId: number; status: string; terminal: boolean };
+  connection: 'live' | 'settled' | 'degraded';
+  activeSurface: WorkbenchExecutionSurface | null;
+  surfaces: WorkbenchExecutionSurface[];
+  progress: Array<{ id: string; sequence: number; type: string; status: string | null; summary: string | null; createdAt: number }>;
+  approvals: unknown[];
+  artifacts: WorkbenchArtifact[];
+  evidence: unknown[];
+  eventCursor: number;
+  projectedAt: number;
+}
+
 export interface WorkbenchAttachment {
   id: string;
   name: string;
@@ -202,6 +252,25 @@ export interface WorkbenchArtifact {
   createdAt: number;
   bytes: number | null;
   preview: string | null;
+}
+
+export interface ExternalCodingHealth {
+  ready: boolean;
+  state: 'ready' | 'provider_unreachable' | 'unsupported_cli' | 'authentication_missing'
+    | 'authentication_invalid' | 'not_configured' | 'unsupported_model'
+    | 'model_unavailable_for_auth_mode' | 'sandbox_unavailable' | 'not_checked';
+  provider: string;
+  executable: string | null;
+  executableSource: 'explicit' | 'path' | 'known_installation' | 'unavailable';
+  version: string;
+  model: string | null;
+  modelValidation: 'ready' | 'unsupported_model' | 'model_unavailable_for_auth_mode' | 'authentication_missing' | 'authentication_invalid' | 'provider_unreachable' | 'unsupported_cli' | 'not_configured' | 'not_checked';
+  authentication: string;
+  authenticationMode: 'api_key' | 'chatgpt_account' | 'not_configured' | 'unknown';
+  isolation: 'available' | 'unavailable';
+  network: 'disabled_by_default';
+  reason: string;
+  unsupportedAmbient?: { executable: string; version: string } | null;
 }
 
 export interface WorkbenchCapabilities {
@@ -238,7 +307,7 @@ export interface WorkbenchAppsSnapshot {
   providers: WorkbenchAppProvider[];
   toolkits: WorkbenchAppToolkit[];
   accounts: WorkbenchConnectedAccount[];
-  configuration: { command: string };
+  configuration: { workbench: boolean; command?: string };
 }
 
 export interface WorkbenchAppConnection {
@@ -246,6 +315,83 @@ export interface WorkbenchAppConnection {
   authorizationUrl?: string;
   userCode?: string;
   expiresAt?: number;
+}
+
+export interface WorkbenchProviderModel {
+  id: string;
+  displayName: string;
+  contextLength?: number;
+  supportsToolCalling?: boolean;
+  supportsVision?: boolean;
+  supportsReasoning?: boolean;
+  available: boolean;
+}
+
+export interface WorkbenchProviderProjection {
+  id: string;
+  displayName: string;
+  description: string;
+  authKinds: Array<'oauth' | 'api_key' | 'local' | 'device_code' | 'subscription' | 'none'>;
+  requiredFields: string[];
+  actions: Array<'connect' | 'disconnect' | 'replaceCredential' | 'test' | 'refreshModels'>;
+  connectionState: 'connected' | 'not_configured' | 'needs_attention' | 'local_ready' | 'local_unavailable';
+  configured: boolean;
+  healthy: boolean;
+  credentialHint?: string;
+  account?: string;
+  models: WorkbenchProviderModel[];
+  currentModel: string | null;
+  default: boolean;
+  detail?: string;
+}
+
+export interface WorkbenchProviderSnapshot {
+  providers: WorkbenchProviderProjection[];
+  defaultSelection: { providerId: string; modelId: string } | null;
+  sessionSelection: { sessionId: string; providerId: string; modelId: string } | null;
+  secretStorage: { backend: string; available: boolean; protectedByOs: boolean; detail: string };
+}
+
+export interface WorkbenchAuthSession {
+  authSessionId: string;
+  providerId: string;
+  method: 'oauth' | 'device_code';
+  state: 'starting' | 'waiting_for_user' | 'connected' | 'failed' | 'expired';
+  createdAt: number;
+  expiresAt: number;
+  verificationUri?: string;
+  userCode?: string;
+  account?: string;
+  detail?: string;
+}
+
+export interface SystemReadinessItem {
+  id: string;
+  category: 'chat' | 'coding' | 'browser' | 'validation' | 'apps' | 'workspace' | 'approvals' | 'evidence';
+  state: 'ready' | 'setup_available' | 'needs_setup' | 'needs_attention' | 'unavailable' | 'checking' | 'degraded';
+  title: string;
+  detail: string;
+  configured: boolean;
+  available: boolean;
+  healthy: boolean;
+  blocking: boolean;
+  severity: 'info' | 'warning' | 'error';
+  availableActions: string[];
+  checkedAt: number;
+}
+
+export interface SystemReadinessProjection {
+  overall: 'ready' | 'needs_attention';
+  items: SystemReadinessItem[];
+  issues: SystemReadinessItem[];
+  checkedAt: number;
+}
+
+export interface WorkbenchBrowserSetup {
+  ready: boolean;
+  detail: string;
+  grantRequired: boolean;
+  permissions: string[];
 }
 
 export interface WorkbenchBrowserSession {
@@ -266,6 +412,66 @@ export interface WorkbenchBrowserSession {
   createdAt: number;
   updatedAt: number;
   closedAt: number | null;
+}
+
+export interface WorkbenchCodingPromotion {
+  promotionId: string;
+  state: 'prepared' | 'approval_required' | 'approved' | 'applying' | 'applied' | 'blocked_drift' | 'rejected' | 'unknown';
+  changedPaths: string[];
+  validationRefs: string[];
+  blockedReason: string | null;
+}
+
+export interface WorkbenchCodingSession {
+  codingSessionId: string;
+  childJobId: string;
+  childAttemptId: string;
+  generation: number;
+  assignmentId: string;
+  workerRunId: string;
+  state: string;
+  reconciliationState: string;
+  provider: { id: string; version: string; protocolMode: string; protocolVersion: string; capabilityDigest: string };
+  workspace: { workspaceLeaseId: string; state: string; baseHead: string; baseBranch: string | null } | null;
+  process: { state: string; exitCode: number | null; exitSignal: string | null; treeDeadVerified: boolean } | null;
+  events: Array<{ eventId: string; sequence: number; type: string; payload: Record<string, unknown>; createdAt: number }>;
+  changedPaths: string[];
+  mutationState: string | null;
+  reconciliation: {
+    actualOutcomeKnown: boolean;
+    providerReportMatches: boolean;
+    actualChangedFiles: string[];
+    reportedChangedFiles: string[];
+    mismatchReasons: string[];
+    protectedPathsIntact: boolean;
+    workspaceContained: boolean;
+    safeForIndependentValidation: boolean;
+    processTreeSettled: boolean | null;
+  } | null;
+  promotion: WorkbenchCodingPromotion | null;
+  validationRefs: string[];
+  createdAt: number;
+  startedAt: number | null;
+  lastActivityAt: number;
+  terminalAt: number | null;
+}
+
+export interface WorkbenchCodingReviewFile {
+  path: string;
+  operation: 'create' | 'update' | 'delete';
+  before: string | null;
+  after: string | null;
+  beforeHash: string | null;
+  afterHash: string | null;
+  truncated: boolean;
+}
+
+export interface WorkbenchCodingReview {
+  promotionId: string;
+  codingSessionId: string;
+  state: string;
+  files: WorkbenchCodingReviewFile[];
+  truncated: boolean;
 }
 
 export function assistantOutputText(projection: WorkbenchRunProjection): string {
@@ -541,8 +747,9 @@ export async function uploadAttachment(file: File): Promise<WorkbenchAttachment>
   return { id: body.id, name: body.name, mime: body.mime || file.type || 'application/octet-stream', size: body.size };
 }
 
-export async function listArtifacts(runId: number): Promise<WorkbenchArtifact[]> {
-  const response = await fetch(`/api/artifacts?runId=${encodeURIComponent(String(runId))}`, {
+export async function listArtifacts(runId?: number): Promise<WorkbenchArtifact[]> {
+  const query = runId === undefined ? '' : `?runId=${encodeURIComponent(String(runId))}`;
+  const response = await fetch(`/api/artifacts${query}`, {
     cache: 'no-store', headers: { 'x-workbench-token': token() },
   });
   if (response.status === 503) return [];
@@ -598,8 +805,97 @@ async function appsRequest<T>(path: string, init?: RequestInit): Promise<T> {
   return body;
 }
 
+async function managementRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    cache: 'no-store',
+    ...init,
+    headers: {
+      ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+      'x-workbench-token': token(),
+      ...(init?.headers ?? {}),
+    },
+  });
+  const body = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(body.error || `Workbench setup request failed (HTTP ${response.status})`);
+  return body;
+}
+
+export function loadProviderSetup(sessionId?: string): Promise<WorkbenchProviderSnapshot> {
+  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+  return managementRequest<WorkbenchProviderSnapshot>(`/api/providers${query}`);
+}
+
+export function connectProvider(input: { providerId: string; modelId: string; credential: string }): Promise<WorkbenchProviderProjection> {
+  return managementRequest<WorkbenchProviderProjection>(`/api/providers/${encodeURIComponent(input.providerId)}/connect`, {
+    method: 'POST', body: JSON.stringify({ modelId: input.modelId, credential: input.credential }),
+  });
+}
+
+export function replaceProviderCredential(input: { providerId: string; modelId: string; credential: string }): Promise<WorkbenchProviderProjection> {
+  return managementRequest<WorkbenchProviderProjection>(`/api/providers/${encodeURIComponent(input.providerId)}/replace-credential`, {
+    method: 'POST', body: JSON.stringify({ modelId: input.modelId, credential: input.credential }),
+  });
+}
+
+export function testProvider(input: { providerId: string; modelId: string; credential?: string }): Promise<WorkbenchProviderProjection> {
+  return managementRequest<WorkbenchProviderProjection>(`/api/providers/${encodeURIComponent(input.providerId)}/test`, {
+    method: 'POST', body: JSON.stringify({ modelId: input.modelId, ...(input.credential ? { credential: input.credential } : {}) }),
+  });
+}
+
+export function disconnectProvider(providerId: string): Promise<WorkbenchProviderProjection> {
+  return managementRequest<WorkbenchProviderProjection>(`/api/providers/${encodeURIComponent(providerId)}/disconnect`, {
+    method: 'POST', body: JSON.stringify({ confirmed: true }),
+  });
+}
+
+export function refreshProviderModels(providerId: string): Promise<WorkbenchProviderProjection> {
+  return managementRequest<WorkbenchProviderProjection>(`/api/providers/${encodeURIComponent(providerId)}/refresh-models`, {
+    method: 'POST', body: JSON.stringify({}),
+  });
+}
+
+export function setSessionModel(input: { sessionId: string; providerId: string; modelId: string }): Promise<{ sessionId: string; providerId: string; modelId: string }> {
+  return managementRequest('/api/providers/model/session', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function setDefaultModel(input: { providerId: string; modelId: string }): Promise<{ providerId: string; modelId: string }> {
+  return managementRequest('/api/providers/model/default', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function startProviderOAuth(providerId: string): Promise<WorkbenchAuthSession> {
+  return managementRequest<WorkbenchAuthSession>(`/api/providers/${encodeURIComponent(providerId)}/oauth/start`, {
+    method: 'POST', body: JSON.stringify({}),
+  });
+}
+
+export function loadProviderAuthSession(authSessionId: string): Promise<WorkbenchAuthSession> {
+  return managementRequest<WorkbenchAuthSession>(`/api/providers/auth-sessions/${encodeURIComponent(authSessionId)}`);
+}
+
+export function loadSystemReadiness(sessionId?: string): Promise<SystemReadinessProjection> {
+  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : '';
+  return managementRequest<SystemReadinessProjection>(`/api/workbench/readiness${query}`);
+}
+
+export function loadBrowserSetup(): Promise<WorkbenchBrowserSetup> {
+  return managementRequest<WorkbenchBrowserSetup>('/api/browser/setup');
+}
+
+export function grantBrowserPermission(): Promise<WorkbenchBrowserSetup> {
+  return managementRequest<WorkbenchBrowserSetup>('/api/browser/setup/grant', {
+    method: 'POST', body: JSON.stringify({ confirmed: true }),
+  });
+}
+
 export function loadApps(): Promise<WorkbenchAppsSnapshot> {
   return appsRequest<WorkbenchAppsSnapshot>('/api/apps');
+}
+
+export function configureAppsProvider(input: { providerId: string; credential: string }): Promise<WorkbenchAppProvider> {
+  return appsRequest<WorkbenchAppProvider>(`/api/apps/providers/${encodeURIComponent(input.providerId)}/configure`, {
+    method: 'POST', body: JSON.stringify({ credential: input.credential }),
+  });
 }
 
 export function connectApp(input: {
@@ -652,6 +948,69 @@ export async function loadBrowserSession(jobId: string): Promise<WorkbenchBrowse
   return body.browser ?? null;
 }
 
+export async function loadCodingSessions(jobId: string): Promise<WorkbenchCodingSession[]> {
+  const response = await fetch(`/api/jobs/${encodeURIComponent(jobId)}/coding`, { cache: 'no-store' });
+  if (response.status === 404 || response.status === 503) return [];
+  if (!response.ok) throw new Error(`coding session projection unavailable (HTTP ${response.status})`);
+  const body = await response.json() as { sessions?: unknown };
+  return Array.isArray(body.sessions) ? body.sessions as WorkbenchCodingSession[] : [];
+}
+
+export async function loadExternalCodingHealth(): Promise<ExternalCodingHealth> {
+  const response = await fetch('/api/coding/health', { cache: 'no-store' });
+  const body = await response.json() as ExternalCodingHealth & { error?: string };
+  if (!response.ok) throw new Error(body.error || 'external coding health unavailable');
+  return body;
+}
+
+export async function configureExternalCoding(model: string): Promise<ExternalCodingHealth> {
+  const response = await fetch('/api/coding/configure', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+    body: JSON.stringify({ model }),
+  });
+  const body = await response.json() as ExternalCodingHealth & { error?: string };
+  if (!response.ok) throw new Error(body.error || 'external coding configuration failed');
+  return body;
+}
+
+export async function decideCodingPromotion(
+  promotionId: string,
+  decision: 'apply' | 'discard',
+): Promise<unknown> {
+  const response = await fetch(`/api/coding/promotions/${encodeURIComponent(promotionId)}/${decision}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+    body: JSON.stringify({ confirmed: true }),
+  });
+  const body = await response.json() as { accepted?: unknown; result?: unknown; error?: string };
+  if (!response.ok || body.accepted !== true) throw new Error(body.error || `coding ${decision} was not accepted`);
+  return body.result;
+}
+
+export async function discardUnknownCodingSession(codingSessionId: string): Promise<unknown> {
+  const response = await fetch(`/api/coding/sessions/${encodeURIComponent(codingSessionId)}/discard`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+    body: JSON.stringify({ confirmed: true }),
+  });
+  const body = await response.json() as { accepted?: unknown; result?: unknown; error?: string };
+  if (!response.ok || body.accepted !== true) {
+    throw new Error(body.error || 'coding reconciliation discard was not accepted');
+  }
+  return body.result;
+}
+
+export async function loadCodingReview(promotionId: string): Promise<WorkbenchCodingReview> {
+  const response = await fetch(`/api/coding/promotions/${encodeURIComponent(promotionId)}/review`, {
+    cache: 'no-store',
+    headers: { 'x-workbench-token': token() },
+  });
+  const body = await response.json() as WorkbenchCodingReview & { error?: string };
+  if (!response.ok) throw new Error(body.error || 'coding review unavailable');
+  return body;
+}
+
 export async function controlBrowserSession(
   jobId: string,
   action: 'take' | 'return' | 'clear',
@@ -682,6 +1041,23 @@ export async function loadRunProjection(jobId: string, attemptId?: string, runId
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`durable run projection unavailable (HTTP ${response.status})`);
   return response.json() as Promise<WorkbenchRunProjection>;
+}
+
+export async function loadLiveExecution(input: {
+  jobId: string; attemptId: string; generation: number; runId: number;
+}): Promise<WorkbenchLiveExecutionProjection | null> {
+  const query = new URLSearchParams({
+    attemptId: input.attemptId,
+    generation: String(input.generation),
+    runId: String(input.runId),
+  });
+  const response = await fetch(
+    `/api/jobs/${encodeURIComponent(input.jobId)}/live-execution?${query.toString()}`,
+    { cache: 'no-store' },
+  );
+  if (response.status === 404 || response.status === 503) return null;
+  if (!response.ok) throw new Error(`live execution projection unavailable (HTTP ${response.status})`);
+  return response.json() as Promise<WorkbenchLiveExecutionProjection>;
 }
 
 export async function loadRuntimeInfo(): Promise<WorkbenchRuntimeInfo> {
@@ -788,12 +1164,22 @@ function projectionMatches(handle: WorkbenchRunHandle, projection: WorkbenchRunP
 export type RestoredRunResolution =
   | { kind: 'missing' }
   | { kind: 'terminal'; projection: WorkbenchRunProjection; handle: WorkbenchRunHandle }
+  | { kind: 'inactive'; projection: WorkbenchRunProjection; handle: WorkbenchRunHandle }
   | { kind: 'active'; projection: WorkbenchRunProjection; handle: WorkbenchRunHandle };
 
 const NONTERMINAL_ATTEMPT_STATUSES = new Set([
   'queued', 'claimed', 'leased', 'running', 'waiting', 'paused',
   'cancelling', 'cancel_requested', 'recovering',
 ]);
+
+const RESTORABLE_ACTIVE_RECEIPT_STATUSES = new Set([
+  'queued', 'running', 'waiting', 'paused', 'cancelling',
+]);
+
+function restoredProjectionKind(projection: WorkbenchRunProjection): 'terminal' | 'inactive' | 'active' {
+  if (projection.receipt.terminal) return 'terminal';
+  return RESTORABLE_ACTIVE_RECEIPT_STATUSES.has(projection.receipt.status) ? 'active' : 'inactive';
+}
 
 function currentRecoveryHandle(
   handle: WorkbenchRunHandle,
@@ -835,12 +1221,9 @@ export async function reconcileRestoredRunHandle(handle: WorkbenchRunHandle): Pr
       currentHandle.admission.runId,
     );
     if (!currentProjection || !projectionMatches(currentHandle, currentProjection)) return { kind: 'missing' };
-    return currentProjection.receipt.terminal
-      ? { kind: 'terminal', projection: currentProjection, handle: currentHandle }
-      : { kind: 'active', projection: currentProjection, handle: currentHandle };
+    return { kind: restoredProjectionKind(currentProjection), projection: currentProjection, handle: currentHandle };
   }
-  if (projection.receipt.terminal) return { kind: 'terminal', projection, handle };
-  return { kind: 'active', projection, handle };
+  return { kind: restoredProjectionKind(projection), projection, handle };
 }
 
 async function readProjection(handle: WorkbenchRunHandle): Promise<{

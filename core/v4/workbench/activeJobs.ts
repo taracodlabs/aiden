@@ -8,6 +8,7 @@ import type { JobEngine, JobRecord } from '../daemon/jobEngine';
 import type { JobWaitAuthority } from '../daemon/jobWaitAuthority';
 import type { RunStore } from '../daemon/runStore';
 import type { TriggerBus } from '../daemon/triggerBus';
+import { operatorStatusMessage } from '../operatorStatusMessage';
 
 export type WorkbenchActiveStatus =
   | 'queued' | 'running' | 'waiting' | 'approval_required' | 'paused'
@@ -95,10 +96,10 @@ function semanticStatus(
     case 'paused': return { status: 'paused', statusDetail: 'Paused' };
     case 'cancelling': return { status: 'cancelling', statusDetail: 'Cancelling' };
     case 'recovering': return { status: 'recovering', statusDetail: 'Recovering' };
-    case 'blocked': return { status: 'blocked', statusDetail: job.finishReason ?? 'Blocked' };
+    case 'blocked': return { status: 'blocked', statusDetail: operatorStatusMessage(job.finishReason, 'Blocked') };
     case 'unknown':
     case 'crashed':
-      return { status: 'state_unknown', statusDetail: job.finishReason ?? 'State requires reconciliation' };
+      return { status: 'state_unknown', statusDetail: operatorStatusMessage(job.finishReason, 'State requires reconciliation') };
     default:
       return { status: 'state_unknown', statusDetail: `Unrecognized state: ${job.status}` };
   }

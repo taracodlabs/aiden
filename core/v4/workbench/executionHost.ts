@@ -20,6 +20,7 @@ import { sweepDurableJobRecovery } from '../daemon/jobRecoverySweep';
 import { reconcileWorkbenchQueue } from './queueReconciliation';
 import type { ActionAuthority } from '../actionAuthority';
 import { buildWorkbenchApprovalCallbacks } from './approvalBridge';
+import type { JobControlAuthority } from '../daemon/jobControlAuthority';
 
 export interface WorkbenchExecutionSnapshot {
   available: boolean;
@@ -43,6 +44,9 @@ export interface CreateWorkbenchExecutionHostOptions {
   triggerBus: TriggerBus;
   runStore: RunStore;
   jobEngine: JobEngine;
+  /** Shared with the Workbench command surface so persisted cancellation can
+   * abort the exact in-flight Attempt controller owned by the lifecycle. */
+  jobControlAuthority: JobControlAuthority;
   taskStore: TaskStore;
   artifactStore?: ArtifactStore;
   approvalAuthority?: ActionAuthority;
@@ -87,6 +91,7 @@ export function createWorkbenchExecutionHost(
         db: options.db,
         runStore: options.runStore,
         jobEngine: options.jobEngine,
+        jobControlAuthority: options.jobControlAuthority,
          taskStore: options.taskStore,
          artifactStore: options.artifactStore,
          sessionStore: options.sessionStore,
@@ -143,6 +148,14 @@ export function createWorkbenchExecutionHost(
       stopped = true;
       if (recoveryTimer) clearInterval(recoveryTimer);
       recoveryTimer = null;
+      if (options.approvalAuthority) {
+        for (const job of options.jobEngine.listJobs({ terminal: false, limit: 1_000 })) {
+          options.approvalAuthority.cancelPendingForJob(
+            job.id,
+            'Workbench execution host shutdown',
+          );
+        }
+      }
       if (dispatcher) await dispatcher.stop(timeoutMs);
     },
     snapshot() {

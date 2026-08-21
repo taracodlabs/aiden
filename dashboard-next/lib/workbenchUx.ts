@@ -5,6 +5,102 @@
 
 export type LiveActivityStatus = 'running' | 'ok' | 'failed' | 'warn';
 
+export type ArtifactPresentation = 'svg' | 'image' | 'text' | 'download';
+
+export function codingReconciliationNeedsAttention(state: string): boolean {
+  return state === 'required' || state === 'inspecting' || state === 'blocked_unknown';
+}
+
+export function artifactPresentationForMime(mime: string): ArtifactPresentation {
+  const normalized = mime.split(';', 1)[0]!.trim().toLowerCase();
+  if (normalized === 'image/svg+xml') return 'svg';
+  if (normalized.startsWith('image/')) return 'image';
+  if (normalized.startsWith('text/')
+    || normalized === 'application/json'
+    || normalized === 'application/xml'
+    || normalized.endsWith('+json')
+    || normalized.endsWith('+xml')) return 'text';
+  return 'download';
+}
+
+export interface ExactRunConversation<Message> {
+  jobId?: string;
+  attemptId?: string;
+  runId?: number;
+  messages: readonly Message[];
+}
+
+/** Resolve browser-persisted conversation content only through exact durable identity. */
+export function conversationForExactRun<Message, Conversation extends ExactRunConversation<Message>>(
+  conversations: readonly Conversation[],
+  identity: { jobId: string; attemptId: string; runId: number },
+): Conversation | null {
+  return conversations.find((conversation) => conversation.jobId === identity.jobId
+    && conversation.attemptId === identity.attemptId
+    && conversation.runId === identity.runId) ?? null;
+}
+
+export interface AppsProjectionAccount {
+  accountId: string; providerId: string; toolkitId: string; label: string;
+  status: string; health: string;
+}
+
+export interface AppsProjectionInput<Account extends AppsProjectionAccount = AppsProjectionAccount> {
+  providers: ReadonlyArray<{ id: string; health: string }>;
+  toolkits: ReadonlyArray<{ providerId: string; toolkitId: string; label: string }>;
+  accounts: ReadonlyArray<Account>;
+}
+
+export interface RecommendedAppCard<Account extends AppsProjectionAccount = AppsProjectionAccount> {
+  id: 'github' | 'gmail' | 'more';
+  label: string;
+  description: string;
+  toolkit: AppsProjectionInput<Account>['toolkits'][number] | null;
+  canConnect: boolean;
+  providerConfigured: boolean;
+  accounts: Array<Account & { needsReconnect: boolean }>;
+}
+
+/** Product-facing Apps cards backed only by exact provider/toolkit authority. */
+export function projectRecommendedApps<Account extends AppsProjectionAccount>(
+  input: AppsProjectionInput<Account>,
+): RecommendedAppCard<Account>[] {
+  const providerConfigured = input.providers.some(
+    (provider) => !['not_configured', 'unavailable'].includes(provider.health),
+  );
+  const exactToolkit = (id: string) => input.toolkits.find(
+    (toolkit) => toolkit.toolkitId.trim().toLowerCase() === id,
+  ) ?? null;
+  const card = (
+    id: 'github' | 'gmail', label: string, description: string,
+  ): RecommendedAppCard<Account> => {
+    const toolkit = exactToolkit(id);
+    return {
+      id,
+      label,
+      description,
+      toolkit,
+      canConnect: toolkit !== null,
+      providerConfigured,
+      accounts: input.accounts
+        .filter((account) => account.toolkitId.trim().toLowerCase() === id)
+        .map((account) => ({
+          ...account,
+          needsReconnect: account.status === 'revoked'
+            || ['expired', 'degraded', 'insufficient_scope'].includes(account.health),
+        })),
+    };
+  };
+  return [
+    card('github', 'GitHub', 'Repositories and issues'),
+    card('gmail', 'Gmail', 'Mail and drafts'),
+    {
+      id: 'more', label: 'More apps', description: 'Available through the configured Apps provider',
+      toolkit: null, canConnect: false, providerConfigured, accounts: [],
+    },
+  ];
+}
+
 export interface LiveActivityItem {
   /** Stable semantic identity, normally a ToolCall or Evidence identity. */
   id: string;
@@ -99,6 +195,15 @@ export interface WorkbenchApprovalCard {
   riskTier: string;
   state: string;
   requestedAt: number;
+  externalCoding: null | {
+    repository: string;
+    requestedScope: string[];
+    protectedPaths: string[];
+    networkPolicy: 'disabled';
+    packagePolicy: 'deny';
+    gitWriteOperations: 'disabled';
+    isolatedUntilPromotion: true;
+  };
 }
 
 const PENDING_APPROVAL_STATES = new Set(['created', 'displayed']);
@@ -116,6 +221,32 @@ function approvalTarget(value: unknown): string | null {
   const resources = (plan as { affectedResources?: unknown }).affectedResources;
   if (!Array.isArray(resources)) return null;
   return resources.map(text).find((resource): resource is string => resource !== null) ?? null;
+}
+
+function externalCodingApproval(value: unknown, toolName: string): WorkbenchApprovalCard['externalCoding'] {
+  if (toolName !== 'external_coding') return null;
+  let plan: unknown = value;
+  if (typeof plan === 'string') {
+    try { plan = JSON.parse(plan); } catch { return null; }
+  }
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) return null;
+  const record = plan as { cwd?: unknown; args?: unknown };
+  if (typeof record.cwd !== 'string' || !record.args || typeof record.args !== 'object' || Array.isArray(record.args)) {
+    return null;
+  }
+  const args = record.args as Record<string, unknown>;
+  const strings = (input: unknown): string[] => Array.isArray(input)
+    ? input.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : [];
+  return {
+    repository: record.cwd,
+    requestedScope: strings(args.allowed_scope),
+    protectedPaths: strings(args.protected_paths),
+    networkPolicy: 'disabled',
+    packagePolicy: 'deny',
+    gitWriteOperations: 'disabled',
+    isolatedUntilPromotion: true,
+  };
 }
 
 /** Translate the durable SQL projection into the narrow approval-card contract.
@@ -144,10 +275,23 @@ export function durableApprovalCards(rows: readonly WorkbenchApprovalRow[]): Wor
       riskTier,
       state,
       requestedAt: Number.isFinite(Number(row.requested_at)) ? Number(row.requested_at) : 0,
+      externalCoding: externalCodingApproval(row.normalized_execution_plan, toolName),
     }];
   }).sort((a, b) => a.requestedAt - b.requestedAt || a.approvalId.localeCompare(b.approvalId));
 }
 
 export function pendingApprovalCards(rows: readonly WorkbenchApprovalRow[]): WorkbenchApprovalCard[] {
   return durableApprovalCards(rows).filter((approval) => PENDING_APPROVAL_STATES.has(approval.state));
+}
+
+/** Bind actionable cards to the projection that supplied them. Browser-local
+ * selection is deliberately not part of this authority boundary. */
+export function pendingApprovalsForProjection(
+  rows: readonly WorkbenchApprovalRow[],
+  identity: { jobId: string; attemptId: string; generation?: number } | null | undefined,
+): WorkbenchApprovalCard[] {
+  if (!identity) return [];
+  return pendingApprovalCards(rows).filter((approval) => approval.jobId === identity.jobId
+    && approval.attemptId === identity.attemptId
+    && (identity.generation === undefined || approval.generation === identity.generation));
 }

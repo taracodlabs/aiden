@@ -3,7 +3,7 @@ import {
   useState, useEffect, useRef, useMemo, useCallback,
   createContext, useContext, Fragment,
   type Dispatch, type SetStateAction, type CSSProperties,
-  type ReactNode, type RefObject, type ChangeEvent,
+  type ReactNode, type RefObject, type ChangeEvent, type FormEvent,
 } from 'react'
 import Onboarding from '../components/Onboarding'
 import { OnboardingModal } from '../components/OnboardingModal'
@@ -11,11 +11,17 @@ import PricingModal from '../components/PricingModal'
 import ChatHeader from '../components/ChatHeader'
 import Sidebar from '../components/Sidebar'
 import WorkflowView from '../components/WorkflowView'
+import LiveExecutionTerminal from '../components/LiveExecutionTerminal'
 import * as aiden from '../lib/aidenClient'
 import { PUBLIC_SPONSORS, SPONSOR_URL } from '../lib/publicSponsors'
 import {
+  artifactPresentationForMime,
+  codingReconciliationNeedsAttention,
+  conversationForExactRun,
   mergeLiveActivity,
   pendingApprovalCards,
+  pendingApprovalsForProjection,
+  projectRecommendedApps,
   selectChatLiveActivity,
   shouldShowChatTelemetry,
   summarizeCompletedActivity,
@@ -24,12 +30,31 @@ import {
 import {
   WorkbenchController,
   emptySelection,
+  foregroundExecutionCount,
+  isForegroundExecutionStatus,
   normalizeActiveJobStatus,
   shouldAttachAdmission,
   selectionFromSearch,
   selectionToSearch,
+  type ActiveJobView,
   type WorkbenchSelection,
 } from '../lib/workbenchController'
+import {
+  groupActiveWork,
+  presentAssistantContent,
+  presentApproval,
+  presentResult,
+  presentRuntimeDetail,
+  presentRuntimeStatus,
+  projectAttentionItems,
+  projectSemanticProgress,
+} from '../lib/workbenchPresentation'
+import {
+  chooseLiveExecutionSurface,
+  liveExecutionAutoOpenKey,
+  shouldAutoOpenLiveExecution,
+  type LiveExecutionSelection,
+} from '../lib/liveExecutionUx'
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -100,11 +125,36 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
   runId: number | null
   onContinued?: (jobId: string, attemptId: string, runId: number) => void
 }) {
+  const { activeJobs, selectActiveJob } = useDevOS()
   const [projection, setProjection] = useState<aiden.WorkbenchRunProjection | null>(null)
   const [continuity, setContinuity] = useState<aiden.ContinuityCheckpointView | null>(null)
   const [continueResult, setContinueResult] = useState<{ pending: boolean; accepted?: boolean; reason?: string }>({ pending: false })
   const continueKeys = useRef<Record<string, string>>({})
   const [projectionRevision, setProjectionRevision] = useState(0)
+  const pendingApprovals = pendingApprovalCards(projection?.approvals ?? [])
+  const activeWorkItems = useMemo(() => {
+    if (!projection?.receipt.terminal || !projection.identity.jobId) return activeJobs
+    if (activeJobs.some((job) => job.jobId === projection.identity.jobId)) return activeJobs
+    const completed: ActiveJobView = {
+      sessionId: null,
+      jobId: projection.identity.jobId,
+      attemptId: projection.identity.attemptId,
+      runId: projection.identity.runId,
+      status: 'terminal',
+      updatedAt: 0,
+      title: projection.receipt.summary || 'Completed work',
+      statusDetail: presentRuntimeStatus(projection.receipt.status).detail,
+    }
+    return [...activeJobs, completed]
+  }, [activeJobs, projection])
+  const workGroups = groupActiveWork(activeWorkItems)
+  const attentionItems = projectAttentionItems({ jobs: activeJobs, approvals: pendingApprovals })
+  const result = projection?.receipt.terminal ? presentResult({
+    status: projection.receipt.status,
+    summary: projection.receipt.summary,
+    verdict: projection.receipt.verdict?.verdict,
+    evidenceCount: projection.evidence?.length ?? 0,
+  }) : null
   useEffect(() => {
     let current = true
     if (!jobId || !attemptId || runId === null) { setProjection(null); setContinuity(null); return () => { current = false } }
@@ -123,12 +173,45 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
   const color = (s?: string) =>
     s === 'ok' ? 'var(--green)' : s === 'err' ? 'var(--red)' : s === 'active' ? 'var(--orange)' : 'var(--muted3)'
   return (
-    <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '18px 22px' }}>
+    <div className="active-work-view">
+      <header className="active-work-header">
+        <div><span className="eyebrow">Your work</span><h1>Active Work</h1><p>See what needs you, what is running, and what is ready to review.</p></div>
+        {attentionItems.length > 0 && <span className="attention-count">{attentionItems.length} need attention</span>}
+      </header>
+      <div className="active-work-groups">
+        {([
+          ['Needs you', workGroups.needsYou],
+          ['Running', workGroups.running],
+          ['Ready for review', workGroups.readyForReview],
+          ['Recently completed', workGroups.recentlyCompleted],
+        ] as const).map(([label, jobs]) => (
+          <section className="work-group" key={label}>
+            <h2>{label}<span>{jobs.length}</span></h2>
+            {jobs.length === 0 ? <p className="work-group-empty">Nothing here</p> : jobs.map((job) => {
+              const state = presentRuntimeStatus(job.status)
+              return (
+                <button type="button" className={`work-item tone-${state.tone}`} key={job.jobId} onClick={() => selectActiveJob(job)}>
+                  <span className="work-item-copy"><strong>{job.title || 'Untitled work'}</strong><small>{presentRuntimeDetail(job.statusDetail, job.status)}</small></span>
+                  <span className="work-item-state">{state.label}</span>
+                </button>
+              )
+            })}
+          </section>
+        ))}
+      </div>
+      {result && (
+        <article className={`result-card tone-${result.tone}`}>
+          <div><span className="eyebrow">Result</span><h2>{result.title}</h2></div>
+          <p>{result.summary}</p>
+          <details><summary>{result.proofLabel}</summary><p>Open durable details below to inspect the recorded Evidence, Verification, and exact execution identity.</p></details>
+        </article>
+      )}
       {projection && (
-        <div style={{ maxWidth: 760, margin: '0 auto 12px', padding: '12px 14px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10 }}>
+        <details className="work-details">
+          <summary>Selected work details</summary>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, color: 'var(--text2)', fontSize: 13 }}>
-            <strong>Active Work <span style={{ color: 'var(--orange)', fontSize: 10 }}>PRO BETA</span></strong>
-            <span style={{ color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>{projection.job?.status ?? projection.receipt.status}</span>
+            <strong>Durable details</strong>
+            <span style={{ color: 'var(--muted2)' }}>{presentRuntimeStatus(projection.job?.status ?? projection.receipt.status).label}</span>
           </div>
           <div style={{ marginTop: 7, color: 'var(--muted3)', fontSize: 12, fontFamily: 'var(--mono)' }}>
             {projection.identity.jobId} · {projection.identity.attemptId} · generation {projection.identity.generation ?? 0} · run {projection.identity.runId}
@@ -136,10 +219,10 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
           <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 10, color: 'var(--muted3)', fontSize: 12 }}>
             <span>Timeline: {projection.timeline?.length ?? 0}</span>
             <span>Worker Tree: {projection.workers?.length ?? 0}</span>
-            <span>Pending Approvals: {projection.approvals?.length ?? 0}</span>
+            <span>Pending Approvals: {pendingApprovals.length}</span>
             <span>Evidence: {projection.evidence?.length ?? 0}</span>
           </div>
-          {pendingApprovalCards(projection.approvals ?? []).map((approval) => (
+          {pendingApprovals.map((approval) => (
             <div key={approval.approvalId} style={{ marginTop: 8, color: 'var(--orange)', fontSize: 11, fontFamily: 'var(--mono)' }}>
               Approval pending · {approval.toolName} · {approval.approvalId}
             </div>
@@ -203,31 +286,25 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
               )}
             </div>
           )}
-        </div>
+        </details>
       )}
-      {logs.length === 0 ? (
-        (projection?.timeline?.length ?? 0) > 0 ? (
-          <div style={{ maxWidth: 760, margin: '0 auto', padding: '12px 14px', color: 'var(--muted3)', fontSize: 13 }}>
-            Durable timeline restored · {projection?.timeline?.length ?? 0} ordered events
-          </div>
-        ) : (
-        <div style={{ padding: '64px 0', textAlign: 'center', color: 'var(--muted2)', fontSize: 13 }}>
-          No activity yet — tools, verification and progress from a run appear here.
-        </div>
-        )
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, maxWidth: 760, margin: '0 auto' }}>
-          {logs.map((l, i) => (
-            <div key={i} style={{
-              display: 'grid', gridTemplateColumns: '20px 1fr auto', gap: 12, alignItems: 'center',
-              padding: '9px 13px', background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 10,
-            }}>
-              <span style={{ color: color(l.style), textAlign: 'center', fontWeight: 700 }}>{l.icon}</span>
-              <span style={{ color: 'var(--text2)', fontSize: 13.5, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{l.message}</span>
-              <span style={{ color: 'var(--muted2)', fontSize: 11, fontFamily: 'var(--mono)', whiteSpace: 'nowrap' }}>{l.time}</span>
+      {(logs.length > 0 || (projection?.timeline?.length ?? 0) > 0) && (
+        <details className="work-details activity-details">
+          <summary>Detailed activity</summary>
+          {logs.length === 0 ? (
+            <p>Durable timeline restored · {projection?.timeline?.length ?? 0} ordered events</p>
+          ) : (
+            <div className="activity-detail-list">
+              {logs.map((l, i) => (
+                <div key={i} className="activity-detail-row">
+                  <span style={{ color: color(l.style), textAlign: 'center', fontWeight: 700 }}>{l.icon}</span>
+                  <span>{l.message}</span>
+                  <time>{l.time}</time>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          )}
+        </details>
       )}
     </div>
   )
@@ -263,6 +340,8 @@ interface DevOSCtxType {
   setHistoryOpen: (v: boolean | ((prev: boolean) => boolean)) => void
   liveViewOpen:   boolean
   setLiveViewOpen:(v: boolean | ((prev: boolean) => boolean)) => void
+  collapseLiveExecution: () => void
+  reopenLiveExecution: () => void
   activityOpen:   boolean
   setActivityOpen:(v: boolean | ((prev: boolean) => boolean)) => void
   settingsOpen:   boolean
@@ -290,6 +369,10 @@ interface DevOSCtxType {
   capabilities: aiden.WorkbenchCapabilities | null
   browserSession: aiden.WorkbenchBrowserSession | null
   controlBrowser: (action: 'take' | 'return' | 'clear') => Promise<void>
+  liveExecution: aiden.WorkbenchLiveExecutionProjection | null
+  liveExecutionSelection: LiveExecutionSelection
+  selectLiveExecutionSurface: (surfaceId: string) => void
+  toggleLiveExecutionPin: () => void
   selectedContext: WorkbenchSelection
   activeJobs: ReturnType<WorkbenchController['active']>
   controllerRevision: number
@@ -905,9 +988,10 @@ function ChatMessage({ message }: { message: Message }) {
   const [copied, setCopied] = useState(false)
   const isUser     = message.role === 'user'
   const isBriefing = !!message.isBriefing
+  const presentedContent = isUser ? message.content : presentAssistantContent(message.content)
 
   const copyMessage = () => {
-    navigator.clipboard.writeText(message.content).catch(() => {})
+    navigator.clipboard.writeText(presentedContent).catch(() => {})
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
@@ -960,22 +1044,18 @@ function ChatMessage({ message }: { message: Message }) {
       )}
 
       {/* Bubble */}
-      <div className="message-bubble" style={{
+      <div className={`message-bubble ${isUser ? 'is-user' : 'is-assistant'}`} style={{
         position: 'relative', maxWidth: '85%',
-        background: isUser
-          ? 'rgba(249,115,22,0.1)'
-          : isBriefing
-            ? 'rgba(249,115,22,0.06)'
-            : 'var(--bg2)',
+        background: isUser ? 'var(--bg2)' : isBriefing ? 'rgba(249,115,22,0.04)' : 'transparent',
         border: `1px solid ${
           isUser
-            ? 'rgba(249,115,22,0.22)'
+            ? 'var(--border2)'
             : isBriefing
               ? 'rgba(249,115,22,0.18)'
-              : 'var(--border)'
+              : 'transparent'
         }`,
-        borderRadius: isUser ? '12px 12px 2px 12px' : '12px 12px 12px 2px',
-        padding: '10px 14px',
+        borderRadius: isUser ? '15px 15px 4px 15px' : 0,
+        padding: isUser ? '10px 14px' : '2px 4px',
       }}>
         {/* Thinking dots */}
         {message.isStreaming && !message.content && (
@@ -991,18 +1071,18 @@ function ChatMessage({ message }: { message: Message }) {
         )}
 
         {/* Content */}
-        {message.content && (
+        {presentedContent && (
           <div style={{
-            fontFamily: 'var(--mono)', fontSize: 13,
+            fontFamily: 'var(--sans)', fontSize: 15,
             color: isUser ? 'var(--text)' : 'var(--muted3)',
-            lineHeight: 1.7, whiteSpace: 'pre-wrap',
+            lineHeight: 1.65, whiteSpace: 'pre-wrap',
           }}>
-            <MarkdownContent content={message.content} />
+            <MarkdownContent content={presentedContent} />
           </div>
         )}
 
         {/* Copy button */}
-        {message.content && !message.isStreaming && (
+        {presentedContent && !message.isStreaming && (
           <button onClick={copyMessage} className="copy-btn" style={{
             position: 'absolute', top: 8, right: 8,
             background: 'var(--bg3)', border: '1px solid var(--border2)',
@@ -1839,8 +1919,10 @@ function NavBar() {
   const {
     isExecuting,
     setSettingsOpen, historyOpen, setHistoryOpen, startNewChat, clearCurrentView,
-    runtimeConnection, executionQueue, activeJobs,
+    runtimeConnection, executionQueue, activeJobs, setMainView,
   } = useDevOS()
+  const runningCount = foregroundExecutionCount(activeJobs)
+  const attentionCount = activeJobs.filter((job) => ['approval_required', 'blocked', 'paused', 'state_unknown'].includes(job.status)).length
 
   return (
     <nav style={{
@@ -1866,11 +1948,11 @@ function NavBar() {
           fontSize: 10, fontWeight: 800, color: '#000', flexShrink: 0,
           animation: isExecuting ? 'pulse-orange 1s infinite' : 'none',
         }}>A</div>
-        <span style={{ fontSize: 13, color: 'var(--text)', letterSpacing: '0.05em', fontFamily: 'var(--mono)' }}>
-          AIDEN
+        <span style={{ fontSize: 14, color: 'var(--text)', fontWeight: 650, fontFamily: 'var(--sans)' }}>
+          Aiden
         </span>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>·</span>
-        <span className="workbench-brand-suffix" style={{ fontSize: 11, color: 'var(--muted2)', fontFamily: 'var(--mono)' }}>WORKBENCH</span>
+        <span className="workbench-brand-suffix" style={{ fontSize: 12, color: 'var(--muted2)' }}>Workbench</span>
         <div className="topbar-connection" style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 4 }}>
           <span style={{
             width: 6, height: 6, borderRadius: '50%',
@@ -1881,10 +1963,22 @@ function NavBar() {
         </div>
       </div>
 
-      <div className="topbar-work-state" style={{ fontSize: 11, fontFamily: 'var(--mono)', color: activeJobs.length > 0 ? 'var(--blue)' : 'var(--muted2)' }}>
-        {activeJobs.length > 0 ? `● ${activeJobs.length} running` : 'Ready'}
-        {executionQueue.pending > 0 ? ` · ${executionQueue.pending} queued` : ''}
-      </div>
+      {attentionCount > 0 ? (
+        <button
+          type="button"
+          className="topbar-work-state is-actionable"
+          aria-label="Open work that needs attention"
+          onClick={() => setMainView('activity')}
+        >
+          Needs attention · {attentionCount}
+          {executionQueue.pending > 0 ? ` · ${executionQueue.pending} queued` : ''}
+        </button>
+      ) : (
+        <div className="topbar-work-state" style={{ color: runningCount > 0 ? 'var(--blue)' : 'var(--muted3)' }}>
+          {runningCount > 0 ? `In progress · ${runningCount}` : 'Ready'}
+          {executionQueue.pending > 0 ? ` · ${executionQueue.pending} queued` : ''}
+        </div>
+      )}
 
       {/* Controls */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
@@ -1905,7 +1999,7 @@ function NavBar() {
 function HistorySidebar() {
   const {
     conversations, currentConvId, startNewChat, loadConversation, selectActiveJob,
-    runtimeVersion, activeJobs, historyOpen, mainView, setMainView,
+    runtimeVersion, activeJobs, historyOpen, setHistoryOpen, mainView, setMainView,
     setSettingsOpen, setSettingsTab,
   } = useDevOS()
 
@@ -1920,19 +2014,23 @@ function HistorySidebar() {
   const openSettings = (tab: string) => {
     setSettingsTab(tab)
     setSettingsOpen(true)
+    if (window.matchMedia('(max-width: 620px)').matches) setHistoryOpen(false)
+  }
+
+  const openView = (view: MainView) => {
+    setMainView(view)
+    if (window.matchMedia('(max-width: 620px)').matches) setHistoryOpen(false)
   }
 
   if (!historyOpen) return (
     <aside className="history-sidebar sidebar-rail" aria-label="Collapsed navigation">
       <button type="button" className="rail-brand" title="Aiden Workbench" aria-label="Aiden Workbench">A</button>
       <button type="button" className="rail-action is-primary" title="New Chat" aria-label="New Chat" onClick={startNewChat}>+</button>
-      <button type="button" className={mainView === 'chat' ? 'rail-action is-active' : 'rail-action'} title="Chat" aria-label="Chat" onClick={() => setMainView('chat')}>△</button>
-      <button type="button" className={mainView === 'activity' ? 'rail-action is-active' : 'rail-action'} title={`Active Work (${activeJobs.length})`} aria-label="Active Work" onClick={() => setMainView('activity')}>◉</button>
-      <button type="button" className={mainView === 'artifacts' ? 'rail-action is-active' : 'rail-action'} title="Artifacts" aria-label="Artifacts" onClick={() => setMainView('artifacts')}>◇</button>
-      <button type="button" className="rail-action" title="Skills" aria-label="Skills" onClick={() => openSettings('skills')}>⌁</button>
-      <button type="button" className={mainView === 'apps' ? 'rail-action is-active' : 'rail-action'} title="Apps" aria-label="Apps" onClick={() => setMainView('apps')}>+</button>
+      <button type="button" className={mainView === 'chat' ? 'rail-action is-active' : 'rail-action'} title="Home" aria-label="Home" onClick={() => openView('chat')}>⌂</button>
+      <button type="button" className={mainView === 'activity' ? 'rail-action is-active' : 'rail-action'} title={`Active Work (${activeJobs.length})`} aria-label="Active Work" onClick={() => openView('activity')}>◉</button>
+      <button type="button" className={mainView === 'apps' ? 'rail-action is-active' : 'rail-action'} title="Apps" aria-label="Apps" onClick={() => openView('apps')}>+</button>
+      <button type="button" className={mainView === 'artifacts' ? 'rail-action is-active' : 'rail-action'} title="Artifacts" aria-label="Artifacts" onClick={() => openView('artifacts')}>◇</button>
       <span className="rail-spacer" />
-      <button type="button" className={mainView === 'sponsors' ? 'rail-action is-active' : 'rail-action'} title="Sponsors" aria-label="Sponsors" onClick={() => setMainView('sponsors')}>♥</button>
       <button type="button" className="rail-action" title="Settings" aria-label="Settings" onClick={() => openSettings('runtime')}>⚙</button>
     </aside>
   )
@@ -1954,12 +2052,10 @@ function HistorySidebar() {
       </button>
 
       <nav className="sidebar-nav" aria-label="Workbench surfaces">
-        <button type="button" className={mainView === 'chat' ? 'is-active' : ''} onClick={() => setMainView('chat')}><span>△</span>Chat</button>
-        <button type="button" className={mainView === 'activity' ? 'is-active' : ''} onClick={() => setMainView('activity')}><span>◉</span>Active Work{activeJobs.length > 0 && <small>{activeJobs.length}</small>}</button>
-        <button type="button" className={mainView === 'artifacts' ? 'is-active' : ''} onClick={() => setMainView('artifacts')}><span>◇</span>Artifacts</button>
-        <button type="button" onClick={() => openSettings('skills')}><span>⌁</span>Skills</button>
-        <button type="button" onClick={() => openSettings('plugins')}><span>◆</span>Plugins</button>
-        <button type="button" className={mainView === 'apps' ? 'is-active' : ''} onClick={() => setMainView('apps')}><span>+</span>Apps</button>
+        <button type="button" className={mainView === 'chat' ? 'is-active' : ''} onClick={() => openView('chat')}><span>⌂</span>Home</button>
+        <button type="button" className={mainView === 'activity' ? 'is-active' : ''} onClick={() => openView('activity')}><span>◉</span>Active Work{activeJobs.length > 0 && <small>{activeJobs.length}</small>}</button>
+        <button type="button" className={mainView === 'apps' ? 'is-active' : ''} onClick={() => openView('apps')}><span>+</span>Apps</button>
+        <button type="button" className={mainView === 'artifacts' ? 'is-active' : ''} onClick={() => openView('artifacts')}><span>◇</span>Artifacts</button>
       </nav>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px' }}>
@@ -1976,7 +2072,7 @@ function HistorySidebar() {
                   {job.title || job.jobId.slice(0, 18)}
                 </span>
                 <span style={{ display: 'block', color: 'var(--muted)', marginTop: 2 }}>
-                  {job.statusDetail || job.status.replace(/_/g, ' ')}
+                  {presentRuntimeDetail(job.statusDetail, job.status)}
                 </span>
               </button>
             ))}
@@ -2035,7 +2131,6 @@ function HistorySidebar() {
       </div>
 
       <div className="sidebar-secondary-nav">
-        <button type="button" className={mainView === 'sponsors' ? 'is-active' : ''} onClick={() => setMainView('sponsors')}><span>♥</span>Sponsors</button>
         <button type="button" onClick={() => openSettings('runtime')}><span>⚙</span>Settings</button>
       </div>
 
@@ -2057,16 +2152,16 @@ function HistorySidebar() {
 function EmptyState() {
   const { setInput } = useDevOS()
   const suggestions = [
-    'Analyze this repository',
-    'Investigate this error',
-    'Summarize these files',
-    'Check my project status',
+    'Work on a codebase',
+    'Research and deliver',
+    'Use my browser',
+    'Work with my Apps',
   ]
   return (
     <div style={{
       flex: 1, display: 'flex', flexDirection: 'column',
       alignItems: 'center', justifyContent: 'center',
-      padding: 40, gap: 24,
+      padding: 40, gap: 22,
     }}>
       <div style={{
         width: 48, height: 48, borderRadius: 10,
@@ -2076,17 +2171,12 @@ function EmptyState() {
         fontFamily: 'var(--sans)',
       }}>A</div>
       <div style={{ textAlign: 'center' }}>
-        <div style={{ fontSize: 20, fontFamily: 'var(--sans)', fontWeight: 650, color: 'var(--text)' }}>Aiden</div>
-        <div style={{ marginTop: 6, fontSize: 15, color: 'var(--muted3)' }}>What would you like to work on?</div>
+        <div style={{ fontSize: 30, fontFamily: 'var(--sans)', fontWeight: 650, color: 'var(--text)', letterSpacing: '-0.02em' }}>What should Aiden take care of?</div>
+        <div style={{ marginTop: 8, fontSize: 15, color: 'var(--muted3)' }}>Private computer work, with proof.</div>
       </div>
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, justifyContent: 'center', maxWidth: 480 }}>
+      <div className="starter-workflows">
         {suggestions.map(s => (
-          <button key={s} onClick={() => setInput(s)} style={{
-            padding: '6px 14px', borderRadius: 20,
-            background: 'var(--bg2)', border: '1px solid var(--border2)',
-            color: 'var(--muted2)', fontFamily: 'var(--mono)', fontSize: 11,
-            cursor: 'pointer', transition: 'all 0.15s',
-          }}>{s} →</button>
+          <button key={s} onClick={() => setInput(s)}>{s}<span>→</span></button>
         ))}
       </div>
     </div>
@@ -2246,60 +2336,137 @@ function PlusMenu() {
 // ── ChatPanel ─────────────────────────────────────────────────
 
 function ArtifactCard({ artifact }: { artifact: aiden.WorkbenchArtifact }) {
-  const [preview, setPreview] = useState<{ url?: string; svg?: string; error?: string } | null>(null)
+  const [preview, setPreview] = useState<{
+    url?: string; svg?: string; text?: string; truncated?: boolean; download?: boolean; error?: string
+  } | null>(null)
+  const [opening, setOpening] = useState(false)
 
   useEffect(() => () => { if (preview?.url) URL.revokeObjectURL(preview.url) }, [preview?.url])
 
   const open = async () => {
     if (preview) { setPreview(null); return }
+    if (opening) return
+    setOpening(true)
     try {
       const content = await aiden.loadArtifactContent(artifact.id)
-      if (content.mime === 'image/svg+xml') setPreview({ svg: await content.blob.text() })
-      else if (content.mime.startsWith('image/')) setPreview({ url: URL.createObjectURL(content.blob) })
-      else setPreview({ error: 'Preview is available for image artifacts only.' })
+      const presentation = artifactPresentationForMime(content.mime)
+      if (presentation === 'svg') setPreview({ svg: await content.blob.text() })
+      else if (presentation === 'image') setPreview({ url: URL.createObjectURL(content.blob) })
+      else if (presentation === 'text') {
+        const value = await content.blob.text()
+        const previewLimit = 200_000
+        setPreview({ text: value.slice(0, previewLimit), truncated: value.length > previewLimit })
+      } else setPreview({ url: URL.createObjectURL(content.blob), download: true })
     } catch (error) {
       setPreview({ error: error instanceof Error ? error.message : String(error) })
+    } finally {
+      setOpening(false)
     }
   }
 
   return (
     <div className="artifact-card">
-      <button type="button" onClick={() => { void open() }} className="artifact-card-button">
+      <button type="button" onClick={() => { void open() }} className="artifact-card-button" aria-expanded={preview !== null} aria-busy={opening} disabled={opening}>
         <span aria-hidden="true">◇</span>
         <span style={{ minWidth: 0, flex: 1 }}>
           <strong>{artifact.name}</strong>
           <small>{artifact.kind} · {artifact.tool} · {artifact.bytes === null ? 'size unknown' : `${artifact.bytes} bytes`}</small>
         </span>
-        <span>{preview ? '−' : '+'}</span>
+        <span>{opening ? 'Opening…' : preview ? 'Close' : 'Open'}</span>
       </button>
-      {preview?.url && <img className="artifact-preview" src={preview.url} alt={artifact.name} />}
+      {preview?.url && !preview.download && <img className="artifact-preview" src={preview.url} alt={artifact.name} />}
       {preview?.svg && <iframe className="artifact-preview" title={`${artifact.name} preview`} sandbox="" srcDoc={preview.svg} />}
+      {preview?.text !== undefined && <pre className="artifact-text-preview"><code>{preview.text}</code>{preview.truncated ? '\n… preview truncated' : ''}</pre>}
+      {preview?.download && preview.url && <a className="artifact-download" href={preview.url} download={artifact.name}>Download {artifact.name}</a>}
       {preview?.error && <div className="artifact-preview-error">{preview.error}</div>}
     </div>
   )
 }
 
 function ArtifactsView() {
-  const { runArtifacts, selectedContext } = useDevOS()
+  const [artifacts, setArtifacts] = useState<aiden.WorkbenchArtifact[]>([])
+  const [view, setView] = useState<'recent' | 'job' | 'type'>('recent')
+  const [error, setError] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  const reload = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const rows = await aiden.listArtifacts()
+      setArtifacts([...rows].sort((left, right) => right.createdAt - left.createdAt))
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Artifacts are unavailable')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void reload() }, [reload])
+
+  const grouped = useMemo(() => {
+    const group = (keyOf: (artifact: aiden.WorkbenchArtifact) => string) => {
+      const result = new Map<string, aiden.WorkbenchArtifact[]>()
+      for (const artifact of artifacts) {
+        const key = keyOf(artifact)
+        result.set(key, [...(result.get(key) ?? []), artifact])
+      }
+      return Array.from(result.entries())
+    }
+    return {
+      job: group((artifact) => artifact.runId === null ? `session:${artifact.sessionId}` : `run:${artifact.runId}`),
+      type: group((artifact) => artifact.kind || 'file'),
+    }
+  }, [artifacts])
+
+  const renderGroups = (groups: Array<[string, aiden.WorkbenchArtifact[]]>, label: (key: string, index: number) => string) => (
+    <div className="artifact-group-list">
+      {groups.map(([key, rows], index) => (
+        <section className="artifact-group" key={key}>
+          <h3>{label(key, index)} <span>{rows.length}</span></h3>
+          <div className="artifact-gallery">
+            {rows.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+          </div>
+        </section>
+      ))}
+    </div>
+  )
+
   return (
     <section className="workspace-surface" aria-labelledby="artifacts-title">
       <header className="workspace-surface-header">
         <div>
-          <span className="eyebrow">Current work</span>
+          <span className="eyebrow">Durable results</span>
           <h2 id="artifacts-title">Artifacts</h2>
-          <p>Files created or modified by the selected durable Job.</p>
+          <p>Review files Aiden produced, grouped without losing their source work.</p>
         </div>
-        <span className="surface-count">{runArtifacts.length}</span>
+        <button type="button" className="nav-btn" onClick={() => { void reload() }} disabled={loading}>Refresh</button>
       </header>
-      {runArtifacts.length === 0 ? (
+
+      <div className="artifact-view-tabs" role="tablist" aria-label="Group artifacts">
+        {([['recent', 'Recent'], ['job', 'By Job'], ['type', 'Type']] as const).map(([key, label]) => (
+          <button key={key} type="button" role="tab" aria-selected={view === key} className={view === key ? 'is-active' : ''} onClick={() => setView(key)}>{label}</button>
+        ))}
+        <span>{artifacts.length}</span>
+      </div>
+
+      {error ? (
+        <div className="workspace-empty-state" role="alert"><strong>Artifacts need attention</strong><span>{error}</span></div>
+      ) : loading ? (
+        <div className="workspace-empty-state"><strong>Loading artifacts</strong><span>Reading the durable artifact index.</span></div>
+      ) : artifacts.length === 0 ? (
         <div className="workspace-empty-state">
-          <strong>No artifacts for this work yet</strong>
-          <span>{selectedContext.jobId ? 'Resulting files will appear here after durable verification.' : 'Select Active Work or run a task that creates a file.'}</span>
+          <strong>No artifacts yet</strong>
+          <span>Files produced by completed work will appear here after durable verification.</span>
         </div>
-      ) : (
+      ) : view === 'recent' ? (
         <div className="artifact-gallery">
-          {runArtifacts.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+          {artifacts.slice(0, 24).map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
         </div>
+      ) : view === 'job' ? (
+        renderGroups(grouped.job, (_key, index) => `Work ${index + 1}`)
+      ) : (
+        renderGroups(grouped.type, (key) => key.replace(/_/g, ' '))
       )}
     </section>
   )
@@ -2311,7 +2478,7 @@ function AppsView() {
   const [busy, setBusy] = useState<string | null>(null)
   const [pending, setPending] = useState<aiden.WorkbenchAppConnection | null>(null)
   const [disconnecting, setDisconnecting] = useState<aiden.WorkbenchConnectedAccount | null>(null)
-  const [accountLabels, setAccountLabels] = useState<Record<string, string>>({})
+  const [setupTarget, setSetupTarget] = useState<string | null>(null)
 
   const reload = useCallback(async () => {
     try {
@@ -2331,7 +2498,6 @@ function AppsView() {
       const connection = await aiden.connectApp({
         providerId: toolkit.providerId,
         toolkitId: toolkit.toolkitId,
-        label: accountLabels[`${toolkit.providerId}:${toolkit.toolkitId}`]?.trim(),
       })
       setPending(connection)
       if (connection.authorizationUrl) window.open(connection.authorizationUrl, '_blank', 'noopener,noreferrer')
@@ -2374,12 +2540,33 @@ function AppsView() {
     } finally { setBusy(null) }
   }
 
+  const configureProvider = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = event.currentTarget
+    const data = new FormData(form)
+    const providerId = String(data.get('providerId') ?? '').trim()
+    const credential = String(data.get('credential') ?? '').trim()
+    if (!providerId || !credential) { setError('Provider and credential are required'); return }
+    setBusy(`configure:${providerId}`); setError(null)
+    try {
+      await aiden.configureAppsProvider({ providerId, credential })
+      form.reset()
+      await reload()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'Apps provider setup failed')
+    } finally { setBusy(null) }
+  }
+
   const healthLabel = (health: string) => ({
     healthy: 'Healthy', degraded: 'Needs attention', expired: 'Reconnect required',
     insufficient_scope: 'Insufficient access',
     revoked: 'Disconnected', unknown: 'Not checked', not_configured: 'Not configured',
     unavailable: 'Unavailable',
   }[health] ?? health.replace(/_/g, ' '))
+  const recommendedApps = useMemo(
+    () => snapshot ? projectRecommendedApps(snapshot) : [],
+    [snapshot],
+  )
 
   return (
     <section className="workspace-surface" aria-labelledby="apps-title">
@@ -2412,12 +2599,11 @@ function AppsView() {
 
       {snapshot && (
         <>
-          <div className="artifact-gallery" aria-label="Connected accounts">
+          <div className="artifact-gallery apps-card-grid" aria-label="Connected accounts">
             {snapshot.accounts.length === 0 ? (
               <div className="workspace-empty-state">
                 <strong>No connected accounts</strong>
-                <span>Configure the provider locally, then connect GitHub or Gmail.</span>
-                <code>{snapshot.configuration.command}</code>
+                <span>Connect your first account below. Aiden will always use an explicitly selected account.</span>
               </div>
             ) : snapshot.accounts.map((account) => (
               <article className="surface-card" key={account.accountId} style={{ padding: 18 }}>
@@ -2436,37 +2622,75 @@ function AppsView() {
           </div>
 
           <header className="workspace-surface-header" style={{ marginTop: 24 }}>
-            <div><span className="eyebrow">Available</span><h3>Connect an app</h3></div>
+            <div><span className="eyebrow">Available apps</span><h3>Connect an app</h3></div>
           </header>
-          <div className="artifact-gallery">
-            {snapshot.toolkits.length === 0 ? (
-              <div className="workspace-empty-state"><strong>No provider is configured</strong><span>Run <code>{snapshot.configuration.command}</code> in a private terminal. Credentials never enter Workbench.</span></div>
-            ) : snapshot.toolkits.map((toolkit) => (
-              <article className="surface-card" key={`${toolkit.providerId}:${toolkit.toolkitId}`} style={{ padding: 18 }}>
-                <span className="eyebrow">{toolkit.providerId}</span>
-                <h3 style={{ margin: '6px 0' }}>{toolkit.label}</h3>
-                <label style={{ display: 'grid', gap: 6, margin: '12px 0', color: 'var(--muted2)', fontSize: 13 }}>
-                  Account label
-                  <input
-                    value={accountLabels[`${toolkit.providerId}:${toolkit.toolkitId}`] ?? ''}
-                    onChange={(event) => setAccountLabels((current) => ({
-                      ...current,
-                      [`${toolkit.providerId}:${toolkit.toolkitId}`]: event.target.value,
-                    }))}
-                    placeholder="Personal or Work"
-                    maxLength={120}
-                    style={{ border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)', color: 'var(--text)', padding: '9px 10px' }}
-                  />
-                </label>
-                <button
-                  type="button"
-                  className="nav-btn"
-                  disabled={busy !== null || !accountLabels[`${toolkit.providerId}:${toolkit.toolkitId}`]?.trim()}
-                  onClick={() => { void connect(toolkit) }}
-                >Connect</button>
-              </article>
-            ))}
+          <div className="artifact-gallery apps-card-grid" aria-label="Available apps">
+            {recommendedApps.map((card) => {
+              const toolkit = card.toolkit
+              return (
+                <article className="surface-card" key={card.id} style={{ padding: 18 }}>
+                  <span className="eyebrow">{card.accounts.length > 0 ? `${card.accounts.length} connected` : 'Available'}</span>
+                  <h3 style={{ margin: '6px 0' }}>{card.label}</h3>
+                  <p style={{ color: 'var(--muted2)', minHeight: 36 }}>{card.description}</p>
+                  {card.accounts.map((account) => (
+                    <div key={account.accountId} className="app-account-row">
+                      <span><strong>{account.label}</strong><small>{healthLabel(account.health)}</small></span>
+                      {account.needsReconnect && (
+                        <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void accountAction(account, 'reconnect') }}>Reconnect</button>
+                      )}
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    className="nav-btn"
+                    disabled={busy !== null}
+                    onClick={() => toolkit ? void connect(toolkit) : setSetupTarget(card.label)}
+                  >{card.id === 'github'
+                      ? (card.accounts.length > 0 ? 'Add another account' : toolkit ? 'Connect GitHub' : 'Set up GitHub')
+                      : card.id === 'gmail'
+                        ? (card.accounts.length > 0 ? 'Add another account' : toolkit ? 'Connect Gmail' : 'Set up Gmail')
+                        : 'Browse apps'}</button>
+                </article>
+              )
+            })}
           </div>
+
+          {setupTarget && (
+            <article className="surface-card app-setup-state" role="status">
+              <span className="eyebrow">Provider status</span>
+              <h3>{setupTarget === 'More apps' ? 'Available Apps provider' : `${setupTarget} connection requires the Apps provider`}</h3>
+              <p>{snapshot.providers.length === 0
+                ? 'Not configured. Configure the local Apps provider, then refresh this page.'
+                : snapshot.providers.map((provider) => `${provider.label}: ${healthLabel(provider.health)}`).join(' · ')}</p>
+              {snapshot.toolkits.filter((toolkit) => !['github', 'gmail'].includes(toolkit.toolkitId.toLowerCase())).length > 0 && setupTarget === 'More apps' && (
+                <p>{snapshot.toolkits.filter((toolkit) => !['github', 'gmail'].includes(toolkit.toolkitId.toLowerCase())).map((toolkit) => toolkit.label).join(' · ')}</p>
+              )}
+              {snapshot.configuration.workbench ? (
+                <form onSubmit={(event) => { void configureProvider(event) }} style={{ display: 'grid', gap: 8, marginTop: 12 }}>
+                  <label style={{ color: 'var(--muted2)', fontSize: 12 }}>Apps provider
+                    <select name="providerId" required defaultValue={snapshot.providers[0]?.id ?? 'composio'} style={{ width: '100%', marginTop: 5, padding: 9, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)' }}>
+                      {snapshot.providers.length > 0
+                        ? snapshot.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)
+                        : <option value="composio">Composio</option>}
+                    </select>
+                  </label>
+                  <input name="credential" type="password" autoComplete="off" required placeholder="Provider API key" style={{ padding: 9, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)' }} />
+                  <button type="submit" className="nav-btn" disabled={busy !== null}>{busy?.startsWith('configure:') ? 'Securing and testing…' : 'Save securely and test'}</button>
+                  <p style={{ color: 'var(--muted2)', margin: 0 }}>The credential is sent once to the local backend secret authority and is never retained by the browser.</p>
+                </form>
+              ) : snapshot.configuration.command ? (
+                <><code>{snapshot.configuration.command}</code><p style={{ color: 'var(--muted2)' }}>Complete provider setup in a private terminal.</p></>
+              ) : null}
+              <button type="button" className="nav-btn" onClick={() => setSetupTarget(null)}>Close setup</button>
+            </article>
+          )}
+
+          <details className="apps-provider-diagnostics">
+            <summary>Provider diagnostics</summary>
+            {snapshot.providers.length === 0
+              ? <p>Apps provider is not configured.</p>
+              : snapshot.providers.map((provider) => <p key={provider.id}>{provider.label} · {healthLabel(provider.health)}{provider.detail ? ` · ${provider.detail}` : ''}</p>)}
+          </details>
         </>
       )}
 
@@ -2522,6 +2746,98 @@ function SponsorsView() {
   )
 }
 
+function LiveExecutionPane() {
+  const {
+    liveExecution, liveExecutionSelection, selectLiveExecutionSurface,
+    toggleLiveExecutionPin, liveViewOpen, collapseLiveExecution,
+  } = useDevOS()
+  if (!liveExecution || !liveViewOpen || liveExecution.surfaces.length === 0) return null
+  const selected = liveExecution.surfaces.find(
+    (surface) => surface.surfaceId === liveExecutionSelection.selectedSurfaceId,
+  ) ?? liveExecution.activeSurface ?? liveExecution.surfaces[0]
+  const isPinned = liveExecutionSelection.pinnedSurfaceId === selected.surfaceId
+  const statusLabel = selected.status.replace(/_/g, ' ')
+  const terminalText = selected.terminal?.chunks.map((chunk) => chunk.data).join('') ?? ''
+  return (
+    <aside className="live-execution-pane" aria-label="Live Execution">
+      <header className="live-execution-header">
+        <div>
+          <strong>Live Execution</strong>
+          <span>{selected.title} · {statusLabel}</span>
+        </div>
+        <div className="live-execution-actions">
+          <button type="button" aria-pressed={isPinned} onClick={toggleLiveExecutionPin}>{isPinned ? 'Following is off' : 'Keep this open'}</button>
+          <button type="button" onClick={collapseLiveExecution}>Collapse</button>
+        </div>
+      </header>
+      {liveExecutionSelection.attentionSurfaceId && liveExecutionSelection.attentionSurfaceId !== selected.surfaceId && (
+        <button type="button" className="live-execution-attention" onClick={() => selectLiveExecutionSurface(liveExecutionSelection.attentionSurfaceId!)}>
+          Another execution view needs attention
+        </button>
+      )}
+      {liveExecution.surfaces.length > 1 && (
+        <nav className="live-execution-tray" aria-label="Execution views">
+          {liveExecution.surfaces.slice(0, 4).map((surface) => (
+            <button
+              key={surface.surfaceId}
+              type="button"
+              className={surface.surfaceId === selected.surfaceId ? 'is-active' : ''}
+              onClick={() => selectLiveExecutionSurface(surface.surfaceId)}
+            >{surface.title}<small>{surface.status}</small></button>
+          ))}
+        </nav>
+      )}
+      <div className="live-execution-body">
+        {selected.kind === 'terminal' && selected.terminal && (
+          <div className="live-terminal-surface">
+            <LiveExecutionTerminal surface={selected} />
+            {selected.terminal.truncated && <small>Recent output shown · older output remains outside the browser projection.</small>}
+            {selected.status === 'disconnected' && <p className="live-execution-notice">Terminal stream disconnected. The Job may still be running.</p>}
+            <span className="sr-only">{terminalText}</span>
+          </div>
+        )}
+        {selected.kind === 'browser' && selected.browser && (
+          <section className="live-browser-surface">
+            <div className="live-browser-address"><span>{selected.browser.navigationStatus}</span><strong>{selected.browser.title || 'Untitled page'}</strong></div>
+            <p>{selected.browser.url || 'No current URL'}</p>
+            {selected.browser.frame ? (
+              <div className="live-browser-frame-placeholder has-frame">
+                <img src={`/api/artifacts/${encodeURIComponent(selected.browser.frame.artifactId)}/content`} alt={`Latest browser view of ${selected.browser.title || selected.browser.url || 'current page'}`} />
+                <small>{selected.browser.stale ? `May be stale · ${Math.round((selected.browser.captureAgeMs ?? 0) / 1000)}s old` : 'Current captured state'}</small>
+              </div>
+            ) : selected.browser.snapshotId ? (
+              <div className="live-browser-frame-placeholder">
+                <strong>Latest structured browser state</strong>
+                <span>Snapshot {selected.browser.snapshotId}</span>
+                <small>{selected.browser.stale ? `May be stale · ${Math.round((selected.browser.captureAgeMs ?? 0) / 1000)}s old` : 'Current observation'}</small>
+              </div>
+            ) : <div className="live-execution-empty">No visual frame has been captured. Structured browser state remains available.</div>}
+          </section>
+        )}
+        {selected.kind === 'changes' && selected.changes && (
+          <section className="live-execution-list"><h3>{selected.changes.count} {selected.changes.count === 1 ? 'file' : 'files'} changed</h3>{selected.changes.paths.map((item) => <div key={item}>◇ {item}</div>)}</section>
+        )}
+        {selected.kind === 'validation' && selected.validation && (
+          <section className="live-execution-list"><h3>Validation</h3>{selected.validation.refs.map((item) => <div key={item}>{selected.validation?.verified ? '✓' : '●'} {item}</div>)}</section>
+        )}
+        {selected.kind === 'workspace' && selected.workspace && (
+          <section className="live-execution-list"><h3>Workspace</h3><div>{selected.workspace.state}</div><div>Base {selected.workspace.baseHead}</div>{selected.workspace.baseBranch && <div>Branch {selected.workspace.baseBranch}</div>}</section>
+        )}
+        {selected.kind === 'artifact' && selected.artifact && (
+          <section className="live-execution-list"><h3>Artifacts</h3>{selected.artifact.names.map((item, index) => <div key={selected.artifact!.ids[index]}>◇ {item}</div>)}</section>
+        )}
+        {selected.kind === 'app_action' && selected.appAction && (
+          <section className="live-app-action"><span>{selected.appAction.provider}</span><h3>{selected.appAction.action}</h3><p>{selected.appAction.state.replace(/_/g, ' ')}</p></section>
+        )}
+      </div>
+      <footer className="live-execution-footer">
+        <span>{liveExecution.job.status}</span>
+        <span>Job {liveExecution.job.jobId.slice(0, 12)} · Attempt {liveExecution.job.attemptId.slice(0, 12)}</span>
+      </footer>
+    </aside>
+  )
+}
+
 function LiveActivitySurface() {
   const {
     liveActivity, runProjection, runArtifacts, selectedContext,
@@ -2529,14 +2845,18 @@ function LiveActivitySurface() {
   } = useDevOS()
   const [expanded, setExpanded] = useState(false)
   const [decisionPending, setDecisionPending] = useState<string | null>(null)
+  const [decisionError, setDecisionError] = useState<string | null>(null)
   const [telemetryVisible, setTelemetryVisible] = useState(false)
   const [telemetryLeaving, setTelemetryLeaving] = useState(false)
+  const [codingSessions, setCodingSessions] = useState<aiden.WorkbenchCodingSession[]>([])
+  const [codingPending, setCodingPending] = useState<'apply' | 'discard' | 'discard-unknown' | null>(null)
+  const [codingReview, setCodingReview] = useState<aiden.WorkbenchCodingReview | null>(null)
+  const [codingReviewError, setCodingReviewError] = useState<string | null>(null)
   const summary = summarizeCompletedActivity(liveActivity)
-  const generation = runProjection?.identity.generation
-  const approvals = pendingApprovalCards(runProjection?.approvals ?? []).filter((approval) =>
-    approval.jobId === selectedContext.jobId
-    && approval.attemptId === selectedContext.attemptId
-    && (generation === undefined || approval.generation === generation))
+  const approvals = runProjection?.receipt.terminal ? [] : pendingApprovalsForProjection(
+    runProjection?.approvals ?? [],
+    runProjection?.identity,
+  )
   const running = isStreaming || summary.running > 0 || Boolean(thinking)
   const showTelemetry = shouldShowChatTelemetry({
     running,
@@ -2544,6 +2864,7 @@ function LiveActivitySurface() {
     terminal: runProjection?.receipt.terminal,
   })
   const visibleActivity = selectChatLiveActivity(liveActivity)
+  const semanticProgress = projectSemanticProgress(liveActivity)
   const currentActivity = visibleActivity.at(-1)
   const currentDuration = currentActivity?.durationMs == null
     ? null
@@ -2557,6 +2878,20 @@ function LiveActivitySurface() {
       : currentActivity
         ? `${currentActivity.label}${currentActivity.detail ? ` · ${currentActivity.detail}` : ''}`
         : (thinking?.message || 'Aiden is working')
+
+  useEffect(() => {
+    let active = true
+    const jobId = selectedContext.jobId
+    if (!jobId) {
+      setCodingSessions([])
+      setCodingReview(null)
+      return () => { active = false }
+    }
+    void aiden.loadCodingSessions(jobId)
+      .then((sessions) => { if (active) setCodingSessions(sessions) })
+      .catch(() => { if (active) setCodingSessions([]) })
+    return () => { active = false }
+  }, [selectedContext.jobId, runProjection])
 
   useEffect(() => {
     if (showTelemetry) {
@@ -2577,15 +2912,58 @@ function LiveActivitySurface() {
       window.clearTimeout(removeTimer)
     }
   }, [showTelemetry, telemetryVisible, approvals.length])
-  if (!telemetryVisible && runArtifacts.length === 0) return null
+  const codingSession = codingSessions.at(-1)
+  if (!telemetryVisible && runArtifacts.length === 0 && !codingSession) return null
 
   const decide = async (approvalId: string, decision: 'approved' | 'denied') => {
     setDecisionPending(approvalId)
+    setDecisionError(null)
     try {
       await aiden.decideApproval(approvalId, decision)
       refreshProjection()
+    } catch (error) {
+      setDecisionError(error instanceof Error ? error.message : 'Approval is no longer actionable')
+      refreshProjection()
     } finally {
       setDecisionPending(null)
+    }
+  }
+
+  const decideCoding = async (decision: 'apply' | 'discard') => {
+    if (!codingSession?.promotion) return
+    setCodingPending(decision)
+    try {
+      await aiden.decideCodingPromotion(codingSession.promotion.promotionId, decision)
+      if (selectedContext.jobId) setCodingSessions(await aiden.loadCodingSessions(selectedContext.jobId))
+      refreshProjection()
+    } finally {
+      setCodingPending(null)
+    }
+  }
+
+
+  const reviewCoding = async () => {
+    if (!codingSession?.promotion) return
+    setCodingReviewError(null)
+    try {
+      setCodingReview(await aiden.loadCodingReview(codingSession.promotion.promotionId))
+    } catch (error) {
+      setCodingReviewError(error instanceof Error ? error.message : String(error))
+    }
+  }
+
+  const discardUnknownCoding = async () => {
+    if (!codingSession) return
+    setCodingPending('discard-unknown')
+    setCodingReviewError(null)
+    try {
+      await aiden.discardUnknownCodingSession(codingSession.codingSessionId)
+      if (selectedContext.jobId) setCodingSessions(await aiden.loadCodingSessions(selectedContext.jobId))
+      refreshProjection()
+    } catch (error) {
+      setCodingReviewError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setCodingPending(null)
     }
   }
 
@@ -2600,34 +2978,140 @@ function LiveActivitySurface() {
           </button>
           {expanded && (
             <div className="live-activity-details">
-              {visibleActivity.map((item) => (
-            <div key={item.id} className={`live-activity-row status-${item.status}`} data-activity-id={item.id}>
-              <span>{item.status === 'running' ? '◐' : item.status === 'ok' ? '✓' : item.status === 'failed' ? '×' : '!'}</span>
-              <strong>{item.kind}</strong>
-              <span className="live-activity-label">{item.label}{item.detail ? ` · ${item.detail}` : ''}</span>
-              {item.durationMs != null && <small>{item.durationMs < 1000 ? `${item.durationMs}ms` : `${(item.durationMs / 1000).toFixed(1)}s`}</small>}
-            </div>
-          ))}
+              {semanticProgress.slice(-3).map((phase) => (
+                <div key={phase.id} className={`live-activity-row status-${phase.status}`} data-progress-id={phase.id}>
+                  <span>{phase.status === 'running' ? '●' : phase.status === 'complete' ? '✓' : phase.status === 'failed' ? '×' : '!'}</span>
+                  <span className="live-activity-label"><strong>{phase.label}</strong>{phase.detail && phase.detail !== phase.label ? <small> · {phase.detail}</small> : null}</span>
+                </div>
+              ))}
               </div>
           )}
           {approvals.map((approval) => (
             <div key={approval.approvalId} className="approval-card">
-              <div><strong>Approval required</strong><span>{approval.riskTier}</span></div>
-              <p>{approval.toolName} requests permission for this exact action.</p>
+              {(() => {
+                const presentation = presentApproval(approval)
+                return <>
+              <div><strong>{approval.externalCoding ? 'External Coding Agent' : 'Your approval is needed'}</strong><span>{presentation.risk}</span></div>
+              <dl className="approval-details approval-summary">
+                <dt>What</dt><dd>{presentation.what}</dd>
+                <dt>Where</dt><dd>{presentation.where}</dd>
+                <dt>Why</dt><dd>{presentation.why}</dd>
+                <dt>Impact</dt><dd>{presentation.impact}</dd>
+                <dt>Risk</dt><dd>{presentation.risk}</dd>
+                <dt>After approval</dt><dd>{presentation.afterApproval}</dd>
+              </dl>
+              {approval.externalCoding && (
+                <dl className="approval-details">
+                  <dt>Repository</dt><dd>{approval.externalCoding.repository}</dd>
+                  <dt>Requested scope</dt><dd>{approval.externalCoding.requestedScope.join(', ') || 'No writable paths declared'}</dd>
+                  <dt>Protected</dt><dd>{approval.externalCoding.protectedPaths.join(', ') || 'No additional paths declared'}</dd>
+                  <dt>Network</dt><dd>Disabled</dd>
+                  <dt>Package installation</dt><dd>Not allowed</dd>
+                  <dt>Git write operations</dt><dd>Commit / Push / Tag / Merge disabled</dd>
+                  <dt>Changes</dt><dd>Isolated until you review and apply them</dd>
+                </dl>
+              )}
               {approval.target && <code className="approval-target">{approval.target}</code>}
               <small>{approval.approvalId} · generation {approval.generation}</small>
               <div className="approval-actions">
                 <button disabled={decisionPending === approval.approvalId} onClick={() => { void decide(approval.approvalId, 'approved') }}>Approve once</button>
                 <button disabled={decisionPending === approval.approvalId} onClick={() => { void decide(approval.approvalId, 'denied') }}>Deny</button>
               </div>
+                </>
+              })()}
             </div>
           ))}
+          {decisionError && <div className="approval-decision-error" role="alert">{decisionError}</div>}
         </div>
       )}
       {runArtifacts.length > 0 && (
         <div className="artifact-list">
           <h4>Artifacts</h4>
           {runArtifacts.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+        </div>
+      )}
+      {codingSession && (
+        <div className={`coding-result-card state-${codingSession.state}`} aria-label="External coding session">
+          <div className="coding-result-heading">
+            <strong>{codingSession.state === 'ready_for_review' ? 'Coding changes ready for review' : 'Coding session'}</strong>
+            <span>{codingSession.state.replace(/_/g, ' ')}</span>
+          </div>
+          <p>
+            {codingSession.changedPaths.length} {codingSession.changedPaths.length === 1 ? 'file' : 'files'} changed
+            {' · '}{codingSession.validationRefs.length} validation {codingSession.validationRefs.length === 1 ? 'run' : 'runs'}
+          </p>
+          <small>
+            {codingSession.provider.id} {codingSession.provider.version}
+            {' · '}{codingSession.codingSessionId}
+            {' · '}generation {codingSession.generation}
+          </small>
+          {codingReconciliationNeedsAttention(codingSession.reconciliationState) && (
+            <div className="coding-reconciliation">
+              <p>Previous isolated coding work requires reconciliation. No changes were applied to your workspace.</p>
+              <details>
+                <summary>Inspect retained attempt</summary>
+                <p>{codingSession.changedPaths.length > 0
+                  ? `Observed isolated paths: ${codingSession.changedPaths.join(', ')}`
+                  : 'No isolated file changes were observed.'}</p>
+                <small>
+                  Workspace {codingSession.workspace?.state || 'unavailable'}
+                  {' · '}process {codingSession.process?.treeDeadVerified ? 'stopped' : 'outcome unknown'}
+                </small>
+              </details>
+              {!codingSession.promotion && (
+                <div className="approval-actions">
+                  <button type="button" disabled={codingPending !== null} onClick={() => { void discardUnknownCoding() }}>
+                    Discard isolated attempt
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+          {codingSession.reconciliationState === 'reconciled' && codingSession.state === 'failed' && (
+            <div className="coding-reconciliation">Previous isolated coding attempt was reconciled and closed. A new attempt may start.</div>
+          )}
+          {codingSession.reconciliation?.providerReportMatches === false
+            && codingSession.reconciliation.actualOutcomeKnown && (
+            <div className="coding-reconciliation">
+              Provider-reported changes differed from the observed repository state.
+              {codingSession.validationRefs.length > 0
+                ? ' Aiden used the observed diff and independent validation.'
+                : ' The observed diff remains authoritative.'}
+            </div>
+          )}
+          {codingSession.changedPaths.length > 0 && (
+            <details onToggle={(event) => {
+              if (event.currentTarget.open && !codingReview) void reviewCoding()
+            }}>
+              <summary>Review changes</summary>
+              {codingReviewError && <p className="coding-reconciliation">{codingReviewError}</p>}
+              {!codingReview && !codingReviewError && <p>Loading exact candidate changesâ€¦</p>}
+              {codingReview?.files.map((file) => (
+                <section className="coding-review-file" key={file.path}>
+                  <strong>{file.operation} <code>{file.path}</code></strong>
+                  {file.before !== null && <pre><code>{file.before}</code></pre>}
+                  {file.after !== null && <pre><code>{file.after}</code></pre>}
+                  {file.truncated && <small>Preview truncated. The durable snapshot remains authoritative.</small>}
+                </section>
+              ))}
+            </details>
+          )}
+          {codingSession.promotion && ['prepared', 'approval_required'].includes(codingSession.promotion.state) && (
+            <div className="approval-actions">
+              <button type="button" disabled={codingPending !== null} onClick={() => { void decideCoding('apply') }}>Apply changes</button>
+              <button type="button" disabled={codingPending !== null} onClick={() => { void decideCoding('discard') }}>Discard</button>
+            </div>
+          )}
+          {codingSession.promotion?.state === 'blocked_drift' && (
+            <div className="coding-reconciliation">
+              <p>Target workspace changed. Review the conflict before applying.</p>
+              <div className="approval-actions">
+                <button type="button" disabled={codingPending !== null} onClick={() => { void decideCoding('discard') }}>
+                  Discard candidate
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       )}
       {browserSession && (
@@ -2697,9 +3181,14 @@ function ChatPanel() {
       {/* Messages */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '24px 0', display: 'flex', flexDirection: 'column' }}>
         {messages.length === 0 ? (
-          <EmptyState />
+          hasSelectedWork ? (
+            <div className="conversation-column">
+              <LiveActivitySurface />
+              <div ref={messagesEndRef} />
+            </div>
+          ) : <EmptyState />
         ) : (
-          <div style={{ maxWidth: 800, width: '100%', margin: '0 auto', padding: '0 24px' }}>
+          <div className="conversation-column">
             {messages.map((msg, index) => (
               <Fragment key={msg.id}>
                 {index === activityAnchor && hasSelectedWork && <LiveActivitySurface />}
@@ -2741,7 +3230,7 @@ function ChatPanel() {
       )}
 
       {/* Input area */}
-      <div style={{
+      <div className="workbench-composer" style={{
         borderTop: '1px solid var(--border)',
         padding: '12px 24px',
         background: 'var(--bg1)', flexShrink: 0,
@@ -2759,7 +3248,7 @@ function ChatPanel() {
             ))}
           </div>
         )}
-        <div style={{ maxWidth: 800, margin: '0 auto', display: 'flex', gap: 8, alignItems: 'flex-end', position: 'relative' }}>
+        <div className="composer-row">
           {/* Plus menu trigger */}
           <div style={{ position: 'relative', flexShrink: 0 }}>
             <PlusMenu />
@@ -2788,14 +3277,14 @@ function ChatPanel() {
             value={input}
             onChange={handleInputChange}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage() } }}
-            placeholder="Ask Aiden anything..."
+            placeholder={hasSelectedWork ? 'Add an instruction…' : 'What should Aiden take care of?'}
             rows={1}
             disabled={isStreaming && hasSelectedWork}
             style={{
               flex: 1, resize: 'none',
               background: 'var(--bg2)', border: '1px solid var(--border2)',
               borderRadius: 8, padding: '9px 14px',
-              fontFamily: 'var(--mono)', fontSize: 13,
+              fontFamily: 'var(--sans)', fontSize: 15,
               color: 'var(--text)', outline: 'none',
               minHeight: 38, maxHeight: 120,
               transition: 'border-color 0.2s', lineHeight: 1.6,
@@ -3160,9 +3649,7 @@ function LiveViewPanel() {
 // ── StatusBar (replaces ActivityBar + DisclaimerBar) ─────────
 
 function StatusBar() {
-  const { activityLogs, systemStats, activeModel, activeProvider, runtimeConnection, runtimeVersion, executionQueue, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
-  const providerLabel = activeProvider || 'No provider'
-  const memCount = systemStats?.recentHistory?.length ?? 0
+  const { runtimeConnection, runtimeVersion, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
 
   return (
     <div className="system-awareness-strip" style={{
@@ -3181,13 +3668,7 @@ function StatusBar() {
          {runtimeConnection}
       </span>
       <span style={{ color: 'var(--border2)' }}>·</span>
-       <span>{providerLabel} · {activeModel || 'No model'}</span>
-      <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>{executionQueue.workerCount} workers · {activeJobs.length} active</span>
-      <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>{memCount} {memCount === 1 ? 'memory' : 'memories'}</span>
-      <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>{activityLogs.length} events</span>
+      <span>{activeJobs.length > 0 ? `${activeJobs.length} active` : 'Your work stays on this computer'}</span>
       {updateBanner && (
         <>
           <span style={{ color: 'var(--border2)' }}>·</span>
@@ -4778,18 +5259,167 @@ response = client.chat.completions.create(
 // ── SettingsDrawer ────────────────────────────────────────────
 
 const SETTINGS_TABS = [
-  { id: 'runtime',  label: '◆ Runtime'       },
-  { id: 'model',    label: '◈ Model'         },
-  { id: 'skills',   label: '◇ Skills'        },
-  { id: 'plugins',  label: '◇ Plugins'       },
-  { id: 'conversation', label: '◇ Conversation' },
-  { id: 'appearance', label: '◐ Appearance'    },
-  { id: 'sponsor',  label: '♥ Sponsor'        },
-  { id: 'guide',    label: '📖 User Guide'  },
-  { id: 'privacy',  label: '📜 Privacy'     },
-  { id: 'legal',    label: '⚖️ Legal'        },
-  { id: 'about',    label: 'ℹ️ About'        },
+  { id: 'runtime',  label: '◆ Readiness', section: 'General' },
+  { id: 'model',    label: '◈ AI & Models', section: 'General' },
+  { id: 'conversation', label: '◇ Conversation', section: 'General' },
+  { id: 'appearance', label: '◐ Appearance', section: 'General' },
+  { id: 'skills',   label: '◇ Skills', section: 'Advanced' },
+  { id: 'plugins',  label: '◇ Plugins', section: 'Advanced' },
+  { id: 'sponsor',  label: '♥ Sponsor', section: 'About' },
+  { id: 'guide',    label: '📖 User Guide', section: 'About' },
+  { id: 'privacy',  label: '📜 Privacy', section: 'About' },
+  { id: 'legal',    label: '⚖️ Legal', section: 'About' },
+  { id: 'about',    label: 'ℹ️ About', section: 'About' },
 ]
+
+function ReadinessSettings({ sessionId, onOpenModels, onOpenApps }: {
+  sessionId: string
+  onOpenModels: () => void
+  onOpenApps: () => void
+}) {
+  const [snapshot, setSnapshot] = useState<aiden.SystemReadinessProjection | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const refresh = useCallback(async () => {
+    setError(null)
+    try { setSnapshot(await aiden.loadSystemReadiness(sessionId)) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Readiness is unavailable') }
+  }, [sessionId])
+  useEffect(() => { void refresh() }, [refresh])
+  const grantBrowser = async () => {
+    setBusy(true); setError(null)
+    try { await aiden.grantBrowserPermission(); await refresh() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Browser permission could not be granted') }
+    finally { setBusy(false) }
+  }
+  if (error) return <p style={{ ...settingsTextStyle, color: 'var(--red)' }}>{error}</p>
+  if (!snapshot) return <p style={settingsTextStyle}>Checking system readiness…</p>
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      <p style={settingsTextStyle}>Overall: <strong style={{ color: snapshot.overall === 'ready' ? 'var(--green)' : 'var(--orange)' }}>{snapshot.overall.replace(/_/g, ' ')}</strong></p>
+      {snapshot.items.map((item) => (
+        <div key={item.id} style={{ padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
+            <strong style={{ color: 'var(--text)', fontSize: 12 }}>{item.title}</strong>
+            <span style={{ color: item.healthy ? 'var(--green)' : item.severity === 'error' ? 'var(--red)' : 'var(--orange)', fontSize: 11, fontFamily: 'var(--mono)' }}>{item.state.replace(/_/g, ' ')}</span>
+          </div>
+          <p style={{ ...settingsTextStyle, margin: '6px 0 0' }}>{item.detail}</p>
+          {item.availableActions.includes('manage_provider') && <button type="button" className="nav-btn" onClick={onOpenModels}>Manage AI & Models</button>}
+          {item.availableActions.includes('manage_apps') && <button type="button" className="nav-btn" onClick={onOpenApps}>Manage Apps</button>}
+          {item.availableActions.includes('review_browser_permission') && <button type="button" className="nav-btn" disabled={busy} onClick={() => { void grantBrowser() }}>{busy ? 'Granting…' : 'Review and grant browser permission'}</button>}
+        </div>
+      ))}
+      <button type="button" className="nav-btn" disabled={busy} onClick={() => { void refresh() }}>Refresh readiness</button>
+    </div>
+  )
+}
+
+function AIModelsSettings({ sessionId }: { sessionId: string }) {
+  const [snapshot, setSnapshot] = useState<aiden.WorkbenchProviderSnapshot | null>(null)
+  const [providerId, setProviderId] = useState('')
+  const [modelId, setModelId] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [auth, setAuth] = useState<aiden.WorkbenchAuthSession | null>(null)
+  const reload = useCallback(async () => {
+    setError(null)
+    try {
+      const next = await aiden.loadProviderSetup(sessionId)
+      setSnapshot(next)
+      const selected = next.sessionSelection ?? next.defaultSelection
+      setProviderId((current) => current || selected?.providerId || next.providers[0]?.id || '')
+      setModelId((current) => current || selected?.modelId || next.providers.find((provider) => provider.id === (selected?.providerId || next.providers[0]?.id))?.models[0]?.id || '')
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Provider setup is unavailable') }
+  }, [sessionId])
+  useEffect(() => { void reload() }, [reload])
+  useEffect(() => {
+    if (!auth || ['connected', 'failed', 'expired'].includes(auth.state)) return
+    const timer = window.setInterval(() => {
+      void aiden.loadProviderAuthSession(auth.authSessionId).then((next) => {
+        setAuth(next)
+        if (next.state === 'connected') void reload()
+      }).catch(() => undefined)
+    }, 1_000)
+    return () => window.clearInterval(timer)
+  }, [auth, reload])
+  const provider = snapshot?.providers.find((item) => item.id === providerId) ?? null
+  const chooseProvider = (nextId: string) => {
+    setProviderId(nextId)
+    setModelId(snapshot?.providers.find((item) => item.id === nextId)?.models[0]?.id || '')
+    setError(null)
+  }
+  const act = async (label: string, operation: () => Promise<unknown>) => {
+    setBusy(label); setError(null)
+    try { await operation(); await reload() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Provider operation failed') }
+    finally { setBusy(null) }
+  }
+  const submitCredential = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    if (!provider || !modelId) return
+    const form = event.currentTarget
+    const credential = String(new FormData(form).get('credential') ?? '').trim()
+    if (!credential) { setError('API key is required'); return }
+    await act(provider.configured ? 'replace' : 'connect', () => provider.configured
+      ? aiden.replaceProviderCredential({ providerId, modelId, credential })
+      : aiden.connectProvider({ providerId, modelId, credential }))
+    form.reset()
+  }
+  if (!snapshot) return <p style={settingsTextStyle}>{error || 'Loading provider authority…'}</p>
+  const selectionLabel = (selection: { providerId: string; modelId: string } | null) => selection
+    ? `${snapshot.providers.find((item) => item.id === selection.providerId)?.displayName ?? selection.providerId} · ${selection.modelId}`
+    : 'Not configured'
+  return (
+    <div style={{ display: 'grid', gap: 12 }}>
+      <p style={settingsTextStyle}>Credentials are handled by the local backend and protected by <strong style={{ color: 'var(--text)' }}>{snapshot.secretStorage.backend}</strong>. They are never stored in browser state.</p>
+      <div style={{ display: 'grid', gap: 4, padding: 10, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)' }}>
+        <span style={settingsTextStyle}>Current chat: <strong style={{ color: 'var(--text)' }}>{snapshot.sessionSelection ? selectionLabel(snapshot.sessionSelection) : 'Uses the future default'}</strong></span>
+        <span style={settingsTextStyle}>Future default: <strong style={{ color: 'var(--text)' }}>{selectionLabel(snapshot.defaultSelection)}</strong></span>
+      </div>
+      <label style={settingsTextStyle}>Provider
+        <select value={providerId} onChange={(event) => chooseProvider(event.target.value)} style={{ width: '100%', marginTop: 5, padding: 8, background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6 }}>
+          {snapshot.providers.map((item) => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+        </select>
+      </label>
+      {provider && (
+        <>
+          <div style={{ padding: 10, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)' }}>
+            <strong style={{ color: 'var(--text)' }}>{provider.displayName}</strong>
+            <p style={{ ...settingsTextStyle, margin: '5px 0' }}>{provider.description}</p>
+            <span style={{ color: provider.healthy ? 'var(--green)' : provider.configured ? 'var(--orange)' : 'var(--muted2)', fontSize: 11, fontFamily: 'var(--mono)' }}>{provider.connectionState.replace(/_/g, ' ')}{provider.credentialHint ? ` · ${provider.credentialHint}` : ''}</span>
+          </div>
+          <label style={settingsTextStyle}>Model
+            <select value={modelId} onChange={(event) => setModelId(event.target.value)} style={{ width: '100%', marginTop: 5, padding: 8, background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6 }}>
+              {provider.models.map((model) => <option key={model.id} value={model.id}>{model.displayName}</option>)}
+            </select>
+          </label>
+          {provider.authKinds.includes('api_key') && (
+            <form onSubmit={(event) => { void submitCredential(event) }} style={{ display: 'grid', gap: 7 }}>
+              <input name="credential" type="password" autoComplete="off" placeholder={provider.configured ? 'Enter replacement API key' : 'Enter API key'} style={{ padding: 8, background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6 }} />
+              <button type="submit" className="nav-btn" disabled={busy !== null || !modelId}>{provider.configured ? 'Replace credential' : 'Connect and verify'}</button>
+            </form>
+          )}
+          {provider.authKinds.includes('oauth') && (
+            <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => {
+              setBusy('oauth'); setError(null)
+              void aiden.startProviderOAuth(provider.id).then(setAuth).catch((cause) => setError(cause instanceof Error ? cause.message : 'Sign-in failed')).finally(() => setBusy(null))
+            }}>Connect with {provider.displayName}</button>
+          )}
+          {auth && <p style={settingsTextStyle}>Sign-in: <strong style={{ color: auth.state === 'connected' ? 'var(--green)' : auth.state === 'failed' ? 'var(--red)' : 'var(--orange)' }}>{auth.state.replace(/_/g, ' ')}</strong>{auth.userCode ? ` · code ${auth.userCode}` : ''}{auth.detail ? ` · ${auth.detail}` : ''}</p>}
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            <button type="button" className="nav-btn" disabled={busy !== null || !modelId} onClick={() => { void act('test', () => aiden.testProvider({ providerId, modelId })) }}>Test connection</button>
+            <button type="button" className="nav-btn" disabled={busy !== null || !modelId || !sessionId} onClick={() => { void act('session', () => aiden.setSessionModel({ sessionId, providerId, modelId })) }}>Use for this chat</button>
+            <button type="button" className="nav-btn" disabled={busy !== null || !modelId} onClick={() => { void act('default', () => aiden.setDefaultModel({ providerId, modelId })) }}>Make default</button>
+            <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void act('models', () => aiden.refreshProviderModels(providerId)) }}>Refresh models</button>
+            {provider.configured && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void act('disconnect', () => aiden.disconnectProvider(providerId)) }}>Disconnect</button>}
+          </div>
+          <p style={settingsTextStyle}>Changes affect future Jobs. A running Job keeps the provider and model captured when it was admitted.</p>
+        </>
+      )}
+      {error && <p role="alert" style={{ ...settingsTextStyle, color: 'var(--red)' }}>{error}</p>}
+    </div>
+  )
+}
 
 function SettingsDrawer() {
   const {
@@ -4798,8 +5428,25 @@ function SettingsDrawer() {
     validateKey, clearProLicense, setPricingOpen, runtimeVersion,
     activeProvider, activeModel, runtimeConnection, executionAvailable,
     executionQueue, workbenchReadOnly, capabilities, startNewChat, clearCurrentView,
-    appearance, setAppearance, setMainView,
+    appearance, setAppearance, setMainView, sessionId,
   } = useDevOS()
+  const [codingHealth, setCodingHealth] = useState<aiden.ExternalCodingHealth | null>(null)
+  const [codingHealthError, setCodingHealthError] = useState<string | null>(null)
+  const [codingSaving, setCodingSaving] = useState(false)
+
+  useEffect(() => {
+    if (settingsTab !== 'runtime') return
+    let current = true
+    setCodingHealthError(null)
+    void aiden.loadExternalCodingHealth()
+      .then((health) => { if (current) setCodingHealth(health) })
+      .catch((error) => {
+        if (!current) return
+        setCodingHealth(null)
+        setCodingHealthError(error instanceof Error ? error.message : 'External coding health unavailable')
+      })
+    return () => { current = false }
+  }, [settingsTab])
 
   return (
     <>
@@ -4828,8 +5475,10 @@ function SettingsDrawer() {
 
         {/* Tabs */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '8px 8px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-          {SETTINGS_TABS.map(tab => (
-            <button key={tab.id} onClick={() => setSettingsTab(tab.id)} style={{
+          {SETTINGS_TABS.map((tab, index) => (
+            <Fragment key={tab.id}>
+            {(index === 0 || SETTINGS_TABS[index - 1]?.section !== tab.section) && <span className="settings-section-label">{tab.section}</span>}
+            <button onClick={() => setSettingsTab(tab.id)} style={{
               textAlign: 'left', padding: '7px 12px', borderRadius: 5,
               background: settingsTab === tab.id ? 'var(--bg2)' : 'transparent',
               border: 'none',
@@ -4840,26 +5489,58 @@ function SettingsDrawer() {
             }}>
               {tab.label}
             </button>
+            </Fragment>
           ))}
         </div>
 
         {/* Content */}
         <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
           {settingsTab === 'runtime' && (
-            <SettingsSection title="Runtime">
-              <p style={settingsTextStyle}><strong style={{ color: 'var(--text)' }}>Aiden v{runtimeVersion}</strong></p>
-              <p style={settingsTextStyle}>Provider: <strong style={{ color: 'var(--text)' }}>{activeProvider || 'Not configured'}</strong></p>
-              <p style={settingsTextStyle}>Model: <strong style={{ color: 'var(--text)' }}>{activeModel || 'Not configured'}</strong></p>
-              <p style={settingsTextStyle}>Managed by the Aiden runtime. Change provider or model from the CLI, then reopen Workbench.</p>
-              <p style={settingsTextStyle}>Connection: <strong style={{ color: 'var(--text)' }}>{runtimeConnection}</strong></p>
-              <p style={settingsTextStyle}>Execution: <strong style={{ color: executionAvailable ? 'var(--green)' : 'var(--red)' }}>
-                {executionAvailable ? `${executionQueue.workerCount} durable workers ready` : 'unavailable'}
-              </strong></p>
-              <p style={settingsTextStyle}>Queue: {executionQueue.inflight} running · {executionQueue.pending} pending · {executionQueue.claimed} claimed</p>
-              <p style={settingsTextStyle}>{workbenchReadOnly
-                ? 'This browser surface is read-only.'
-                : 'Provider and model configuration is owned by the Aiden CLI. Use `aiden model` or `aiden setup`, then restart Workbench.'}</p>
-            </SettingsSection>
+            <>
+              <SettingsSection title="System Readiness">
+                <p style={settingsTextStyle}><strong style={{ color: 'var(--text)' }}>Aiden v{runtimeVersion}</strong></p>
+                <p style={settingsTextStyle}>Connection: <strong style={{ color: 'var(--text)' }}>{runtimeConnection}</strong></p>
+                <p style={settingsTextStyle}>Execution: <strong style={{ color: executionAvailable ? 'var(--green)' : 'var(--red)' }}>
+                  {executionAvailable ? `${executionQueue.workerCount} durable workers ready` : 'unavailable'}
+                </strong></p>
+                <p style={settingsTextStyle}>Queue: {executionQueue.inflight} running · {executionQueue.pending} pending · {executionQueue.claimed} claimed</p>
+                <p style={settingsTextStyle}>{workbenchReadOnly ? 'This browser surface is read-only.' : 'Setup commands use the same local runtime authorities as the CLI.'}</p>
+                <ReadinessSettings sessionId={sessionId} onOpenModels={() => setSettingsTab('model')} onOpenApps={() => { setMainView('apps'); setSettingsOpen(false) }} />
+              </SettingsSection>
+              <SettingsSection title="External Coding">
+                {codingHealth ? (
+                  <>
+                    <p style={settingsTextStyle}>Status: <strong style={{ color: codingHealth.ready ? 'var(--green)' : 'var(--red)' }}>{codingHealth.ready ? 'Ready' : 'Needs attention'}</strong></p>
+                    <p style={settingsTextStyle}>Provider: <strong style={{ color: 'var(--text)' }}>{codingHealth.provider}</strong></p>
+                    <p style={settingsTextStyle}>Version: <strong style={{ color: 'var(--text)' }}>{codingHealth.version}</strong></p>
+                    <p style={settingsTextStyle}>Model: <strong style={{ color: 'var(--text)' }}>{codingHealth.model || 'Not configured'}</strong></p>
+                    <p style={settingsTextStyle}>Exact model check: <strong style={{ color: codingHealth.modelValidation === 'ready' ? 'var(--green)' : 'var(--red)' }}>{codingHealth.modelValidation.replace(/_/g, ' ')}</strong></p>
+                    <p style={settingsTextStyle}>Authentication: <strong style={{ color: 'var(--text)' }}>{codingHealth.authenticationMode.replace(/_/g, ' ')} · {codingHealth.authentication}</strong></p>
+                    <p style={settingsTextStyle}>Isolation: <strong style={{ color: codingHealth.isolation === 'available' ? 'var(--green)' : 'var(--red)' }}>{codingHealth.isolation}</strong></p>
+                    <p style={settingsTextStyle}>Validation: <strong style={{ color: codingHealth.isolation === 'available' ? 'var(--green)' : 'var(--red)' }}>{codingHealth.isolation === 'available' ? 'Docker ready' : 'Docker unavailable'}</strong></p>
+                    <p style={settingsTextStyle}>Network: Disabled by default</p>
+                    <p style={settingsTextStyle}>{codingHealth.reason}</p>
+                    <form onSubmit={(event) => {
+                      event.preventDefault()
+                      const model = String(new FormData(event.currentTarget).get('codingModel') ?? '').trim()
+                      if (!model) { setCodingHealthError('A coding model is required'); return }
+                      setCodingSaving(true); setCodingHealthError(null)
+                      void aiden.configureExternalCoding(model)
+                        .then(setCodingHealth)
+                        .catch((error) => setCodingHealthError(error instanceof Error ? error.message : 'Coding setup failed'))
+                        .finally(() => setCodingSaving(false))
+                    }} style={{ display: 'grid', gap: 7, marginTop: 10 }}>
+                      <label style={settingsTextStyle}>Exact compatible model
+                        <input name="codingModel" defaultValue={codingHealth.model ?? ''} autoComplete="off" placeholder="Model ID" style={{ width: '100%', marginTop: 5, padding: 8, background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6 }} />
+                      </label>
+                      <button type="submit" className="nav-btn" disabled={codingSaving}>{codingSaving ? 'Validating…' : 'Validate and save model'}</button>
+                    </form>
+                    <p style={settingsTextStyle}>Aiden uses the bounded detected executable shown above. Environment variables remain advanced process-level overrides.</p>
+                  </>
+                ) : <p style={settingsTextStyle}>{codingHealthError || 'Checking external coding health…'}</p>}
+                {codingHealth && codingHealthError && <p role="alert" style={{ ...settingsTextStyle, color: 'var(--red)' }}>{codingHealthError}</p>}
+              </SettingsSection>
+            </>
           )}
           {settingsTab === 'profile'   && <UserProfileTab />}
           {settingsTab === 'api'       && <ApiKeysTab />}
@@ -4868,13 +5549,8 @@ function SettingsDrawer() {
           {settingsTab === 'updates'   && <UpdatesTab />}
 
           {settingsTab === 'model' && (
-            <SettingsSection title="Active Model">
-              <p style={settingsTextStyle}>Provider: <strong style={{ color: 'var(--text)' }}>{activeProvider || 'No provider configured'}</strong></p>
-              <p style={settingsTextStyle}>Model: <strong style={{ color: 'var(--text)' }}>{activeModel || 'No model configured'}</strong></p>
-              <p style={settingsTextStyle}>Status: <strong style={{ color: runtimeConnection === 'connected' ? 'var(--green)' : 'var(--red)' }}>{runtimeConnection}</strong></p>
-              <p style={settingsTextStyle}>{capabilities?.modelSwitch.available
-                ? 'Model changes are available through the runtime.'
-                : (capabilities?.modelSwitch.reason || 'Managed by the Aiden runtime. Use the CLI to change models.')}</p>
+            <SettingsSection title="AI & Models">
+              <AIModelsSettings sessionId={sessionId} />
             </SettingsSection>
           )}
 
@@ -5372,9 +6048,21 @@ export default function Home() {
   const [executionQueue, setExecutionQueue] = useState({ pending: 0, claimed: 0, inflight: 0, workerCount: 0 })
   const [workbenchReadOnly, setWorkbenchReadOnly] = useState(true)
 
+  useEffect(() => {
+    const narrow = window.matchMedia('(max-width: 620px)')
+    const closePermanentSidebar = (event: MediaQueryListEvent | MediaQueryList) => {
+      if (event.matches) setHistoryOpen(false)
+    }
+    closePermanentSidebar(narrow)
+    narrow.addEventListener('change', closePermanentSidebar)
+    return () => narrow.removeEventListener('change', closePermanentSidebar)
+  }, [])
+
   // ── Messages / conversations ────────────────────────────────
   const [messages,       setMessages]       = useState<Message[]>([])
   const [conversations,  setConversations]  = useState<Conversation[]>([])
+  const [conversationsHydrated, setConversationsHydrated] = useState(false)
+  const conversationsRef = useRef<Conversation[]>([])
   const [currentConvId,  setCurrentConvId]  = useState<string>('')
   const [input,          setInput]          = useState('')
 
@@ -5387,6 +6075,12 @@ export default function Home() {
   const [runArtifacts,   setRunArtifacts]   = useState<aiden.WorkbenchArtifact[]>([])
   const [capabilities,   setCapabilities]   = useState<aiden.WorkbenchCapabilities | null>(null)
   const [browserSession, setBrowserSession] = useState<aiden.WorkbenchBrowserSession | null>(null)
+  const [liveExecution, setLiveExecution] = useState<aiden.WorkbenchLiveExecutionProjection | null>(null)
+  const [liveExecutionSelection, setLiveExecutionSelection] = useState<LiveExecutionSelection>({
+    selectedSurfaceId: null, pinnedSurfaceId: null, autoFollow: true,
+  })
+  const liveExecutionCollapsedKeyRef = useRef<string | null>(null)
+  const liveExecutionIdentityKeyRef = useRef<string | null>(null)
   const [projectionRevision, setProjectionRevision] = useState(0)
   const recordLiveActivity = useCallback((jobId: string, activity: LiveActivityItem, foreground: boolean) => {
     const next = mergeLiveActivity(liveActivityByJobRef.current.get(jobId) ?? [], activity)
@@ -5418,9 +6112,10 @@ export default function Home() {
     }
   }, [publishController])
   const syncForegroundLifecycle = useCallback((jobId: string | null) => {
-    const active = jobId === null
+    const projected = jobId === null
       ? undefined
       : workbenchControllerRef.current.active().find((job) => job.jobId === jobId)
+    const active = projected && isForegroundExecutionStatus(projected.status) ? projected : undefined
     setIsExecuting(Boolean(active))
     setIsStreaming(Boolean(active))
     setThinking(active ? {
@@ -5525,6 +6220,52 @@ export default function Home() {
   }, [activeJobId, activeAttemptId, activeRunId, projectionRevision, runProjection?.receipt.terminal])
   useEffect(() => {
     let current = true
+    const generation = runProjection?.identity.generation
+    if (!activeJobId || !activeAttemptId || activeRunId === null || generation === undefined) {
+      setLiveExecution(null)
+      setLiveExecutionSelection({ selectedSurfaceId: null, pinnedSurfaceId: null, autoFollow: true })
+      liveExecutionCollapsedKeyRef.current = null
+      liveExecutionIdentityKeyRef.current = null
+      return () => { current = false }
+    }
+    setLiveExecution((visible) => visible
+      && visible.job.jobId === activeJobId
+      && visible.job.attemptId === activeAttemptId
+      && visible.job.generation === generation
+      && visible.job.runId === activeRunId
+      ? visible
+      : null)
+    const refresh = async () => {
+      const next = await aiden.loadLiveExecution({
+        jobId: activeJobId, attemptId: activeAttemptId, generation, runId: activeRunId,
+      })
+      if (!current || !next) return
+      const identityKey = `${next.job.jobId}:${next.job.attemptId}:${next.job.generation}:${next.job.runId}`
+      if (liveExecutionIdentityKeyRef.current !== identityKey) {
+        liveExecutionIdentityKeyRef.current = identityKey
+        liveExecutionCollapsedKeyRef.current = null
+      }
+      setLiveExecution(next)
+      const attention = next.surfaces.find((surface) => surface.kind === 'app_action' && surface.status === 'waiting')?.surfaceId ?? null
+      setLiveExecutionSelection((selection) => chooseLiveExecutionSurface(
+        next.surfaces,
+        selection,
+        next.activeSurface?.surfaceId ?? null,
+        attention,
+      ))
+      const autoOpenSurfaceId = next.activeSurface?.surfaceId ?? next.surfaces[0]?.surfaceId ?? null
+      if (shouldAutoOpenLiveExecution(next.job, next.job.terminal, autoOpenSurfaceId, liveExecutionCollapsedKeyRef.current)) {
+        setLiveViewOpen(true)
+      }
+    }
+    void refresh().catch(() => { /* observer failure never changes Job truth */ })
+    const timer = window.setInterval(() => {
+      void refresh().catch(() => { /* retain last bounded observer snapshot */ })
+    }, runProjection?.receipt.terminal ? 2_000 : 500)
+    return () => { current = false; window.clearInterval(timer) }
+  }, [activeJobId, activeAttemptId, activeRunId, runProjection?.identity.generation, runProjection?.receipt.terminal])
+  useEffect(() => {
+    let current = true
     if (!activeJobId) {
       setBrowserSession(null)
       return () => { current = false }
@@ -5542,6 +6283,29 @@ export default function Home() {
     const next = await aiden.controlBrowserSession(activeJobId, action)
     setBrowserSession(next)
   }, [activeJobId])
+  const selectLiveExecutionSurface = useCallback((surfaceId: string) => {
+    setLiveExecutionSelection((selection) => ({
+      ...selection, selectedSurfaceId: surfaceId, autoFollow: false, attentionSurfaceId: null,
+    }))
+    setLiveViewOpen(true)
+  }, [])
+  const toggleLiveExecutionPin = useCallback(() => {
+    setLiveExecutionSelection((selection) => {
+      const pinned = selection.pinnedSurfaceId === selection.selectedSurfaceId ? null : selection.selectedSurfaceId
+      return { ...selection, pinnedSurfaceId: pinned, autoFollow: pinned === null }
+    })
+  }, [])
+  const collapseLiveExecution = useCallback(() => {
+    if (liveExecution) {
+      const autoOpenSurfaceId = liveExecution.activeSurface?.surfaceId ?? liveExecution.surfaces[0]?.surfaceId ?? null
+      liveExecutionCollapsedKeyRef.current = liveExecutionAutoOpenKey(liveExecution.job, autoOpenSurfaceId)
+    }
+    setLiveViewOpen(false)
+  }, [liveExecution])
+  const reopenLiveExecution = useCallback(() => {
+    liveExecutionCollapsedKeyRef.current = null
+    setLiveViewOpen(true)
+  }, [])
   useEffect(() => {
     if (typeof window === 'undefined') return
     const onPopState = () => {
@@ -5565,9 +6329,13 @@ export default function Home() {
     return () => window.removeEventListener('popstate', onPopState)
   }, [conversations, selectContext, syncForegroundLifecycle])
   useEffect(() => {
+    if (!conversationsHydrated) return
     let restored = aiden.restoreRunHandle()
     if (!restored) return
     const controller = new AbortController()
+    let restorationSelectionGeneration = workbenchControllerRef.current.snapshot().selectionGeneration
+    const restorationStillOwnsSelection = () => !controller.signal.aborted
+      && workbenchControllerRef.current.isCurrent(restorationSelectionGeneration)
     const replay = { admission: restored.admission, lastEventId: 0 }
     const recoveredMessageId = `recovered_${restored.admission.attemptId}`
     let fullReply = ''
@@ -5578,7 +6346,7 @@ export default function Home() {
       setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false)
     }
     const startReplay = () => {
-      if (controller.signal.aborted) return
+      if (!restorationStillOwnsSelection()) return
       activeRunIdRef.current = restored.admission.runId
       workbenchControllerRef.current.register(restored.admission, restored.admission.jobId)
       publishController()
@@ -5592,10 +6360,12 @@ export default function Home() {
       setThinking({ stage: 'reconnecting', message: 'Reconnecting…' })
       void aiden.followRun(replay, {
       onConnectionState: (state) => {
+        if (!restorationStillOwnsSelection()) return
         if (state === 'terminal') return
         setThinking({ stage: state, message: state === 'connected' ? 'Restoring durable activity…' : `${state}…` })
       },
       onReattached: (admission) => {
+        if (!restorationStillOwnsSelection()) return
         restored = { admission, lastEventId: 0 }
         const sessionId = workbenchControllerRef.current.snapshot().selected.sessionId
         setActiveJobId(admission.jobId)
@@ -5608,9 +6378,14 @@ export default function Home() {
           attemptId: admission.attemptId,
           runId: admission.runId,
         }, true)
+        restorationSelectionGeneration = workbenchControllerRef.current.snapshot().selectionGeneration
       },
-      onThinking: (stage, message) => setThinking({ stage, message }),
+      onThinking: (stage, message) => {
+        if (!restorationStillOwnsSelection()) return
+        setThinking({ stage, message })
+      },
       onReply: (chunk) => {
+        if (!restorationStillOwnsSelection()) return
         setThinking(null)
         fullReply += chunk
         setMessages((prev) => {
@@ -5620,6 +6395,7 @@ export default function Home() {
         })
       },
       onReplySnapshot: (content) => {
+        if (!restorationStillOwnsSelection()) return
         setThinking(null)
         fullReply = content
         setMessages((prev) => {
@@ -5629,6 +6405,7 @@ export default function Home() {
         })
       },
       onActivity: (activity) => {
+        if (!restorationStillOwnsSelection()) return
         recordLiveActivity(restored.admission.jobId, activity, true)
         const style: ActivityLog['style'] = activity.status === 'ok'
           ? 'ok' : (activity.status === 'failed' || activity.status === 'warn') ? 'err' : 'active'
@@ -5638,8 +6415,12 @@ export default function Home() {
         const message = activity.label + (activity.detail ? ` · ${activity.detail}` : '')
         setActivityLogs((prev) => [...prev.slice(-199), { time: nowTime(), icon, agent: 'Aiden', message, style }])
       },
-      onTokens: (total) => setBudget({ current: total, max: 0, remaining: 0 }),
+      onTokens: (total) => {
+        if (!restorationStillOwnsSelection()) return
+        setBudget({ current: total, max: 0, remaining: 0 })
+      },
       onDone: (info) => {
+        if (!restorationStillOwnsSelection()) return
         aiden.clearRunHandle(restored.admission)
         settle()
         if (!fullReply && info.summary) {
@@ -5649,6 +6430,7 @@ export default function Home() {
         }
       },
       onError: (message) => {
+        if (!restorationStillOwnsSelection()) return
         aiden.clearRunHandle(restored.admission)
         settle()
         setMessages((prev) => fullReply ? prev : [...prev, { id: recoveredMessageId, role: 'assistant', content: `⚠ ${message}`, timestamp: Date.now(), isStreaming: false }])
@@ -5656,6 +6438,7 @@ export default function Home() {
       }, { signal: controller.signal, stallMs: 2_000, maxUncertainMs: 15_000 })
     }
     void aiden.reconcileRestoredRunHandle(restored).then((resolution) => {
+      if (!restorationStillOwnsSelection()) return
       if (resolution.kind === 'missing') throw new Error('stale Workbench run handle')
       restored = resolution.handle
       setActiveJobId(restored.admission.jobId)
@@ -5668,6 +6451,7 @@ export default function Home() {
         attemptId: restored.admission.attemptId,
         runId: restored.admission.runId,
       }, true)
+      restorationSelectionGeneration = workbenchControllerRef.current.snapshot().selectionGeneration
       if (resolution.kind === 'terminal') {
         workbenchControllerRef.current.register(restored.admission, null)
         workbenchControllerRef.current.settle(restored.admission.jobId)
@@ -5676,15 +6460,42 @@ export default function Home() {
         settle()
         const summary = aiden.assistantOutputText(resolution.projection)
           || resolution.projection.receipt.summary
-        if (summary) {
+        const durableConversation = conversationForExactRun(
+          conversationsRef.current,
+          restored.admission,
+        )
+        const durableResponseExists = durableConversation?.messages.at(-1)?.role === 'assistant'
+          && durableConversation.messages.at(-1)?.isStreaming !== true
+          && Boolean(durableConversation.messages.at(-1)?.content.trim())
+        if (durableConversation && durableResponseExists) {
+          setCurrentConvId(durableConversation.id)
+          setMessages([...durableConversation.messages])
+        } else if (summary) {
           setMessages((prev) => prev.some((message) => message.id === recoveredMessageId)
             ? prev
             : [...prev, { id: recoveredMessageId, role: 'assistant', content: summary, timestamp: Date.now(), isStreaming: false }])
         }
         return
       }
+      if (resolution.kind === 'inactive') {
+        workbenchControllerRef.current.registerView({
+          sessionId: null,
+          jobId: restored.admission.jobId,
+          attemptId: restored.admission.attemptId,
+          runId: restored.admission.runId,
+          status: normalizeActiveJobStatus(resolution.projection.receipt.status),
+          statusDetail: resolution.projection.receipt.summary || 'Durable reconciliation required',
+          updatedAt: Date.now(),
+        })
+        publishController()
+        aiden.clearRunHandle(restored.admission)
+        activeRunIdRef.current = null
+        settle()
+        return
+      }
       startReplay()
     }).catch(() => {
+      if (!restorationStillOwnsSelection()) return
       aiden.clearRunHandle(restored.admission)
       workbenchControllerRef.current.settle(restored.admission.jobId)
       publishController()
@@ -5705,7 +6516,7 @@ export default function Home() {
       controller.abort()
       activeRunFollowControllersRef.current.delete(controller)
     }
-  }, [publishController, selectContext, recordLiveActivity])
+  }, [conversationsHydrated, publishController, selectContext, recordLiveActivity])
   useEffect(() => () => {
     for (const controller of Array.from(activeRunFollowControllersRef.current)) controller.abort()
     activeRunFollowControllersRef.current.clear()
@@ -5863,10 +6674,17 @@ export default function Home() {
 
   // ── Load conversations from localStorage + backend ───────────
   useEffect(() => {
+    let loaded: Conversation[] = []
     try {
       const saved = localStorage.getItem('devos_conversations')
-      if (saved) setConversations(JSON.parse(saved))
+      if (saved) {
+        const parsed = JSON.parse(saved)
+        if (Array.isArray(parsed)) loaded = parsed
+      }
     } catch {}
+    conversationsRef.current = loaded
+    setConversations(loaded)
+    setConversationsHydrated(true)
     // Fetch backend sessions and merge in any not already in localStorage
     aiden.listSessions()
       .then((sessions) => {
@@ -5876,9 +6694,11 @@ export default function Home() {
           const fromBackend = sessions
             .filter(s => !existingIds.has(s.id))
             .map(s => ({ id: s.id, title: s.label || 'Untitled', timestamp: s.lastActive, messages: [] as Message[] }))
-          return fromBackend.length > 0
+          const next = fromBackend.length > 0
             ? [...prev, ...fromBackend].sort((a: Conversation, b: Conversation) => b.timestamp - a.timestamp)
             : prev
+          conversationsRef.current = next
+          return next
         })
       })
       .catch(() => {})
@@ -5886,6 +6706,7 @@ export default function Home() {
 
   // ── Save conversations to localStorage ──────────────────────
   useEffect(() => {
+    conversationsRef.current = conversations
     try { localStorage.setItem('devos_conversations', JSON.stringify(conversations)) } catch {}
   }, [conversations])
 
@@ -6090,7 +6911,7 @@ export default function Home() {
 
   // ── Stop execution ───────────────────────────────────────────
   const stopExecution = useCallback(async () => {
-    const rid = activeRunIdRef.current
+    const rid = workbenchControllerRef.current.snapshot().selected.runId ?? activeRunIdRef.current
     if (rid == null) return
     const accepted = await aiden.cancelTask(rid)
     setThinking(accepted
@@ -6196,6 +7017,7 @@ export default function Home() {
         workbenchControllerRef.current.register(admission, requestSessionId, userMsg.content)
         publishController()
         if (attachToForeground) {
+          activeRunIdRef.current = admission.runId
           setActiveJobId(admission.jobId)
           setActiveAttemptId(admission.attemptId)
           setActiveRunId(admission.runId)
@@ -6473,12 +7295,13 @@ export default function Home() {
   // ── Context value ───────────────────────────────────────────
   const ctxValue: DevOSCtxType = {
     uiMode, setUIMode, execMode, setExecMode,
-    historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen,
+    historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen, collapseLiveExecution, reopenLiveExecution,
     activityOpen, setActivityOpen, settingsOpen, setSettingsOpen,
     settingsTab, setSettingsTab, mainView, setMainView, appearance, setAppearance,
     isExecuting, isStreaming, thinking, budget, activeModel, activeProvider, runtimeConnection, runtimeVersion,
     executionAvailable, executionQueue, workbenchReadOnly,
     runProjection, runArtifacts, capabilities, browserSession, controlBrowser,
+    liveExecution, liveExecutionSelection, selectLiveExecutionSurface, toggleLiveExecutionPin,
     selectedContext, activeJobs: workbenchControllerRef.current.active(),
     messages, setMessages, conversations, setConversations, currentConvId,
     input, setInput,
@@ -6533,7 +7356,7 @@ export default function Home() {
       <div style={{
         display: 'flex', flexDirection: 'column',
         height: '100vh', background: 'var(--bg)',
-        color: 'var(--text)', fontFamily: 'var(--mono)', overflow: 'hidden',
+        color: 'var(--text)', fontFamily: 'var(--sans)', overflow: 'hidden',
       }}>
         <NavBar />
         {updateBanner && (
@@ -6560,30 +7383,12 @@ export default function Home() {
         )}
         {/* Headless connector — keeps WebSocket alive for briefings */}
         <LiveViewPanel />
-        <div className={`workbench-grid ${historyOpen ? 'sidebar-open' : 'sidebar-closed'}`} style={{
+        <div className={`workbench-grid ${historyOpen ? 'sidebar-open' : 'sidebar-closed'} ${liveViewOpen && liveExecution?.surfaces.length ? 'live-execution-open' : ''}`} style={{
           flex: 1, display: 'grid', overflow: 'hidden',
           transition: 'grid-template-columns 0.3s cubic-bezier(0.22,1,0.36,1)',
         }}>
           <HistorySidebar />
           <div className="workbench-main" style={{ display: 'flex', flexDirection: 'column', minWidth: 0, overflow: 'hidden' }}>
-            {/* Chat | Activity — the conversation stays clean; tools live in Activity */}
-            <div style={{ display: 'flex', gap: 4, padding: '8px 14px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
-              {(['chat', 'activity'] as const).map(v => (
-                <button
-                  key={v}
-                  onClick={() => setMainView(v)}
-                  className="nav-btn"
-                  style={{
-                    background: mainView === v ? 'var(--orange2)' : 'transparent',
-                    color: mainView === v ? 'var(--orange)' : 'var(--muted3)',
-                    border: '1px solid ' + (mainView === v ? 'rgba(255,107,53,0.34)' : 'transparent'),
-                    borderRadius: 8, padding: '5px 14px', cursor: 'pointer',
-                    fontFamily: 'var(--sans)', fontSize: 13, fontWeight: 600, textTransform: 'capitalize',
-                  }}>
-                  {v}{v === 'activity' && activityLogs.length ? ` (${activityLogs.length})` : ''}
-                </button>
-              ))}
-            </div>
             <div style={{ flex: 1, minHeight: 0, display: mainView === 'chat' ? 'flex' : 'none', flexDirection: 'column' }}>
               <ChatPanel />
             </div>
@@ -6604,7 +7409,11 @@ export default function Home() {
             {mainView === 'artifacts' && <ArtifactsView />}
             {mainView === 'apps' && <AppsView />}
             {mainView === 'sponsors' && <SponsorsView />}
+            {!liveViewOpen && liveExecution?.surfaces.length ? (
+              <button type="button" className="live-execution-reopen" onClick={reopenLiveExecution}>Open Live Execution</button>
+            ) : null}
           </div>
+          {mainView === 'chat' && <LiveExecutionPane />}
         </div>
         <StatusBar />
         {settingsOpen && <SettingsDrawer />}

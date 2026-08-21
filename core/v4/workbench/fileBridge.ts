@@ -49,7 +49,9 @@ function mimeFor(file: string): string {
     case '.pdf': return 'application/pdf';
     case '.json': return 'application/json';
     case '.md': case '.markdown': return 'text/markdown';
-    case '.txt': case '.log': case '.csv': return 'text/plain';
+    case '.txt': case '.log': case '.csv': case '.js': case '.jsx': case '.ts': case '.tsx':
+    case '.css': case '.html': case '.xml': case '.yaml': case '.yml': case '.sh': case '.ps1': case '.py':
+      return 'text/plain';
     default: return 'application/octet-stream';
   }
 }
@@ -71,7 +73,7 @@ export function sanitizeSvg(input: string): string {
 
 export function createWorkbenchFileBridge(options: {
   root: string;
-  artifacts?: Pick<ArtifactStore, 'get' | 'listRecent'>;
+  artifacts?: Pick<ArtifactStore, 'get' | 'listRecent'> & Partial<Pick<ArtifactStore, 'readContent'>>;
   artifactCwd?: string;
   maxAttachmentBytes?: number;
   maxArtifactBytes?: number;
@@ -119,6 +121,16 @@ export function createWorkbenchFileBridge(options: {
     readArtifact(id) {
       const artifact = options.artifacts?.get(id);
       if (!artifact || artifact.kind !== 'file') return null;
+      const archived = options.artifacts?.readContent?.(id);
+      if (archived) {
+        if (!Buffer.isBuffer(archived.bytes) || archived.bytes.length > maxArtifactBytes) return null;
+        const name = safeName(archived.sourceName || artifact.path);
+        const mime = mimeFor(name);
+        const bytes = mime === 'image/svg+xml'
+          ? Buffer.from(sanitizeSvg(archived.bytes.toString('utf8')), 'utf8')
+          : Buffer.from(archived.bytes);
+        return { id: artifact.id, name, mime, bytes };
+      }
       const workspace = path.resolve(options.artifactCwd ?? process.cwd());
       const candidate = path.resolve(workspace, artifact.path);
       let stat: fs.Stats;

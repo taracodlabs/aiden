@@ -30,10 +30,16 @@ export function createWorkbenchJobCommands(options: {
   jobEngine: JobEngine;
   runStore: RunStore;
   instanceId: string;
+  /** Exact repository/workspace root bound to newly admitted Workbench Jobs. */
+  workspacePath?: string;
   controlAuthority?: JobControlAuthority;
   actionAuthority?: ActionAuthority;
   /** Durable conversation authority shared with the Workbench dispatcher. */
   sessionStore?: SessionStore;
+  /** Resolve the exact provider/model before admission. The returned binding
+   * is copied into the immutable trigger event so later settings changes
+   * cannot drift an already-admitted Job. */
+  resolveModelBinding?: (sessionId?: string) => { provider: string; model: string; source?: 'session' | 'default' } | null;
   idFactory?: () => string;
 }) {
   const controlAuthority = options.controlAuthority ?? createJobControlAuthority({ db: options.db, jobEngine: options.jobEngine });
@@ -42,12 +48,20 @@ export function createWorkbenchJobCommands(options: {
   if (!checkpoints) throw new Error('Workbench requires the canonical JobEngine continuity authority');
   const taskStore = createTaskStore({ db: options.db });
   const nextId = options.idFactory ?? randomUUID;
-  const enqueueTx = options.db.transaction((task: { message: string; sessionId?: string }) => {
+  const enqueueTx = options.db.transaction((task: {
+    message: string;
+    sessionId?: string;
+    modelBinding?: { provider: string; model: string; source: 'session' | 'default' } | null;
+  }) => {
     const idempotencyKey = nextId();
     const fingerprint = createHash('sha256').update(task.message).digest('hex');
     const trigger = options.triggerBus.insert({
       source: 'manual', sourceKey: 'workbench-web', idempotencyKey,
-      payload: { body: { prompt: task.message, source: 'workbench-web' }, sessionId: task.sessionId },
+      payload: {
+        body: { prompt: task.message, source: 'workbench-web' },
+        sessionId: task.sessionId,
+        ...(task.modelBinding ? { model_binding: task.modelBinding } : {}),
+      },
     });
     const admission = admitDurableJob(options.jobEngine, {
       entryPoint: 'workbench', source: 'workbench',
@@ -56,6 +70,7 @@ export function createWorkbenchJobCommands(options: {
       idempotencyNamespace: 'workbench-web', idempotencyKey,
       requestFingerprint: fingerprint,
       goal: summarizeWorkbenchGoal(task.message),
+      workspaceId: options.workspacePath ?? null,
       triggerEventId: trigger.id,
     });
     options.db.prepare('UPDATE trigger_events SET payload_json = ? WHERE id = ?').run(JSON.stringify({
@@ -66,6 +81,7 @@ export function createWorkbenchJobCommands(options: {
         attempt_id: admission.attemptId,
         run_id: admission.runId,
       },
+      ...(task.modelBinding ? { model_binding: task.modelBinding } : {}),
     }), trigger.id);
     return { trigger, admission };
   }).immediate;
@@ -116,7 +132,11 @@ export function createWorkbenchJobCommands(options: {
   return {
     enqueue: {
       enqueue(task: { message: string; sessionId?: string }) {
-        const accepted = enqueueTx(task);
+        const resolved = options.resolveModelBinding?.(task.sessionId) ?? null;
+        const modelBinding = resolved?.provider?.trim() && resolved.model?.trim()
+          ? { provider: resolved.provider.trim(), model: resolved.model.trim(), source: resolved.source ?? 'default' as const }
+          : null;
+        const accepted = enqueueTx({ ...task, modelBinding });
         if (accepted.trigger.inserted && options.sessionStore) {
           try {
             const sessionId = task.sessionId ?? `workbench:${accepted.admission.jobId}`;
@@ -170,6 +190,7 @@ export function createWorkbenchJobCommands(options: {
             idempotencyKey: `cancel:${run.taskId}`,
           });
           if (!result.applied && !result.duplicate) return { accepted: false, runId };
+          actionAuthority.cancelPendingForJob(run.taskId, 'Job cancellation requested');
           if (run.triggerEventId) {
             const trigger = options.triggerBus.get(run.triggerEventId);
             if (trigger && (trigger.status === 'pending' || trigger.status === 'claimed')) {
