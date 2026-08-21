@@ -6001,7 +6001,11 @@ export default function Home() {
   const [runtimeVersion, setRuntimeVersion] = useState('unknown')
 
   // ── Onboarding ──────────────────────────────────────────────
-  const [onboardingDone, setOnboardingDone] = useState(true)
+  const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    setOnboardingDone(window.localStorage.getItem('aiden:first-run:v1') === 'complete')
+  }, [])
 
   // ── Load active model label for header ───────────────────────
   // ── Auto-update banner wiring ────────────────────────────────
@@ -7441,10 +7445,16 @@ export default function Home() {
             onUpgrade={(message) => setUpgradeToast({ message, action: 'Upgrade to Pro', onAction: () => setPricingOpen(true) })}
           />
         )}
-        {!onboardingDone && (
-          <OnboardingModal onComplete={(name) => {
-            setOnboardingDone(true)
-          }} />
+        {onboardingDone === false && (
+          <OnboardingModal
+            onOpenSettings={(tab) => { setSettingsTab(tab); setSettingsOpen(true) }}
+            onOpenApps={() => { setMainView('apps') }}
+            onComplete={(choice) => {
+              window.localStorage.setItem('aiden:first-run:v1', 'complete')
+              if (choice === 'Work with Apps') setMainView('apps')
+              setOnboardingDone(true)
+            }}
+          />
         )}
       </div>
     </DevOSCtx.Provider>
