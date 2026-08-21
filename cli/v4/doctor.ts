@@ -42,6 +42,13 @@ import { checkForUpdate } from '../../core/v4/update/checkUpdate';
 import type { Display } from './display';
 import { boxBottom, boxLine, boxTopTitled, visibleLength } from './box';
 import { detectBackend, missingBackendMessage, listKnownBackends } from '../../core/voice/audioBackend';
+import {
+  applySafeDoctorFixes,
+  productDoctorResults,
+  toDoctorJson,
+  type CommercialDoctorContext,
+} from '../../core/v4/commercial/productDoctor';
+import type { SystemReadinessProjection } from '../../core/v4/workbench/systemReadiness';
 
 /**
  * v4.1.3-essentials doctor-polish: stable group identifiers used by the
@@ -53,8 +60,16 @@ import { detectBackend, missingBackendMessage, listKnownBackends } from '../../c
  * liveness) get their own groups appended after the main set.
  */
 export type DoctorGroup =
+  | 'System'
+  | 'Runtime'
   | 'Setup'
   | 'Providers'
+  | 'AI'
+  | 'Coding'
+  | 'Browser'
+  | 'Apps'
+  | 'Workbench'
+  | 'Commercial'
   | 'Inference'
   | 'System tools'
   | 'Storage'
@@ -71,10 +86,18 @@ export type DoctorGroup =
  * hierarchy stable even if `runDoctor` reorders its check sequence.
  */
 export const DOCTOR_GROUP_ORDER: readonly DoctorGroup[] = [
+  'System',
+  'Runtime',
   // v4.14.x — "what's my current setup" leads the box: active model, enabled
   // tools, permission mode, memory files, daemon. Informational (always green).
   'Setup',
   'Providers',
+  'AI',
+  'Coding',
+  'Browser',
+  'Apps',
+  'Workbench',
+  'Commercial',
   'Inference',
   'System tools',
   'Storage',
@@ -153,6 +176,16 @@ export interface DoctorOptions {
    * on standalone CLI invocations (no live agent → no outcome state).
    */
   skillOutcomeTracker?: import('../../core/v4/skillOutcomeTracker').SkillOutcomeTracker;
+  /** Stable machine-readable output for support and installer diagnostics. */
+  json?: boolean;
+  /** Apply only low-risk local directory repairs. */
+  fix?: boolean;
+  /** Existing Workbench readiness projection; doctor does not create a second authority. */
+  readinessProjection?: SystemReadinessProjection;
+  /** Commercial diagnostics are present only in a commercial build context. */
+  commercial?: CommercialDoctorContext;
+  /** Injectable output for tests and embedding. */
+  write?: (text: string) => void;
 }
 
 /**
@@ -1333,12 +1366,14 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   // candidate is missing — which would imply a packaging bug worth
   // surfacing rather than masking.
   let installedVersion = '0.0.0';
+  let commercialDevelopment = false;
   for (const rel of ['../../package.json', '../../../package.json']) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const pkg = require(rel) as { version: string };
+      const pkg = require(rel) as { version: string; private?: boolean };
       if (pkg && typeof pkg.version === 'string' && pkg.version) {
         installedVersion = pkg.version;
+        commercialDevelopment = pkg.private === true;
         break;
       }
     } catch {
@@ -1361,6 +1396,16 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   // Phase 20 Task 7: license + update health.
   results.push(await checkLicense({ paths, fetchImpl, timeoutMs }));
   results.push(await checkUpdate({ paths, installedVersion, timeoutMs }));
+  results.push(...await productDoctorResults({
+    paths,
+    installedVersion,
+    readiness: opts.readinessProjection,
+    commercial: opts.commercial ?? (commercialDevelopment ? {
+      edition: 'pro',
+      entitlementState: 'unavailable',
+      updateChannel: 'pro-preview',
+    } : undefined),
+  }));
 
   return {
     results,
@@ -1577,6 +1622,13 @@ export function renderHealthBox(report: DoctorReport, display: Display): string 
  * doctor` command handler.
  */
 export async function runDoctorCli(opts?: DoctorOptions): Promise<DoctorReport> {
+  const write = opts?.write ?? ((text: string) => process.stdout.write(text));
+  if (opts?.fix) {
+    const fixes = await applySafeDoctorFixes(opts.paths ?? resolveAidenPaths());
+    if (!opts.json) {
+      for (const fix of fixes) write(`${fix.applied ? '✓' : '✗'} ${fix.id} · ${fix.detail}\n`);
+    }
+  }
   const report = await runDoctor(opts);
 
   // v4.14.x — the Setup group (current runtime state). Standalone CLI has no
@@ -1654,12 +1706,13 @@ export async function runDoctorCli(opts?: DoctorOptions): Promise<DoctorReport> 
     livenessFailed = summary.red > 0;
   }
 
-  process.stdout.write(renderHealthBox(report, display) + '\n');
+  if (opts?.json) write(JSON.stringify(toDoctorJson(report), null, 2) + '\n');
+  else write(renderHealthBox(report, display) + '\n');
 
   // Phase v4.1.1-oauth-fix Phase 5: discoverability hint for the deep
   // mode. Outside the box so it reads as meta-guidance, not a check.
-  if (!opts?.liveness) {
-    process.stdout.write(
+  if (!opts?.liveness && !opts?.json) {
+    write(
       '\n  hint: Run `aiden doctor --providers` for live provider checks\n',
     );
   }
