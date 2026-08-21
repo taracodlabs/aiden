@@ -833,6 +833,16 @@ Even a one-time tip or a star on the repository is appreciated.
 
 <br>
 
+## Aiden Community
+
+Aiden Community is the local-first, open-source runtime and current v4.20 feature generation. It includes Workbench, Browser Operator, Apps and External Coding foundations, Live Execution, approvals, Evidence, Verification, Proof, recovery, cancellation, and artifacts.
+
+Community maintenance continues through v4.20.x for critical bugs, security, compatibility, runtime correctness, and core trust and safety improvements. Commercial offerings may add managed workflows, automation, remote access, collaboration, hosted services, and commercial support without changing existing AGPL rights.
+
+See [COMMUNITY.md](COMMUNITY.md) for the maintenance and versioning policy.
+
+<br>
+
 ## Acknowledgements
 
 Built solo by **Shiva Deore** at **Taracod**.
