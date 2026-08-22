@@ -70,6 +70,7 @@ export type DoctorGroup =
   | 'Apps'
   | 'Automations'
   | 'Presence'
+  | 'Learning'
   | 'Workbench'
   | 'Commercial'
   | 'Inference'
@@ -99,6 +100,8 @@ export const DOCTOR_GROUP_ORDER: readonly DoctorGroup[] = [
   'Browser',
   'Apps',
   'Automations',
+  'Presence',
+  'Learning',
   'Workbench',
   'Commercial',
   'Inference',

@@ -11,8 +11,9 @@ import type { SystemReadinessProjection } from '../workbench/systemReadiness';
 import { classifyPlatform } from './platformSupport';
 import { snapshotAutomationReadiness } from '../automation/readiness';
 import { snapshotPresenceReadiness } from '../presence/readiness';
+import { snapshotLearningReadiness } from '../learning/readiness';
 
-export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Automations' | 'Presence' | 'Workbench' | 'Commercial';
+export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Automations' | 'Presence' | 'Learning' | 'Workbench' | 'Commercial';
 export interface ProductDoctorResult {
   name: string;
   group: ProductDoctorGroup;
@@ -93,7 +94,7 @@ export async function productDoctorResults(input: {
   if (input.readiness) {
     const groupByCategory: Record<string, ProductDoctorGroup> = {
       chat: 'AI', coding: 'Coding', validation: 'Coding', browser: 'Browser',
-      apps: 'Apps', automations: 'Automations', presence: 'Presence', workspace: 'Workbench', approvals: 'Workbench', evidence: 'Workbench',
+      apps: 'Apps', automations: 'Automations', presence: 'Presence', learning: 'Learning', workspace: 'Workbench', approvals: 'Workbench', evidence: 'Workbench',
     };
     for (const item of input.readiness.items) {
       results.push(result(
@@ -109,6 +110,11 @@ export async function productDoctorResults(input: {
   if (input.commercial && !input.readiness) {
     results.push(automationReadinessFromDisk(input.paths));
     results.push(presenceReadinessFromDisk(input.paths));
+    results.push(learningReadinessFromDisk(
+      input.paths,
+      input.commercial.edition.toLowerCase() === 'pro'
+        && !['revoked', 'expired'].includes(input.commercial.entitlementState),
+    ));
   }
 
   if (input.commercial) {
@@ -124,6 +130,32 @@ export async function productDoctorResults(input: {
     }
   }
   return results;
+}
+
+function learningReadinessFromDisk(paths: AidenPaths, entitled: boolean): ProductDoctorResult {
+  let db: { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] }; close(): void } | null = null;
+  try {
+    // Read-only by construction: Doctor observes and never migrates, imports,
+    // rebuilds, edits, or deletes learned content.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Database = require('better-sqlite3') as new (
+      name: string, options: { readonly: boolean; fileMustExist: boolean },
+    ) => { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] }; close(): void };
+    db = new Database(daemonDbPath(paths.root), { readonly: true, fileMustExist: true });
+    const readiness = snapshotLearningReadiness({
+      db: db as unknown as import('better-sqlite3').Database,
+      entitled,
+    });
+    return result(
+      'Evidence-linked Learning', 'Learning', readiness.ready, readiness.detail,
+      readiness.repairable ? 'Run `aiden learning rebuild` after reviewing the diagnostic.' : undefined,
+    );
+  } catch {
+    return result(
+      'Evidence-linked Learning', 'Learning', true, 'not initialized yet',
+      'Start Aiden or open Workbench to initialize the local Learning database.',
+    );
+  } finally { db?.close(); }
 }
 
 function presenceReadinessFromDisk(paths: AidenPaths): ProductDoctorResult {
