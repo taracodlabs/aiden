@@ -5640,6 +5640,7 @@ const SETTINGS_TABS = [
   { id: 'conversation', label: '◇ Conversation', section: 'General' },
   { id: 'appearance', label: '◐ Appearance', section: 'General' },
   { id: 'skills',   label: '◇ Skills', section: 'Advanced' },
+  { id: 'capabilities', label: '◇ Capabilities', section: 'Advanced' },
   { id: 'plugins',  label: '◇ Plugins', section: 'Advanced' },
   { id: 'sponsor',  label: '♥ Sponsor', section: 'About' },
   { id: 'guide',    label: '📖 User Guide', section: 'About' },
@@ -5647,6 +5648,80 @@ const SETTINGS_TABS = [
   { id: 'legal',    label: '⚖️ Legal', section: 'About' },
   { id: 'about',    label: 'ℹ️ About', section: 'About' },
 ]
+
+function CapabilitiesSettings() {
+  const [snapshot, setSnapshot] = useState<aiden.CapabilityExtensionsSnapshot | null>(null)
+  const [sourcePath, setSourcePath] = useState('')
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const refresh = useCallback(async () => {
+    const value = await aiden.loadWorkbenchCapabilities()
+    setSnapshot(value.extensions ?? null)
+  }, [])
+  useEffect(() => { void refresh().catch((cause) => setError(cause instanceof Error ? cause.message : 'Capabilities unavailable')) }, [refresh])
+  const act = async (label: string, operation: () => Promise<aiden.CapabilityExtensionsSnapshot>) => {
+    setBusy(label); setError(null)
+    try { setSnapshot(await operation()) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Capability operation failed') }
+    finally { setBusy(null) }
+  }
+  if (!snapshot) return <p style={settingsTextStyle}>{error || 'Loading capability registry…'}</p>
+  return (
+    <div style={{ display: 'grid', gap: 10 }}>
+      <p style={settingsTextStyle}>
+        Execution: <strong style={{ color: snapshot.executionEnabled && snapshot.sandbox.available ? 'var(--green)' : 'var(--orange)' }}>
+          {snapshot.executionEnabled ? (snapshot.sandbox.available ? 'Docker boundary ready' : 'Docker boundary unavailable') : 'Entitlement unavailable'}
+        </strong>
+      </p>
+      <p style={settingsTextStyle}>{snapshot.sandbox.image}{snapshot.sandbox.reason ? ` · ${snapshot.sandbox.reason}` : ''}</p>
+      <form onSubmit={(event) => {
+        event.preventDefault()
+        const value = sourcePath.trim()
+        if (!value) return
+        void act('install', () => aiden.installCapability(value)).then(() => setSourcePath(''))
+      }} style={{ display: 'flex', gap: 6 }}>
+        <input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="Local capability folder" style={{ flex: 1, minWidth: 0, padding: 8, background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6 }} />
+        <button type="submit" className="nav-btn" disabled={busy !== null || !sourcePath.trim()}>Install</button>
+      </form>
+      {snapshot.items.length === 0 && <p style={settingsTextStyle}>No capabilities installed.</p>}
+      {snapshot.items.map((item) => {
+        const latest = item.versions[item.versions.length - 1]
+        const pendingPermissions = item.permissionChanges.added
+        return (
+          <div key={item.capabilityId} style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)', minWidth: 0 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'start' }}>
+              <div style={{ minWidth: 0 }}>
+                <strong style={{ color: 'var(--text)', overflowWrap: 'anywhere' }}>{item.displayName}</strong>
+                <div style={{ ...settingsTextStyle, overflowWrap: 'anywhere' }}>{item.capabilityId}</div>
+              </div>
+              <span style={{ color: item.health?.state === 'healthy' ? 'var(--green)' : 'var(--orange)', fontFamily: 'var(--mono)', fontSize: 10 }}>{item.health?.state ?? 'unknown'}</span>
+            </div>
+            <p style={settingsTextStyle}>Active: {item.active ? `${item.active.version} · ${item.active.enabled ? 'enabled' : 'disabled'}` : 'none'}</p>
+            <p style={{ ...settingsTextStyle, overflowWrap: 'anywhere' }}>Digest: {item.active?.digest ?? latest?.digest ?? '—'}</p>
+            <p style={settingsTextStyle}>Requested: {item.requestedPermissions.map((permission) => permission.kind).join(', ') || 'none'}</p>
+            <p style={settingsTextStyle}>Granted: {item.grantedPermissions.map((permission) => permission.permission).join(', ') || 'none'}</p>
+            {pendingPermissions.length > 0 && <p style={{ ...settingsTextStyle, color: 'var(--orange)' }}>New permission review: {pendingPermissions.map((permission) => permission.kind).join(', ')}</p>}
+            <p style={settingsTextStyle}>Recent: {item.recentInvocations[0]?.state ?? 'no invocations'}</p>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+              {latest && (!item.active?.enabled || item.active.version !== latest.version) && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => {
+                const permissions = item.requestedPermissions.map((permission) => `${permission.kind} ${JSON.stringify(permission.scope)}`).join('\n') || 'No permissions'
+                if (window.confirm(`Activate ${item.displayName} ${latest.version}?\n\n${permissions}`)) void act('activate', () => aiden.activateCapability(item.capabilityId, latest.version))
+              }}>Review and activate {latest.version}</button>}
+              {item.active?.enabled && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void act('test', () => aiden.testCapability(item.capabilityId)) }}>Test health</button>}
+              {item.active?.enabled && item.rollbackTarget && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void act('rollback', () => aiden.rollbackCapability(item.capabilityId)) }}>Rollback to {item.rollbackTarget.version}</button>}
+              {item.active?.enabled && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void act('disable', () => aiden.disableCapability(item.capabilityId)) }}>Disable</button>}
+              {latest && !item.active?.enabled && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => {
+                if (window.confirm(`Uninstall ${item.displayName} ${latest.version}?`)) void act('uninstall', () => aiden.uninstallCapability(item.capabilityId, latest.version))
+              }}>Uninstall {latest.version}</button>}
+            </div>
+          </div>
+        )
+      })}
+      <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void refresh() }}>Refresh</button>
+      {error && <p role="alert" style={{ ...settingsTextStyle, color: 'var(--red)' }}>{error}</p>}
+    </div>
+  )
+}
 
 function ReadinessSettings({ sessionId, onOpenModels, onOpenApps }: {
   sessionId: string
@@ -5972,6 +6047,12 @@ function SettingsDrawer() {
           {settingsTab === 'skills' && (
             <SettingsSection title="Skills Manager">
               <SkillsManager />
+            </SettingsSection>
+          )}
+
+          {settingsTab === 'capabilities' && (
+            <SettingsSection title="Capabilities">
+              <CapabilitiesSettings />
             </SettingsSection>
           )}
 

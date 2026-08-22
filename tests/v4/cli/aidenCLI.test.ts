@@ -105,6 +105,25 @@ describe('aiden CLI', () => {
     ]);
   });
 
+  it('routes capability management with exact identities and explicit permission acceptance', async () => {
+    const capabilities = vi.fn(async () => 0);
+    await main(['node', 'aiden', 'capabilities', 'install', 'C:/local/sample', '--json'], {
+      runCapabilitiesHook: capabilities,
+    });
+    await main(['node', 'aiden', 'capability', 'activate', 'dev.taracod.sample@1.0.0', '--accept-permissions', '--json'], {
+      runCapabilitiesHook: capabilities,
+    });
+    await main(['node', 'aiden', 'capabilities', 'rollback', 'dev.taracod.sample'], {
+      runCapabilitiesHook: capabilities,
+    });
+
+    expect(capabilities.mock.calls).toEqual([
+      [{ action: 'install', target: 'C:/local/sample', json: true }],
+      [{ action: 'activate', target: 'dev.taracod.sample@1.0.0', json: true, acceptPermissions: true }],
+      [{ action: 'rollback', target: 'dev.taracod.sample', json: false }],
+    ]);
+  });
+
   it('aiden skills view <name> threads the arg', async () => {
     const skills = vi.fn(async () => undefined);
     const { argv, hooks } = captureMain(['skills', 'view', 'graphify'], {

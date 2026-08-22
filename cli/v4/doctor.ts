@@ -49,6 +49,7 @@ import {
   type CommercialDoctorContext,
 } from '../../core/v4/commercial/productDoctor';
 import type { SystemReadinessProjection } from '../../core/v4/workbench/systemReadiness';
+import type { CapabilityDoctorProjection } from '../../core/v4/capabilities/management';
 
 /**
  * v4.1.3-essentials doctor-polish: stable group identifiers used by the
@@ -71,6 +72,7 @@ export type DoctorGroup =
   | 'Automations'
   | 'Presence'
   | 'Learning'
+  | 'Capabilities'
   | 'Workbench'
   | 'Commercial'
   | 'Inference'
@@ -102,6 +104,7 @@ export const DOCTOR_GROUP_ORDER: readonly DoctorGroup[] = [
   'Automations',
   'Presence',
   'Learning',
+  'Capabilities',
   'Workbench',
   'Commercial',
   'Inference',
@@ -190,8 +193,56 @@ export interface DoctorOptions {
   readinessProjection?: SystemReadinessProjection;
   /** Commercial diagnostics are present only in a commercial build context. */
   commercial?: CommercialDoctorContext;
+  /** Read-only capability diagnostics supplied by the canonical management authority. */
+  capabilityDoctor?: () => Promise<CapabilityDoctorProjection>;
   /** Injectable output for tests and embedding. */
   write?: (text: string) => void;
+}
+
+export function capabilityDoctorResults(projection: CapabilityDoctorProjection): CheckResult[] {
+  const sandboxReason = projection.sandbox.reason ?? 'required image and Docker daemon are available';
+  return [
+    {
+      name: 'capability broker',
+      group: 'Capabilities',
+      passed: projection.broker === 'ready',
+      message: 'canonical ToolRegistry broker is ready',
+    },
+    {
+      name: 'capability sandbox',
+      group: 'Capabilities',
+      passed: projection.sandbox.available,
+      message: `${projection.sandbox.mechanism} · ${projection.sandbox.image} · ${sandboxReason}`,
+      ...(projection.sandbox.available ? {} : { suggestion: 'Start Docker and install the pinned capability image before executing capabilities.' }),
+    },
+    {
+      name: 'capability registry',
+      group: 'Capabilities',
+      passed: true,
+      message: `${projection.installed} installed · ${projection.active} active`,
+    },
+    {
+      name: 'capability health',
+      group: 'Capabilities',
+      passed: projection.degraded === 0,
+      message: `${projection.healthy} healthy · ${projection.degraded} degraded`,
+      ...(projection.degraded === 0 ? {} : { suggestion: 'Inspect or disable degraded capability versions.' }),
+    },
+    {
+      name: 'permission updates',
+      group: 'Capabilities',
+      passed: projection.permissionUpdates === 0,
+      message: `${projection.permissionUpdates} update${projection.permissionUpdates === 1 ? '' : 's'} awaiting permission review`,
+      ...(projection.permissionUpdates === 0 ? {} : { suggestion: 'Review the exact new permissions before activation.' }),
+    },
+    {
+      name: 'capability staging',
+      group: 'Capabilities',
+      passed: projection.stagingPending === 0,
+      message: `${projection.stagingPending} interrupted staging entr${projection.stagingPending === 1 ? 'y' : 'ies'}`,
+      ...(projection.stagingPending === 0 ? {} : { suggestion: 'Restart Aiden to clean interrupted capability staging safely.' }),
+    },
+  ];
 }
 
 /**
@@ -1412,6 +1463,19 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
       updateChannel: 'pro-preview',
     } : undefined),
   }));
+  if (opts.capabilityDoctor) {
+    try {
+      results.push(...capabilityDoctorResults(await opts.capabilityDoctor()));
+    } catch (error) {
+      results.push({
+        name: 'capability diagnostics',
+        group: 'Capabilities',
+        passed: false,
+        message: error instanceof Error ? error.message : String(error),
+        suggestion: 'Capability execution remains unavailable until diagnostics can read the canonical registry.',
+      });
+    }
+  }
 
   return {
     results,

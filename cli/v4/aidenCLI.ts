@@ -49,6 +49,7 @@ import { runDoctorCli } from './doctor';
 import { runModelPicker } from './commands/modelPicker';
 import { allCommands } from './commands';
 import { runAppsCli } from './appsCli';
+import { readCapabilityDoctor, runCapabilitiesCli, type CapabilityCliInput } from './capabilitiesCli';
 // v4.12 /commands slice — inline /activity roll-up + /home cwd invalidation + history source.
 import { makeActivityCommand } from './commands/activity';
 import { loadRecent, HISTORY_MAX_ENTRIES } from './historyStore';
@@ -75,6 +76,11 @@ import { resolveAutonomyPolicy, type AutonomyLevel } from '../../moat/autonomy';
 import { SessionStore } from '../../core/v4/sessionStore';
 import { SessionManager } from '../../core/v4/sessionManager';
 import { ToolRegistry } from '../../core/v4/toolRegistry';
+import { CapabilityInstaller } from '../../core/v4/capabilities/installer';
+import { CapabilityManagementAuthority } from '../../core/v4/capabilities/management';
+import { DockerCapabilityProcessHost } from '../../core/v4/capabilities/processHost';
+import { CapabilityRuntime } from '../../core/v4/capabilities/runtime';
+import { createCapabilityStore } from '../../core/v4/capabilities/store';
 import { createIntegrationRuntime, integrationLocalScope } from '../../core/v4/integrations/runtime';
 import { SecretAuthority } from '../../core/v4/integrations/secretAuthority';
 import {
@@ -367,6 +373,8 @@ export interface MainOptions {
   runQueryHook?: (opts: any) => Promise<number>;
   /** Override for parser-level Apps command tests. Returns exit code. */
   runAppsHook?: (input: Parameters<typeof runAppsCli>[0]) => Promise<number>;
+  /** Override for parser-level capability management tests. */
+  runCapabilitiesHook?: (input: CapabilityCliInput) => Promise<number>;
   /** Path override for tests. */
   pathsOverride?: AidenPaths;
   /** Existing durable authority used by an embedded production host. */
@@ -558,6 +566,52 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       ...(opts.writeOut ? { write: opts.writeOut } : {}),
     });
   };
+
+  const runCapabilitiesAction = async (input: CapabilityCliInput): Promise<void> => {
+    if (opts.runCapabilitiesHook) {
+      actionExitCode = await opts.runCapabilitiesHook(input);
+      return;
+    }
+    const paths = opts.pathsOverride ?? resolveAidenPaths();
+    await ensureAidenDirsExist(paths);
+    actionExitCode = await runCapabilitiesCli(input, {
+      aidenRoot: paths.root,
+      aidenVersion: VERSION,
+      workspaceRoot: process.cwd(),
+      ...(opts.writeOut ? { write: opts.writeOut } : {}),
+    });
+  };
+
+  const capabilitiesCommand = program
+    .command('capabilities')
+    .alias('capability')
+    .description('Manage private, permission-bound capability packages')
+    .option('--json', 'Print structured output with host-private fields removed')
+    .action(async (command: { json?: boolean }) => runCapabilitiesAction({ action: 'list', json: command.json === true }));
+  const capabilityJson = (command: { json?: boolean }): boolean => command.json === true
+    || (capabilitiesCommand as unknown as { json?: boolean }).json === true
+    || (capabilitiesCommand.opts() as { json?: boolean }).json === true;
+  capabilitiesCommand.command('list').option('--json', 'Print structured output')
+    .action(async (command: { json?: boolean }) => runCapabilitiesAction({ action: 'list', json: capabilityJson(command) }));
+  capabilitiesCommand.command('inspect <id>').option('--json', 'Print structured output')
+    .action(async (id: string, command: { json?: boolean }) => runCapabilitiesAction({ action: 'inspect', target: id, json: capabilityJson(command) }));
+  capabilitiesCommand.command('install <path>').option('--json', 'Print structured output')
+    .action(async (source: string, command: { json?: boolean }) => runCapabilitiesAction({ action: 'install', target: source, json: capabilityJson(command) }));
+  capabilitiesCommand.command('activate <identity>')
+    .option('--accept-permissions', 'Accept the exact permission declarations for this immutable version')
+    .option('--json', 'Print structured output')
+    .action(async (identity: string, command: { json?: boolean; acceptPermissions?: boolean }) => runCapabilitiesAction({
+      action: 'activate', target: identity, json: capabilityJson(command),
+      acceptPermissions: command.acceptPermissions === true,
+    }));
+  capabilitiesCommand.command('rollback <id>').option('--json', 'Print structured output')
+    .action(async (id: string, command: { json?: boolean }) => runCapabilitiesAction({ action: 'rollback', target: id, json: capabilityJson(command) }));
+  capabilitiesCommand.command('disable <id>').option('--json', 'Print structured output')
+    .action(async (id: string, command: { json?: boolean }) => runCapabilitiesAction({ action: 'disable', target: id, json: capabilityJson(command) }));
+  capabilitiesCommand.command('test <id>').option('--json', 'Print structured output')
+    .action(async (id: string, command: { json?: boolean }) => runCapabilitiesAction({ action: 'test', target: id, json: capabilityJson(command) }));
+  capabilitiesCommand.command('uninstall <identity>').option('--json', 'Print structured output')
+    .action(async (identity: string, command: { json?: boolean }) => runCapabilitiesAction({ action: 'uninstall', target: identity, json: capabilityJson(command) }));
 
   const appsCommand = program
     .command('apps')
@@ -952,7 +1006,37 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
             ...(skill.readiness ? { readiness: skill.readiness } : {}),
           })),
           plugins: workbenchPlugins,
+          extensions: workbenchRuntime ? {
+            executionEnabled: editionAuthority.can('capability.sdk'),
+            sandbox: workbenchRuntime.capabilityManagement.sandbox(),
+            items: workbenchRuntime.capabilityManagement.list(),
+          } : {
+            executionEnabled: false,
+            sandbox: {
+              available: false,
+              mechanism: 'docker' as const,
+              image: 'node:22.23.1-bookworm-slim',
+              reason: 'Capability runtime is unavailable.',
+            },
+            items: [],
+          },
         }),
+        capabilityManagement: workbenchRuntime ? {
+          snapshot: () => ({
+            executionEnabled: editionAuthority.can('capability.sdk'),
+            sandbox: workbenchRuntime!.capabilityManagement.sandbox(),
+            items: workbenchRuntime!.capabilityManagement.list(),
+          }),
+          async install(sourcePath: string) {
+            const installed = await workbenchRuntime!.capabilityManagement.install(sourcePath);
+            return { capabilityId: installed.record.manifest.id };
+          },
+          activate: (input) => workbenchRuntime!.capabilityManagement.activate(input),
+          rollback: (capabilityId) => workbenchRuntime!.capabilityManagement.rollback(capabilityId),
+          disable: (capabilityId) => workbenchRuntime!.capabilityManagement.disable(capabilityId),
+          test: (capabilityId) => workbenchRuntime!.capabilityManagement.test(capabilityId),
+          uninstall: (input) => workbenchRuntime!.capabilityManagement.uninstall(input),
+        } : undefined,
         continuity,
         continueTask,
         token,
@@ -1043,10 +1127,17 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         await opts.runDoctorHook();
         return;
       }
+      const paths = opts.pathsOverride ?? resolveAidenPaths();
       await runDoctorCli({
+        paths,
         liveness: cmdOpts.providers === true,
         json: cmdOpts.json === true,
         fix: cmdOpts.fix === true,
+        capabilityDoctor: () => readCapabilityDoctor({
+          aidenRoot: paths.root,
+          aidenVersion: VERSION,
+          workspaceRoot: process.cwd(),
+        }),
       });
       // Non-interactive subcommand: exit cleanly instead of hanging on a
       // lingering handle. runDoctorCli already set process.exitCode honestly
@@ -2179,6 +2270,35 @@ export async function buildAgentRuntime(
   // Tool registry + executor.
   const toolRegistry = new ToolRegistry();
   registerAllTools(toolRegistry);
+  const capabilityStore = createCapabilityStore(replDb);
+  const capabilityInstaller = new CapabilityInstaller({
+    aidenRoot: paths.root,
+    store: capabilityStore,
+    aidenVersion: VERSION,
+  });
+  await capabilityInstaller.cleanupStaging();
+  const capabilityProcessHost = new DockerCapabilityProcessHost();
+  const capabilityEdition = buildEditionAuthority(detectProductEdition());
+  const capabilityRuntime = new CapabilityRuntime({
+    store: capabilityStore,
+    processHost: capabilityProcessHost,
+    canExecute: () => capabilityEdition.can('capability.sdk'),
+  });
+  const capabilityRecovery = capabilityRuntime.reconcileInterruptedInvocations();
+  if (capabilityRecovery.failedCleanup > 0) {
+    projectStartupDiagnostic('warning',
+      `${capabilityRecovery.failedCleanup} capability invocation${capabilityRecovery.failedCleanup === 1 ? '' : 's'} could not be safely reconciled.`,
+    );
+  }
+  const capabilityScope = path.resolve(process.cwd());
+  const capabilityManagement = new CapabilityManagementAuthority({
+    store: capabilityStore,
+    installer: capabilityInstaller,
+    processHost: capabilityProcessHost,
+    scopeId: capabilityScope,
+    ownerId: 'local-user',
+    workspaceId: capabilityScope,
+  });
   const codingCredential = await credentialResolver.loadCredentials('codex_responses').catch(() => null);
   const codingApiKey = codingCredential?.apiKey
     ?? process.env.AIDEN_CODING_OPENAI_API_KEY
@@ -2922,6 +3042,20 @@ export async function buildAgentRuntime(
     // P1B-2B — shadow snapshot sink (non-authoritative; fail-safe capture only).
     snapshotSink: snapshotLedger.sink,
   };
+  try {
+    capabilityRuntime.registerActiveTools({
+      registry: toolRegistry,
+      scopeId: capabilityScope,
+      ownerId: 'local-user',
+      workspaceId: capabilityScope,
+      workspaceRoot: capabilityScope,
+    });
+  } catch (error) {
+    projectStartupDiagnostic(
+      'warning',
+      `Capability adapters were not registered: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
   const toolExecutor = toolRegistry.buildExecutor(toolExecutorContext);
 
   // v4.12 /commands slice — the `/home` seam. Aiden sources tool cwd two ways:
@@ -4366,6 +4500,8 @@ export async function buildAgentRuntime(
     jobEngine,
     jobControlAuthority,
     actionAuthority,
+    capabilityRuntime,
+    capabilityManagement,
     replInstanceId,
     replParentRunRef,
     // v4.10 Slice 10.8 — durable Task-lite store.
@@ -4408,6 +4544,8 @@ export interface AgentRuntime {
   tirithScanner: TirithScanner;
   approvalEngine: ApprovalEngine;
   actionAuthority: import('../../core/v4/actionAuthority').ActionAuthority;
+  capabilityRuntime: CapabilityRuntime;
+  capabilityManagement: CapabilityManagementAuthority;
   jobControlAuthority: import('../../core/v4/daemon/jobControlAuthority').JobControlAuthority;
   auxiliaryClient: AuxiliaryClient;
   callbacks: CliCallbacks;

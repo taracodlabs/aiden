@@ -37,6 +37,7 @@ import {
 } from './projection';
 import { summarizeWorkbenchActiveJobs } from './activeJobs';
 import type { WorkbenchPresencePort } from './presencePort';
+import type { CapabilityManagementProjection } from '../capabilities/management';
 import type {
   WorkbenchAttachment,
   WorkbenchArtifactContent,
@@ -185,6 +186,21 @@ export interface WorkbenchCapabilitiesProjection {
     name: string; version: string; description: string; author?: string;
     status: string; permissions: string[];
   }>;
+  extensions?: {
+    executionEnabled: boolean;
+    sandbox: { available: boolean; mechanism: 'docker'; image: string; reason?: string };
+    items: CapabilityManagementProjection[];
+  };
+}
+
+export interface WorkbenchCapabilityManagementPort {
+  snapshot(): WorkbenchCapabilitiesProjection['extensions'];
+  install(sourcePath: string): Promise<{ capabilityId: string }>;
+  activate(input: { capabilityId: string; version: string; acceptPermissions: boolean }): unknown;
+  rollback(capabilityId: string): unknown;
+  disable(capabilityId: string): unknown;
+  test(capabilityId: string): Promise<unknown>;
+  uninstall(input: { capabilityId: string; version: string }): Promise<unknown>;
 }
 
 export interface ContinuityReader {
@@ -226,6 +242,7 @@ export interface WorkbenchBridgeOptions {
   attachments?: WorkbenchAttachmentPort;
   artifacts?: WorkbenchArtifactPort;
   capabilities?: () => WorkbenchCapabilitiesProjection;
+  capabilityManagement?: WorkbenchCapabilityManagementPort;
   jobs?:       DurableJobReader;
   continuity?: ContinuityReader;
   continueTask?: ContinuityController;
@@ -546,6 +563,19 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     }
     if (req.method === 'POST' && url.pathname === '/api/browser/setup/grant') {
       handleBrowserGrant(req, res); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/capabilities/install') {
+      handleCapabilityInstall(req, res); return;
+    }
+    const capabilityActionMatch = url.pathname.match(/^\/api\/capabilities\/([^/]+)\/(activate|rollback|disable|test|uninstall)$/);
+    if (req.method === 'POST' && capabilityActionMatch) {
+      handleCapabilityAction(
+        req,
+        res,
+        decodeURIComponent(capabilityActionMatch[1]),
+        capabilityActionMatch[2] as 'activate' | 'rollback' | 'disable' | 'test' | 'uninstall',
+      );
+      return;
     }
     if (req.method === 'POST' && url.pathname === '/api/automations') {
       handleAutomationCreate(req, res); return;
@@ -1227,6 +1257,54 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       try { sendJson(res, 200, await opts.browserSetup!.grant({ confirmed: true })); }
       catch (error) { sendJson(res, 400, { error: managementError(error) }); }
     }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleCapabilityInstall(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.capabilityManagement) { sendJson(res, 503, { error: 'Capability management is unavailable' }); return; }
+    readJsonBody(req, 8 * 1024).then(async (body) => {
+      if (typeof body.path !== 'string' || body.path.trim().length === 0) {
+        sendJson(res, 400, { error: 'A local capability folder is required' }); return;
+      }
+      try {
+        const installed = await opts.capabilityManagement!.install(body.path.trim());
+        sendJson(res, 201, { capabilityId: installed.capabilityId, snapshot: opts.capabilityManagement!.snapshot() });
+      } catch (error) {
+        sendJson(res, 400, { error: managementError(error, [body.path]) });
+      }
+    }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
+  }
+
+  function handleCapabilityAction(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    capabilityId: string,
+    action: 'activate' | 'rollback' | 'disable' | 'test' | 'uninstall',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.capabilityManagement) { sendJson(res, 503, { error: 'Capability management is unavailable' }); return; }
+    readJsonBody(req, 8 * 1024).then(async (body) => {
+      try {
+        if (action === 'activate') {
+          if (typeof body.version !== 'string') throw new Error('Exact version is required');
+          opts.capabilityManagement!.activate({
+            capabilityId,
+            version: body.version,
+            acceptPermissions: body.acceptPermissions === true,
+          });
+        } else if (action === 'uninstall') {
+          if (typeof body.version !== 'string') throw new Error('Exact version is required');
+          await opts.capabilityManagement!.uninstall({ capabilityId, version: body.version });
+        } else if (action === 'test') {
+          await opts.capabilityManagement!.test(capabilityId);
+        } else {
+          opts.capabilityManagement![action](capabilityId);
+        }
+        sendJson(res, 200, opts.capabilityManagement!.snapshot());
+      } catch (error) {
+        sendJson(res, 400, { error: managementError(error) });
+      }
+    }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
   }
 
   function handleAutomationCreate(req: http.IncomingMessage, res: http.ServerResponse): void {
