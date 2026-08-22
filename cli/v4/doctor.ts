@@ -69,6 +69,7 @@ export type DoctorGroup =
   | 'Browser'
   | 'Apps'
   | 'Automations'
+  | 'Presence'
   | 'Workbench'
   | 'Commercial'
   | 'Inference'

@@ -930,6 +930,71 @@ export function loadApps(): Promise<WorkbenchAppsSnapshot> {
   return appsRequest<WorkbenchAppsSnapshot>('/api/apps');
 }
 
+export type WorkbenchPresenceState = 'active' | 'snoozed' | 'dismissed' | 'resolved' | 'expired' | 'suppressed';
+
+export interface WorkbenchPresenceItem {
+  id: string;
+  sourceKind: string;
+  sourceIdentity: string;
+  sourceRevision: string;
+  sourceDigest: string;
+  workspaceId: string | null;
+  ownerId: string | null;
+  jobId: string | null;
+  automationId: string | null;
+  category: string;
+  priority: number;
+  state: WorkbenchPresenceState;
+  title: string;
+  summary: string;
+  reasonCode: string;
+  reason: string;
+  recommendedAction: string | null;
+  payload: Record<string, unknown>;
+  occurrenceCount: number;
+  version: number;
+  firstObservedAt: number;
+  lastObservedAt: number;
+  snoozedUntil: number | null;
+  expiresAt: number | null;
+  resolvedAt: number | null;
+}
+
+export interface WorkbenchPresenceSnapshot {
+  enabled: boolean;
+  quietHours: boolean;
+  interruptions: WorkbenchPresenceItem[];
+  needsYou: WorkbenchPresenceItem[];
+  reviewWhenReady: WorkbenchPresenceItem[];
+  recentlyResolved: WorkbenchPresenceItem[];
+}
+
+export interface WorkbenchProposedJob {
+  id: string;
+  itemId: string;
+  prompt: string;
+  goal: string;
+  state: 'proposed' | 'accepting' | 'accepted' | 'dismissed' | 'expired' | 'invalidated';
+  version: number;
+  invalidationReason: string | null;
+  jobId: string | null;
+  attemptId: string | null;
+  runId: number | null;
+}
+
+export interface WorkbenchPresenceBriefing {
+  briefingId: string;
+  duplicate: boolean;
+  items: WorkbenchPresenceItem[];
+  groups: {
+    changed: WorkbenchPresenceItem[];
+    resolved: WorkbenchPresenceItem[];
+    blocked: WorkbenchPresenceItem[];
+    ready: WorkbenchPresenceItem[];
+    next: WorkbenchPresenceItem[];
+  };
+}
+
 export function loadAutomations(): Promise<WorkbenchAutomationSnapshot> {
   return appsRequest<WorkbenchAutomationSnapshot>('/api/automations');
 }
@@ -1212,6 +1277,71 @@ export async function loadWorkbenchBootstrap(): Promise<WorkbenchBootstrap> {
       ? body.activeJobCount
       : (Array.isArray(body.activeJobs) ? body.activeJobs.length : 0),
   };
+}
+
+function writeHeaders(): Record<string, string> {
+  return { 'Content-Type': 'application/json', 'x-workbench-token': token() };
+}
+
+async function presenceRequest<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    cache: 'no-store',
+    ...init,
+    headers: { ...writeHeaders(), ...(init?.headers ?? {}) },
+  });
+  const body = await response.json() as T & { error?: string };
+  if (!response.ok) throw new Error(body.error || `Presence request failed (HTTP ${response.status})`);
+  return body;
+}
+
+export function loadPresenceSnapshot(): Promise<WorkbenchPresenceSnapshot> {
+  return presenceRequest<WorkbenchPresenceSnapshot>('/api/presence');
+}
+
+export function loadPresenceProposals(): Promise<WorkbenchProposedJob[]> {
+  return presenceRequest<WorkbenchProposedJob[]>('/api/presence/proposals');
+}
+
+export function loadPresenceBriefing(briefingId: string): Promise<WorkbenchPresenceBriefing> {
+  return presenceRequest(`/api/presence/briefing?briefingId=${encodeURIComponent(briefingId)}`);
+}
+
+export function explainPresenceItem(itemId: string): Promise<{
+  itemId: string; reason: string; reasonCode: string;
+  source: { kind: string; identity: string; revision: string };
+  history: Array<{ eventId: string; type: string; createdAt: number }>;
+}> {
+  return presenceRequest(`/api/presence/${encodeURIComponent(itemId)}/explain`);
+}
+
+export function snoozePresenceItem(itemId: string, expectedVersion: number, until: number): Promise<WorkbenchPresenceItem> {
+  return presenceRequest(`/api/presence/${encodeURIComponent(itemId)}/snooze`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, until }),
+  });
+}
+
+export function dismissPresenceItem(itemId: string, expectedVersion: number): Promise<WorkbenchPresenceItem> {
+  return presenceRequest(`/api/presence/${encodeURIComponent(itemId)}/dismiss`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion }),
+  });
+}
+
+export function sendPresenceFeedback(itemId: string, kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority'): Promise<{ accepted: true }> {
+  return presenceRequest(`/api/presence/${encodeURIComponent(itemId)}/feedback`, {
+    method: 'POST', body: JSON.stringify({ kind }),
+  });
+}
+
+export function proposePresenceJob(itemId: string, prompt: string, goal: string): Promise<WorkbenchProposedJob> {
+  return presenceRequest(`/api/presence/${encodeURIComponent(itemId)}/proposals`, {
+    method: 'POST', body: JSON.stringify({ prompt, goal }),
+  });
+}
+
+export function acceptPresenceProposal(proposalId: string, expectedVersion: number, sessionId?: string): Promise<WorkbenchProposedJob> {
+  return presenceRequest(`/api/presence/proposals/${encodeURIComponent(proposalId)}/accept`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, ...(sessionId ? { sessionId } : {}) }),
+  });
 }
 
 export async function loadContinuity(jobId: string): Promise<ContinuityCheckpointView | null> {
