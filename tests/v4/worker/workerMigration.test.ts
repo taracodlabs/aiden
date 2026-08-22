@@ -86,6 +86,12 @@ describe('Worker persistence migration', () => {
     expect(runMigrations(db)).toEqual({ from: 38, to: LATEST_SCHEMA_VERSION });
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(40);
     expect(tables().filter((table) => !before.has(table))).toEqual([
+      'automation_approval_continuations',
+      'automation_definitions',
+      'automation_migration_receipts',
+      'automation_occurrences',
+      'automation_revisions',
+      'automation_trigger_bindings',
       'browser_action_receipts',
       'browser_navigation_history',
       'browser_sessions',
@@ -166,10 +172,21 @@ describe('Worker persistence migration', () => {
       `INSERT INTO daemon_instances (instance_id,pid,hostname,started_at,last_heartbeat,version)
        VALUES ('fixture',1,'localhost',1,1,'4.18.0')`,
     ).run();
-    const before = createJobEngine({ db }).submitJob({
-      entryPoint: 'test', source: 'test', sessionId: 'fixture', instanceId: 'fixture',
-      idempotencyNamespace: 'fixture', idempotencyKey: 'job', goal: 'legacy job',
-    });
+    const before = { jobId: 'job_legacy_worker', attemptId: 'attempt_legacy_worker' };
+    db.prepare(
+      `INSERT INTO tasks (
+         id,title,goal,status,created_at,updated_at,session_id,active_attempt_id,root_job_id,
+         idempotency_namespace,idempotency_key,request_fingerprint,entry_point,source
+       ) VALUES (?,?,?,'running',1,1,'fixture',?,?,?,?,?,?,?)`,
+    ).run(
+      before.jobId, 'legacy job', 'legacy job', before.attemptId, before.jobId,
+      'fixture', 'job', 'job', 'test', 'test',
+    );
+    db.prepare(
+      `INSERT INTO runs (
+         session_id,instance_id,status,started_at,task_id,attempt_id,attempt_number,generation,trigger_reason
+       ) VALUES ('fixture','fixture','running',1,?,?,1,1,'test')`,
+    ).run(before.jobId, before.attemptId);
 
     expect(runMigrations(db)).toEqual({ from: 36, to: LATEST_SCHEMA_VERSION });
     const engine = createJobEngine({ db });

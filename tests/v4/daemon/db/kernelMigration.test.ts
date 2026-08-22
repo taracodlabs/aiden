@@ -16,7 +16,6 @@ import {
   MIGRATIONS_FOR_TESTS,
   runMigrations,
 } from '../../../../core/v4/daemon/db/migrations';
-import { createJobEngine } from '../../../../core/v4/daemon/jobEngine';
 
 const roots: string[] = [];
 
@@ -77,11 +76,21 @@ describe('kernel migration compatibility', () => {
       `INSERT INTO daemon_instances (instance_id, pid, hostname, started_at, last_heartbeat, version)
        VALUES ('legacy-instance', 1, 'localhost', ?, ?, '4.16.1')`,
     ).run(now, now);
-    const engine = createJobEngine({ db: legacy });
-    const admitted = engine.submitJob({
-      entryPoint: 'legacy', source: 'legacy', sessionId: 'legacy-session', instanceId: 'legacy-instance',
-      idempotencyNamespace: 'legacy', idempotencyKey: 'job', requestFingerprint: 'job', goal: 'legacy goal',
-    });
+    const admitted = { jobId: 'job_legacy', attemptId: 'attempt_legacy' };
+    legacy.prepare(
+      `INSERT INTO tasks (
+         id,title,goal,status,created_at,updated_at,session_id,active_attempt_id,root_job_id,
+         idempotency_namespace,idempotency_key,request_fingerprint,entry_point,source
+       ) VALUES (?,?,?,'running',?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      admitted.jobId, 'legacy goal', 'legacy goal', now, now, 'legacy-session', admitted.attemptId,
+      admitted.jobId, 'legacy', 'job', 'job', 'legacy', 'legacy',
+    );
+    legacy.prepare(
+      `INSERT INTO runs (
+         session_id,instance_id,status,started_at,task_id,attempt_id,attempt_number,generation,trigger_reason
+       ) VALUES ('legacy-session','legacy-instance','running',?,?,?,1,1,'legacy')`,
+    ).run(now, admitted.jobId, admitted.attemptId);
     legacy.prepare(
       `UPDATE tasks SET status = 'completed', terminal_at = ?, terminal_outcome = 'verified',
          finish_reason = 'legacy_done', evidence = ?, active_attempt_id = NULL WHERE id = ?`,

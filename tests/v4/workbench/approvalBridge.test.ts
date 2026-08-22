@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest';
 import type { ActionAuthority, ApprovalRecord } from '../../../core/v4/actionAuthority';
+import { DurableJobHostDetachedError } from '../../../core/v4/daemon/jobLifecycle';
 import { buildWorkbenchApprovalCallbacks } from '../../../core/v4/workbench/approvalBridge';
 
 function record(state: ApprovalRecord['state'], overrides: Partial<ApprovalRecord> = {}): ApprovalRecord {
@@ -110,5 +111,23 @@ describe('Workbench durable approval bridge', () => {
     });
     controller.abort();
     await expect(decision).resolves.toBe('interrupted');
+  });
+
+  it('propagates host detachment without converting it into a user cancellation', async () => {
+    const controller = new AbortController();
+    const callbacks = buildWorkbenchApprovalCallbacks({
+      authority: authority(() => record('displayed')),
+      jobId: 'job_exact',
+      attemptId: 'attempt_exact',
+      generation: 3,
+      signal: controller.signal,
+      pollIntervalMs: 1,
+      timeoutMs: 100,
+    });
+    const decision = callbacks.promptUser?.({
+      toolName: 'file_write', category: 'write', args: {}, durableApprovalId: 'approval_exact',
+    });
+    controller.abort(new DurableJobHostDetachedError('Workbench host shutdown'));
+    await expect(decision).rejects.toMatchObject({ name: 'DurableJobHostDetachedError' });
   });
 });
