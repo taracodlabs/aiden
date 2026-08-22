@@ -125,12 +125,27 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
   runId: number | null
   onContinued?: (jobId: string, attemptId: string, runId: number) => void
 }) {
-  const { activeJobs, selectActiveJob } = useDevOS()
+  const {
+    activeJobs, selectActiveJob, presence, presenceBriefing, refreshPresence, sessionId,
+    setMainView, setSettingsOpen, setSettingsTab,
+  } = useDevOS()
   const [projection, setProjection] = useState<aiden.WorkbenchRunProjection | null>(null)
   const [continuity, setContinuity] = useState<aiden.ContinuityCheckpointView | null>(null)
   const [continueResult, setContinueResult] = useState<{ pending: boolean; accepted?: boolean; reason?: string }>({ pending: false })
   const continueKeys = useRef<Record<string, string>>({})
   const [projectionRevision, setProjectionRevision] = useState(0)
+  const [presenceReasons, setPresenceReasons] = useState<Record<string, string>>({})
+  const [presenceProposals, setPresenceProposals] = useState<Record<string, aiden.WorkbenchProposedJob>>({})
+  useEffect(() => {
+    let current = true
+    void aiden.loadPresenceProposals()
+      .then((proposals) => {
+        if (!current) return
+        setPresenceProposals(Object.fromEntries(proposals.map((proposal) => [proposal.itemId, proposal])))
+      })
+      .catch(() => { /* keep Presence usable if proposal projection is temporarily unavailable */ })
+    return () => { current = false }
+  }, [presence])
   const pendingApprovals = pendingApprovalCards(projection?.approvals ?? [])
   const activeWorkItems = useMemo(() => {
     if (!projection?.receipt.terminal || !projection.identity.jobId) return activeJobs
@@ -148,7 +163,17 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
     return [...activeJobs, completed]
   }, [activeJobs, projection])
   const workGroups = groupActiveWork(activeWorkItems)
-  const attentionItems = projectAttentionItems({ jobs: activeJobs, approvals: pendingApprovals })
+  const fallbackAttention = projectAttentionItems({ jobs: activeJobs, approvals: pendingApprovals })
+  const attentionItems = presence?.enabled ? presence.needsYou : fallbackAttention
+  const presenceJobIds = new Set([
+    ...(presence?.needsYou ?? []), ...(presence?.reviewWhenReady ?? []), ...(presence?.recentlyResolved ?? []),
+  ].flatMap((item) => item.jobId ? [item.jobId] : []))
+  const visibleWorkGroups = ([
+    ['Needs you', presence?.enabled ? workGroups.needsYou.filter((job) => !presenceJobIds.has(job.jobId)) : workGroups.needsYou],
+    ['Running', workGroups.running],
+    ['Ready for review', presence?.enabled ? workGroups.readyForReview.filter((job) => !presenceJobIds.has(job.jobId)) : workGroups.readyForReview],
+    ['Recently completed', presence?.enabled ? workGroups.recentlyCompleted.filter((job) => !presenceJobIds.has(job.jobId)) : workGroups.recentlyCompleted],
+  ] as const).filter(([, jobs], index) => jobs.length > 0 || index === 1)
   const result = projection?.receipt.terminal ? presentResult({
     status: projection.receipt.status,
     summary: projection.receipt.summary,
@@ -176,15 +201,103 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
     <div className="active-work-view">
       <header className="active-work-header">
         <div><span className="eyebrow">Your work</span><h1>Active Work</h1><p>See what needs you, what is running, and what is ready to review.</p></div>
-        {attentionItems.length > 0 && <span className="attention-count">{attentionItems.length} need attention</span>}
+        {attentionItems.length > 0 && <span className="attention-count">{attentionItems.length} {attentionItems.length === 1 ? 'needs' : 'need'} you</span>}
       </header>
+      {presence?.enabled && (
+        <div className="presence-board" aria-label="Agentic Presence">
+          {presenceBriefing && presenceBriefing.items.length > 0 && (
+            <div className="presence-briefing">
+              <span className="eyebrow">Since you were away</span>
+              <strong>{presenceBriefing.items.length} meaningful {presenceBriefing.items.length === 1 ? 'change' : 'changes'}</strong>
+              <span>Current durable state only; stale blockers are omitted.</span>
+              <div className="presence-briefing-groups" aria-label="Briefing categories">
+                {([['Changed', presenceBriefing.groups.changed], ['Resolved', presenceBriefing.groups.resolved],
+                  ['Blocked', presenceBriefing.groups.blocked], ['Ready', presenceBriefing.groups.ready],
+                  ['Next', presenceBriefing.groups.next]] as const).map(([label, items]) => items.length > 0 && (
+                  <span key={label}><b>{label.toUpperCase()}</b>{items.length}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {([
+            ['Needs you', presence.needsYou],
+            ['Review when ready', presence.reviewWhenReady],
+            ['Recently resolved', presence.recentlyResolved],
+          ] as const).map(([label, items]) => items.length > 0 && (
+            <section className="presence-group" key={label}>
+              <h2>{label}<span>{items.length}</span></h2>
+              <div className="presence-list">
+                {items.map((item) => {
+                  const proposal = presenceProposals[item.id]
+                  return (
+                    <article className={`presence-item priority-${item.priority >= 90 ? 'critical' : item.priority >= 70 ? 'attention' : 'review'}`} key={item.id}>
+                      <div className="presence-item-copy">
+                        <strong>{item.title}</strong>
+                        <p>{item.summary}</p>
+                        <small>{item.reasonCode.replace(/_/g, ' ')} · updated {new Date(item.lastObservedAt).toLocaleString()}</small>
+                        {presenceReasons[item.id] && <div className="presence-reason"><b>Why shown</b>{presenceReasons[item.id]}</div>}
+                        {proposal && (
+                          <div className="presence-proposal">
+                            <b>Proposed task</b>
+                            <span>{proposal.goal}</span>
+                            <small>{proposal.state === 'proposed' ? 'No Job exists until you accept.' : proposal.state.replace(/_/g, ' ')}</small>
+                          </div>
+                        )}
+                      </div>
+                      {item.state === 'active' && (
+                        <div className="presence-actions">
+                          {item.jobId && activeJobs.some((job) => job.jobId === item.jobId) && (
+                            <button type="button" onClick={() => selectActiveJob(activeJobs.find((job) => job.jobId === item.jobId)!)}>
+                              {item.recommendedAction || 'Open source'}
+                            </button>
+                          )}
+                          {!item.jobId && item.recommendedAction && (
+                            <button type="button" onClick={() => {
+                              if (item.sourceKind === 'connected_account') setMainView('apps')
+                              else if (item.sourceKind === 'automation') setMainView('automations')
+                              else {
+                                setSettingsTab('readiness')
+                                setSettingsOpen(true)
+                              }
+                            }}>{item.recommendedAction}</button>
+                          )}
+                          <button type="button" onClick={() => {
+                            void aiden.explainPresenceItem(item.id)
+                              .then((explanation) => setPresenceReasons((current) => ({ ...current, [item.id]: explanation.reason })))
+                          }}>Why shown</button>
+                          {item.category === 'next_action' && !proposal && (
+                            <button type="button" onClick={() => {
+                              void aiden.proposePresenceJob(item.id, item.summary, item.title)
+                                .then((next) => setPresenceProposals((current) => ({ ...current, [item.id]: next })))
+                            }}>Propose task</button>
+                          )}
+                          {proposal?.state === 'proposed' && (
+                            <button type="button" className="is-primary" onClick={() => {
+                              void aiden.acceptPresenceProposal(proposal.id, proposal.version, sessionId)
+                                .then((next) => {
+                                  setPresenceProposals((current) => ({ ...current, [item.id]: next }))
+                                  return refreshPresence()
+                                })
+                            }}>Accept proposed task</button>
+                          )}
+                          <button type="button" onClick={() => {
+                            void aiden.snoozePresenceItem(item.id, item.version, Date.now() + 3_600_000).then(refreshPresence)
+                          }}>Snooze 1h</button>
+                          <button type="button" onClick={() => {
+                            void aiden.dismissPresenceItem(item.id, item.version).then(refreshPresence)
+                          }}>Dismiss</button>
+                        </div>
+                      )}
+                    </article>
+                  )
+                })}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
       <div className="active-work-groups">
-        {([
-          ['Needs you', workGroups.needsYou],
-          ['Running', workGroups.running],
-          ['Ready for review', workGroups.readyForReview],
-          ['Recently completed', workGroups.recentlyCompleted],
-        ] as const).map(([label, jobs]) => (
+        {visibleWorkGroups.map(([label, jobs]) => (
           <section className="work-group" key={label}>
             <h2>{label}<span>{jobs.length}</span></h2>
             {jobs.length === 0 ? <p className="work-group-empty">Nothing here</p> : jobs.map((job) => {
@@ -376,6 +489,9 @@ interface DevOSCtxType {
   toggleLiveExecutionPin: () => void
   selectedContext: WorkbenchSelection
   activeJobs: ReturnType<WorkbenchController['active']>
+  presence: aiden.WorkbenchPresenceSnapshot | null
+  presenceBriefing: aiden.WorkbenchPresenceBriefing | null
+  refreshPresence: () => Promise<void>
   controllerRevision: number
   // Messages / conversations
   messages:       Message[]
@@ -1920,10 +2036,12 @@ function NavBar() {
   const {
     isExecuting,
     setSettingsOpen, historyOpen, setHistoryOpen, startNewChat, clearCurrentView,
-    runtimeConnection, executionQueue, activeJobs, setMainView,
+    runtimeConnection, executionQueue, activeJobs, presence, setMainView,
   } = useDevOS()
   const runningCount = foregroundExecutionCount(activeJobs)
-  const attentionCount = activeJobs.filter((job) => ['approval_required', 'blocked', 'paused', 'state_unknown'].includes(job.status)).length
+  const attentionCount = presence?.enabled
+    ? presence.needsYou.length
+    : activeJobs.filter((job) => ['approval_required', 'blocked', 'paused', 'state_unknown'].includes(job.status)).length
 
   return (
     <nav style={{
@@ -1971,7 +2089,7 @@ function NavBar() {
           aria-label="Open work that needs attention"
           onClick={() => setMainView('activity')}
         >
-          Needs attention · {attentionCount}
+          {attentionCount} {attentionCount === 1 ? 'needs' : 'need'} you
           {executionQueue.pending > 0 ? ` · ${executionQueue.pending} queued` : ''}
         </button>
       ) : (
@@ -3739,7 +3857,8 @@ interface PulseEntry {
   tool?: string
 }
 
-// LiveViewPanel is now a headless data connector — no UI, just WebSocket for briefings + pulse events
+// Legacy market/news briefing content remains a chat output, not an attention
+// authority. Agentic Presence owns startup and operational attention above.
 function LiveViewPanel() {
   const { setActivityLogs, setMessages } = useDevOS()
 
@@ -3750,13 +3869,16 @@ function LiveViewPanel() {
       try {
         const data = JSON.parse(e.data)
         if (data.type === 'briefing' && data.content) {
-          setMessages((prev: Message[]) => [...prev, {
-            id:             `briefing_${Date.now()}`,
+          const timestamp = Number.isFinite(Number(data.timestamp)) ? Number(data.timestamp) : 0
+          const label = (data.label as string) ?? 'Morning Briefing'
+          const id = `market_briefing_${timestamp}_${label.replace(/[^a-z0-9]+/gi, '-').toLowerCase()}`
+          setMessages((prev: Message[]) => prev.some((message) => message.id === id) ? prev : [...prev, {
+            id,
             role:           'assistant' as const,
             content:        data.content as string,
-            timestamp:      data.timestamp ?? Date.now(),
+            timestamp,
             isBriefing:     true,
-            briefingLabel:  (data.label as string) ?? 'Morning Briefing',
+            briefingLabel:  label,
             isStreaming:    false,
           }])
           return
@@ -6188,6 +6310,12 @@ export default function Home() {
   const [executionAvailable, setExecutionAvailable] = useState(false)
   const [executionQueue, setExecutionQueue] = useState({ pending: 0, claimed: 0, inflight: 0, workerCount: 0 })
   const [workbenchReadOnly, setWorkbenchReadOnly] = useState(true)
+  const [presence, setPresence] = useState<aiden.WorkbenchPresenceSnapshot | null>(null)
+  const [presenceBriefing, setPresenceBriefing] = useState<aiden.WorkbenchPresenceBriefing | null>(null)
+  const refreshPresence = useCallback(async () => {
+    const snapshot = await aiden.loadPresenceSnapshot()
+    setPresence(snapshot)
+  }, [])
 
   useEffect(() => {
     const narrow = window.matchMedia('(max-width: 620px)')
@@ -6303,6 +6431,26 @@ export default function Home() {
     }, 5_000)
     return () => { current = false; window.clearInterval(timer) }
   }, [publishController, syncForegroundLifecycle])
+  useEffect(() => {
+    let current = true
+    const refresh = async () => {
+      const snapshot = await aiden.loadPresenceSnapshot()
+      if (current) setPresence(snapshot)
+    }
+    void refresh().catch(() => { /* Presence projection failure never changes Job or composer truth. */ })
+    const timer = window.setInterval(() => {
+      void refresh().catch(() => { /* retain the last durable attention projection */ })
+    }, 5_000)
+    let briefingId = window.sessionStorage.getItem('aiden.presence.briefing.v1')
+    if (!briefingId) {
+      briefingId = `workbench-start:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`
+      window.sessionStorage.setItem('aiden.presence.briefing.v1', briefingId)
+    }
+    void aiden.loadPresenceBriefing(briefingId)
+      .then((briefing) => { if (current) setPresenceBriefing(briefing) })
+      .catch(() => { /* the normal snapshot remains available if briefing projection fails */ })
+    return () => { current = false; window.clearInterval(timer) }
+  }, [])
   useEffect(() => {
     let current = true
     void aiden.loadWorkbenchCapabilities()
@@ -7445,6 +7593,7 @@ export default function Home() {
     runProjection, runArtifacts, capabilities, browserSession, controlBrowser,
     liveExecution, liveExecutionSelection, selectLiveExecutionSurface, toggleLiveExecutionPin,
     selectedContext, activeJobs: workbenchControllerRef.current.active(),
+    presence, presenceBriefing, refreshPresence,
     messages, setMessages, conversations, setConversations, currentConvId,
     input, setInput,
     activityLogs, setActivityLogs, liveActivity, screenshot, setScreenshot, sessionId,

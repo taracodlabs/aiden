@@ -10,8 +10,9 @@ import { daemonDbPath } from '../daemon/daemonConfig';
 import type { SystemReadinessProjection } from '../workbench/systemReadiness';
 import { classifyPlatform } from './platformSupport';
 import { snapshotAutomationReadiness } from '../automation/readiness';
+import { snapshotPresenceReadiness } from '../presence/readiness';
 
-export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Automations' | 'Workbench' | 'Commercial';
+export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Automations' | 'Presence' | 'Workbench' | 'Commercial';
 export interface ProductDoctorResult {
   name: string;
   group: ProductDoctorGroup;
@@ -92,7 +93,7 @@ export async function productDoctorResults(input: {
   if (input.readiness) {
     const groupByCategory: Record<string, ProductDoctorGroup> = {
       chat: 'AI', coding: 'Coding', validation: 'Coding', browser: 'Browser',
-      apps: 'Apps', automations: 'Automations', workspace: 'Workbench', approvals: 'Workbench', evidence: 'Workbench',
+      apps: 'Apps', automations: 'Automations', presence: 'Presence', workspace: 'Workbench', approvals: 'Workbench', evidence: 'Workbench',
     };
     for (const item of input.readiness.items) {
       results.push(result(
@@ -107,6 +108,7 @@ export async function productDoctorResults(input: {
 
   if (input.commercial && !input.readiness) {
     results.push(automationReadinessFromDisk(input.paths));
+    results.push(presenceReadinessFromDisk(input.paths));
   }
 
   if (input.commercial) {
@@ -122,6 +124,31 @@ export async function productDoctorResults(input: {
     }
   }
   return results;
+}
+
+function presenceReadinessFromDisk(paths: AidenPaths): ProductDoctorResult {
+  let db: { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] }; close(): void } | null = null;
+  try {
+    // Read-only: Doctor observes the canonical local projection and never runs migrations.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Database = require('better-sqlite3') as new (
+      name: string, options: { readonly: boolean; fileMustExist: boolean },
+    ) => { prepare(sql: string): { get(...args: unknown[]): unknown; all(...args: unknown[]): unknown[] }; close(): void };
+    db = new Database(daemonDbPath(paths.root), { readonly: true, fileMustExist: true });
+    const readiness = snapshotPresenceReadiness({
+      db: db as unknown as import('better-sqlite3').Database,
+      entitled: true,
+    });
+    return result(
+      'Agentic Presence', 'Presence', readiness.ready, readiness.detail,
+      readiness.ready ? undefined : 'Open Workbench and review Agentic Presence readiness.',
+    );
+  } catch {
+    return result(
+      'Agentic Presence', 'Presence', true, 'not initialized yet',
+      'Start Aiden or open Workbench to initialize the local Presence database.',
+    );
+  } finally { db?.close(); }
 }
 
 function automationReadinessFromDisk(paths: AidenPaths): ProductDoctorResult {

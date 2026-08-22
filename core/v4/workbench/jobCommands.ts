@@ -51,9 +51,10 @@ export function createWorkbenchJobCommands(options: {
   const enqueueTx = options.db.transaction((task: {
     message: string;
     sessionId?: string;
+    idempotencyKey?: string;
     modelBinding?: { provider: string; model: string; source: 'session' | 'default' } | null;
   }) => {
-    const idempotencyKey = nextId();
+    const idempotencyKey = task.idempotencyKey?.trim() || nextId();
     const fingerprint = createHash('sha256').update(task.message).digest('hex');
     const trigger = options.triggerBus.insert({
       source: 'manual', sourceKey: 'workbench-web', idempotencyKey,
@@ -131,7 +132,7 @@ export function createWorkbenchJobCommands(options: {
   };
   return {
     enqueue: {
-      enqueue(task: { message: string; sessionId?: string }) {
+      enqueue(task: { message: string; sessionId?: string; idempotencyKey?: string }) {
         const resolved = options.resolveModelBinding?.(task.sessionId) ?? null;
         const modelBinding = resolved?.provider?.trim() && resolved.model?.trim()
           ? { provider: resolved.provider.trim(), model: resolved.model.trim(), source: resolved.source ?? 'default' as const }

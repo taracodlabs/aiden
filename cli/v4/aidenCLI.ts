@@ -605,6 +605,9 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createWorkbenchAutomationPort } = await import('../../core/v4/workbench/automationPort');
       const { buildEditionAuthority } = await import('../../core/v4/commercial/edition');
       const { createAutomationReadinessAuthority } = await import('../../core/v4/automation/readiness');
+      const { createPresenceAuthority } = await import('../../core/v4/presence/presenceAuthority');
+      const { createPresenceReadinessAuthority } = await import('../../core/v4/presence/readiness');
+      const { createWorkbenchPresencePort } = await import('../../core/v4/workbench/presencePort');
       const { createAutomationScheduler } = await import('../../core/v4/automation/scheduler');
       const { recoverCancelledExternalCodingSessions } = await import('../../core/v4/coding/cancellationRecovery');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
@@ -742,6 +745,14 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         workspaceRoot: process.cwd(),
       });
       const automationReadiness = createAutomationReadinessAuthority({ db, edition: editionAuthority });
+      const presenceAuthority = createPresenceAuthority({
+        db, enabled: editionAuthority.can('presence.active'),
+      });
+      const presencePort = createWorkbenchPresencePort({
+        db, authority: presenceAuthority, edition: editionAuthority,
+        enqueue: executionHost ? enqueue : undefined,
+      });
+      const presenceReadiness = createPresenceReadinessAuthority({ db, edition: editionAuthority });
       const automationScheduler = createAutomationScheduler({ db, triggerBus, maxPerScan: 100 });
       const scanAutomations = (): void => {
         try { automationScheduler.scanDue(); }
@@ -766,6 +777,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         evidence: async () => ({ ready: true, detail: 'Durable Evidence storage is available.' }),
         approvals: async () => ({ ready: true, detail: 'Exact-action approvals are protected.' }),
         automations: () => automationReadiness.snapshot(),
+        presence: () => presenceReadiness.snapshot(),
       }) : undefined;
       // STEER path: the stop button cancels a running job by run id. We record
       // the stop durably — mark the run `cancelled` (so the dispatcher won't
@@ -841,6 +853,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         },
         apps: appsPort,
         automations: automationsPort,
+        presence: presencePort,
         coding: codingPort,
         providerSetup,
         readiness: readiness ? { snapshot: (sessionId?: string) => readiness.snapshot(sessionId) } : undefined,

@@ -36,6 +36,7 @@ import {
   type WorkbenchJobProjectionReader,
 } from './projection';
 import { summarizeWorkbenchActiveJobs } from './activeJobs';
+import type { WorkbenchPresencePort } from './presencePort';
 import type {
   WorkbenchAttachment,
   WorkbenchArtifactContent,
@@ -95,7 +96,7 @@ export interface EnqueueResult {
  *  which routes it through the same approval/safe-mode-gated dispatcher a CLI
  *  turn uses. When absent, POST /api/tasks returns 503. */
 export interface TaskEnqueuer {
-  enqueue(task: { message: string; sessionId?: string }): EnqueueResult;
+  enqueue(task: { message: string; sessionId?: string; idempotencyKey?: string }): EnqueueResult;
 }
 
 /** Result of a stop/cancel request against a run. */
@@ -242,6 +243,8 @@ export interface WorkbenchBridgeOptions {
   browserSetup?: WorkbenchBrowserSetupPort;
   /** Reliable automation projection and commands over canonical SQLite authority. */
   automations?: WorkbenchAutomationPort;
+  /** Durable Agentic Presence projection. It cannot execute work directly. */
+  presence?: WorkbenchPresencePort;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -555,6 +558,35 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && automationReplayMatch) {
       handleAutomationReplay(req, res, automationReplayMatch[1]); return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/presence/preferences') {
+      if (!passesWriteGate(req, res)) return;
+      if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+      readJsonBody(req, 16 * 1024).then((body) => {
+        try {
+          sendJson(res, 200, opts.presence!.updatePreferences({
+            ...(typeof body.timezone === 'string' ? { timezone: body.timezone.slice(0, 100) } : {}),
+            ...(body.quietStart === null || typeof body.quietStart === 'string' ? { quietStart: body.quietStart as string | null } : {}),
+            ...(body.quietEnd === null || typeof body.quietEnd === 'string' ? { quietEnd: body.quietEnd as string | null } : {}),
+            ...(Number.isSafeInteger(body.maxInterruptions) ? { maxInterruptions: Number(body.maxInterruptions) } : {}),
+            ...(Number.isSafeInteger(body.interruptionWindowMs) ? { interruptionWindowMs: Number(body.interruptionWindowMs) } : {}),
+            ...(Number.isSafeInteger(body.cooldownMs) ? { cooldownMs: Number(body.cooldownMs) } : {}),
+            ...(typeof body.notificationConsent === 'boolean' ? { notificationConsent: body.notificationConsent } : {}),
+            ...(Array.isArray(body.allowedDeliveryClasses) ? { allowedDeliveryClasses: body.allowedDeliveryClasses.filter((value): value is string => typeof value === 'string') } : {}),
+            ...(Number.isSafeInteger(body.defaultSnoozeMs) ? { defaultSnoozeMs: Number(body.defaultSnoozeMs) } : {}),
+          }));
+        } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+      }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
+      return;
+    }
+    const presenceActionMatch = url.pathname.match(/^\/api\/presence\/([^/]+)\/(snooze|dismiss|feedback|proposals)$/);
+    if (req.method === 'POST' && presenceActionMatch) {
+      handlePresenceAction(req, res, presenceActionMatch[1], presenceActionMatch[2] as 'snooze' | 'dismiss' | 'feedback' | 'proposals');
+      return;
+    }
+    const proposalAcceptMatch = url.pathname.match(/^\/api\/presence\/proposals\/([^/]+)\/accept$/);
+    if (req.method === 'POST' && proposalAcceptMatch) {
+      handlePresenceProposalAccept(req, res, proposalAcceptMatch[1]); return;
+    }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The built-in self-contained dark page. The per-launch write token is
@@ -640,6 +672,44 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       if (!opts.automations) { sendJson(res, 503, { error: 'Automations are unavailable' }); return; }
       try { sendJson(res, 200, opts.automations.snapshot()); }
       catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    if (url.pathname === '/api/presence') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+      try { sendJson(res, 200, opts.presence.snapshot()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    if (url.pathname === '/api/presence/proposals') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+      try { sendJson(res, 200, opts.presence.proposals()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    if (url.pathname === '/api/presence/preferences') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+      try { sendJson(res, 200, opts.presence.preferences()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    if (url.pathname === '/api/presence/briefing') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+      const briefingId = url.searchParams.get('briefingId')?.trim() ?? '';
+      if (!briefingId) { sendJson(res, 400, { error: 'briefingId is required' }); return; }
+      try { sendJson(res, 200, opts.presence.briefing(briefingId.slice(0, 200))); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    const presenceExplainMatch = url.pathname.match(/^\/api\/presence\/([^/]+)\/explain$/);
+    if (presenceExplainMatch) {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+      try { sendJson(res, 200, opts.presence.explain(decodeURIComponent(presenceExplainMatch[1]))); }
+      catch (error) { sendJson(res, 404, { error: managementError(error) }); }
       return;
     }
     if (url.pathname === '/api/providers') {
@@ -871,7 +941,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/presence', 'GET /api/presence/proposals', 'GET /api/presence/preferences', 'GET /api/presence/briefing', 'GET /api/presence/:id/explain', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay', 'POST /api/presence/preferences', 'POST /api/presence/:id/snooze', 'POST /api/presence/:id/dismiss', 'POST /api/presence/:id/feedback', 'POST /api/presence/:id/proposals', 'POST /api/presence/proposals/:id/accept'],
     });
   });
 
@@ -1134,6 +1204,64 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     req.resume();
     try { sendJson(res, 202, opts.automations.replay(decodeURIComponent(rawId))); }
     catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+  }
+
+  function handlePresenceAction(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawId: string,
+    action: 'snooze' | 'dismiss' | 'feedback' | 'proposals',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+    readJsonBody(req, 16 * 1024).then((body) => {
+      const itemId = decodeURIComponent(rawId);
+      const expectedVersion = Number(body.expectedVersion);
+      try {
+        if (action === 'snooze') {
+          const until = Number(body.until);
+          if (!Number.isSafeInteger(expectedVersion) || !Number.isFinite(until)) {
+            sendJson(res, 400, { error: 'expectedVersion and until are required' }); return;
+          }
+          sendJson(res, 200, opts.presence!.snooze({ itemId, expectedVersion, until })); return;
+        }
+        if (action === 'dismiss') {
+          if (!Number.isSafeInteger(expectedVersion)) { sendJson(res, 400, { error: 'expectedVersion is required' }); return; }
+          const reason = typeof body.reason === 'string' ? body.reason.slice(0, 300) : undefined;
+          sendJson(res, 200, opts.presence!.dismiss({ itemId, expectedVersion, ...(reason ? { reason } : {}) })); return;
+        }
+        if (action === 'feedback') {
+          const kind = String(body.kind ?? '');
+          if (!['helpful', 'not_helpful', 'too_frequent', 'wrong_priority'].includes(kind)) {
+            sendJson(res, 400, { error: 'valid feedback kind is required' }); return;
+          }
+          sendJson(res, 202, opts.presence!.feedback({ itemId, kind: kind as 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority' })); return;
+        }
+        const prompt = typeof body.prompt === 'string' ? body.prompt.trim() : '';
+        const goal = typeof body.goal === 'string' ? body.goal.trim() : '';
+        const expiresAt = body.expiresAt === null || body.expiresAt === undefined ? undefined : Number(body.expiresAt);
+        if (!prompt || !goal || (expiresAt !== undefined && !Number.isFinite(expiresAt))) {
+          sendJson(res, 400, { error: 'prompt and goal are required' }); return;
+        }
+        sendJson(res, 201, opts.presence!.propose({ itemId, prompt, goal, ...(expiresAt !== undefined ? { expiresAt } : {}) }));
+      } catch (error) { sendJson(res, 409, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handlePresenceProposalAccept(req: http.IncomingMessage, res: http.ServerResponse, rawId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
+    readJsonBody(req, 8 * 1024).then((body) => {
+      const expectedVersion = Number(body.expectedVersion);
+      if (!Number.isSafeInteger(expectedVersion)) { sendJson(res, 400, { error: 'expectedVersion is required' }); return; }
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : undefined;
+      try {
+        const result = opts.presence!.acceptProposal({
+          proposalId: decodeURIComponent(rawId), expectedVersion, ...(sessionId ? { sessionId } : {}),
+        });
+        sendJson(res, result.state === 'accepted' ? 202 : 409, result);
+      } catch (error) { sendJson(res, 409, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 
   function handleAppsConnect(req: http.IncomingMessage, res: http.ServerResponse): void {

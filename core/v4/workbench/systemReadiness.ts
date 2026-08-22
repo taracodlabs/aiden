@@ -9,7 +9,7 @@ export type ReadinessState = 'ready' | 'setup_available' | 'needs_setup' | 'need
 
 export interface SystemReadinessItem {
   id: string;
-  category: 'chat' | 'coding' | 'browser' | 'validation' | 'apps' | 'automations' | 'workspace' | 'approvals' | 'evidence';
+  category: 'chat' | 'coding' | 'browser' | 'validation' | 'apps' | 'automations' | 'presence' | 'workspace' | 'approvals' | 'evidence';
   state: ReadinessState;
   title: string;
   detail: string;
@@ -42,14 +42,15 @@ export function createSystemReadinessAuthority(options: {
   evidence(): Promise<{ ready: boolean; detail: string }>;
   approvals(): Promise<{ ready: boolean; detail: string }>;
   automations?: () => Promise<{ ready: boolean; entitled: boolean; detail: string }> | { ready: boolean; entitled: boolean; detail: string };
+  presence?: () => Promise<{ ready: boolean; entitled: boolean; detail: string }> | { ready: boolean; entitled: boolean; detail: string };
   now?: () => number;
 }) {
   return {
     async snapshot(sessionId?: string): Promise<SystemReadinessProjection> {
       const checkedAt = (options.now ?? Date.now)();
-      const [providerSnapshot, coding, apps, browser, workspace, evidence, approvals, automations] = await Promise.all([
+      const [providerSnapshot, coding, apps, browser, workspace, evidence, approvals, automations, presence] = await Promise.all([
         options.providers(sessionId), options.coding(), options.apps(), options.browser(), options.workspace(), options.evidence(), options.approvals(),
-        options.automations?.() ?? null,
+        options.automations?.() ?? null, options.presence?.() ?? null,
       ]);
       const selected = providerSnapshot.sessionSelection ?? providerSnapshot.defaultSelection;
       const chat = selected
@@ -96,6 +97,13 @@ export function createSystemReadinessAuthority(options: {
           detail: automations.detail,
           configured: automations.ready, available: automations.entitled, healthy: automations.ready,
           blocking: false, severity: automations.ready ? 'info' : 'warning', availableActions: ['manage_automations'],
+        }, checkedAt)] : []),
+        ...(presence ? [item({
+          id: 'presence', category: 'presence' as const, title: 'Agentic Presence',
+          state: presence.ready ? 'ready' : presence.entitled ? 'needs_attention' : 'unavailable',
+          detail: presence.detail,
+          configured: presence.ready, available: presence.entitled, healthy: presence.ready,
+          blocking: false, severity: presence.ready ? 'info' : 'warning', availableActions: ['open_attention'],
         }, checkedAt)] : []),
         item({
           id: 'workspace', category: 'workspace', title: 'Coding workspace',
