@@ -277,6 +277,32 @@ export interface WorkbenchCapabilities {
   modelSwitch: { available: boolean; reason?: string };
   skills: Array<{ name: string; description: string; version: string; category?: string; trustLevel?: string; readiness?: unknown }>;
   plugins: Array<{ name: string; version: string; description: string; author?: string; status: string; permissions: string[] }>;
+  extensions?: CapabilityExtensionsSnapshot;
+}
+
+export interface CapabilityExtensionItem {
+  capabilityId: string;
+  displayName: string;
+  active: null | { version: string; digest: string; enabled: boolean };
+  rollbackTarget: null | { version: string; digest: string };
+  health: null | { state: string; consecutiveFailures: number; reason: string | null; checkedAt: number };
+  requestedPermissions: Array<{ kind: string; scope: Record<string, unknown> }>;
+  grantedPermissions: Array<{ permission: string; scope: Record<string, unknown> }>;
+  permissionChanges: {
+    added: Array<{ kind: string; scope: Record<string, unknown> }>;
+    removed: Array<{ kind: string; scope: Record<string, unknown> }>;
+  };
+  versions: Array<{ version: string; digest: string; installedAt: number }>;
+  recentInvocations: Array<{
+    invocationId: string; version: string; digest: string; state: string;
+    startedAt: number; terminalAt: number | null;
+  }>;
+}
+
+export interface CapabilityExtensionsSnapshot {
+  executionEnabled: boolean;
+  sandbox: { available: boolean; mechanism: 'docker'; image: string; reason?: string };
+  items: CapabilityExtensionItem[];
 }
 
 export interface WorkbenchAppProvider {
@@ -825,7 +851,46 @@ export async function loadWorkbenchCapabilities(): Promise<WorkbenchCapabilities
       : { available: false, reason: body.modelSwitch?.reason || 'Model changes are managed by the Aiden runtime.' },
     skills: Array.isArray(body.skills) ? body.skills : [],
     plugins: Array.isArray(body.plugins) ? body.plugins : [],
+    ...(body.extensions && Array.isArray(body.extensions.items) ? { extensions: body.extensions } : {}),
   };
+}
+
+async function capabilityRequest(path: string, body: Record<string, unknown>): Promise<CapabilityExtensionsSnapshot> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+    body: JSON.stringify(body),
+  });
+  const value = await response.json() as CapabilityExtensionsSnapshot & { snapshot?: CapabilityExtensionsSnapshot; error?: string };
+  if (!response.ok) throw new Error(value.error || `Capability operation failed (HTTP ${response.status})`);
+  return value.snapshot ?? value;
+}
+
+export async function installCapability(sourcePath: string): Promise<CapabilityExtensionsSnapshot> {
+  return capabilityRequest('/api/capabilities/install', { path: sourcePath });
+}
+
+export async function activateCapability(capabilityId: string, version: string): Promise<CapabilityExtensionsSnapshot> {
+  return capabilityRequest(`/api/capabilities/${encodeURIComponent(capabilityId)}/activate`, {
+    version,
+    acceptPermissions: true,
+  });
+}
+
+export async function rollbackCapability(capabilityId: string): Promise<CapabilityExtensionsSnapshot> {
+  return capabilityRequest(`/api/capabilities/${encodeURIComponent(capabilityId)}/rollback`, {});
+}
+
+export async function disableCapability(capabilityId: string): Promise<CapabilityExtensionsSnapshot> {
+  return capabilityRequest(`/api/capabilities/${encodeURIComponent(capabilityId)}/disable`, {});
+}
+
+export async function testCapability(capabilityId: string): Promise<CapabilityExtensionsSnapshot> {
+  return capabilityRequest(`/api/capabilities/${encodeURIComponent(capabilityId)}/test`, {});
+}
+
+export async function uninstallCapability(capabilityId: string, version: string): Promise<CapabilityExtensionsSnapshot> {
+  return capabilityRequest(`/api/capabilities/${encodeURIComponent(capabilityId)}/uninstall`, { version });
 }
 
 async function appsRequest<T>(path: string, init?: RequestInit): Promise<T> {
