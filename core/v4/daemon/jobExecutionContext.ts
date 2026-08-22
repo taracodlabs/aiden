@@ -187,6 +187,7 @@ export interface PreparedDurableToolCall {
   effectId: string | null;
   mutates: boolean;
   effect?: DurableEffectDescriptor;
+  recoveryDisposition?: 'prepared' | 'committed' | 'unknown';
 }
 
 function requireApplied(operation: string, result: TransitionResult): void {
@@ -203,6 +204,7 @@ export function prepareDurableToolCall(command: {
   mutates: boolean;
   effect?: DurableEffectDescriptor;
   approvalState?: 'not_required' | 'pending';
+  allowExactMutationRecovery?: boolean;
 }): PreparedDurableToolCall | null {
   const context = currentJobExecutionContext();
   if (!context) return null;
@@ -260,8 +262,17 @@ export function prepareDurableToolCall(command: {
     } : undefined,
     producer: context.producer,
   });
+  let recoveryDisposition: PreparedDurableToolCall['recoveryDisposition'];
   if (result.duplicate && command.mutates) {
-    throw new DurableToolCallConflictError('duplicate mutation', result);
+    if (!command.allowExactMutationRecovery) {
+      throw new DurableToolCallConflictError('duplicate mutation', result);
+    }
+    recoveryDisposition = result.existingToolCallState === 'prepared'
+      && ['requested', 'approved'].includes(result.existingEffectState ?? '')
+      ? 'prepared'
+      : result.existingToolCallState === 'completed' && result.existingEffectState === 'committed'
+        ? 'committed'
+        : 'unknown';
   }
   requireApplied('prepare', result);
   return {
@@ -269,6 +280,7 @@ export function prepareDurableToolCall(command: {
     effectId: result.effectId ?? null,
     mutates: command.mutates,
     ...(effect ? { effect } : {}),
+    ...(recoveryDisposition ? { recoveryDisposition } : {}),
   };
 }
 

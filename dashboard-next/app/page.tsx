@@ -60,7 +60,7 @@ import {
 
 type UIMode   = 'focus' | 'execution' | 'power' | 'watch'
 type ExecMode = 'auto'  | 'plan'      | 'chat'  | 'react'
-type MainView = 'chat' | 'activity' | 'artifacts' | 'apps' | 'sponsors'
+type MainView = 'chat' | 'activity' | 'artifacts' | 'apps' | 'automations' | 'sponsors'
 type WorkbenchAppearance = 'dark' | 'system'
 
 interface AutomationPattern {
@@ -2030,6 +2030,7 @@ function HistorySidebar() {
       <button type="button" className={mainView === 'chat' ? 'rail-action is-active' : 'rail-action'} title="Home" aria-label="Home" onClick={() => openView('chat')}>⌂</button>
       <button type="button" className={mainView === 'activity' ? 'rail-action is-active' : 'rail-action'} title={`Active Work (${activeJobs.length})`} aria-label="Active Work" onClick={() => openView('activity')}>◉</button>
       <button type="button" className={mainView === 'apps' ? 'rail-action is-active' : 'rail-action'} title="Apps" aria-label="Apps" onClick={() => openView('apps')}>+</button>
+      <button type="button" className={mainView === 'automations' ? 'rail-action is-active' : 'rail-action'} title="Automations" aria-label="Automations" onClick={() => openView('automations')}>↻</button>
       <button type="button" className={mainView === 'artifacts' ? 'rail-action is-active' : 'rail-action'} title="Artifacts" aria-label="Artifacts" onClick={() => openView('artifacts')}>◇</button>
       <span className="rail-spacer" />
       <button type="button" className="rail-action" title="Settings" aria-label="Settings" onClick={() => openSettings('runtime')}>⚙</button>
@@ -2056,6 +2057,7 @@ function HistorySidebar() {
         <button type="button" className={mainView === 'chat' ? 'is-active' : ''} onClick={() => openView('chat')}><span>⌂</span>Home</button>
         <button type="button" className={mainView === 'activity' ? 'is-active' : ''} onClick={() => openView('activity')}><span>◉</span>Active Work{activeJobs.length > 0 && <small>{activeJobs.length}</small>}</button>
         <button type="button" className={mainView === 'apps' ? 'is-active' : ''} onClick={() => openView('apps')}><span>+</span>Apps</button>
+        <button type="button" className={mainView === 'automations' ? 'is-active' : ''} onClick={() => openView('automations')}><span>↻</span>Automations</button>
         <button type="button" className={mainView === 'artifacts' ? 'is-active' : ''} onClick={() => openView('artifacts')}><span>◇</span>Artifacts</button>
       </nav>
 
@@ -2706,6 +2708,137 @@ function AppsView() {
             </div>
           </div>
         </div>
+      )}
+    </section>
+  )
+}
+
+function describeAutomationSchedule(expression: string): string {
+  if (expression === '0 9 * * 1-5') return 'Every weekday at 9:00 AM'
+  if (expression === '0 9 * * *') return 'Every day at 9:00 AM'
+  if (expression === '0 * * * *') return 'Every hour'
+  return `Advanced schedule · ${expression}`
+}
+
+function AutomationsView() {
+  const [snapshot, setSnapshot] = useState<aiden.WorkbenchAutomationSnapshot | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [preview, setPreview] = useState<string[]>([])
+
+  const reload = useCallback(async () => {
+    try { setError(null); setSnapshot(await aiden.loadAutomations()) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Automations are unavailable') }
+  }, [])
+  useEffect(() => { void reload() }, [reload])
+
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+    const form = event.currentTarget
+    const data = new FormData(form)
+    const input = {
+      name: String(data.get('name') ?? '').trim(),
+      prompt: String(data.get('prompt') ?? '').trim(),
+      expression: String(data.get('expression') ?? '').trim() || String(data.get('schedulePreset') ?? '').trim(),
+      timezone: String(data.get('timezone') ?? '').trim(),
+      overlap: String(data.get('overlap') ?? 'queue') as 'queue' | 'skip' | 'cancel_previous',
+      misfire: String(data.get('misfire') ?? 'run_once') as 'run_once' | 'skip' | 'catch_up',
+      allowWrite: data.get('allowWrite') === 'on',
+    }
+    if (!input.name || !input.prompt || !input.expression || !input.timezone) { setError('Every automation field is required'); return }
+    setBusy('create'); setError(null)
+    try { await aiden.createAutomation(input); form.reset(); setPreview([]); await reload() }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Automation could not be created') }
+    finally { setBusy(null) }
+  }
+
+  const previewSchedule = async (form: HTMLFormElement) => {
+    const data = new FormData(form)
+    const expression = String(data.get('expression') ?? '').trim() || String(data.get('schedulePreset') ?? '').trim()
+    const timezone = String(data.get('timezone') ?? '').trim()
+    if (!expression || !timezone) { setError('Schedule and timezone are required for preview'); return }
+    setBusy('preview'); setError(null)
+    try { setPreview((await aiden.previewAutomationSchedule({ expression, timezone })).instants) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Schedule preview failed') }
+    finally { setBusy(null) }
+  }
+
+  const action = async (automation: aiden.WorkbenchAutomationSummary, kind: 'run' | 'toggle' | 'replay') => {
+    setBusy(`${kind}:${automation.automationId}`); setError(null)
+    try {
+      if (kind === 'run') await aiden.runAutomationNow(automation.automationId)
+      else if (kind === 'replay' && automation.lastOccurrence) await aiden.replayAutomationOccurrence(automation.lastOccurrence.occurrenceId)
+      else await aiden.setAutomationEnabled(automation.automationId, !automation.enabled)
+      await reload()
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Automation action failed') }
+    finally { setBusy(null) }
+  }
+
+  return (
+    <section className="workspace-surface automation-surface" aria-labelledby="automations-title">
+      <header className="workspace-surface-header">
+        <div><span className="eyebrow">Reliable schedules</span><h2 id="automations-title">Automations</h2><p>Each logical occurrence creates one durable Job with normal approval and Evidence.</p></div>
+        <button type="button" className="nav-btn" onClick={() => { void reload() }} disabled={busy !== null}>Refresh</button>
+      </header>
+      {error && <div className="workspace-empty-state" role="alert"><strong>Automations need attention</strong><span>{error}</span></div>}
+      {snapshot && !snapshot.capability.available && <div className="workspace-empty-state"><strong>Pro capability required</strong><span>{snapshot.capability.reason}</span></div>}
+      {snapshot?.capability.available && (
+        <>
+          <form className="surface-card automation-create" onSubmit={(event) => { void create(event) }}>
+            <span className="eyebrow">Create automation</span>
+            <input name="name" required placeholder="Daily repository summary" />
+            <textarea name="prompt" required placeholder="What should Aiden do?" rows={3} />
+            <div className="automation-schedule-fields">
+              <label><span>When</span><select name="schedulePreset" defaultValue="0 9 * * 1-5"><option value="0 9 * * 1-5">Every weekday at 9:00 AM</option><option value="0 9 * * *">Every day at 9:00 AM</option><option value="0 * * * *">Every hour</option></select></label>
+              <input name="timezone" required defaultValue="Asia/Kolkata" aria-label="IANA timezone" />
+            </div>
+            <details className="automation-advanced"><summary>Advanced schedule</summary><input name="expression" placeholder="Cron expression, for example 0 9 * * 1-5" aria-label="Advanced cron schedule" /></details>
+            <div className="automation-safety-fields">
+              <label><span>If a previous run is working</span><select name="overlap" defaultValue="queue"><option value="queue">Wait for it to finish</option><option value="skip">Skip the new run</option><option value="cancel_previous">Stop it, then start the new run</option></select></label>
+              <label><span>If Aiden was offline</span><select name="misfire" defaultValue="run_once"><option value="run_once">Run once when Aiden returns</option><option value="skip">Skip missed runs</option><option value="catch_up">Catch up at most 3 runs</option></select></label>
+            </div>
+            <label className="automation-write-option"><input type="checkbox" name="allowWrite" /><span>Allow workspace changes. Consequential actions still require normal Aiden approval.</span></label>
+            <p className="automation-meta">Scheduling never bypasses approvals. This automation is bound to the workspace where Workbench is running.</p>
+            <div className="automation-actions">
+              <button type="button" className="nav-btn" disabled={busy !== null} onClick={(event) => { void previewSchedule(event.currentTarget.form!) }}>Preview next 5</button>
+              <button type="submit" className="nav-btn" disabled={busy !== null}>{busy === 'create' ? 'Creating…' : 'Create'}</button>
+            </div>
+            {preview.length > 0 && <ol className="automation-preview">{preview.map((instant) => <li key={instant}>{new Date(instant).toLocaleString()} <code>{instant}</code></li>)}</ol>}
+          </form>
+          <div className="artifact-gallery automation-grid" aria-label="Automations">
+            {snapshot.automations.length === 0 ? <div className="workspace-empty-state"><strong>No automations yet</strong><span>Create a safe schedule above.</span></div> : snapshot.automations.map((automation) => (
+              <article className="surface-card automation-card" key={automation.automationId}>
+                <span className="eyebrow">Revision {automation.revisionNumber} · {automation.enabled ? 'Active' : 'Paused'}</span>
+                <h3>{automation.name}</h3>
+                <p>{automation.trigger.kind === 'schedule' ? `${describeAutomationSchedule(automation.trigger.expression)} · ${automation.trigger.timezone}` : automation.trigger.kind}</p>
+                <p className="automation-meta">Next: {automation.nextFireAt ? new Date(automation.nextFireAt).toLocaleString() : 'Not scheduled'}</p>
+                {automation.lastOccurrence && <p className="automation-meta">Last: {automation.lastOccurrence.state} · {automation.lastOccurrence.occurrenceId}</p>}
+                <div className="automation-actions">
+                  <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'run') }}>Run now</button>
+                  <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'toggle') }}>{automation.enabled ? 'Pause' : 'Resume'}</button>
+                  {automation.lastOccurrence && automation.lastOccurrence.state !== 'unknown' && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'replay') }}>Replay</button>}
+                </div>
+              </article>
+            ))}
+          </div>
+          <section className="surface-card automation-history" aria-labelledby="automation-history-title">
+            <div><span className="eyebrow">Durable history</span><h3 id="automation-history-title">Occurrences</h3></div>
+            {snapshot.history.length === 0 ? <p className="automation-meta">No occurrences yet.</p> : (
+              <div className="automation-history-list">
+                {snapshot.history.map((occurrence) => (
+                  <article key={occurrence.occurrenceId} className="automation-history-row">
+                    <strong>{occurrence.state}</strong>
+                    <span>{occurrence.triggerKind} · {new Date(occurrence.triggeredAt).toLocaleString()}</span>
+                    <code>{occurrence.occurrenceId}</code>
+                    {occurrence.jobId && <code>Job {occurrence.jobId}</code>}
+                    {occurrence.replayOfOccurrenceId && <span>Replay of {occurrence.replayOfOccurrenceId}</span>}
+                    {occurrence.detail.delivery && <span>Work {occurrence.state === 'completed' ? 'completed' : occurrence.state} · Delivery {occurrence.detail.delivery.state}</span>}
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        </>
       )}
     </section>
   )
@@ -7417,6 +7550,7 @@ export default function Home() {
             )}
             {mainView === 'artifacts' && <ArtifactsView />}
             {mainView === 'apps' && <AppsView />}
+            {mainView === 'automations' && <AutomationsView />}
             {mainView === 'sponsors' && <SponsorsView />}
             {!liveViewOpen && liveExecution?.surfaces.length ? (
               <button type="button" className="live-execution-reopen" onClick={reopenLiveExecution}>Open Live Execution</button>

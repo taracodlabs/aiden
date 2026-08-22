@@ -9,7 +9,7 @@ export type ReadinessState = 'ready' | 'setup_available' | 'needs_setup' | 'need
 
 export interface SystemReadinessItem {
   id: string;
-  category: 'chat' | 'coding' | 'browser' | 'validation' | 'apps' | 'workspace' | 'approvals' | 'evidence';
+  category: 'chat' | 'coding' | 'browser' | 'validation' | 'apps' | 'automations' | 'workspace' | 'approvals' | 'evidence';
   state: ReadinessState;
   title: string;
   detail: string;
@@ -41,13 +41,15 @@ export function createSystemReadinessAuthority(options: {
   workspace(): Promise<{ ready: boolean; detail: string }>;
   evidence(): Promise<{ ready: boolean; detail: string }>;
   approvals(): Promise<{ ready: boolean; detail: string }>;
+  automations?: () => Promise<{ ready: boolean; entitled: boolean; detail: string }> | { ready: boolean; entitled: boolean; detail: string };
   now?: () => number;
 }) {
   return {
     async snapshot(sessionId?: string): Promise<SystemReadinessProjection> {
       const checkedAt = (options.now ?? Date.now)();
-      const [providerSnapshot, coding, apps, browser, workspace, evidence, approvals] = await Promise.all([
+      const [providerSnapshot, coding, apps, browser, workspace, evidence, approvals, automations] = await Promise.all([
         options.providers(sessionId), options.coding(), options.apps(), options.browser(), options.workspace(), options.evidence(), options.approvals(),
+        options.automations?.() ?? null,
       ]);
       const selected = providerSnapshot.sessionSelection ?? providerSnapshot.defaultSelection;
       const chat = selected
@@ -88,6 +90,13 @@ export function createSystemReadinessAuthority(options: {
           configured: appConfigured, available: true, healthy: appConfigured,
           blocking: false, severity: 'info', availableActions: ['manage_apps'],
         }, checkedAt),
+        ...(automations ? [item({
+          id: 'automations', category: 'automations' as const, title: 'Reliable Automations',
+          state: automations.ready ? 'ready' : automations.entitled ? 'needs_attention' : 'unavailable',
+          detail: automations.detail,
+          configured: automations.ready, available: automations.entitled, healthy: automations.ready,
+          blocking: false, severity: automations.ready ? 'info' : 'warning', availableActions: ['manage_automations'],
+        }, checkedAt)] : []),
         item({
           id: 'workspace', category: 'workspace', title: 'Coding workspace',
           state: workspace.ready ? 'ready' : 'needs_attention', detail: workspace.detail,

@@ -55,6 +55,13 @@ export class EditionAuthority {
   }
 }
 
+export function buildEditionAuthority(edition: ProductEdition): EditionAuthority {
+  return new EditionAuthority({
+    edition,
+    grants: edition === 'community' ? [] : [...COMMERCIAL_CAPABILITIES],
+  });
+}
+
 /** Resolve the installed build edition from the authoritative package manifest. */
 export function detectProductEdition(startDirectory: string = __dirname): ProductEdition {
   let directory = startDirectory;

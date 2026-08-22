@@ -97,6 +97,7 @@ import { createJobEngine } from '../../core/v4/daemon/jobEngine';
 import type { JobEngine } from '../../core/v4/daemon/jobEngine';
 import { createJobControlAuthority } from '../../core/v4/daemon/jobControlAuthority';
 import { createActionAuthority, type ActionAuthority } from '../../core/v4/actionAuthority';
+import { createAutomationApprovalContinuationAuthority } from '../../core/v4/automation/approvalContinuation';
 import { CodexCliExternalCodingProvider } from '../../core/v4/coding/codexCliProvider';
 import { ExternalCodingProviderRegistry } from '../../core/v4/coding/providerRegistry';
 import { DockerExternalCodingValidationExecutor } from '../../core/v4/coding/validationExecutor';
@@ -601,6 +602,10 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createWorkbenchAppsPort } = await import('../../core/v4/workbench/appsPort');
       const { createWorkbenchCodingPort } = await import('../../core/v4/workbench/codingPort');
       const { createWorkbenchLiveExecutionPort } = await import('../../core/v4/workbench/liveExecution');
+      const { createWorkbenchAutomationPort } = await import('../../core/v4/workbench/automationPort');
+      const { buildEditionAuthority } = await import('../../core/v4/commercial/edition');
+      const { createAutomationReadinessAuthority } = await import('../../core/v4/automation/readiness');
+      const { createAutomationScheduler } = await import('../../core/v4/automation/scheduler');
       const { recoverCancelledExternalCodingSessions } = await import('../../core/v4/coding/cancellationRecovery');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
       const { randomBytes } = await import('node:crypto');
@@ -624,6 +629,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const triggerBus = createTriggerBus({ db });
       const token = randomBytes(24).toString('hex');
       const actionAuthority = createActionAuthority({ db, jobEngine });
+      const workbenchAutomationContinuations = createAutomationApprovalContinuationAuthority({ db, jobEngine });
       const jobControlAuthority = createJobControlAuthority({ db, jobEngine });
       const { enqueue, cancel, input, control, approval, continuity, continueTask } = createWorkbenchJobCommands({
         db, triggerBus, jobEngine, runStore, instanceId: workbenchInstanceId, sessionStore,
@@ -665,6 +671,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
             sessionStore,
             artifactStore: workbenchRuntime.replArtifactStore,
             approvalAuthority: actionAuthority,
+            automationApprovalContinuations: workbenchAutomationContinuations,
             instanceId: workbenchInstanceId,
             agentBuilder: workbenchRuntime.daemonAgentBuilder,
             persistedDefault: {
@@ -726,6 +733,23 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const browserSetup = workbenchRuntime
         ? createWorkbenchBrowserSetupPort(workbenchRuntime.pluginLoader)
         : undefined;
+      const productEdition = detectProductEdition();
+      const editionAuthority = buildEditionAuthority(productEdition);
+      const automationsPort = createWorkbenchAutomationPort({
+        db, triggerBus, edition: editionAuthority,
+        ownerId: workbenchIntegrationRuntime.scope.ownerId,
+        workspaceId: workbenchIntegrationRuntime.scope.workspaceId,
+        workspaceRoot: process.cwd(),
+      });
+      const automationReadiness = createAutomationReadinessAuthority({ db, edition: editionAuthority });
+      const automationScheduler = createAutomationScheduler({ db, triggerBus, maxPerScan: 100 });
+      const scanAutomations = (): void => {
+        try { automationScheduler.scanDue(); }
+        catch { /* readiness/history surfaces the durable issue without killing Workbench */ }
+      };
+      scanAutomations();
+      const automationTimer = setInterval(scanAutomations, 1_000);
+      automationTimer.unref?.();
       const readiness = providerSetup ? createSystemReadinessAuthority({
         providers: (sessionId?: string) => providerSetup.snapshot(sessionId),
         coding: () => codingPort.health(),
@@ -741,6 +765,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         },
         evidence: async () => ({ ready: true, detail: 'Durable Evidence storage is available.' }),
         approvals: async () => ({ ready: true, detail: 'Exact-action approvals are protected.' }),
+        automations: () => automationReadiness.snapshot(),
       }) : undefined;
       // STEER path: the stop button cancels a running job by run id. We record
       // the stop durably — mark the run `cancelled` (so the dispatcher won't
@@ -757,7 +782,6 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       ].filter((d): d is string => Boolean(d));
       const staticDir = staticCandidates.find((d) => existsSync(nodePath.join(d, 'index.html')));
       const port     = cmdOpts.port ?? Number(process.env.WORKBENCH_BRIDGE_PORT ?? 4280);
-      const productEdition = detectProductEdition();
       const workbenchFiles = createWorkbenchFileBridge({
         root: nodePath.join(paths.root, 'workbench'),
         artifacts: workbenchRuntime?.replArtifactStore,
@@ -816,6 +840,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           },
         },
         apps: appsPort,
+        automations: automationsPort,
         coding: codingPort,
         providerSetup,
         readiness: readiness ? { snapshot: (sessionId?: string) => readiness.snapshot(sessionId) } : undefined,
@@ -897,6 +922,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const shutdown = (): void => {
         if (shutdownPromise) return;
         shutdownPromise = (async () => {
+          clearInterval(automationTimer);
           try { if (executionHost) await executionHost.stop(); } catch { /* best-effort bounded drain */ }
           try { await bridge.close(); } catch { /* listener may already be closed */ }
           try { workbenchRuntime?.processRegistry.cleanup(); } catch { /* best-effort */ }
@@ -1554,6 +1580,10 @@ export async function buildAgentRuntime(
   const jobEngine = opts.jobEngineOverride ?? createJobEngine({ db: replDb });
   const jobControlAuthority = createJobControlAuthority({ db: replDb, jobEngine });
   const actionAuthority = opts.actionAuthorityOverride ?? createActionAuthority({ db: replDb, jobEngine });
+  const automationApprovalContinuations = createAutomationApprovalContinuationAuthority({
+    db: replDb,
+    jobEngine,
+  });
   // v4.10 Slice 10.8 — durable Task-lite store. Shares the daemon.db
   // handle with replRunStore so /tasks listing + /adjust mutations
   // see the same WAL view chatSession's runAgentTurn writes through.
@@ -2792,6 +2822,7 @@ export async function buildAgentRuntime(
     memoryGuard,
     approvalEngine,
     actionAuthority,
+    automationApprovalContinuations,
     policySnapshot: {
       trustLevel: resolveConfiguredAutonomyLevel(config),
       autonomyPolicy: 'runtime',

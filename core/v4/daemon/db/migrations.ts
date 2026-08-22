@@ -2887,6 +2887,164 @@ function applyV47(db: Database.Database): void {
   ]);
 }
 
+/** Reliable automation definitions, immutable revisions, occurrences and trigger bindings. */
+function applyV48(db: Database.Database): void {
+  addMissingColumns(db, 'tasks', [
+    ['automation_id', 'TEXT'],
+    ['automation_revision_id', 'TEXT'],
+    ['automation_occurrence_id', 'TEXT'],
+  ]);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_definitions (
+      automation_id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      current_revision_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT,
+      commercial_context TEXT NOT NULL DEFAULT 'pro',
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS automation_revisions (
+      revision_id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL,
+      revision_number INTEGER NOT NULL,
+      spec_json TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(automation_id,revision_number),
+      FOREIGN KEY (automation_id) REFERENCES automation_definitions(automation_id) ON DELETE RESTRICT
+    );
+
+    CREATE TRIGGER IF NOT EXISTS automation_revisions_immutable_update
+      BEFORE UPDATE ON automation_revisions
+      BEGIN SELECT RAISE(ABORT, 'automation revisions are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS automation_revisions_immutable_delete
+      BEFORE DELETE ON automation_revisions
+      BEGIN SELECT RAISE(ABORT, 'automation revisions are immutable'); END;
+
+    CREATE TABLE IF NOT EXISTS automation_occurrences (
+      occurrence_id TEXT PRIMARY KEY,
+      occurrence_key TEXT NOT NULL UNIQUE,
+      automation_id TEXT NOT NULL,
+      revision_id TEXT NOT NULL,
+      trigger_kind TEXT NOT NULL,
+      source_identity TEXT NOT NULL,
+      scheduled_for TEXT,
+      triggered_at INTEGER NOT NULL,
+      admitted_at INTEGER,
+      trigger_event_id INTEGER,
+      job_id TEXT,
+      attempt_id TEXT,
+      state TEXT NOT NULL,
+      replay_of_occurrence_id TEXT,
+      detail_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      terminal_at INTEGER,
+      FOREIGN KEY (automation_id) REFERENCES automation_definitions(automation_id) ON DELETE RESTRICT,
+      FOREIGN KEY (revision_id) REFERENCES automation_revisions(revision_id) ON DELETE RESTRICT,
+      FOREIGN KEY (trigger_event_id) REFERENCES trigger_events(id) ON DELETE RESTRICT,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (attempt_id) REFERENCES runs(attempt_id) ON DELETE RESTRICT,
+      FOREIGN KEY (replay_of_occurrence_id) REFERENCES automation_occurrences(occurrence_id) ON DELETE RESTRICT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_automation_occurrence_job
+      ON automation_occurrences(job_id) WHERE job_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_automation_occurrences_history
+      ON automation_occurrences(automation_id,created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_automation_occurrences_active
+      ON automation_occurrences(automation_id,state,created_at)
+      WHERE state IN ('detected','admitted','queued_overlap','waiting_approval','running','unknown');
+
+    CREATE TABLE IF NOT EXISTS automation_trigger_bindings (
+      binding_id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL,
+      revision_id TEXT NOT NULL,
+      trigger_kind TEXT NOT NULL,
+      source_key TEXT,
+      schedule_expression TEXT,
+      timezone TEXT,
+      next_fire_at TEXT,
+      last_scanned_at INTEGER,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(automation_id,revision_id,trigger_kind,source_key),
+      FOREIGN KEY (automation_id) REFERENCES automation_definitions(automation_id) ON DELETE RESTRICT,
+      FOREIGN KEY (revision_id) REFERENCES automation_revisions(revision_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_bindings_due
+      ON automation_trigger_bindings(enabled,next_fire_at,binding_id)
+      WHERE enabled = 1 AND next_fire_at IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS automation_migration_receipts (
+      source_kind TEXT NOT NULL,
+      source_identity TEXT NOT NULL,
+      source_digest TEXT NOT NULL,
+      automation_id TEXT NOT NULL,
+      revision_id TEXT NOT NULL,
+      imported_at INTEGER NOT NULL,
+      PRIMARY KEY(source_kind,source_identity),
+      FOREIGN KEY (automation_id) REFERENCES automation_definitions(automation_id) ON DELETE RESTRICT,
+      FOREIGN KEY (revision_id) REFERENCES automation_revisions(revision_id) ON DELETE RESTRICT
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_automation_occurrence
+      ON tasks(automation_occurrence_id) WHERE automation_occurrence_id IS NOT NULL;
+  `);
+}
+
+/** Restart-safe ScriptSpec cursor and exact pending Approval identity. */
+function applyV49(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS automation_approval_continuations (
+      continuation_id TEXT PRIMARY KEY,
+      automation_id TEXT NOT NULL,
+      revision_id TEXT NOT NULL,
+      occurrence_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      fence_token_digest TEXT NOT NULL,
+      script_spec_json TEXT NOT NULL,
+      script_spec_digest TEXT NOT NULL,
+      step_index INTEGER NOT NULL CHECK(step_index >= 0),
+      tool_call_id TEXT NOT NULL,
+      effect_id TEXT,
+      action_digest TEXT,
+      policy_snapshot_id TEXT,
+      approval_id TEXT UNIQUE,
+      state TEXT NOT NULL CHECK(state IN (
+        'preparing','waiting_approval','claimed','approved','denied',
+        'cancelled','consumed','unknown'
+      )),
+      claim_owner TEXT,
+      claim_token TEXT,
+      claim_expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      terminal_at INTEGER,
+      UNIQUE(job_id,attempt_id,generation,step_index),
+      UNIQUE(job_id,attempt_id,generation,tool_call_id),
+      FOREIGN KEY (automation_id) REFERENCES automation_definitions(automation_id) ON DELETE RESTRICT,
+      FOREIGN KEY (revision_id) REFERENCES automation_revisions(revision_id) ON DELETE RESTRICT,
+      FOREIGN KEY (occurrence_id) REFERENCES automation_occurrences(occurrence_id) ON DELETE RESTRICT,
+      FOREIGN KEY (job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY (attempt_id) REFERENCES runs(attempt_id) ON DELETE RESTRICT,
+      FOREIGN KEY (approval_id) REFERENCES approvals(approval_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_automation_approval_continuations_active
+      ON automation_approval_continuations(job_id,state,step_index)
+      WHERE state IN ('preparing','waiting_approval','claimed','approved','unknown');
+    CREATE INDEX IF NOT EXISTS idx_automation_approval_continuations_claim
+      ON automation_approval_continuations(state,claim_expires_at);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -2935,6 +3093,8 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 45, name: 'provider-neutral Apps authority', apply: applyV45 },
   { version: 46, name: 'durable external coding session authority', apply: applyV46 },
   { version: 47, name: 'durable external coding candidate recovery', apply: applyV47 },
+  { version: 48, name: 'reliable automation authority', apply: applyV48 },
+  { version: 49, name: 'durable automation approval continuation', apply: applyV49 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -2991,7 +3151,9 @@ function validateLatestSchema(db: Database.Database): void {
     'external_coding_repository_locks', 'external_coding_sessions',
     'external_coding_events', 'external_coding_inputs', 'external_coding_processes',
     'external_coding_raw_output', 'external_coding_mutation_receipts',
-    'external_coding_promotion_plans'];
+    'external_coding_promotion_plans', 'automation_definitions',
+    'automation_revisions', 'automation_occurrences', 'automation_trigger_bindings',
+    'automation_migration_receipts', 'automation_approval_continuations'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

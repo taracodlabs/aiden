@@ -125,6 +125,7 @@ export type ResourceKind =
   | 'subprocess'
   | 'imap_connection'
   | 'webhook_server'
+  | 'automation_scheduler'
   | 'sqlite_connection';
 
 export interface Resource {

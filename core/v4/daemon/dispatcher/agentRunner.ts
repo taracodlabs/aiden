@@ -40,6 +40,8 @@ import type { Message } from '../../../../providers/v4/types';
 import type { TriggerSource } from '../types';
 import type { RunStore } from '../runStore';
 import type { JobEngine } from '../jobEngine';
+import type { ScriptSpec } from '../../automation/types';
+import type { AutomationDeliverySpec } from '../../automation/types';
 import { executeDurableJob, type DurableJobDisposition } from '../jobLifecycle';
 // v4.10 Slice 10.2b — shared event taxonomy.
 import { categorizeEvent } from '../eventCategories';
@@ -75,6 +77,13 @@ export interface DaemonAgentInput {
    * (per Q-P5-4(a) stub). Future phases wire channel adapters.
    */
   deliverOnly:      boolean;
+  /** Optional bounded model-free action executed through the normal tool authority. */
+  automationScriptSpec?: ScriptSpec;
+  /** Desired revision posture; ActionAuthority still computes the exact decision. */
+  automationApprovalMode?: 'policy' | 'always';
+  /** Optional post-work notification executed as a normal durable app Effect. */
+  automationDeliverySpec?: AutomationDeliverySpec;
+  automationOccurrenceId?: string;
   /** Durable admission created by an ingress surface before dispatch. */
   admission?: {
     jobId: string;
@@ -114,6 +123,8 @@ export interface DaemonAgentResult {
   error?:       string;
   /** Verification-derived settlement supplied to the durable lifecycle. */
   finalization?: DurableJobDisposition;
+  /** Bounded final user-facing content available to an optional delivery adapter. */
+  finalContent?: string;
 }
 
 /** The function-shaped agent invocation seam. */

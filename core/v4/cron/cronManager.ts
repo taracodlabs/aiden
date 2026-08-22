@@ -126,6 +126,10 @@ async function withLock<T>(fn: (state: CronStateV2) => Promise<T>): Promise<T> {
  *  Cancels any existing timer first. */
 async function armJobTimer(job: CronJobV2): Promise<void> {
   clearTimer(job.id);
+  // Daemon scheduling is owned by SQLite automation_trigger_bindings. The
+  // JSON store remains readable for compatibility/import, but must never arm
+  // a second execution timer in daemon mode.
+  if (process.env.AIDEN_DAEMON === '1') return;
   if (!job.enabled || job.state === 'paused' || job.state === 'completed') return;
   const { next } = await computeNextFire(job);
   if (next === null) return;
@@ -517,6 +521,9 @@ export async function deleteJobAsync(id: string): Promise<boolean> {
 }
 
 export async function triggerJob(id: string): Promise<boolean> {
+  if (process.env.AIDEN_DAEMON === '1') {
+    throw new Error('Legacy cron execution is disabled in daemon mode; use Automation Run Now');
+  }
   // A trigger fires NOW, then the post-fire armJobTimer re-schedules.
   const exists = await getJob(id);
   if (!exists) return false;
@@ -551,6 +558,7 @@ export async function getStateSnapshot(): Promise<CronStateV2> {
 /** Start the heartbeat singleton with a default onTick that
  *  re-arms changed timers. Idempotent. */
 export function startHeartbeat(): void {
+  if (process.env.AIDEN_DAEMON === '1') return;
   startHeartbeatRaw({
     paths: _paths,
     onTick: async (jobs) => {

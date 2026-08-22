@@ -6,10 +6,12 @@
 import { constants, promises as fs } from 'node:fs';
 import path from 'node:path';
 import type { AidenPaths } from '../paths';
+import { daemonDbPath } from '../daemon/daemonConfig';
 import type { SystemReadinessProjection } from '../workbench/systemReadiness';
 import { classifyPlatform } from './platformSupport';
+import { snapshotAutomationReadiness } from '../automation/readiness';
 
-export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Workbench' | 'Commercial';
+export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Automations' | 'Workbench' | 'Commercial';
 export interface ProductDoctorResult {
   name: string;
   group: ProductDoctorGroup;
@@ -90,7 +92,7 @@ export async function productDoctorResults(input: {
   if (input.readiness) {
     const groupByCategory: Record<string, ProductDoctorGroup> = {
       chat: 'AI', coding: 'Coding', validation: 'Coding', browser: 'Browser',
-      apps: 'Apps', workspace: 'Workbench', approvals: 'Workbench', evidence: 'Workbench',
+      apps: 'Apps', automations: 'Automations', workspace: 'Workbench', approvals: 'Workbench', evidence: 'Workbench',
     };
     for (const item of input.readiness.items) {
       results.push(result(
@@ -101,6 +103,10 @@ export async function productDoctorResults(input: {
         item.healthy ? undefined : nextAction(item.availableActions),
       ));
     }
+  }
+
+  if (input.commercial && !input.readiness) {
+    results.push(automationReadinessFromDisk(input.paths));
   }
 
   if (input.commercial) {
@@ -116,6 +122,36 @@ export async function productDoctorResults(input: {
     }
   }
   return results;
+}
+
+function automationReadinessFromDisk(paths: AidenPaths): ProductDoctorResult {
+  let db: { prepare(sql: string): { get(...args: unknown[]): unknown }; close(): void } | null = null;
+  try {
+    // Read-only by construction: doctor observes the canonical daemon database
+    // and never runs migrations or creates a parallel scheduler authority.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const Database = require('better-sqlite3') as new (
+      name: string, options: { readonly: boolean; fileMustExist: boolean },
+    ) => { prepare(sql: string): { get(...args: unknown[]): unknown }; close(): void };
+    db = new Database(daemonDbPath(paths.root), { readonly: true, fileMustExist: true });
+    const readiness = snapshotAutomationReadiness({
+      db: db as unknown as import('better-sqlite3').Database,
+      entitled: true,
+    });
+    return result(
+      'Reliable Automations', 'Automations', readiness.ready,
+      readiness.detail,
+      readiness.ready ? undefined : 'Open Workbench Automations and review durable readiness.',
+    );
+  } catch {
+    return result(
+      'Reliable Automations', 'Automations', true,
+      'not initialized yet',
+      'Start Aiden or open Workbench to initialize the local automation database.',
+    );
+  } finally {
+    db?.close();
+  }
 }
 
 function nextAction(actions: string[]): string | undefined {

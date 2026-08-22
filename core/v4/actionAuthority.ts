@@ -398,6 +398,28 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
       }
       const transaction = db.transaction(() => {
         persistPolicy(command.normalized.policySnapshot, now);
+        const existing = db.prepare(
+          `SELECT * FROM approvals
+            WHERE job_id = ? AND attempt_id = ? AND generation = ? AND tool_call_id = ?
+            ORDER BY request_sequence DESC LIMIT 1`,
+        ).get(
+          command.jobId,
+          command.attemptId,
+          command.generation,
+          command.toolCallId,
+        ) as ApprovalRow | undefined;
+        if (existing) {
+          const record = mapApproval(existing);
+          if (
+            record.effectId !== (command.effectId ?? null)
+            || record.toolName !== command.toolName
+            || record.riskTier !== command.riskTier
+            || record.actionDigest !== command.normalized.actionDigest
+            || record.policySnapshotId !== command.normalized.policySnapshot.policySnapshotId
+            || record.fenceDigest !== sha(command.fenceToken)
+          ) throw new Error('Existing durable approval identity does not match the requested action');
+          return record;
+        }
         const sequence = (db.prepare(
           'SELECT COALESCE(MAX(request_sequence), 0) + 1 AS sequence FROM approvals WHERE job_id = ?',
         ).get(command.jobId) as { sequence: number }).sequence;
@@ -499,6 +521,12 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
           appendApprovalEvent(updated, 'approval.cancelled', 'approval');
           approvals.push(updated);
         }
+        db.prepare(
+          `UPDATE automation_approval_continuations
+              SET state = 'cancelled',claim_owner = NULL,claim_token = NULL,claim_expires_at = NULL,
+                  terminal_at = COALESCE(terminal_at,?),updated_at = ?
+            WHERE job_id = ? AND state IN ('preparing','waiting_approval','claimed','approved','unknown')`,
+        ).run(now, now, jobId);
         return { changed: approvals.length, approvals };
       }).immediate();
     },

@@ -5,6 +5,7 @@
 
 import type { ApprovalCallbacks, ApprovalDecision, ApprovalRequest } from '../../../moat/approvalEngine';
 import type { ActionAuthority } from '../actionAuthority';
+import { DurableJobHostDetachedError } from '../daemon/jobLifecycle';
 
 export interface BuildWorkbenchApprovalCallbacksOptions {
   authority: ActionAuthority;
@@ -65,11 +66,19 @@ export function buildWorkbenchApprovalCallbacks(
           record.toolName !== request.toolName
         ) return 'deny';
 
+        if (record.expiresAt !== null && record.expiresAt <= Date.now()) {
+          options.authority.invalidate(record.approvalId, 'approval expired before recovery');
+          return 'interrupted';
+        }
+
         if (record.state === 'approved') return 'allow';
         if (record.state === 'denied') return 'deny';
         if (record.state === 'cancelled') return 'interrupted';
         if (!['created', 'displayed'].includes(record.state)) return 'deny';
-        if (!await waitForPoll(pollIntervalMs, options.signal)) return 'interrupted';
+        if (!await waitForPoll(pollIntervalMs, options.signal)) {
+          if (options.signal?.reason instanceof DurableJobHostDetachedError) throw options.signal.reason;
+          return 'interrupted';
+        }
       }
       return 'interrupted';
     },

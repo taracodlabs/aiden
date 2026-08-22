@@ -125,6 +125,13 @@ export class DurableJobLifecycleDisposedError extends DurableJobLifecycleError {
   }
 }
 
+export class DurableJobHostDetachedError extends DurableJobLifecycleDisposedError {
+  constructor(message = 'Durable lifecycle host detached', handle?: Partial<DurableJobHandle>) {
+    super(message, handle);
+    this.name = 'DurableJobHostDetachedError';
+  }
+}
+
 interface DurableJobLifecycleRegistration {
   dispose(reason: string): void;
   done: Promise<void>;
@@ -202,6 +209,9 @@ export interface ExecuteDurableJobOptions<T> {
   onLeaseLost?: (error: DurableJobLifecycleError) => void;
   onPhase?: (event: DurableJobLifecyclePhaseEvent) => void;
   lifecycleScope?: DurableJobLifecycleScope;
+  /** Host shutdown may detach an Automation approval wait without changing
+   * user intent. The callback is evaluated synchronously at disposal. */
+  detachOnDispose?: (handle: DurableJobHandle) => boolean;
   /** Optional durable continuity projection. It records references at lifecycle
    * boundaries and never participates in Job/Attempt transitions. */
   continuity?: Pick<ContinuityCheckpointAuthority, 'capture'>;
@@ -377,11 +387,27 @@ export async function executeDurableJob<T>(
   }
 
   const leaseTtlMs = Math.max(3_000, options.leaseTtlMs ?? 45_000);
-  const lease = options.engine.claimAttempt({
-    attemptId: admitted.attemptId,
-    ownerId: options.ownerId,
-    ttlMs: leaseTtlMs,
-  });
+  const admittedAttempt = options.engine.getAttempt(admitted.attemptId);
+  const retainedFence = isExistingAdmission(options.admission)
+    && admittedAttempt?.status === 'waiting'
+    && admittedAttempt.leaseOwner === null
+    && admittedAttempt.fenceToken
+    ? admittedAttempt.fenceToken
+    : null;
+  const lease = retainedFence
+    ? options.engine.reattachAttempt({
+        jobId: admitted.jobId,
+        attemptId: admitted.attemptId,
+        generation: admittedAttempt!.generation,
+        fenceToken: retainedFence,
+        ownerId: options.ownerId,
+        ttlMs: leaseTtlMs,
+      })
+    : options.engine.claimAttempt({
+        attemptId: admitted.attemptId,
+        ownerId: options.ownerId,
+        ttlMs: leaseTtlMs,
+      });
   if (!lease.acquired || !lease.fenceToken || lease.generation === undefined || lease.stateVersion === undefined) {
     throw new DurableJobLifecycleError(
       `Durable Attempt lease unavailable: ${lease.conflict ?? 'unknown'}`,
@@ -470,16 +496,38 @@ export async function executeDurableJob<T>(
     done: lifecycleDone,
     dispose(reason) {
       if (disposalError) return;
-      disposalError = new DurableJobLifecycleDisposedError(reason, handle);
+      const detach = options.detachOnDispose?.(handle) === true;
+      disposalError = detach
+        ? new DurableJobHostDetachedError(reason, handle)
+        : new DurableJobLifecycleDisposedError(reason, handle);
       stopAsyncResources();
       let persistenceError: unknown = null;
       try {
-        options.engine.cancelJob({
-          jobId: handle.jobId,
-          reason,
-          producer,
-          eventIdempotencyKey: `lifecycle-dispose:${handle.attemptId}:${handle.generation}`,
-        });
+        if (detach) {
+          const detached = options.engine.detachAttemptForHost({
+            jobId: handle.jobId,
+            attemptId: handle.attemptId,
+            generation: handle.generation,
+            fenceToken: handle.fenceToken,
+            ownerId: options.ownerId,
+            reason,
+            producer,
+            eventIdempotencyKey: `lifecycle-host-detach:${handle.attemptId}:${handle.generation}`,
+          });
+          if (!detached.applied && !detached.duplicate) {
+            throw new DurableJobAuthorityLostError(
+              `Durable host detach rejected: ${detached.conflict ?? 'unknown'}`,
+              handle,
+            );
+          }
+        } else {
+          options.engine.cancelJob({
+            jobId: handle.jobId,
+            reason,
+            producer,
+            eventIdempotencyKey: `lifecycle-dispose:${handle.attemptId}:${handle.generation}`,
+          });
+        }
       } catch (error) {
         persistenceError = error;
       }
@@ -619,7 +667,7 @@ export async function executeDurableJob<T>(
       generation: handle.generation,
       fenceToken: handle.fenceToken,
       to: 'running',
-      eventIdempotencyKey: `attempt-running:${handle.attemptId}:${handle.generation}`,
+      eventIdempotencyKey: `attempt-running:${handle.attemptId}:${handle.generation}${retainedFence ? `:reattach:${lease.leaseId}` : ''}`,
       producer,
     });
     if (!attemptStarted.applied || attemptStarted.stateVersion === undefined) {
@@ -636,7 +684,7 @@ export async function executeDurableJob<T>(
       fenceToken: handle.fenceToken,
       expectedStateVersion: jobStateVersion,
       to: 'running',
-      eventIdempotencyKey: `job-running:${handle.jobId}:${handle.generation}`,
+      eventIdempotencyKey: `job-running:${handle.jobId}:${handle.generation}${retainedFence ? `:reattach:${lease.leaseId}` : ''}`,
       producer,
     });
     if (!jobStarted.applied || jobStarted.stateVersion === undefined) {
@@ -648,27 +696,37 @@ export async function executeDurableJob<T>(
     jobStateVersion = jobStarted.stateVersion;
 
     if (initialInput && options.controlAuthority) {
-      const claimed = options.controlAuthority.inputs.claimNext({
-        jobId: handle.jobId,
-        attemptId: handle.attemptId,
-        generation: handle.generation,
-        inputId: initialInput.inputId,
-      });
-      if (!claimed) {
-        throw new DurableJobLifecycleError('Durable initial input could not be claimed by the active Attempt', handle);
+      if (
+        initialInput.state === 'consumed'
+        && initialInput.claimedByAttemptId === handle.attemptId
+        && initialInput.claimedGeneration === handle.generation
+      ) {
+        // A host reattachment reuses the exact Attempt and its already-consumed
+        // admission input. Replaying that input would duplicate execution.
+        handle.initialInput = initialInput;
+      } else {
+        const claimed = options.controlAuthority.inputs.claimNext({
+          jobId: handle.jobId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+          inputId: initialInput.inputId,
+        });
+        if (!claimed) {
+          throw new DurableJobLifecycleError('Durable initial input could not be claimed by the active Attempt', handle);
+        }
+        const consumed = options.controlAuthority.inputs.consume({
+          inputId: claimed.inputId,
+          attemptId: handle.attemptId,
+          generation: handle.generation,
+        });
+        if (!consumed.applied && !consumed.duplicate) {
+          throw new DurableJobLifecycleError(
+            `Durable initial input could not be consumed: ${consumed.conflict ?? 'unknown'}`,
+            handle,
+          );
+        }
+        handle.initialInput = options.controlAuthority.inputs.get(claimed.inputId) ?? claimed;
       }
-      const consumed = options.controlAuthority.inputs.consume({
-        inputId: claimed.inputId,
-        attemptId: handle.attemptId,
-        generation: handle.generation,
-      });
-      if (!consumed.applied && !consumed.duplicate) {
-        throw new DurableJobLifecycleError(
-          `Durable initial input could not be consumed: ${consumed.conflict ?? 'unknown'}`,
-          handle,
-        );
-      }
-      handle.initialInput = options.controlAuthority.inputs.get(claimed.inputId) ?? claimed;
     }
 
     startHeartbeat();

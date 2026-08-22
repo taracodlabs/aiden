@@ -35,7 +35,7 @@ function opaqueTextError(value: unknown, label: string, maximum: number): string
     : null;
 }
 
-function validateExactActionArguments(args: Readonly<Record<string, unknown>>): string | null {
+export function validateExactActionArguments(args: Readonly<Record<string, unknown>>): string | null {
   const checks: Array<string | null> = [
     identityError(args.provider_id, 'provider identity', 64),
     identityError(args.toolkit_id, 'toolkit identity'),

@@ -102,6 +102,9 @@ export interface JobRecord {
   finishReason: string | null;
   nextEventSequence: number;
   repositorySnapshotId?: string | null;
+  automationId?: string | null;
+  automationRevisionId?: string | null;
+  automationOccurrenceId?: string | null;
 }
 
 export interface AttemptRecord {
@@ -150,6 +153,9 @@ export interface SubmitJobCommand {
   parentJobId?: string | null;
   rootJobId?: string | null;
   triggerEventId?: number | null;
+  automationId?: string | null;
+  automationRevisionId?: string | null;
+  automationOccurrenceId?: string | null;
   childContract?: {
     required?: boolean;
     workerId: string;
@@ -192,6 +198,8 @@ export interface TransitionResult {
   duplicate?: boolean;
   effectId?: string;
   existingToolCallId?: string;
+  existingToolCallState?: string;
+  existingEffectState?: string;
 }
 
 export interface EffectReconciliationRecord {
@@ -366,6 +374,26 @@ export interface JobEngine {
     ttlMs: number;
     now?: number;
   }): LeaseResult;
+  detachAttemptForHost(command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+    fenceToken: string;
+    ownerId: string;
+    reason: string;
+    producer: string;
+    eventIdempotencyKey: string;
+    now?: number;
+  }): TransitionResult;
+  reattachAttempt(command: {
+    jobId: string;
+    attemptId: string;
+    generation: number;
+    fenceToken: string;
+    ownerId: string;
+    ttlMs: number;
+    now?: number;
+  }): LeaseResult;
   renewAttemptLease(command: {
     attemptId: string;
     ownerId: string;
@@ -524,6 +552,9 @@ interface JobSqlRow {
   finish_reason: string | null;
   next_event_sequence: number;
   repository_snapshot_id: string | null;
+  automation_id: string | null;
+  automation_revision_id: string | null;
+  automation_occurrence_id: string | null;
 }
 
 interface AttemptSqlRow {
@@ -605,6 +636,9 @@ function fingerprintOf(command: SubmitJobCommand): string {
       principalId: command.principalId ?? null,
       goal: command.goal,
       parentJobId: command.parentJobId ?? null,
+      automationId: command.automationId ?? null,
+      automationRevisionId: command.automationRevisionId ?? null,
+      automationOccurrenceId: command.automationOccurrenceId ?? null,
     }))
     .digest('hex');
 }
@@ -647,6 +681,9 @@ function mapJob(row: JobSqlRow): JobRecord {
     finishReason: row.finish_reason,
     nextEventSequence: row.next_event_sequence,
     repositorySnapshotId: row.repository_snapshot_id,
+    automationId: row.automation_id,
+    automationRevisionId: row.automation_revision_id,
+    automationOccurrenceId: row.automation_occurrence_id,
   };
 }
 
@@ -726,7 +763,8 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     `SELECT id, status, state_version, active_attempt_id, root_job_id,
             parent_task_id, session_id, goal, entry_point, source, workspace_id,
             terminal_at, terminal_outcome, finish_reason, next_event_sequence,
-            repository_snapshot_id
+            repository_snapshot_id, automation_id, automation_revision_id,
+            automation_occurrence_id
        FROM tasks WHERE id = ?`,
   ).get(jobId) as JobSqlRow | undefined;
 
@@ -869,9 +907,10 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
          state_version, active_attempt_id, root_job_id,
          idempotency_namespace, idempotency_key, request_fingerprint,
          entry_point, source, workspace_id, principal_id,
-         recovery_state, crash_count, next_event_sequence
+         recovery_state, crash_count, next_event_sequence,
+         automation_id, automation_revision_id, automation_occurrence_id
        ) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, '[]', '[]',
-                 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 1)`,
+                 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', 0, 1, ?, ?, ?)`,
     ).run(
       jobId,
       (command.title ?? command.goal).slice(0, 80),
@@ -890,6 +929,9 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
       command.source,
       command.workspaceId ?? null,
       command.principalId ?? null,
+      command.automationId ?? null,
+      command.automationRevisionId ?? null,
+      command.automationOccurrenceId ?? null,
     );
     const inserted = db.prepare(
       `INSERT INTO runs (
@@ -1622,6 +1664,136 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     };
   }).immediate;
 
+  const detachAttemptForHostTx = db.transaction((
+    command: Parameters<JobEngine['detachAttemptForHost']>[0],
+  ): TransitionResult => {
+    if (existingEvent(command.jobId, command.eventIdempotencyKey)) {
+      return { applied: false, duplicate: true };
+    }
+    const job = getJobRow(command.jobId);
+    const attempt = getAttemptRow(command.attemptId);
+    const now = command.now ?? Date.now();
+    if (!job || !attempt || attempt.task_id !== command.jobId || job.active_attempt_id !== command.attemptId) {
+      return { applied: false, conflict: 'not_found' };
+    }
+    if (JOB_TERMINAL.has(job.status) || ATTEMPT_TERMINAL.has(attempt.status)) {
+      return { applied: false, conflict: 'terminal_state', stateVersion: attempt.state_version };
+    }
+    if (
+      attempt.generation !== command.generation
+      || attempt.fence_token !== command.fenceToken
+      || attempt.lease_owner !== command.ownerId
+      || attempt.lease_expires_at === null
+      || attempt.lease_expires_at <= now
+    ) {
+      return { applied: false, conflict: 'stale_fence', stateVersion: attempt.state_version };
+    }
+    const attemptVersion = attempt.state_version + 1;
+    const attemptChanged = db.prepare(
+      `UPDATE runs
+          SET status = 'waiting', state_version = ?, finish_reason = ?,
+              lease_id = NULL, lease_owner = NULL, lease_expires_at = NULL,
+              lease_heartbeat_at = NULL
+        WHERE attempt_id = ? AND state_version = ? AND generation = ?
+          AND fence_token = ? AND lease_owner = ?`,
+    ).run(
+      attemptVersion,
+      command.reason,
+      command.attemptId,
+      attempt.state_version,
+      command.generation,
+      command.fenceToken,
+      command.ownerId,
+    );
+    if (attemptChanged.changes !== 1) return { applied: false, conflict: 'state_version' };
+    appendEvent({
+      jobId: command.jobId,
+      runId: attempt.id,
+      attemptId: command.attemptId,
+      generation: command.generation,
+      type: 'attempt.host_detached',
+      payload: { reason: command.reason },
+      producer: command.producer,
+      idempotencyKey: `${command.eventIdempotencyKey}:attempt`,
+    });
+    const jobVersion = job.state_version + 1;
+    const jobChanged = db.prepare(
+      `UPDATE tasks SET status = 'waiting', state_version = ?, finish_reason = ?, updated_at = ?
+        WHERE id = ? AND state_version = ? AND active_attempt_id = ?`,
+    ).run(jobVersion, command.reason, now, command.jobId, job.state_version, command.attemptId);
+    if (jobChanged.changes !== 1) return { applied: false, conflict: 'state_version' };
+    appendEvent({
+      jobId: command.jobId,
+      runId: attempt.id,
+      attemptId: command.attemptId,
+      generation: command.generation,
+      type: 'job.waiting',
+      payload: { reason: command.reason, hostDetached: true },
+      producer: command.producer,
+      idempotencyKey: command.eventIdempotencyKey,
+    });
+    return { applied: true, stateVersion: attemptVersion };
+  }).immediate;
+
+  const reattachAttemptTx = db.transaction((
+    command: Parameters<JobEngine['reattachAttempt']>[0],
+  ): LeaseResult => {
+    const job = getJobRow(command.jobId);
+    const attempt = getAttemptRow(command.attemptId);
+    if (!job || !attempt || attempt.task_id !== command.jobId || job.active_attempt_id !== command.attemptId) {
+      return { acquired: false, applied: false, conflict: 'not_found' };
+    }
+    if (
+      job.status !== 'waiting'
+      || attempt.status !== 'waiting'
+      || attempt.generation !== command.generation
+      || attempt.fence_token !== command.fenceToken
+      || attempt.lease_id !== null
+      || attempt.lease_owner !== null
+    ) {
+      return { acquired: false, applied: false, conflict: 'stale_fence', stateVersion: attempt.state_version };
+    }
+    const now = command.now ?? Date.now();
+    const leaseId = randomId('lease');
+    const nextVersion = attempt.state_version + 1;
+    const changed = db.prepare(
+      `UPDATE runs
+          SET status = 'leased', state_version = ?, lease_id = ?, lease_owner = ?,
+              lease_expires_at = ?, lease_heartbeat_at = ?
+        WHERE attempt_id = ? AND state_version = ? AND generation = ?
+          AND fence_token = ? AND lease_id IS NULL AND lease_owner IS NULL`,
+    ).run(
+      nextVersion,
+      leaseId,
+      command.ownerId,
+      now + Math.max(1, command.ttlMs),
+      now,
+      command.attemptId,
+      attempt.state_version,
+      command.generation,
+      command.fenceToken,
+    );
+    if (changed.changes !== 1) return { acquired: false, applied: false, conflict: 'lease_held' };
+    appendEvent({
+      jobId: command.jobId,
+      runId: attempt.id,
+      attemptId: command.attemptId,
+      generation: command.generation,
+      type: 'attempt.reattached',
+      payload: { ownerId: command.ownerId, expiresAt: now + Math.max(1, command.ttlMs) },
+      producer: command.ownerId,
+      idempotencyKey: `lease-reattached:${leaseId}`,
+    });
+    return {
+      acquired: true,
+      applied: true,
+      leaseId,
+      fenceToken: command.fenceToken,
+      generation: command.generation,
+      stateVersion: nextVersion,
+    };
+  }).immediate;
+
   const renewAttemptTx = db.transaction((command: Parameters<JobEngine['renewAttemptLease']>[0]): TransitionResult => {
     const attempt = getAttemptRow(command.attemptId);
     if (!attempt || !attempt.task_id) return { applied: false, conflict: 'not_found' };
@@ -1743,8 +1915,19 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         && existing.generation === command.generation
         && existing.tool_name === command.toolName
         && existing.normalized_args_digest === command.normalizedArgsDigest;
+      const effect = existing.side_effect_id
+        ? db.prepare('SELECT effect_state FROM side_effect_ledger WHERE key = ?')
+          .get(existing.side_effect_id) as { effect_state: string } | undefined
+        : undefined;
       return sameIdentity
-        ? { applied: false, duplicate: true, effectId: existing.side_effect_id ?? undefined, existingToolCallId: existing.tool_call_id }
+        ? {
+            applied: false,
+            duplicate: true,
+            effectId: existing.side_effect_id ?? undefined,
+            existingToolCallId: existing.tool_call_id,
+            existingToolCallState: existing.state,
+            ...(effect ? { existingEffectState: effect.effect_state } : {}),
+          }
         : { applied: false, conflict: 'illegal_transition' };
     }
 
@@ -2785,7 +2968,8 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
         `SELECT id, status, state_version, active_attempt_id, root_job_id,
                 parent_task_id, session_id, goal, entry_point, source, workspace_id,
                 terminal_at, terminal_outcome, finish_reason, next_event_sequence,
-                repository_snapshot_id
+                repository_snapshot_id,automation_id,automation_revision_id,
+                automation_occurrence_id
            FROM tasks
           ${clauses.length > 0 ? `WHERE ${clauses.join(' AND ')}` : ''}
           ORDER BY created_at ASC, id ASC
@@ -2877,6 +3061,8 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     resumeJob: resumeJobTx,
     transitionAttempt: transitionAttemptTx,
     claimAttempt: claimAttemptTx,
+    detachAttemptForHost: detachAttemptForHostTx,
+    reattachAttempt: reattachAttemptTx,
     renewAttemptLease: renewAttemptTx,
     createRecoveryAttempt: recoveryTx,
     prepareToolCall: prepareToolCallTx,

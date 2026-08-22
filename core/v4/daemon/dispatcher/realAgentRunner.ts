@@ -90,10 +90,12 @@ import type { JobEngine } from '../jobEngine';
 import { createJobControlAuthority, type JobControlAuthority } from '../jobControlAuthority';
 import {
   createDurableJobLifecycleScope,
+  DurableJobHostDetachedError,
   executeDurableJob,
   type DurableJobHandle,
   type DurableJobLifecycleScope,
 } from '../jobLifecycle';
+import { createAutomationApprovalContinuationAuthority } from '../../automation/approvalContinuation';
 import {
   resolveDaemonModel,
 } from './resolveModel';
@@ -119,6 +121,7 @@ import {
   type ReadOnlyWorkerProviderResolver,
 } from '../../worker/readOnlyRepositoryWorker';
 import type { RecoverExternalCodingSessionRequest, RecoveredExternalCodingSession } from '../../coding/recovery';
+import type { AutomationDeliverySpec, ScriptSpec } from '../../automation/types';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -146,6 +149,7 @@ export type AgentBuilder = ((input: {
   sessionId:        string;
   resolvedModel:    ResolvedDaemonModel;
   approvalPolicy:   DaemonApprovalPolicy;
+  approvalMode:     'policy' | 'always';
   approvalCallbacks: ReturnType<typeof buildDaemonApprovalCallbacks>;
   hooks: {
     onToolCall:        (call: ToolCallRequest, phase: 'before' | 'after', result?: ToolCallResult) => void;
@@ -157,6 +161,22 @@ export type AgentBuilder = ((input: {
   recoverExternalCoding?: (
     input: Omit<RecoverExternalCodingSessionRequest, 'verify'>,
   ) => Promise<RecoveredExternalCodingSession>;
+  executeAutomationScript?: (input: {
+    spec: ScriptSpec;
+    approvalMode: 'policy' | 'always';
+    approvalCallbacks: ReturnType<typeof buildDaemonApprovalCallbacks>;
+    signal: AbortSignal;
+    onToolCall: (call: ToolCallRequest, phase: 'before' | 'after', result?: ToolCallResult) => void;
+  }) => Promise<readonly ToolCallResult[]>;
+  executeAutomationDelivery?: (input: {
+    spec: AutomationDeliverySpec;
+    occurrenceId: string;
+    content: string;
+    approvalMode: 'policy' | 'always';
+    approvalCallbacks: ReturnType<typeof buildDaemonApprovalCallbacks>;
+    signal: AbortSignal;
+    onToolCall: (call: ToolCallRequest, phase: 'before' | 'after', result?: ToolCallResult) => void;
+  }) => Promise<ToolCallResult>;
 };
 
 export interface CreateRealAgentRunnerOptions {
@@ -410,6 +430,7 @@ export function createRealAgentRunner(
           sessionId:        input.sessionId,
           resolvedModel:    resolved,
           approvalPolicy,
+          approvalMode:     input.automationApprovalMode ?? 'policy',
           approvalCallbacks,
           hooks: {
             onToolCall: (call, phase, result) => emitToolEvent(opts.runStore, runId, input.sessionId, call, phase, result, startedAt, now),
@@ -720,6 +741,7 @@ export function createRealAgentRunner(
         totalTokens: perTurnWatcher.used() > 0 ? perTurnWatcher.used() : undefined,
         error: invocationError ?? (perTurnWatcher.hit() ? perTurnWatcher.reason() ?? undefined : undefined),
         finalization: durableFinalization,
+        ...(finalReply ? { finalContent: finalReply } : {}),
       };
     },
   };
@@ -798,9 +820,15 @@ async function invokeDurableDaemon(
   opts: CreateRealAgentRunnerOptions & { jobEngine: JobEngine },
   jobControls: JobControlAuthority,
 ): Promise<DaemonAgentResult> {
+  const log = opts.log ?? (() => { /* silent */ });
+  const now = opts.now ?? Date.now;
   let activeHandle: DurableJobHandle | null = null;
   let projectedResult: DaemonAgentResult | null = null;
   let artifactCandidates: readonly TraceEntryLike[] = [];
+  const automationApprovalContinuations = createAutomationApprovalContinuationAuthority({
+    db: opts.db,
+    jobEngine: opts.jobEngine,
+  });
   const admission = input.admission
     ? { existing: { ...input.admission, reused: true }, source: 'daemon' } as const
     : input.resume?.taskId && opts.jobEngine.getJob(input.resume.taskId)
@@ -833,6 +861,86 @@ async function invokeDurableDaemon(
         triggerEventId: input.triggerEventId,
       };
 
+  const projectDelivery = (state: 'completed' | 'failed' | 'unknown', detail?: string): void => {
+    if (!input.automationOccurrenceId) return;
+    try {
+      const row = opts.db.prepare('SELECT detail_json FROM automation_occurrences WHERE occurrence_id = ?')
+        .get(input.automationOccurrenceId) as { detail_json: string } | undefined;
+      if (!row) return;
+      let current: Record<string, unknown> = {};
+      try { current = JSON.parse(row.detail_json) as Record<string, unknown>; } catch { /* replace malformed projection */ }
+      opts.db.prepare('UPDATE automation_occurrences SET detail_json = ?,updated_at = ? WHERE occurrence_id = ?')
+        .run(JSON.stringify({
+          ...current,
+          delivery: {
+            state,
+            ...(detail ? { detail: detail.slice(0, 300) } : {}),
+            updatedAt: now(),
+          },
+        }), now(), input.automationOccurrenceId);
+    } catch { /* delivery history is a projection and cannot rewrite Job truth */ }
+  };
+
+  const deliverAutomationResult = async (
+    handle: DurableJobHandle,
+    work: DaemonAgentResult,
+  ): Promise<DaemonAgentResult> => {
+    const spec = input.automationDeliverySpec;
+    const occurrenceId = input.automationOccurrenceId;
+    if (!spec || !occurrenceId) return work;
+    const succeeded = work.finishReason === 'stop' || work.finishReason === 'delivered';
+    const shouldDeliver = spec.mode === 'always'
+      || (spec.mode === 'on_success' && succeeded)
+      || (spec.mode === 'on_failure' && !succeeded);
+    if (!shouldDeliver) return work;
+    const executeDelivery = opts.agentBuilder.executeAutomationDelivery;
+    if (!executeDelivery) {
+      projectDelivery('failed', 'Durable automation delivery executor is unavailable');
+      return work;
+    }
+    const fallback = buildDaemonApprovalCallbacks({
+      policy: DEFAULT_DAEMON_APPROVAL_POLICY,
+      runStore: opts.runStore,
+      runId: handle.runId,
+      log: (level, message) => log(level, message),
+    });
+    const approvalCallbacks = opts.approvalCallbacksFactory?.({
+      policy: DEFAULT_DAEMON_APPROVAL_POLICY,
+      runId: handle.runId,
+      admission: {
+        jobId: handle.jobId, attemptId: handle.attemptId, runId: handle.runId,
+        generation: handle.generation, fenceToken: handle.fenceToken,
+      },
+      signal: handle.signal,
+      fallback,
+    }) ?? fallback;
+    try {
+      const result = await executeDelivery({
+        spec,
+        occurrenceId,
+        content: work.finalContent ?? work.error ?? (succeeded ? 'Automation completed.' : 'Automation failed.'),
+        approvalMode: input.automationApprovalMode ?? 'policy',
+        approvalCallbacks,
+        signal: handle.signal,
+        onToolCall: (call, phase, result2) => emitToolEvent(
+          opts.runStore, handle.runId, input.sessionId, call, phase, result2, now(), now,
+        ),
+      });
+      const unresolved = opts.jobEngine.listEffectsRequiringReconciliation(handle.jobId);
+      if (unresolved.length > 0) projectDelivery('unknown', 'Delivery outcome requires reconciliation');
+      else if (result.error) projectDelivery('failed', result.error);
+      else projectDelivery('completed');
+    } catch (error) {
+      const unresolved = opts.jobEngine.listEffectsRequiringReconciliation(handle.jobId);
+      if (unresolved.length > 0) {
+        projectDelivery('unknown', 'Delivery outcome requires reconciliation');
+        throw error;
+      }
+      projectDelivery('failed', error instanceof Error ? error.message : String(error));
+    }
+    return work;
+  };
+
   try {
     const execution = await executeDurableJob({
       engine: opts.jobEngine,
@@ -841,6 +949,22 @@ async function invokeDurableDaemon(
       leaseTtlMs: 60_000,
       admission,
       controlAuthority: jobControls,
+      ...(input.automationScriptSpec ? {
+        detachOnDispose: (handle: DurableJobHandle) => {
+          if (!automationApprovalContinuations.hasPendingForAttempt(
+            handle.jobId,
+            handle.attemptId,
+            handle.generation,
+          )) return false;
+          automationApprovalContinuations.releaseForHost(
+            handle.jobId,
+            handle.attemptId,
+            handle.generation,
+            input.instanceId,
+          );
+          return true;
+        },
+      } : {}),
       initialInput: {
         sessionId: input.sessionId,
         source: input.triggerContext.source,
@@ -870,6 +994,55 @@ async function invokeDurableDaemon(
             finalization: recovered.finalization,
           };
           return projectedResult;
+        }
+        if (input.automationScriptSpec) {
+          const executeScript = opts.agentBuilder.executeAutomationScript;
+          if (!executeScript) throw new Error('Typed automation ScriptSpec executor is unavailable');
+          const fallback = buildDaemonApprovalCallbacks({
+            policy: DEFAULT_DAEMON_APPROVAL_POLICY,
+            runStore: opts.runStore,
+            runId: handle.runId,
+            log: (level, message) => log(level, message),
+          });
+          const approvalCallbacks = opts.approvalCallbacksFactory?.({
+            policy: DEFAULT_DAEMON_APPROVAL_POLICY,
+            runId: handle.runId,
+            admission: {
+              jobId: handle.jobId, attemptId: handle.attemptId, runId: handle.runId,
+              generation: handle.generation, fenceToken: handle.fenceToken,
+            },
+            signal: handle.signal,
+            fallback,
+          }) ?? fallback;
+          const results = await executeScript({
+            spec: input.automationScriptSpec,
+            approvalMode: input.automationApprovalMode ?? 'policy',
+            approvalCallbacks,
+            signal: handle.signal,
+            onToolCall: (call, phase, result) => emitToolEvent(
+              opts.runStore, handle.runId, input.sessionId, call, phase, result, now(), now,
+            ),
+          });
+          const steps = results.map((result) => ({
+            tool: result.name,
+            status: result.error ? 'failed' : 'completed',
+            ...(result.error ? { error: result.error.slice(0, 500) } : {}),
+          }));
+          const failed = steps.find((step) => step.status === 'failed');
+          projectedResult = {
+            runId: handle.runId,
+            finishReason: failed ? 'error' : 'stop',
+            ...(failed ? { error: failed.error ?? `${failed.tool} failed` } : {}),
+            finalContent: failed
+              ? `Automation stopped after ${steps.length} scripted step${steps.length === 1 ? '' : 's'}.`
+              : `Automation completed ${steps.length} scripted step${steps.length === 1 ? '' : 's'}.`,
+            finalization: failed ? {
+              status: 'failed', outcome: 'failed', finishReason: 'script_step_failed', evidence: { steps },
+            } : {
+              status: 'completed', outcome: 'verified', finishReason: 'stop', evidence: { scriptSpecVersion: 1, steps },
+            },
+          };
+          return deliverAutomationResult(handle, projectedResult);
         }
         const workerAssignment = opts.jobEngine.worker.getWorkerAssignmentForChild(handle.jobId);
         if (workerAssignment) {
@@ -950,7 +1123,7 @@ async function invokeDurableDaemon(
           attemptId: handle.attemptId,
           attemptGeneration: handle.generation,
         });
-        return projectedResult;
+        return deliverAutomationResult(handle, projectedResult);
       },
       finalize: (result) => result.finalization ?? {
         status: result.finishReason === 'interrupted' ? 'cancelled' : 'failed',
@@ -970,6 +1143,7 @@ async function invokeDurableDaemon(
     }
     return execution.value;
   } catch (error) {
+    if (error instanceof DurableJobHostDetachedError) throw error;
     const identity = activeHandle;
     const job = identity ? opts.jobEngine.getJob(identity.jobId) : null;
     if (projectedResult && (job?.status === 'paused' || job?.status === 'cancelled')) {

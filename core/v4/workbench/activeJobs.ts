@@ -119,11 +119,15 @@ export function listWorkbenchActiveJobs(
     claimed: queueStats.claimed,
     oldestPendingMs: queueStats.oldestPendingMs,
   };
-  return deps.jobs.listJobs({
-    entryPoint: 'workbench',
-    terminal: false,
-    limit: Math.max(1, Math.min(1_000, limit)),
-  })
+  const boundedLimit = Math.max(1, Math.min(1_000, limit));
+  const activeJobs = [...new Map(
+    ['workbench', 'automation'].flatMap((entryPoint) => deps.jobs.listJobs({
+      entryPoint,
+      terminal: false,
+      limit: boundedLimit,
+    })).map((job) => [job.id, job] as const),
+  ).values()];
+  return activeJobs
     .filter((job) => !isTerminalWorkbenchJob(job.status))
     .map((job) => {
       const attempt = job.activeAttemptId ? deps.jobs.getAttempt(job.activeAttemptId) : null;
@@ -149,5 +153,6 @@ export function listWorkbenchActiveJobs(
         queue,
       };
     })
-    .sort((a, b) => b.updatedAt - a.updatedAt || a.jobId.localeCompare(b.jobId));
+    .sort((a, b) => b.updatedAt - a.updatedAt || a.jobId.localeCompare(b.jobId))
+    .slice(0, boundedLimit);
 }

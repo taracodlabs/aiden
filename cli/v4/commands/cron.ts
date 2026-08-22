@@ -52,6 +52,8 @@ import {
 import { jobToRow } from '../../../core/v4/daemon/cron/cronBridge';
 import { isMisfirePolicy } from '../../../core/v4/daemon/cron/misfirePolicy';
 import { resolveAidenRoot } from '../../../core/v4/paths';
+import { importLegacyScheduledWorkflows } from '../../../core/v4/automation/legacyMigration';
+import { createAutomationAuthority } from '../../../core/v4/automation/automationAuthority';
 
 const NAME_RE      = /^[A-Za-z0-9_-]+$/;
 const LOGS_DIR     = path.join(os.homedir(), '.aiden', 'cron-logs');
@@ -368,6 +370,7 @@ function upsertScheduledWorkflow(job: CronJob, misfirePolicy?: string, promptTem
       row.last_fired_at, row.next_fire_at,
       row.created_at, row.updated_at,
     );
+    importLegacyScheduledWorkflows({ db, createdBy: 'legacy-cron-cli', now: Date.now() });
   } catch { /* daemon DB absent — JSON path still wrote the job */ }
 }
 
@@ -376,6 +379,11 @@ function deleteScheduledWorkflow(id: string): void {
   try {
     const root = resolveAidenRoot();
     const db = openDaemonDb(daemonDbPath(root));
+    const receipt = db.prepare(
+      `SELECT automation_id FROM automation_migration_receipts
+        WHERE source_kind = 'scheduled_workflow' AND source_identity = ?`,
+    ).get(id) as { automation_id: string } | undefined;
+    if (receipt) createAutomationAuthority({ db }).setEnabled(receipt.automation_id, false);
     db.prepare(`DELETE FROM scheduled_workflows WHERE id = ?`).run(id);
   } catch { /* noop */ }
 }
@@ -388,6 +396,7 @@ function setWorkflowEnabled(id: string, enabled: number): void {
     db.prepare(
       `UPDATE scheduled_workflows SET enabled = ?, updated_at = ? WHERE id = ?`,
     ).run(enabled, Date.now(), id);
+    importLegacyScheduledWorkflows({ db, createdBy: 'legacy-cron-cli', now: Date.now() });
   } catch { /* noop */ }
 }
 

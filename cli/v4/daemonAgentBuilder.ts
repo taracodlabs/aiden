@@ -41,13 +41,15 @@ import { AidenAgent } from '../../core/v4/aidenAgent';
 import type { AidenAgentOptions, ToolExecutor } from '../../core/v4/aidenAgent';
 import type { ToolContext, ToolRegistry } from '../../core/v4/toolRegistry';
 import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
-import type { ProviderAdapter } from '../../providers/v4/types';
+import type { ProviderAdapter, ToolCallRequest } from '../../providers/v4/types';
 import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 import type { PromptBuilder, PromptBuilderOptions } from '../../core/v4/promptBuilder';
 import type { MemoryManager } from '../../core/v4/memoryManager';
 import { ApprovalEngine } from '../../moat/approvalEngine';
 import { HonestyEnforcement, type HonestyMode } from '../../moat/honestyEnforcement';
 import type { AidenPaths } from '../../core/v4/paths';
+import { currentJobExecutionContext } from '../../core/v4/daemon/jobExecutionContext';
+import { createAutomationApprovalContinuationRuntime } from '../../core/v4/automation/approvalContinuation';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -125,7 +127,7 @@ export function buildDaemonAgentBuilder(
 
     // Approval engine — fresh per turn so the session-scoped
     // allowlist doesn't bleed across daemon turns.
-    const approvalEngine = new ApprovalEngine('smart');
+    const approvalEngine = new ApprovalEngine(input.approvalMode === 'always' ? 'manual' : 'smart');
     approvalEngine['callbacks'] = input.approvalCallbacks;
     const toolExecutor = deps.toolContext
       ? deps.toolRegistry.buildExecutor({ ...deps.toolContext, approvalEngine })
@@ -225,6 +227,105 @@ export function buildDaemonAgentBuilder(
     credentialReference: binding.credentialReference,
     endpointReference: binding.endpointReference,
   });
+  builder.executeAutomationScript = async (input) => {
+    const approvalEngine = new ApprovalEngine(input.approvalMode === 'always' ? 'manual' : 'smart');
+    approvalEngine['callbacks'] = input.approvalCallbacks;
+    const execution = currentJobExecutionContext();
+    if (!execution) throw new Error('Automation ScriptSpec requires an exact durable Job execution context');
+    const continuationAuthority = deps.toolContext?.automationApprovalContinuations;
+    const ownerId = continuationAuthority
+      ? execution.engine.getAttempt(execution.attemptId)?.leaseOwner
+      : null;
+    if (continuationAuthority && !ownerId) {
+      throw new Error('Automation ScriptSpec requires an active durable lease owner');
+    }
+    const calls = input.spec.steps.map((step, index) => ({
+      id: `automation-script:${execution.attemptId}:${execution.generation}:step:${index + 1}`,
+      name: step.kind === 'read_file' ? 'file_read'
+        : step.kind === 'write_file' ? 'file_write'
+        : step.kind === 'list_directory' ? 'file_list'
+        : 'fetch_url',
+      arguments: step.kind === 'read_file'
+        ? { path: step.path, ...(step.maxBytes === undefined ? {} : { maxBytes: step.maxBytes }) }
+        : step.kind === 'write_file'
+          ? { path: step.path, content: step.content }
+          : step.kind === 'list_directory'
+            ? { path: step.path, ...(step.maxEntries === undefined ? {} : { maxEntries: step.maxEntries }) }
+            : { url: step.url },
+    }));
+    const timeout = new AbortController();
+    const timer = setTimeout(() => timeout.abort(new Error('Automation ScriptSpec runtime budget exhausted')), input.spec.maxRuntimeMs);
+    timer.unref?.();
+    const signal = AbortSignal.any([input.signal, timeout.signal]);
+    const results = [];
+    try {
+      const resumable = continuationAuthority?.findResume(
+        execution.jobId,
+        execution.attemptId,
+        execution.generation,
+      );
+      const firstStep = resumable?.stepIndex ?? 0;
+      for (let stepIndex = firstStep; stepIndex < calls.length; stepIndex += 1) {
+        const call = calls[stepIndex]!;
+        if (signal.aborted) throw signal.reason ?? new Error('Automation ScriptSpec cancelled');
+        const continuation = continuationAuthority
+          ? createAutomationApprovalContinuationRuntime({
+              authority: continuationAuthority,
+              handle: execution,
+              ownerId: ownerId!,
+              scriptSpec: input.spec,
+              stepIndex,
+            })
+          : undefined;
+        const executor = deps.toolContext
+          ? deps.toolRegistry.buildExecutor({
+              ...deps.toolContext,
+              approvalEngine,
+              ...(continuation ? { automationApprovalContinuation: continuation } : {}),
+            })
+          : deps.toolExecutor;
+        input.onToolCall(call, 'before');
+        const result = await executor(call, signal);
+        continuation?.settle(result);
+        input.onToolCall(call, 'after', result);
+        results.push(result);
+        if (result.error) break;
+      }
+      return results;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+  builder.executeAutomationDelivery = async (input) => {
+    const execution = currentJobExecutionContext();
+    if (!execution) throw new Error('Automation delivery requires an exact durable Job execution context');
+    const approvalEngine = new ApprovalEngine(input.approvalMode === 'always' ? 'manual' : 'smart');
+    approvalEngine['callbacks'] = input.approvalCallbacks;
+    const executor = deps.toolContext
+      ? deps.toolRegistry.buildExecutor({ ...deps.toolContext, approvalEngine })
+      : deps.toolExecutor;
+    const actionInput = { ...input.spec.input };
+    if (input.spec.contentField) actionInput[input.spec.contentField] = input.content;
+    const call: ToolCallRequest = {
+      id: `automation-delivery:${execution.attemptId}:${execution.generation}`,
+      name: 'app_action',
+      arguments: {
+        provider_id: input.spec.providerId,
+        toolkit_id: input.spec.toolkitId,
+        action_id: input.spec.actionId,
+        schema_version: input.spec.schemaVersion,
+        provider_action_version: input.spec.providerActionVersion,
+        account_id: input.spec.destinationRef,
+        input: actionInput,
+        request_id: `automation-delivery:${input.occurrenceId}`,
+      },
+    };
+    if (input.signal.aborted) throw input.signal.reason ?? new Error('Automation delivery cancelled');
+    input.onToolCall(call, 'before');
+    const result = await executor(call, input.signal);
+    input.onToolCall(call, 'after', result);
+    return result;
+  };
   builder.recoverExternalCoding = deps.recoverExternalCoding;
   return builder;
 }
