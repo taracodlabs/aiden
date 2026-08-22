@@ -3156,6 +3156,170 @@ function applyV50(db: Database.Database): void {
   `);
 }
 
+/** Append-only, evidence-linked learning events and rebuildable retrieval projection. */
+function applyV51(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS learning_sources (
+      source_id TEXT PRIMARY KEY,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      source_kind TEXT NOT NULL,
+      source_identity TEXT NOT NULL,
+      source_revision TEXT NOT NULL,
+      independent_key TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT,
+      job_id TEXT,
+      attempt_id TEXT,
+      generation INTEGER,
+      evidence_id TEXT,
+      effect_id TEXT,
+      presence_id TEXT,
+      automation_id TEXT,
+      skill_name TEXT,
+      recovery_id TEXT,
+      verification_state TEXT NOT NULL CHECK(verification_state IN (
+        'explicit_user','verified','unverified','late','unknown_effect','invalid'
+      )),
+      source_digest TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      occurred_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_sources_job
+      ON learning_sources(job_id,attempt_id,generation,evidence_id);
+    CREATE INDEX IF NOT EXISTS idx_learning_sources_presence
+      ON learning_sources(presence_id,source_kind,occurred_at);
+    CREATE TRIGGER IF NOT EXISTS learning_sources_immutable_update
+      BEFORE UPDATE ON learning_sources
+      BEGIN SELECT RAISE(ABORT, 'learning sources are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS learning_sources_immutable_delete
+      BEFORE DELETE ON learning_sources
+      BEGIN SELECT RAISE(ABORT, 'learning sources are immutable'); END;
+
+    CREATE TABLE IF NOT EXISTS learning_content_versions (
+      version_id TEXT PRIMARY KEY,
+      entry_id TEXT NOT NULL,
+      content TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(entry_id,content_digest)
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_content_entry
+      ON learning_content_versions(entry_id,created_at,version_id);
+    CREATE TRIGGER IF NOT EXISTS learning_content_versions_immutable_update
+      BEFORE UPDATE ON learning_content_versions
+      BEGIN SELECT RAISE(ABORT, 'learning content versions are immutable'); END;
+
+    CREATE TABLE IF NOT EXISTS learning_events (
+      event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      entry_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      version_id TEXT,
+      entry_version INTEGER NOT NULL,
+      entry_key TEXT NOT NULL,
+      scope_kind TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT,
+      learning_type TEXT NOT NULL,
+      subject_key TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      lifecycle TEXT NOT NULL,
+      eligible INTEGER NOT NULL CHECK(eligible IN (0,1)),
+      source_count INTEGER NOT NULL DEFAULT 0,
+      expires_at INTEGER,
+      content_digest TEXT,
+      related_entry_id TEXT,
+      reason_code TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      idempotency_key TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (source_id) REFERENCES learning_sources(source_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_events_entry
+      ON learning_events(entry_id,event_sequence);
+    CREATE INDEX IF NOT EXISTS idx_learning_events_scope
+      ON learning_events(owner_id,workspace_id,scope_kind,scope_key,event_sequence);
+    CREATE TRIGGER IF NOT EXISTS learning_events_immutable_update
+      BEFORE UPDATE ON learning_events
+      BEGIN SELECT RAISE(ABORT, 'learning events are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS learning_events_immutable_delete
+      BEFORE DELETE ON learning_events
+      BEGIN SELECT RAISE(ABORT, 'learning events are immutable'); END;
+
+    CREATE TABLE IF NOT EXISTS learning_entries (
+      entry_id TEXT PRIMARY KEY,
+      entry_key TEXT NOT NULL UNIQUE,
+      scope_kind TEXT NOT NULL,
+      scope_key TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT,
+      learning_type TEXT NOT NULL,
+      subject_key TEXT NOT NULL,
+      confidence TEXT NOT NULL,
+      lifecycle TEXT NOT NULL,
+      current_version_id TEXT,
+      content TEXT,
+      content_digest TEXT,
+      eligible INTEGER NOT NULL CHECK(eligible IN (0,1)),
+      source_count INTEGER NOT NULL DEFAULT 0,
+      state_version INTEGER NOT NULL DEFAULT 1,
+      expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      deleted_at INTEGER
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_entries_scope
+      ON learning_entries(owner_id,workspace_id,scope_kind,scope_key,lifecycle,confidence,updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_learning_entries_subject
+      ON learning_entries(owner_id,workspace_id,scope_kind,scope_key,learning_type,subject_key);
+    CREATE INDEX IF NOT EXISTS idx_learning_entries_eligible
+      ON learning_entries(owner_id,workspace_id,eligible,updated_at DESC) WHERE eligible = 1;
+
+    CREATE TABLE IF NOT EXISTS learning_entry_sources (
+      entry_id TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      independent_key TEXT NOT NULL,
+      verification_state TEXT NOT NULL,
+      linked_at INTEGER NOT NULL,
+      PRIMARY KEY(entry_id,source_id),
+      FOREIGN KEY (entry_id) REFERENCES learning_entries(entry_id) ON DELETE CASCADE,
+      FOREIGN KEY (source_id) REFERENCES learning_sources(source_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_entry_sources_independent
+      ON learning_entry_sources(entry_id,independent_key,verification_state);
+
+    CREATE TABLE IF NOT EXISTS learning_conflicts (
+      conflict_id TEXT PRIMARY KEY,
+      left_entry_id TEXT NOT NULL,
+      right_entry_id TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('OPEN','RESOLVED')),
+      reason_code TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      resolved_at INTEGER,
+      UNIQUE(left_entry_id,right_entry_id),
+      FOREIGN KEY (left_entry_id) REFERENCES learning_entries(entry_id) ON DELETE CASCADE,
+      FOREIGN KEY (right_entry_id) REFERENCES learning_entries(entry_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_learning_conflicts_state
+      ON learning_conflicts(state,created_at,conflict_id);
+
+    CREATE VIRTUAL TABLE IF NOT EXISTS learning_fts USING fts5(
+      entry_id UNINDEXED,
+      owner_id UNINDEXED,
+      workspace_id UNINDEXED,
+      scope_kind UNINDEXED,
+      scope_key UNINDEXED,
+      learning_type UNINDEXED,
+      subject_key,
+      content,
+      tokenize='unicode61'
+    );
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -3207,6 +3371,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 48, name: 'reliable automation authority', apply: applyV48 },
   { version: 49, name: 'durable automation approval continuation', apply: applyV49 },
   { version: 50, name: 'durable Agentic Presence projection', apply: applyV50 },
+  { version: 51, name: 'evidence-linked learning ledger', apply: applyV51 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -3266,6 +3431,8 @@ function validateLatestSchema(db: Database.Database): void {
     'external_coding_promotion_plans', 'automation_definitions',
     'automation_revisions', 'automation_occurrences', 'automation_trigger_bindings',
     'presence_items', 'presence_item_events', 'attention_preferences', 'presence_proposed_jobs',
+    'learning_sources', 'learning_content_versions', 'learning_events', 'learning_entries',
+    'learning_entry_sources', 'learning_conflicts', 'learning_fts',
     'automation_migration_receipts', 'automation_approval_continuations'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
