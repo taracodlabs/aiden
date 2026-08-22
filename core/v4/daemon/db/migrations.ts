@@ -3045,6 +3045,117 @@ function applyV49(db: Database.Database): void {
   `);
 }
 
+/** Durable, bounded Agentic Presence projection and explicit proposed-Job intent. */
+function applyV50(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS presence_items (
+      presence_id TEXT PRIMARY KEY,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      source_kind TEXT NOT NULL,
+      source_identity TEXT NOT NULL,
+      source_revision TEXT NOT NULL,
+      source_digest TEXT NOT NULL,
+      initiator TEXT NOT NULL CHECK(initiator IN ('USER','AUTOMATION','SYSTEM','EXTERNAL_EVENT','PROPOSED')),
+      workspace_id TEXT,
+      owner_id TEXT,
+      job_id TEXT,
+      automation_id TEXT,
+      category TEXT NOT NULL,
+      priority INTEGER NOT NULL CHECK(priority >= 0 AND priority <= 100),
+      state TEXT NOT NULL CHECK(state IN ('active','snoozed','dismissed','resolved','expired','suppressed')),
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      reason_code TEXT NOT NULL,
+      reason_text TEXT NOT NULL,
+      recommended_action TEXT,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      untrusted_external INTEGER NOT NULL DEFAULT 0 CHECK(untrusted_external IN (0,1)),
+      occurrence_count INTEGER NOT NULL DEFAULT 1 CHECK(occurrence_count >= 1),
+      state_version INTEGER NOT NULL DEFAULT 1 CHECK(state_version >= 1),
+      first_observed_at INTEGER NOT NULL,
+      last_observed_at INTEGER NOT NULL,
+      snoozed_until INTEGER,
+      expires_at INTEGER,
+      dismissed_at INTEGER,
+      resolved_at INTEGER,
+      terminal_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_presence_items_scope_state
+      ON presence_items(workspace_id,owner_id,state,priority DESC,last_observed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_presence_items_source
+      ON presence_items(source_kind,source_identity,last_observed_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_presence_items_job
+      ON presence_items(job_id,state,last_observed_at DESC) WHERE job_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_presence_items_expiry
+      ON presence_items(state,snoozed_until,expires_at);
+
+    CREATE TABLE IF NOT EXISTS presence_item_events (
+      event_sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id TEXT NOT NULL UNIQUE,
+      presence_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      from_state TEXT,
+      to_state TEXT,
+      reason_json TEXT NOT NULL DEFAULT '{}',
+      idempotency_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      FOREIGN KEY (presence_id) REFERENCES presence_items(presence_id) ON DELETE CASCADE,
+      UNIQUE(presence_id,idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_presence_item_events_item
+      ON presence_item_events(presence_id,event_sequence);
+    CREATE INDEX IF NOT EXISTS idx_presence_item_events_type
+      ON presence_item_events(event_type,created_at);
+
+    CREATE TABLE IF NOT EXISTS attention_preferences (
+      preference_id TEXT PRIMARY KEY,
+      workspace_id TEXT,
+      owner_id TEXT,
+      timezone TEXT NOT NULL DEFAULT 'UTC',
+      quiet_start TEXT,
+      quiet_end TEXT,
+      max_interruptions INTEGER NOT NULL DEFAULT 3 CHECK(max_interruptions >= 0),
+      interruption_window_ms INTEGER NOT NULL DEFAULT 3600000 CHECK(interruption_window_ms > 0),
+      cooldown_ms INTEGER NOT NULL DEFAULT 300000 CHECK(cooldown_ms >= 0),
+      notification_consent INTEGER NOT NULL DEFAULT 0 CHECK(notification_consent IN (0,1)),
+      allowed_delivery_classes_json TEXT NOT NULL DEFAULT '[]',
+      default_snooze_ms INTEGER NOT NULL DEFAULT 3600000 CHECK(default_snooze_ms > 0),
+      state_version INTEGER NOT NULL DEFAULT 1 CHECK(state_version >= 1),
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(workspace_id,owner_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS presence_proposed_jobs (
+      proposal_id TEXT PRIMARY KEY,
+      presence_id TEXT NOT NULL,
+      source_digest TEXT NOT NULL,
+      workspace_id TEXT,
+      owner_id TEXT,
+      prompt TEXT NOT NULL,
+      goal TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('proposed','accepting','accepted','dismissed','expired','invalidated')),
+      state_version INTEGER NOT NULL DEFAULT 1 CHECK(state_version >= 1),
+      invalidation_reason TEXT,
+      job_id TEXT,
+      attempt_id TEXT,
+      run_id INTEGER,
+      trigger_event_id INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      accepted_at INTEGER,
+      expires_at INTEGER,
+      FOREIGN KEY (presence_id) REFERENCES presence_items(presence_id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_presence_proposed_jobs_item
+      ON presence_proposed_jobs(presence_id,state,created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_presence_proposed_jobs_state
+      ON presence_proposed_jobs(state,expires_at,updated_at);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -3095,6 +3206,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 47, name: 'durable external coding candidate recovery', apply: applyV47 },
   { version: 48, name: 'reliable automation authority', apply: applyV48 },
   { version: 49, name: 'durable automation approval continuation', apply: applyV49 },
+  { version: 50, name: 'durable Agentic Presence projection', apply: applyV50 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -3153,6 +3265,7 @@ function validateLatestSchema(db: Database.Database): void {
     'external_coding_raw_output', 'external_coding_mutation_receipts',
     'external_coding_promotion_plans', 'automation_definitions',
     'automation_revisions', 'automation_occurrences', 'automation_trigger_bindings',
+    'presence_items', 'presence_item_events', 'attention_preferences', 'presence_proposed_jobs',
     'automation_migration_receipts', 'automation_approval_continuations'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
