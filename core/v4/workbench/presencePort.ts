@@ -19,7 +19,7 @@ export interface WorkbenchPresencePort {
   explain(itemId: string): ReturnType<PresenceAuthority['explain']>;
   snooze(input: { itemId: string; expectedVersion: number; until: number }): PresenceItem;
   dismiss(input: { itemId: string; expectedVersion: number; reason?: string }): PresenceItem;
-  feedback(input: { itemId: string; kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority' }): { accepted: true };
+  feedback(input: { itemId: string; kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority' }): { accepted: true; eventId: string };
   propose(input: { itemId: string; prompt: string; goal: string; expiresAt?: number | null }): ProposedJob;
   proposals(): ProposedJob[];
   acceptProposal(input: { proposalId: string; expectedVersion: number; sessionId?: string }): ProposedJob;
@@ -32,6 +32,11 @@ export function createWorkbenchPresencePort(options: {
   enqueue?: TaskEnqueuer;
   workspaceId?: string | null;
   ownerId?: string | null;
+  onFeedback?: (input: {
+    item: PresenceItem;
+    kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority';
+    eventId: string;
+  }) => void;
   revalidateProposal?: (proposal: ProposedJob, item: PresenceItem) => { ok: boolean; reason?: string };
 }): WorkbenchPresencePort {
   const scope = options.workspaceId === undefined && options.ownerId === undefined
@@ -67,7 +72,13 @@ export function createWorkbenchPresencePort(options: {
     },
     snooze(input) { scopedItem(input.itemId); return options.authority.snooze(input); },
     dismiss(input) { scopedItem(input.itemId); return options.authority.dismiss(input); },
-    feedback(input) { scopedItem(input.itemId); return options.authority.feedback(input); },
+    feedback(input) {
+      const item = scopedItem(input.itemId);
+      const result = options.authority.feedback(input);
+      try { options.onFeedback?.({ item, kind: input.kind, eventId: result.eventId }); }
+      catch { /* Learning projection is contextual and cannot rewrite feedback truth. */ }
+      return result;
+    },
     propose(input) {
       if (!options.edition.can('presence.active')) throw new Error('Agentic Presence requires Aiden Pro');
       reconcile();
