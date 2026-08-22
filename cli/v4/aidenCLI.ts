@@ -82,7 +82,18 @@ import {
   createWorkbenchProviderSetupAuthority,
 } from '../../core/v4/workbench/providerSetupAuthority';
 import { createSystemReadinessAuthority } from '../../core/v4/workbench/systemReadiness';
-import { detectProductEdition } from '../../core/v4/commercial/edition';
+import { buildEditionAuthority, detectProductEdition } from '../../core/v4/commercial/edition';
+import {
+  createLearningAuthority,
+  createLearningContextProvider,
+  capturePresenceFeedbackLearning,
+  legacyLearningScope,
+  localLearningScopes,
+  migrateLegacyMemorySnapshot,
+  type LearningAuthority,
+  type LearningContextProvider,
+  type LearningScope,
+} from '../../core/v4/learning';
 import { createWorkbenchBrowserSetupPort } from '../../core/v4/workbench/browserSetupPort';
 import { SkillLoader } from '../../core/v4/skillLoader';
 import { makeExternalCodingTool, makeSubagentFanoutTool } from '../../tools/v4/index';
@@ -608,6 +619,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createPresenceAuthority } = await import('../../core/v4/presence/presenceAuthority');
       const { createPresenceReadinessAuthority } = await import('../../core/v4/presence/readiness');
       const { createWorkbenchPresencePort } = await import('../../core/v4/workbench/presencePort');
+      const { createWorkbenchLearningPort } = await import('../../core/v4/workbench/learningPort');
       const { createAutomationScheduler } = await import('../../core/v4/automation/scheduler');
       const { recoverCancelledExternalCodingSessions } = await import('../../core/v4/coding/cancellationRecovery');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
@@ -745,12 +757,44 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         workspaceRoot: process.cwd(),
       });
       const automationReadiness = createAutomationReadinessAuthority({ db, edition: editionAuthority });
+      const learningAuthority = workbenchRuntime?.learningAuthority ?? createLearningAuthority({
+        db, enabled: editionAuthority.can('learning.enabled'),
+      });
+      const learningScopes = workbenchRuntime?.learningScopes
+        ?? localLearningScopes(workbenchIntegrationRuntime.scope);
+      const learningPort = createWorkbenchLearningPort({
+        authority: learningAuthority,
+        edition: editionAuthority,
+        scopes: learningScopes,
+        defaultScope: learningScopes[2],
+      });
       const presenceAuthority = createPresenceAuthority({
         db, enabled: editionAuthority.can('presence.active'),
       });
       const presencePort = createWorkbenchPresencePort({
         db, authority: presenceAuthority, edition: editionAuthority,
+        workspaceId: workbenchIntegrationRuntime.scope.workspaceId,
+        ownerId: workbenchIntegrationRuntime.scope.ownerId,
         enqueue: executionHost ? enqueue : undefined,
+        onFeedback(input) {
+          const scope = learningScopes.find((candidate) => candidate.kind === 'WORKSPACE');
+          if (!scope) return;
+          const content = input.kind === 'helpful'
+            ? 'This Agentic Presence item was helpful.'
+            : input.kind === 'not_helpful'
+              ? 'This Agentic Presence item was not helpful.'
+              : input.kind === 'too_frequent'
+                ? 'This category of Agentic Presence item appeared too frequently.'
+                : 'This Agentic Presence item had the wrong priority.';
+          capturePresenceFeedbackLearning({
+            authority: learningAuthority,
+            scope,
+            eventId: input.eventId,
+            presenceId: input.item.id,
+            feedback: input.kind,
+            content,
+          });
+        },
       });
       const presenceReadiness = createPresenceReadinessAuthority({ db, edition: editionAuthority });
       const automationScheduler = createAutomationScheduler({ db, triggerBus, maxPerScan: 100 });
@@ -854,6 +898,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         apps: appsPort,
         automations: automationsPort,
         presence: presencePort,
+        learning: learningPort,
         coding: codingPort,
         providerSetup,
         readiness: readiness ? { snapshot: (sessionId?: string) => readiness.snapshot(sessionId) } : undefined,
@@ -1165,6 +1210,16 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const code = await runMemorySubcommand(action ?? 'list', posArgs ?? [], {
         writeOut: opts.writeOut,
       });
+      process.exit(code);
+    });
+
+  program
+    .command('learning [action] [args...]')
+    .description('Inspect and manage evidence-linked learned context. Actions: list, show, review, export, archive, delete, rebuild.')
+    .allowUnknownOption()
+    .action(async (action: string | undefined, posArgs: string[] | undefined) => {
+      const { runLearningSubcommand } = await import('./commands/learning');
+      const code = await runLearningSubcommand(action ?? 'list', posArgs ?? [], { writeOut: opts.writeOut });
       process.exit(code);
     });
 
@@ -1983,6 +2038,13 @@ export async function buildAgentRuntime(
   // Resolver + adapter.
   const credentialResolver = new CredentialResolver(paths.authJson);
   const integrationScope = integrationLocalScope(process.cwd());
+  const learningEdition = buildEditionAuthority(detectProductEdition());
+  const learningAuthority = createLearningAuthority({
+    db: replDb,
+    enabled: learningEdition.can('learning.enabled'),
+  });
+  const learningScopes = localLearningScopes(integrationScope);
+  const learningContext = createLearningContextProvider(learningAuthority);
   const providerSecretAuthority = new SecretAuthority({
     db: replDb,
     rootDir: path.join(paths.root, 'secrets'),
@@ -2916,6 +2978,19 @@ export async function buildAgentRuntime(
   } catch {
     memorySnapshot = undefined;
   }
+  if (memorySnapshot && learningEdition.can('learning.enabled')) {
+    try {
+      migrateLegacyMemorySnapshot({
+        authority: learningAuthority,
+        snapshot: memorySnapshot,
+        resolveScope: (namespace) => legacyLearningScope(learningScopes, namespace),
+      });
+    } catch (error) {
+      projectStartupDiagnostic('warning',
+        `[learning] legacy memory projection was skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
   let activeOverlay = '';
   try {
     activeOverlay = await personalityManager.getActiveOverlay();
@@ -3185,6 +3260,8 @@ export async function buildAgentRuntime(
     resolveUiOnly,
     resolveToolInteraction,
     externalCodingRequirement,
+    learningContextProvider: learningContext,
+    learningScopes,
     providerId,
     modelId,
     // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.
@@ -3333,6 +3410,8 @@ export async function buildAgentRuntime(
     resolveUiOnly,
     resolveToolInteraction,
     externalCodingRequirement,
+    learningContextProvider: learningContext,
+    learningScopes,
     recoverExternalCoding: (input) => recoverCompletedExternalCodingSession({
       ...input,
       verify: codingVerifier,
@@ -4232,6 +4311,9 @@ export async function buildAgentRuntime(
     configureExternalCoding,
     externalCodingRequirement,
     integrationRuntime,
+    learningAuthority,
+    learningContext,
+    learningScopes,
     providerSecretAuthority,
     skillLoader,
     memoryManager,
@@ -4315,6 +4397,9 @@ export interface AgentRuntime {
   configureExternalCoding: (input: { model: string }) => Promise<ExternalCodingHealthProjection>;
   externalCodingRequirement: NonNullable<import('../../core/v4/aidenAgent').AidenAgentOptions['externalCodingRequirement']>;
   integrationRuntime: import('../../core/v4/integrations/runtime').IntegrationRuntime;
+  learningAuthority: LearningAuthority;
+  learningContext: LearningContextProvider;
+  learningScopes: LearningScope[];
   providerSecretAuthority: SecretAuthority;
   skillLoader: SkillLoader;
   memoryManager: MemoryManager;
