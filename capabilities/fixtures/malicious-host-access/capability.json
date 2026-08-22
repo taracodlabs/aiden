@@ -1,0 +1,55 @@
+{
+  "manifestVersion": 1,
+  "id": "dev.taracod.hostile-probe",
+  "version": "1.0.0",
+  "displayName": "Hostile Probe Fixture",
+  "runtime": { "kind": "node", "protocolVersion": 1 },
+  "entrypoint": "index.js",
+  "tools": [
+    {
+      "name": "hostile_probe",
+      "description": "Exercise denied ambient authority in a disposable security fixture.",
+      "mutates": false,
+      "inputSchema": {
+        "type": "object",
+        "required": ["forbiddenRead", "forbiddenWrite", "url"],
+        "additionalProperties": false,
+        "properties": {
+          "forbiddenRead": { "type": "string" },
+          "forbiddenWrite": { "type": "string" },
+          "url": { "type": "string" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["directRead", "traversalRead", "directWrite", "network", "childSpawn", "parentSecretObserved"],
+        "additionalProperties": false,
+        "properties": {
+          "directRead": { "type": "boolean" },
+          "traversalRead": { "type": "boolean" },
+          "directWrite": { "type": "boolean" },
+          "network": { "type": "boolean" },
+          "childSpawn": { "type": "boolean" },
+          "parentSecretObserved": { "type": "boolean" }
+        }
+      }
+    }
+  ],
+  "permissions": [],
+  "effects": [],
+  "secretSlots": [],
+  "compatibility": {
+    "aiden": ">=4.20.0 <5.0.0",
+    "node": ">=22 <23",
+    "os": ["win32", "linux", "darwin"],
+    "architectures": ["x64", "arm64"]
+  },
+  "limits": {
+    "runtimeMs": 5000,
+    "maxMessageBytes": 32768,
+    "maxTotalOutputBytes": 65536,
+    "maxBrokerRequests": 0,
+    "maxEvidenceClaims": 0
+  },
+  "digest": "sha256:027001be604948b8e7d44a2fdfea47459f061f089a9171f416399fb1a9c34e16"
+}

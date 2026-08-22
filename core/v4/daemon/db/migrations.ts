@@ -3320,6 +3320,121 @@ function applyV51(db: Database.Database): void {
   `);
 }
 
+function applyV52(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS capability_packages (
+      capability_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS capability_versions (
+      capability_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      manifest_json TEXT NOT NULL,
+      install_path TEXT NOT NULL,
+      compatibility_json TEXT NOT NULL,
+      install_receipt_json TEXT NOT NULL,
+      installed_at INTEGER NOT NULL,
+      uninstalled_at INTEGER,
+      PRIMARY KEY(capability_id,version,digest),
+      FOREIGN KEY(capability_id) REFERENCES capability_packages(capability_id) ON DELETE RESTRICT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_capability_version_identity
+      ON capability_versions(capability_id,version) WHERE uninstalled_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS capability_active_versions (
+      capability_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      state_version INTEGER NOT NULL DEFAULT 1,
+      activated_at INTEGER NOT NULL,
+      PRIMARY KEY(capability_id,scope_id),
+      FOREIGN KEY(capability_id,version,digest)
+        REFERENCES capability_versions(capability_id,version,digest) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS capability_activation_history (
+      activation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      capability_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('activate','rollback','disable','enable')),
+      activated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_capability_activation_history
+      ON capability_activation_history(capability_id,scope_id,activation_id DESC);
+
+    CREATE TABLE IF NOT EXISTS capability_grants (
+      grant_id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT NOT NULL,
+      permission TEXT NOT NULL,
+      scope_json TEXT NOT NULL,
+      granted_at INTEGER NOT NULL,
+      revoked_at INTEGER,
+      UNIQUE(capability_id,version,digest,owner_id,workspace_id,permission,scope_json),
+      FOREIGN KEY(capability_id,version,digest)
+        REFERENCES capability_versions(capability_id,version,digest) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_capability_grants_identity
+      ON capability_grants(capability_id,version,digest,owner_id,workspace_id,revoked_at);
+
+    CREATE TABLE IF NOT EXISTS capability_health (
+      capability_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('unknown','healthy','degraded','unavailable','quarantined')),
+      consecutive_failures INTEGER NOT NULL DEFAULT 0,
+      last_reason TEXT,
+      last_checked_at INTEGER NOT NULL,
+      last_invocation_id TEXT,
+      PRIMARY KEY(capability_id,version,digest),
+      FOREIGN KEY(capability_id,version,digest)
+        REFERENCES capability_versions(capability_id,version,digest) ON DELETE RESTRICT
+    );
+
+    CREATE TABLE IF NOT EXISTS capability_invocations (
+      invocation_id TEXT PRIMARY KEY,
+      capability_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      digest TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      job_id TEXT,
+      attempt_id TEXT,
+      generation INTEGER,
+      fence_token_hash TEXT,
+      host_instance_id TEXT NOT NULL,
+      host_pid INTEGER NOT NULL,
+      host_start_time INTEGER,
+      state TEXT NOT NULL CHECK(state IN ('admitted','starting','running','waiting_approval','completed','failed','cancelled','timed_out','protocol_error','unknown')),
+      permission_digest TEXT NOT NULL,
+      effect_refs_json TEXT NOT NULL DEFAULT '[]',
+      evidence_refs_json TEXT NOT NULL DEFAULT '[]',
+      started_at INTEGER NOT NULL,
+      terminal_at INTEGER,
+      runtime_ms INTEGER,
+      exit_code INTEGER,
+      exit_signal TEXT,
+      detail TEXT,
+      state_version INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY(capability_id,version,digest)
+        REFERENCES capability_versions(capability_id,version,digest) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_capability_invocations_identity
+      ON capability_invocations(capability_id,version,digest,started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_capability_invocations_job
+      ON capability_invocations(job_id,attempt_id,generation,started_at DESC);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -3372,6 +3487,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 49, name: 'durable automation approval continuation', apply: applyV49 },
   { version: 50, name: 'durable Agentic Presence projection', apply: applyV50 },
   { version: 51, name: 'evidence-linked learning ledger', apply: applyV51 },
+  { version: 52, name: 'secure capability SDK foundation', apply: applyV52 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -3433,7 +3549,10 @@ function validateLatestSchema(db: Database.Database): void {
     'presence_items', 'presence_item_events', 'attention_preferences', 'presence_proposed_jobs',
     'learning_sources', 'learning_content_versions', 'learning_events', 'learning_entries',
     'learning_entry_sources', 'learning_conflicts', 'learning_fts',
-    'automation_migration_receipts', 'automation_approval_continuations'];
+    'automation_migration_receipts', 'automation_approval_continuations',
+    'capability_packages', 'capability_versions', 'capability_active_versions',
+    'capability_activation_history', 'capability_grants', 'capability_health',
+    'capability_invocations'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

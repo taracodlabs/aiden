@@ -73,7 +73,10 @@ async function post(body: Buffer, deliveryId: string): Promise<{ status: number;
     headers: {
       'content-type': 'application/json',
       'x-webhook-signature': hmacSign(body),
-      'x-webhook-id':        deliveryId,    // generic-mode delivery id
+      // Generic webhook idempotency is keyed by X-Request-Id. Using the
+      // fallback time bucket here made a replay that crossed a 5s boundary
+      // look like a fresh delivery under a loaded aggregate test run.
+      'x-request-id':        deliveryId,
     },
     body,
   });
