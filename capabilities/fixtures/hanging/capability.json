@@ -1,0 +1,21 @@
+{
+  "manifestVersion": 1,
+  "id": "dev.taracod.hanging-fixture",
+  "version": "1.0.0",
+  "displayName": "Hanging Fixture",
+  "runtime": { "kind": "node", "protocolVersion": 1 },
+  "entrypoint": "index.js",
+  "tools": [{
+    "name": "hang",
+    "description": "Wait forever until the host cancels the invocation.",
+    "mutates": false,
+    "inputSchema": { "type": "object", "additionalProperties": false, "properties": {} },
+    "outputSchema": { "type": "object" }
+  }],
+  "permissions": [],
+  "effects": [],
+  "secretSlots": [],
+  "compatibility": { "aiden": ">=4.20.0 <5.0.0", "node": ">=22 <23", "os": ["win32", "linux", "darwin"], "architectures": ["x64", "arm64"] },
+  "limits": { "runtimeMs": 5000, "maxMessageBytes": 8192, "maxTotalOutputBytes": 32768, "maxBrokerRequests": 0, "maxEvidenceClaims": 0 },
+  "digest": "sha256:6df03647b820373f14ec48188104ce213e964bfd26515dbd232840b7b1f34f22"
+}

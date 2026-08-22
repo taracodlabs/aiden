@@ -1,0 +1,53 @@
+{
+  "manifestVersion": 1,
+  "id": "dev.taracod.marker-writer",
+  "version": "1.0.0",
+  "displayName": "Marker Writer",
+  "description": "Writes one reversible marker through Aiden approval and Evidence authority.",
+  "runtime": { "kind": "node", "protocolVersion": 1 },
+  "entrypoint": "index.js",
+  "tools": [
+    {
+      "name": "write_marker",
+      "description": "Write a marker file after normal Aiden approval.",
+      "mutates": true,
+      "inputSchema": {
+        "type": "object",
+        "required": ["path", "content"],
+        "additionalProperties": false,
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 260 },
+          "content": { "type": "string", "maxLength": 4096 },
+          "delayMs": { "type": "integer", "minimum": 0, "maximum": 5000 },
+          "crashAfterBroker": { "type": "boolean" }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["written", "result"],
+        "additionalProperties": false,
+        "properties": {
+          "written": { "type": "boolean" },
+          "result": { "type": "object" }
+        }
+      }
+    }
+  ],
+  "permissions": [{ "kind": "filesystem.write", "scope": { "paths": ["capability-output/**/*"] } }],
+  "effects": [{ "tool": "write_marker", "kind": "filesystem.write", "approval": "required", "reversible": true }],
+  "secretSlots": [],
+  "compatibility": {
+    "aiden": ">=4.20.0 <5.0.0",
+    "node": ">=20 <21 || >=22 <23",
+    "os": ["win32", "linux", "darwin"],
+    "architectures": ["x64", "arm64"]
+  },
+  "limits": {
+    "runtimeMs": 10000,
+    "maxMessageBytes": 32768,
+    "maxTotalOutputBytes": 262144,
+    "maxBrokerRequests": 4,
+    "maxEvidenceClaims": 0
+  },
+  "digest": "sha256:2ed71a4e25d97cff7f18f5b12ba86ecf6ad433ef4bc0d7d8a94f9aea817dd2cb"
+}

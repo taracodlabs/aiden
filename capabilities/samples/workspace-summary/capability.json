@@ -1,0 +1,49 @@
+{
+  "manifestVersion": 1,
+  "id": "dev.taracod.workspace-summary",
+  "version": "1.0.0",
+  "displayName": "Workspace Summary",
+  "description": "Reads explicitly granted workspace files through the Aiden broker.",
+  "runtime": { "kind": "node", "protocolVersion": 1 },
+  "entrypoint": "index.js",
+  "tools": [
+    {
+      "name": "workspace_summary",
+      "description": "Read and summarize explicitly granted workspace files.",
+      "mutates": false,
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "paths": { "type": "array", "items": { "type": "string", "maxLength": 260 }, "minItems": 1, "maxItems": 8 }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": ["files", "count"],
+        "additionalProperties": false,
+        "properties": {
+          "files": { "type": "array", "maxItems": 8, "items": { "type": "object" } },
+          "count": { "type": "integer", "minimum": 0, "maximum": 8 }
+        }
+      }
+    }
+  ],
+  "permissions": [{ "kind": "filesystem.read", "scope": { "paths": ["**/*"] } }],
+  "effects": [],
+  "secretSlots": [],
+  "compatibility": {
+    "aiden": ">=4.20.0 <5.0.0",
+    "node": ">=20 <21 || >=22 <23",
+    "os": ["win32", "linux", "darwin"],
+    "architectures": ["x64", "arm64"]
+  },
+  "limits": {
+    "runtimeMs": 10000,
+    "maxMessageBytes": 32768,
+    "maxTotalOutputBytes": 262144,
+    "maxBrokerRequests": 16,
+    "maxEvidenceClaims": 0
+  },
+  "digest": "sha256:5b8c4b8713fa6e39a66cfba673924370314663993951cb173cfc3ab58d2bdb4a"
+}
