@@ -19,6 +19,7 @@ describe('Workbench system readiness projection', () => {
       workspace: async () => ({ ready: true, detail: 'Workspace is available' }),
       evidence: async () => ({ ready: true, detail: 'Durable Evidence storage is available' }),
       approvals: async () => ({ ready: true, detail: 'Exact-action approvals are protected' }),
+      presence: async () => ({ ready: true, entitled: true, detail: 'Durable attention projection is ready' }),
     });
 
     const result = await authority.snapshot();
@@ -29,5 +30,6 @@ describe('Workbench system readiness projection', () => {
     expect(result.items.find((item) => item.id === 'coding-provider')).toMatchObject({ state: 'needs_setup' });
     expect(result.items.find((item) => item.id === 'apps')).toMatchObject({ state: 'setup_available', blocking: false });
     expect(result.items.find((item) => item.id === 'browser')).toMatchObject({ state: 'ready' });
+    expect(result.items.find((item) => item.id === 'presence')).toMatchObject({ state: 'ready', category: 'presence' });
   });
 });

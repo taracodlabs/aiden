@@ -86,6 +86,7 @@ describe('Worker persistence migration', () => {
     expect(runMigrations(db)).toEqual({ from: 38, to: LATEST_SCHEMA_VERSION });
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(40);
     expect(tables().filter((table) => !before.has(table))).toEqual([
+      'attention_preferences',
       'automation_approval_continuations',
       'automation_definitions',
       'automation_migration_receipts',
@@ -117,6 +118,9 @@ describe('Worker persistence migration', () => {
       'integration_secret_handles',
       'integration_trigger_cursors',
       'job_budget_reservation_reconciliations',
+      'presence_item_events',
+      'presence_items',
+      'presence_proposed_jobs',
       'worker_group_members',
       'worker_groups',
       'worker_provider_call_reconciliations',

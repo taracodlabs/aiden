@@ -71,6 +71,18 @@ describe('Workbench durable Job commands', () => {
     });
   });
 
+  it('reuses the exact ordinary Job admission for a durable proposal idempotency key', () => {
+    const { enqueue } = commands();
+    const first = enqueue.enqueue({ message: 'continue verified work', idempotencyKey: 'presence-proposal:proposal_1' });
+    const replay = enqueue.enqueue({ message: 'continue verified work', idempotencyKey: 'presence-proposal:proposal_1' });
+
+    expect(replay).toMatchObject({
+      accepted: true, duplicate: true, jobId: first.jobId, attemptId: first.attemptId, runId: first.runId,
+    });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM tasks WHERE idempotency_namespace=? AND idempotency_key=?')
+      .get('workbench-web', 'presence-proposal:proposal_1')).toEqual({ count: 1 });
+  });
+
   it('cancels through the Job authority and rejects the active worker late result', () => {
     const { enqueue, cancel, jobEngine } = commands();
     const admitted = enqueue.enqueue({ message: 'wait for cancellation' });
