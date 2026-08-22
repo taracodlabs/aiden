@@ -51,8 +51,10 @@ describe('minimal Workbench continuity surface', () => {
   it('E6 exposes Active Work as an operator-facing destination', () => {
     const page = source();
     expect(page).toContain('<h1>Active Work</h1>');
-    expect(page).toContain("['Needs you', workGroups.needsYou]");
-    expect(page).toContain("['Ready for review', workGroups.readyForReview]");
+    expect(page).toContain("['Needs you', presence?.enabled ? workGroups.needsYou.filter");
+    expect(page).toContain("['Ready for review', presence?.enabled ? workGroups.readyForReview.filter");
+    expect(page).toContain(': workGroups.needsYou]');
+    expect(page).toContain(': workGroups.readyForReview]');
   });
   it('E7 exposes exact Job, Attempt generation, and run identity', () => {
     const page = source();

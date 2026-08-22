@@ -87,6 +87,10 @@ describe('runMigrations', () => {
     expect(names).toContain('job_event_cursors');
     expect(names).toContain('repository_change_intents');
     expect(names).toContain('repository_change_records');
+    expect(names).toContain('presence_items');
+    expect(names).toContain('presence_item_events');
+    expect(names).toContain('attention_preferences');
+    expect(names).toContain('presence_proposed_jobs');
   });
 
   it('enforces trigger_events UNIQUE(source, idempotency_key) when key present', () => {

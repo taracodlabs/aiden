@@ -19,6 +19,13 @@ import {
   loadCodingSessions,
   listArtifacts,
   loadWorkbenchBootstrap,
+  loadPresenceSnapshot,
+  loadPresenceProposals,
+  explainPresenceItem,
+  snoozePresenceItem,
+  dismissPresenceItem,
+  proposePresenceJob,
+  acceptPresenceProposal,
   loadProviderSetup,
   loadSystemReadiness,
   parseTaskAdmission,
@@ -85,6 +92,32 @@ const response = (body: unknown, ok = true, status = 202): Response => ({
 } as Response);
 
 describe('Workbench exact task admission and run following', () => {
+  it('uses only token-gated typed Presence endpoints for attention actions and proposal acceptance', async () => {
+    const fetchMock = vi.fn(async (url: string) => {
+      if (url === '/api/presence') return response({ enabled: true, needsYou: [], reviewWhenReady: [], recentlyResolved: [], interruptions: [], quietHours: false }, true, 200);
+      if (String(url).endsWith('/explain')) return response({ itemId: 'presence_1', reason: 'Exact durable reason', history: [] }, true, 200);
+      if (String(url) === '/api/presence/proposals') return response([{ id: 'proposal_1', itemId: 'presence_1', state: 'proposed', version: 1 }], true, 200);
+      if (String(url).endsWith('/proposals')) return response({ id: 'proposal_1', state: 'proposed', version: 1 }, true, 201);
+      if (String(url).endsWith('/accept')) return response({ id: 'proposal_1', state: 'accepted', version: 2, jobId: 'job_1' }, true, 202);
+      return response({ id: 'presence_1', state: String(url).endsWith('/snooze') ? 'snoozed' : 'dismissed', version: 2 }, true, 200);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.stubGlobal('window', { __WB_TOKEN__: 'token_exact' });
+
+    await loadPresenceSnapshot();
+    await loadPresenceProposals();
+    await explainPresenceItem('presence_1');
+    await snoozePresenceItem('presence_1', 1, 99);
+    await dismissPresenceItem('presence_1', 2);
+    await proposePresenceJob('presence_1', 'Continue safely', 'Continue');
+    await acceptPresenceProposal('proposal_1', 1, 'session_1');
+
+    expect(fetchMock).toHaveBeenCalledWith('/api/presence', expect.objectContaining({ headers: expect.objectContaining({ 'x-workbench-token': 'token_exact' }) }));
+    expect(fetchMock).toHaveBeenCalledWith('/api/presence/proposals', expect.objectContaining({ headers: expect.objectContaining({ 'x-workbench-token': 'token_exact' }) }));
+    expect(fetchMock).toHaveBeenCalledWith('/api/presence/proposals/proposal_1/accept', expect.objectContaining({
+      method: 'POST', body: JSON.stringify({ expectedVersion: 1, sessionId: 'session_1' }),
+    }));
+  });
   it('loads provider/model/runtime from the bounded Workbench bootstrap contract', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => ({
       ok: true,
