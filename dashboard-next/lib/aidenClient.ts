@@ -995,6 +995,105 @@ export interface WorkbenchPresenceBriefing {
   };
 }
 
+export type WorkbenchLearningConfidence = 'CANDIDATE' | 'OBSERVED' | 'CORROBORATED' | 'TRUSTED';
+export type WorkbenchLearningLifecycle = 'ACTIVE' | 'CONFLICTED' | 'STALE' | 'DEMOTED' | 'ARCHIVED' | 'DELETED';
+export type WorkbenchLearningType =
+  | 'USER_PREFERENCE' | 'USER_CORRECTION' | 'WORKSPACE_CONVENTION'
+  | 'VERIFIED_PROCEDURE_LESSON' | 'TOOL_RELIABILITY_LESSON' | 'SKILL_RELIABILITY'
+  | 'PRESENCE_FEEDBACK' | 'RECOVERY_LESSON';
+export type WorkbenchLearningScopeKind = 'USER_GLOBAL' | 'WORKSPACE' | 'PROJECT' | 'REPOSITORY' | 'AUTOMATION' | 'SKILL';
+
+export interface WorkbenchLearningEntry {
+  id: string;
+  scope: { kind: WorkbenchLearningScopeKind; key: string; ownerId: string; workspaceId: string | null };
+  type: WorkbenchLearningType;
+  subjectKey: string;
+  confidence: WorkbenchLearningConfidence;
+  lifecycle: WorkbenchLearningLifecycle;
+  content: string | null;
+  contentDigest: string | null;
+  eligible: boolean;
+  sourceCount: number;
+  version: number;
+  expiresAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+  deletedAt: number | null;
+}
+
+export interface WorkbenchLearningConflict {
+  id: string; leftEntryId: string; rightEntryId: string; state: 'OPEN' | 'RESOLVED';
+  reasonCode: string; createdAt: number; resolvedAt: number | null;
+}
+
+export interface WorkbenchLearningSnapshot {
+  enabled: boolean;
+  trusted: WorkbenchLearningEntry[];
+  needsReview: WorkbenchLearningEntry[];
+  archived: WorkbenchLearningEntry[];
+  conflicts: WorkbenchLearningConflict[];
+  counts: { trusted: number; needsReview: number; conflicts: number; archived: number };
+}
+
+export interface WorkbenchLearningReview {
+  entry: WorkbenchLearningEntry;
+  history: Array<{ id: string; type: string; entryVersion: number; confidence: string; lifecycle: string; expiresAt: number | null; createdAt: number }>;
+  versions: Array<{ id: string; entryId: string; content: string; contentDigest: string; createdAt: number }>;
+  sources: Array<{
+    id: string; entryId: string; kind: string; identity: string; revision: string; verification: string;
+    jobId: string | null; attemptId: string | null; generation: number | null;
+    evidenceId: string | null; effectId: string | null;
+    presenceId: string | null; automationId: string | null; skillName: string | null; recoveryId: string | null;
+    occurredAt: number;
+  }>;
+  conflicts: WorkbenchLearningConflict[];
+}
+
+export function loadLearning(): Promise<WorkbenchLearningSnapshot> {
+  return managementRequest('/api/learning');
+}
+
+export function loadLearningReview(entryId: string): Promise<WorkbenchLearningReview> {
+  return managementRequest(`/api/learning/${encodeURIComponent(entryId)}`);
+}
+
+export function rememberLearning(input: {
+  content: string; subjectKey: string; type: WorkbenchLearningType;
+  scopeKind: WorkbenchLearningScopeKind; idempotencyKey: string;
+}): Promise<WorkbenchLearningEntry> {
+  return managementRequest('/api/learning/remember', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function editLearning(entryId: string, input: { expectedVersion: number; content: string; idempotencyKey: string }): Promise<WorkbenchLearningEntry> {
+  return managementRequest(`/api/learning/${encodeURIComponent(entryId)}/edit`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function rollbackLearning(entryId: string, input: { expectedVersion: number; versionId: string; idempotencyKey: string }): Promise<WorkbenchLearningEntry> {
+  return managementRequest(`/api/learning/${encodeURIComponent(entryId)}/rollback`, { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function demoteLearning(entryId: string, expectedVersion: number): Promise<WorkbenchLearningEntry> {
+  return managementRequest(`/api/learning/${encodeURIComponent(entryId)}/demote`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, reason: 'disabled_by_user' }),
+  });
+}
+
+export function archiveLearning(entryId: string, expectedVersion: number): Promise<WorkbenchLearningEntry> {
+  return managementRequest(`/api/learning/${encodeURIComponent(entryId)}/archive`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, reason: 'archived_by_user' }),
+  });
+}
+
+export function deleteLearning(entryId: string, expectedVersion: number): Promise<WorkbenchLearningEntry> {
+  return managementRequest(`/api/learning/${encodeURIComponent(entryId)}/delete`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion, reason: 'privacy_request' }),
+  });
+}
+
+export function exportLearning(): Promise<Record<string, unknown>> {
+  return managementRequest('/api/learning/export');
+}
+
 export function loadAutomations(): Promise<WorkbenchAutomationSnapshot> {
   return appsRequest<WorkbenchAutomationSnapshot>('/api/automations');
 }
@@ -1326,7 +1425,7 @@ export function dismissPresenceItem(itemId: string, expectedVersion: number): Pr
   });
 }
 
-export function sendPresenceFeedback(itemId: string, kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority'): Promise<{ accepted: true }> {
+export function sendPresenceFeedback(itemId: string, kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority'): Promise<{ accepted: true; eventId: string }> {
   return presenceRequest(`/api/presence/${encodeURIComponent(itemId)}/feedback`, {
     method: 'POST', body: JSON.stringify({ kind }),
   });

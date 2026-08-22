@@ -5516,6 +5516,124 @@ response = client.chat.completions.create(
 
 // ── SettingsDrawer ────────────────────────────────────────────
 
+function LearningSettingsTab() {
+  const [snapshot, setSnapshot] = useState<aiden.WorkbenchLearningSnapshot | null>(null)
+  const [review, setReview] = useState<aiden.WorkbenchLearningReview | null>(null)
+  const [filter, setFilter] = useState<'all' | 'preferences' | 'corrections' | 'workspace' | 'skills'>('all')
+  const [draft, setDraft] = useState('')
+  const [subject, setSubject] = useState('user.preference')
+  const [edit, setEdit] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const refresh = useCallback(async () => {
+    setError(null)
+    try { setSnapshot(await aiden.loadLearning()) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Learning is unavailable') }
+  }, [])
+  useEffect(() => { void refresh() }, [refresh])
+
+  const idempotencyKey = () => typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `learning-${Date.now()}`
+  const openReview = async (entryId: string) => {
+    setBusy(true); setError(null)
+    try { const value = await aiden.loadLearningReview(entryId); setReview(value); setEdit(value.entry.content ?? '') }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Learning review is unavailable') }
+    finally { setBusy(false) }
+  }
+  const mutate = async (operation: () => Promise<unknown>, reopen?: string) => {
+    setBusy(true); setError(null)
+    try { await operation(); await refresh(); if (reopen) await openReview(reopen); else setReview(null) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Learning change failed') }
+    finally { setBusy(false) }
+  }
+  const exportJson = async () => {
+    setBusy(true); setError(null)
+    try {
+      const value = await aiden.exportLearning()
+      const url = URL.createObjectURL(new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' }))
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'aiden-learning-export.json'; anchor.click()
+      URL.revokeObjectURL(url)
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Learning export failed') }
+    finally { setBusy(false) }
+  }
+  const accepts = (entry: aiden.WorkbenchLearningEntry) => filter === 'all'
+    || (filter === 'preferences' && entry.type === 'USER_PREFERENCE')
+    || (filter === 'corrections' && entry.type === 'USER_CORRECTION')
+    || (filter === 'workspace' && ['WORKSPACE_CONVENTION', 'VERIFIED_PROCEDURE_LESSON', 'TOOL_RELIABILITY_LESSON'].includes(entry.type))
+    || (filter === 'skills' && entry.type === 'SKILL_RELIABILITY')
+  const cards = (entries: aiden.WorkbenchLearningEntry[]) => entries.filter(accepts).map((entry) => (
+    <article className="learning-card" key={entry.id}>
+      <div><strong>{entry.content ?? '[learned content deleted]'}</strong><span>{entry.confidence} · {entry.scope.kind.replace(/_/g, ' ')}</span></div>
+      <button type="button" disabled={busy} onClick={() => { void openReview(entry.id) }}>Review</button>
+    </article>
+  ))
+
+  return (
+    <SettingsSection title="What Aiden has learned">
+      <p style={settingsTextStyle}>Evidence-linked context stays local and never grants permission, approval, budget, or execution authority.</p>
+      {snapshot && !snapshot.enabled && <p className="learning-notice">New capture and use are unavailable. Inspect, export, archive, and delete remain available.</p>}
+      {error && <p className="learning-error">{error}</p>}
+      <div className="learning-actions">
+        <button type="button" disabled={busy} onClick={() => { void refresh() }}>Refresh</button>
+        <button type="button" disabled={busy} onClick={() => { void exportJson() }}>Export JSON</button>
+      </div>
+      <form className="learning-remember" onSubmit={(event) => {
+        event.preventDefault()
+        if (!draft.trim()) return
+        void mutate(() => aiden.rememberLearning({
+          content: draft.trim(), subjectKey: subject.trim() || 'user.preference', type: 'USER_PREFERENCE',
+          scopeKind: 'REPOSITORY', idempotencyKey: idempotencyKey(),
+        })).then(() => setDraft(''))
+      }}>
+        <label>Remember this<textarea value={draft} disabled={!snapshot?.enabled || busy} onChange={(event) => setDraft(event.target.value)} placeholder="A preference or repository convention you explicitly want Aiden to remember" /></label>
+        <input value={subject} disabled={!snapshot?.enabled || busy} onChange={(event) => setSubject(event.target.value)} aria-label="Learning subject" />
+        <button type="submit" disabled={!snapshot?.enabled || busy || !draft.trim()}>Remember this</button>
+      </form>
+      <div className="learning-filters" aria-label="Learning filters">
+        {([['all', 'All'], ['preferences', 'Preferences'], ['corrections', 'Corrections'], ['workspace', 'Workspace lessons'], ['skills', 'Skill reliability']] as const).map(([id, label]) => (
+          <button type="button" className={filter === id ? 'is-active' : ''} key={id} onClick={() => setFilter(id)}>{label}</button>
+        ))}
+      </div>
+      {snapshot && <div className="learning-groups">
+        {([['Trusted', snapshot.trusted], ['Needs review', snapshot.needsReview], ['Archived', snapshot.archived]] as const).map(([title, entries]) => (
+          <section key={title}><h4>{title} <span>{entries.filter(accepts).length}</span></h4>{entries.filter(accepts).length ? cards(entries) : <p>No matching items.</p>}</section>
+        ))}
+        <section><h4>Conflicts <span>{snapshot.conflicts.length}</span></h4>
+          {snapshot.conflicts.length ? snapshot.conflicts.map((conflict) => <button className="learning-conflict" type="button" key={conflict.id} onClick={() => { void openReview(conflict.leftEntryId) }}>Needs review · {conflict.reasonCode.replace(/_/g, ' ')}</button>) : <p>No unresolved conflicts.</p>}
+        </section>
+      </div>}
+      {review && <div className="learning-review" role="dialog" aria-label="Learning review">
+        <div className="learning-review-head"><h4>Review learned context</h4><button type="button" onClick={() => setReview(null)}>Close</button></div>
+        <textarea value={edit} disabled={!snapshot?.enabled || busy || review.entry.lifecycle === 'DELETED'} onChange={(event) => setEdit(event.target.value)} />
+        <p>Editing preserves history.</p>
+        <dl>
+          <dt>Status</dt><dd>{review.entry.confidence} · {review.entry.lifecycle}</dd>
+          <dt>Scope</dt><dd>{review.entry.scope.kind} · {review.entry.scope.key}</dd>
+          <dt>Expiry</dt><dd>{review.entry.expiresAt === null ? 'No expiry' : new Date(review.entry.expiresAt).toLocaleString()}</dd>
+          <dt>Why Aiden remembers this</dt><dd>{review.sources.map((source) => `${source.kind} · ${source.verification} · ${new Date(source.occurredAt).toLocaleString()}`).join(', ') || 'No active source content'}</dd>
+          <dt>Evidence</dt><dd>{review.sources.map((source) => source.evidenceId ?? source.identity).join(', ')}</dd>
+          <dt>Source records</dt><dd>{review.sources.map((source) => [
+            source.presenceId, source.automationId, source.skillName, source.recoveryId,
+          ].filter(Boolean).join(' · ') || source.identity).join(', ')}</dd>
+          <dt>History</dt><dd>{review.history.map((event) => `${event.type} v${event.entryVersion}`).join(' → ')}</dd>
+        </dl>
+        <div className="learning-actions">
+          <button type="button" disabled={!snapshot?.enabled || busy || edit.trim() === review.entry.content} onClick={() => { void mutate(() => aiden.editLearning(review.entry.id, { expectedVersion: review.entry.version, content: edit, idempotencyKey: idempotencyKey() }), review.entry.id) }}>Save edit</button>
+          <button type="button" disabled={busy || review.entry.lifecycle === 'DELETED'} onClick={() => { void mutate(() => aiden.demoteLearning(review.entry.id, review.entry.version), review.entry.id) }}>Stop using automatically</button>
+          <button type="button" disabled={busy || review.entry.lifecycle === 'DELETED'} onClick={() => { void mutate(() => aiden.archiveLearning(review.entry.id, review.entry.version), review.entry.id) }}>Archive</button>
+          <button type="button" disabled={busy || review.entry.lifecycle === 'DELETED'} onClick={() => {
+            if (window.confirm('Delete learned content permanently? Source Job and Evidence records remain.')) void mutate(() => aiden.deleteLearning(review.entry.id, review.entry.version))
+          }}>Delete learned content</button>
+        </div>
+        {review.versions.length > 1 && <div className="learning-versions"><h4>Prior versions</h4>{review.versions.filter((version) => version.contentDigest !== review.entry.contentDigest).map((version) => (
+          <button type="button" key={version.id} disabled={!snapshot?.enabled || busy} onClick={() => { void mutate(() => aiden.rollbackLearning(review.entry.id, { expectedVersion: review.entry.version, versionId: version.id, idempotencyKey: idempotencyKey() }), review.entry.id) }}>Roll back · {new Date(version.createdAt).toLocaleString()}</button>
+        ))}</div>}
+      </div>}
+    </SettingsSection>
+  )
+}
+
 const SETTINGS_TABS = [
   { id: 'runtime',  label: '◆ Readiness', section: 'General' },
   { id: 'model',    label: '◈ AI & Models', section: 'General' },
@@ -6118,6 +6236,7 @@ function SettingsDrawer() {
 
           {settingsTab === 'privacy' && (
             <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted2)', lineHeight: 1.8 }}>
+              <LearningSettingsTab />
               <SettingsSection title="Privacy Policy">
                 <p style={settingsTextStyle}><strong style={{ color: 'var(--text)' }}>DevOS runs entirely on your machine.</strong></p>
                 <br />

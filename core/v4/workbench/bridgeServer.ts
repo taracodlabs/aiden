@@ -49,6 +49,7 @@ import type { SystemReadinessProjection } from './systemReadiness';
 import type { ProductEdition } from '../commercial/edition';
 import type { WorkbenchLiveExecutionPort } from './liveExecution';
 import type { WorkbenchAutomationPort } from './automationPort';
+import type { WorkbenchLearningPort } from './learningPort';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -245,6 +246,8 @@ export interface WorkbenchBridgeOptions {
   automations?: WorkbenchAutomationPort;
   /** Durable Agentic Presence projection. It cannot execute work directly. */
   presence?: WorkbenchPresencePort;
+  /** Scoped privacy and review controls over the canonical Learning authority. */
+  learning?: WorkbenchLearningPort;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -578,6 +581,66 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
       return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/learning/remember') {
+      if (!passesWriteGate(req, res)) return;
+      if (!opts.learning) { sendJson(res, 503, { error: 'Learning is unavailable' }); return; }
+      readJsonBody(req, 32 * 1024).then((body) => {
+        try {
+          if (typeof body.content !== 'string' || typeof body.subjectKey !== 'string'
+            || typeof body.type !== 'string' || typeof body.scopeKind !== 'string'
+            || typeof body.idempotencyKey !== 'string') {
+            sendJson(res, 400, { error: 'content, subjectKey, type, scopeKind and idempotencyKey are required' }); return;
+          }
+          sendJson(res, 201, opts.learning!.remember({
+            content: body.content.slice(0, 8_001),
+            subjectKey: body.subjectKey.slice(0, 513),
+            type: body.type as Parameters<WorkbenchLearningPort['remember']>[0]['type'],
+            scopeKind: body.scopeKind as Parameters<WorkbenchLearningPort['remember']>[0]['scopeKind'],
+            idempotencyKey: body.idempotencyKey.slice(0, 513),
+          }));
+        } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+      }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
+      return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/learning/rebuild') {
+      if (!passesWriteGate(req, res)) return;
+      if (!opts.learning) { sendJson(res, 503, { error: 'Learning is unavailable' }); return; }
+      try { sendJson(res, 200, opts.learning.rebuild()); }
+      catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+      return;
+    }
+    const learningActionMatch = url.pathname.match(/^\/api\/learning\/([^/]+)\/(edit|rollback|demote|archive|delete)$/);
+    if (req.method === 'POST' && learningActionMatch) {
+      if (!passesWriteGate(req, res)) return;
+      if (!opts.learning) { sendJson(res, 503, { error: 'Learning is unavailable' }); return; }
+      const entryId = decodeURIComponent(learningActionMatch[1]);
+      const action = learningActionMatch[2] as 'edit' | 'rollback' | 'demote' | 'archive' | 'delete';
+      readJsonBody(req, 32 * 1024).then((body) => {
+        try {
+          if (!Number.isSafeInteger(body.expectedVersion)) {
+            sendJson(res, 400, { error: 'expectedVersion is required' }); return;
+          }
+          const expectedVersion = Number(body.expectedVersion);
+          if (action === 'edit') {
+            if (typeof body.content !== 'string' || typeof body.idempotencyKey !== 'string') {
+              sendJson(res, 400, { error: 'content and idempotencyKey are required' }); return;
+            }
+            sendJson(res, 200, opts.learning!.edit({ entryId, expectedVersion,
+              content: body.content.slice(0, 8_001), idempotencyKey: body.idempotencyKey.slice(0, 513) }));
+          } else if (action === 'rollback') {
+            if (typeof body.versionId !== 'string' || typeof body.idempotencyKey !== 'string') {
+              sendJson(res, 400, { error: 'versionId and idempotencyKey are required' }); return;
+            }
+            sendJson(res, 200, opts.learning!.rollback({ entryId, expectedVersion,
+              versionId: body.versionId.slice(0, 513), idempotencyKey: body.idempotencyKey.slice(0, 513) }));
+          } else {
+            const reason = typeof body.reason === 'string' ? body.reason.slice(0, 1_000) : 'user request';
+            sendJson(res, 200, opts.learning![action]({ entryId, expectedVersion, reason }));
+          }
+        } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+      }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
+      return;
+    }
     const presenceActionMatch = url.pathname.match(/^\/api\/presence\/([^/]+)\/(snooze|dismiss|feedback|proposals)$/);
     if (req.method === 'POST' && presenceActionMatch) {
       handlePresenceAction(req, res, presenceActionMatch[1], presenceActionMatch[2] as 'snooze' | 'dismiss' | 'feedback' | 'proposals');
@@ -679,6 +742,28 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       if (!opts.presence) { sendJson(res, 503, { error: 'Agentic Presence is unavailable' }); return; }
       try { sendJson(res, 200, opts.presence.snapshot()); }
       catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    if (url.pathname === '/api/learning') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.learning) { sendJson(res, 503, { error: 'Learning is unavailable' }); return; }
+      try { sendJson(res, 200, opts.learning.snapshot()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    if (url.pathname === '/api/learning/export') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.learning) { sendJson(res, 503, { error: 'Learning is unavailable' }); return; }
+      try { sendJson(res, 200, opts.learning.export()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    const learningReviewMatch = url.pathname.match(/^\/api\/learning\/([^/]+)$/);
+    if (learningReviewMatch) {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.learning) { sendJson(res, 503, { error: 'Learning is unavailable' }); return; }
+      try { sendJson(res, 200, opts.learning.review(decodeURIComponent(learningReviewMatch[1]))); }
+      catch (error) { sendJson(res, 404, { error: managementError(error) }); }
       return;
     }
     if (url.pathname === '/api/presence/proposals') {
@@ -941,7 +1026,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/presence', 'GET /api/presence/proposals', 'GET /api/presence/preferences', 'GET /api/presence/briefing', 'GET /api/presence/:id/explain', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay', 'POST /api/presence/preferences', 'POST /api/presence/:id/snooze', 'POST /api/presence/:id/dismiss', 'POST /api/presence/:id/feedback', 'POST /api/presence/:id/proposals', 'POST /api/presence/proposals/:id/accept'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/presence', 'GET /api/learning', 'GET /api/learning/export', 'GET /api/learning/:id', 'GET /api/presence/proposals', 'GET /api/presence/preferences', 'GET /api/presence/briefing', 'GET /api/presence/:id/explain', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay', 'POST /api/presence/preferences', 'POST /api/presence/:id/snooze', 'POST /api/presence/:id/dismiss', 'POST /api/presence/:id/feedback', 'POST /api/presence/:id/proposals', 'POST /api/presence/proposals/:id/accept', 'POST /api/learning/remember', 'POST /api/learning/:id/edit', 'POST /api/learning/:id/rollback', 'POST /api/learning/:id/demote', 'POST /api/learning/:id/archive', 'POST /api/learning/:id/delete', 'POST /api/learning/rebuild'],
     });
   });
 
