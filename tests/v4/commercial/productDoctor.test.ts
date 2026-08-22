@@ -45,6 +45,9 @@ describe('product doctor', () => {
       commercial: { edition: 'pro', entitlementState: 'active', updateChannel: 'pro-preview' },
     });
     expect(withCommercial.filter((entry) => entry.group === 'Commercial')).toHaveLength(3);
+    expect(withCommercial).toContainEqual(expect.objectContaining({
+      group: 'Learning', name: 'Evidence-linked Learning', message: 'not initialized yet',
+    }));
   });
 
   it('produces stable JSON and redacts credential-shaped values', () => {
