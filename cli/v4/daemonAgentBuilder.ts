@@ -75,6 +75,8 @@ export interface BuildDaemonAgentBuilderInput {
   resolveUiOnly?:       AidenAgentOptions['resolveUiOnly'];
   resolveToolInteraction?: AidenAgentOptions['resolveToolInteraction'];
   externalCodingRequirement?: AidenAgentOptions['externalCodingRequirement'];
+  learningContextProvider?: AidenAgentOptions['learningContextProvider'];
+  learningScopes?: AidenAgentOptions['learningScopes'];
   recoverExternalCoding?: AgentBuilder['recoverExternalCoding'];
   /**
    * v4.7.0 Phase 2.4 — honesty-mode plumbed in from the REPL's config
@@ -173,6 +175,8 @@ export function buildDaemonAgentBuilder(
       resolveUiOnly:        deps.resolveUiOnly,
       resolveToolInteraction: deps.resolveToolInteraction,
       externalCodingRequirement: deps.externalCodingRequirement,
+      learningContextProvider: deps.learningContextProvider,
+      learningScopes: deps.learningScopes,
       // Memory snapshot refresh — daemon agent doesn't track dirty
       // bits because each instance is short-lived; we provide the
       // refresh callback so honestyEnforcement (and any future
