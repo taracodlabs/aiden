@@ -90,7 +90,6 @@ import type {
 } from './dispatcher';
 // v4.5 Phase 5b — cron migration to SQLite + daemon-mode emitter.
 import { runCronMigration } from './cron/migration';
-import { createCronEmitter } from './cron/cronEmitter';
 import { pwClose } from '../../playwrightBridge';
 import { VERSION } from '../../version';
 // v4.9.0 Slice 3 — structured logger + crash recovery.
@@ -119,7 +118,8 @@ import { insertIncarnation, markEnded } from './incarnationStore';
 import { mountRunsRoutes } from './api/runs';
 import { initSpawnPause } from '../subagent/spawnPause';
 import { initRecoveryStore } from '../selfimprovement/recoveryStore';
-import { setRunActionForTests } from '../cron/cronManager';
+import { createAutomationScheduler } from '../automation/scheduler';
+import { importLegacyScheduledWorkflows } from '../automation/legacyMigration';
 
 export interface DaemonBootstrapHandle {
   /** True when the foundation actually initialized (AIDEN_DAEMON=1). */
@@ -902,23 +902,29 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       log('error', `[cron-migration] unhandled failure: ${e instanceof Error ? e.message : String(e)}`);
     }
 
-    // ── v4.5 Phase 5b — install daemon-mode cron emitter ─────────────────
-    // When AIDEN_DAEMON=1, cron fires go through the trigger bus
-    // (consumed by the Phase 5a dispatcher) instead of shelling out.
-    // We swap the cronManager's RunActionFn here so any cron heartbeat
-    // started by the CLI uses the daemon-mode path.
-    //
-    // Best-effort import — we don't pull cronManager into the daemon
-    // hot path unless the user actually runs cron. The import is
-    // lazy so non-cron CLIs don't pay the cost.
+    // Reliable automations are the sole active daemon schedule scanner. The
+    // legacy cron store is imported above and remains compatibility data only.
     try {
-      const emitter = createCronEmitter({
-        triggerBus, db, log,
+      const imported = importLegacyScheduledWorkflows({ db, now: Date.now() });
+      if (imported.imported > 0 || imported.errors.length > 0) {
+        log(imported.errors.length > 0 ? 'warn' : 'info',
+          `[automations] legacy import imported=${imported.imported} existing=${imported.existing} skipped=${imported.skipped}`);
+      }
+      const automationScheduler = createAutomationScheduler({ db, triggerBus, maxPerScan: 100 });
+      const scan = (): void => {
+        try { automationScheduler.scanDue(); }
+        catch (error) { log('error', `[automations] due scan failed: ${error instanceof Error ? error.message : String(error)}`); }
+      };
+      scan();
+      const automationTimer = setInterval(scan, 1_000);
+      if (typeof automationTimer.unref === 'function') automationTimer.unref();
+      resourceRegistry.register({
+        kind: 'automation_scheduler', owner: tracker.instanceId,
+        metadata: { authority: 'automation_trigger_bindings' },
+        close: () => clearInterval(automationTimer),
       });
-      setRunActionForTests(emitter);
-      log('info', `[cron-emitter] daemon-mode runAction installed`);
-    } catch (e) {
-      log('warn', `[cron-emitter] install skipped: ${e instanceof Error ? e.message : String(e)}`);
+    } catch (error) {
+      log('error', `[automations] scheduler start failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     // ── v4.5 Phase 5a — start the trigger dispatcher ─────────────────────

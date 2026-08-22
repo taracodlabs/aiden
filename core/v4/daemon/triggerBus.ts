@@ -49,7 +49,7 @@ export interface TriggerBus {
   insert(ev: TriggerEventInput): { id: number; inserted: boolean };
   claim(opts?: { source?: TriggerSource; leaseMs?: number; ownerId: string }): ClaimedEvent | null;
   renewClaim(eventId: number, claimToken: string, extendMs: number): boolean;
-  release(eventId: number, claimToken: string): void;
+  release(eventId: number, claimToken: string, options?: { restoreAttempt?: boolean }): void;
   markDone(eventId: number, claimToken: string, runId?: number): void;
   markFailed(eventId: number, claimToken: string, error: string, opts?: { maxAttempts?: number; cooldownMs?: number }): void;
   reclaimExpired(now?: number): { reclaimed: number };
@@ -236,7 +236,7 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
       return upd.changes > 0;
     },
 
-    release(eventId: number, claimToken: string): void {
+    release(eventId: number, claimToken: string, releaseOptions = {}): void {
       const now = Date.now();
       db.prepare(
         `UPDATE trigger_events
@@ -244,9 +244,10 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
                 claim_owner      = NULL,
                 claim_token      = NULL,
                 claim_expires_at = NULL,
-                updated_at       = ?
+                updated_at       = ?,
+                attempts         = CASE WHEN ? = 1 THEN MAX(0, attempts - 1) ELSE attempts END
           WHERE id = ? AND status = 'claimed' AND claim_token = ?`,
-      ).run(now, eventId, claimToken);
+      ).run(now, releaseOptions.restoreAttempt ? 1 : 0, eventId, claimToken);
     },
 
     markDone(eventId: number, claimToken: string, runId?: number): void {

@@ -759,3 +759,58 @@ button:focus-visible, textarea:focus-visible, input:focus-visible, summary:focus
   *, *::before, *::after { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
 }
 
+.automation-create {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+  margin-bottom: 18px;
+}
+
+.automation-create input,
+.automation-create textarea,
+.automation-create select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg2);
+  color: var(--text);
+  font: inherit;
+}
+
+.automation-safety-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.automation-safety-fields label { display: grid; gap: 6px; color: var(--muted2); font-size: 12px; }
+.automation-write-option { display: flex; gap: 8px; align-items: flex-start; color: var(--text2); font-size: 12px; }
+.automation-write-option input { width: auto; margin-top: 2px; }
+
+.automation-schedule-fields,
+.automation-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.automation-schedule-fields > * { flex: 1 1 220px; }
+.automation-schedule-fields label { display: grid; gap: 6px; color: var(--muted2); font-size: 12px; }
+.automation-advanced { color: var(--muted2); font-size: 12px; }
+.automation-advanced summary { cursor: pointer; margin-bottom: 8px; }
+.automation-grid { margin-top: 18px; }
+.automation-card { padding: 18px; min-width: 0; }
+.automation-card h3, .automation-card p { overflow-wrap: anywhere; }
+.automation-meta { color: var(--muted2); font-size: 12px; }
+.automation-preview { margin: 0; padding-left: 20px; color: var(--muted2); }
+.automation-preview code { overflow-wrap: anywhere; }
+.automation-history { display: grid; gap: 12px; }
+.automation-history-list { display: grid; gap: 0; border-top: 1px solid var(--line); }
+.automation-history-row { display: grid; grid-template-columns: minmax(88px,.6fr) minmax(180px,1.4fr) minmax(180px,1fr); gap: 8px; padding: 10px 0; border-bottom: 1px solid var(--line); align-items: center; }
+.automation-history-row code, .automation-history-row span { color: var(--muted2); font-size: 12px; overflow-wrap: anywhere; }
+@media (max-width: 700px) { .automation-history-row { grid-template-columns: 1fr; } }
+
+@media (max-width: 620px) {
+  .automation-surface { min-width: 0; padding-inline: 14px; }
+  .automation-schedule-fields { display: grid; grid-template-columns: minmax(0, 1fr); }
+  .automation-safety-fields { grid-template-columns: minmax(0, 1fr); }
+  .automation-actions .nav-btn { flex: 1 1 auto; }
+}

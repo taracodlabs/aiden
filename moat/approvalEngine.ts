@@ -773,10 +773,13 @@ export class ApprovalEngine {
         .then((value) => ({ source: 'prompt' as const, value }));
       const durable = durableWait(req, controller.signal)
         .then((value) => ({ source: 'durable' as const, value }));
-      const winner = await Promise.race([prompt, durable]);
-      decision = winner.value;
-      controller.abort();
-      await Promise.allSettled([prompt, durable]);
+      try {
+        const winner = await Promise.race([prompt, durable]);
+        decision = winner.value;
+      } finally {
+        controller.abort();
+        await Promise.allSettled([prompt, durable]);
+      }
     } else {
       decision = await this.callbacks.promptUser(req);
     }

@@ -49,7 +49,7 @@ import type { RunStore } from '../runStore';
 import type { ClaimedEvent, TriggerSource } from '../types';
 import type { Db } from '../db/connection';
 import type { JobEngine } from '../jobEngine';
-import { admitDurableJob } from '../jobLifecycle';
+import { admitDurableJob, DurableJobHostDetachedError } from '../jobLifecycle';
 import type { TriggerRowSql } from '../db/schema/v1.spec';
 import {
   buildTriggerSessionId,
@@ -69,6 +69,7 @@ import type {
   TriggerInvocationContext,
 } from './agentRunner';
 import { computeRetryCooldownMs } from './realAgentRunner';
+import { createOccurrenceAuthority } from '../../automation/occurrenceAuthority';
 
 // ── Defaults ───────────────────────────────────────────────────────────────
 
@@ -323,8 +324,55 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
 
     // Start renew timer; clean up on every exit path.
     const renewTimer = startRenewTimer(event.id, event.claimToken);
+    let effectiveMaxAttempts = maxAttempts;
 
     try {
+      const payloadAlreadyBound = typeof event.payload.automationId === 'string'
+        && typeof event.payload.revisionId === 'string';
+      if (!payloadAlreadyBound) {
+        const bindings = opts.db.prepare(
+          `SELECT b.binding_id,b.automation_id,b.revision_id,b.trigger_kind
+             FROM automation_trigger_bindings b
+             JOIN automation_definitions d ON d.automation_id = b.automation_id
+            WHERE b.enabled = 1 AND d.enabled = 1 AND b.source_key = ?
+              AND (b.trigger_kind = ? OR (b.trigger_kind = 'app_event' AND ? IN ('manual','email')))
+            ORDER BY b.binding_id`,
+        ).all(event.sourceKey, event.source, event.source) as Array<{
+          binding_id: string; automation_id: string; revision_id: string; trigger_kind: string;
+        }>;
+        if (bindings.length > 0) {
+          opts.db.transaction(() => {
+            const liveClaim = opts.db.prepare(
+              `SELECT 1 FROM trigger_events
+                WHERE id = ? AND status = 'claimed' AND claim_token = ?
+                  AND claim_expires_at IS NOT NULL AND claim_expires_at > ?`,
+            ).get(event.id, event.claimToken, Date.now());
+            if (!liveClaim) throw new Error('Trigger claim authority was lost before automation binding fan-out');
+            for (const binding of bindings) {
+              const sourceIdentity = `${binding.binding_id}:${event.idempotencyKey ?? event.id}`;
+              opts.triggerBus.insert({
+                source: event.source,
+                sourceKey: binding.automation_id,
+                idempotencyKey: `automation-bound:${sourceIdentity}`,
+                payload: {
+                  automationId: binding.automation_id,
+                  revisionId: binding.revision_id,
+                  triggerKind: binding.trigger_kind,
+                  sourceIdentity,
+                  triggerReceiptRef: event.id,
+                  triggerPayload: event.payload,
+                  untrustedContent: true,
+                },
+              });
+            }
+            opts.triggerBus.markDone(event.id, event.claimToken);
+            const settled = opts.db.prepare("SELECT 1 FROM trigger_events WHERE id = ? AND status = 'done'").get(event.id);
+            if (!settled) throw new Error('Trigger claim authority was lost during automation binding fan-out');
+          }).immediate();
+          _stats.succeeded += 1;
+          return;
+        }
+      }
       // Render initial message + check missing vars.
       const { message, missing } = renderInitialMessage(event, spec?.prompt_template ?? null);
       if (missing.length > 0 && spec?.prompt_template) {
@@ -382,24 +430,62 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
         && typeof durable.run_id === 'number'
           ? { jobId: durable.job_id, attemptId: durable.attempt_id, runId: durable.run_id }
           : undefined;
-      const admission = existingAdmission ?? (opts.jobEngine ? admitDurableJob(opts.jobEngine, {
-        entryPoint: 'daemon_trigger',
-        source: event.source,
-        sessionId,
-        instanceId: opts.instanceId,
-        idempotencyNamespace: `trigger:${event.source}:${event.sourceKey}`,
-        idempotencyKey: String(event.id),
-        requestFingerprint: event.idempotencyKey ?? String(event.id),
-        goal: message,
-        triggerEventId: event.id,
-      }) : undefined);
+      const automationPayload = event.payload as {
+        automationId?: unknown; revisionId?: unknown; triggerKind?: unknown;
+        scheduledFor?: unknown; sourceIdentity?: unknown;
+        replayOfOccurrenceId?: unknown;
+      };
+      const isAutomation = opts.jobEngine
+        && typeof automationPayload.automationId === 'string'
+        && typeof automationPayload.revisionId === 'string'
+        && typeof automationPayload.triggerKind === 'string'
+        && typeof automationPayload.sourceIdentity === 'string';
+      const occurrenceAdmission = isAutomation
+        ? createOccurrenceAuthority({ db: opts.db, jobEngine: opts.jobEngine! }).admitClaimed({
+            triggerEventId: event.id,
+            claimToken: event.claimToken,
+            automationId: automationPayload.automationId as string,
+            revisionId: automationPayload.revisionId as string,
+            triggerKind: automationPayload.triggerKind as string,
+            scheduledFor: typeof automationPayload.scheduledFor === 'string' ? automationPayload.scheduledFor : null,
+            sourceIdentity: automationPayload.sourceIdentity as string,
+            replayOfOccurrenceId: typeof automationPayload.replayOfOccurrenceId === 'string'
+              ? automationPayload.replayOfOccurrenceId : null,
+            instanceId: opts.instanceId,
+          })
+        : undefined;
+      effectiveMaxAttempts = occurrenceAdmission?.retryMaxAttempts ?? maxAttempts;
+      if (occurrenceAdmission && occurrenceAdmission.disposition !== 'admitted') {
+        opts.triggerBus.markDone(event.id, event.claimToken);
+        _stats.succeeded += 1;
+        return;
+      }
+      const admittedOccurrence = occurrenceAdmission?.disposition === 'admitted' ? occurrenceAdmission : undefined;
+      const admission = existingAdmission ?? admittedOccurrence ?? (opts.jobEngine ? admitDurableJob(opts.jobEngine, {
+          entryPoint: 'daemon_trigger',
+          source: event.source,
+          sessionId,
+          instanceId: opts.instanceId,
+          idempotencyNamespace: `trigger:${event.source}:${event.sourceKey}`,
+          idempotencyKey: String(event.id),
+          requestFingerprint: event.idempotencyKey ?? String(event.id),
+          goal: message,
+          triggerEventId: event.id,
+        }) : undefined);
+      const executionMessage = admittedOccurrence?.goal ?? message;
       const input: DaemonAgentInput = {
         sessionId,
         instanceId:     opts.instanceId,
         triggerEventId: event.id,
         triggerContext: context,
-        initialMessage: message,
+        initialMessage: executionMessage,
         deliverOnly,
+        ...(admittedOccurrence?.scriptSpec ? { automationScriptSpec: admittedOccurrence.scriptSpec } : {}),
+        ...(admittedOccurrence ? { automationApprovalMode: admittedOccurrence.approvalMode } : {}),
+        ...(admittedOccurrence?.deliverySpec ? {
+          automationDeliverySpec: admittedOccurrence.deliverySpec,
+          automationOccurrenceId: admittedOccurrence.occurrenceId,
+        } : {}),
         ...(admission ? { admission } : {}),
         ...(workerAssignmentId ? { workerAssignmentId } : {}),
         ...(resume ? { resume } : {}),
@@ -425,28 +511,36 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       if (result.finishReason === 'error') {
         const errMsg = result.error ?? 'agent reported error finish';
         opts.triggerBus.markFailed(event.id, event.claimToken, errMsg, {
-          maxAttempts,
+          maxAttempts: effectiveMaxAttempts,
           cooldownMs: computeRetryCooldownMs(event.attempts),
         });
         _stats.failed += 1;
-        if (event.attempts >= maxAttempts) _stats.deadLetter += 1;
+        if (event.attempts >= effectiveMaxAttempts) _stats.deadLetter += 1;
         return;
       }
 
       // Success — markDone with the runId.
       opts.triggerBus.markDone(event.id, event.claimToken, result.runId);
+      if (admittedOccurrence) {
+        createOccurrenceAuthority({ db: opts.db, jobEngine: opts.jobEngine! })
+          .reconcileJob(admittedOccurrence.occurrenceId);
+      }
       _stats.succeeded += 1;
     } catch (e) {
+      if (e instanceof DurableJobHostDetachedError) {
+        opts.triggerBus.release(event.id, event.claimToken, { restoreAttempt: true });
+        return;
+      }
       const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
       log('error', `[dispatcher] worker threw eventId=${event.id}: ${msg}`);
       try {
         opts.triggerBus.markFailed(event.id, event.claimToken, msg.slice(0, 500), {
-          maxAttempts,
+          maxAttempts: effectiveMaxAttempts,
           cooldownMs: computeRetryCooldownMs(event.attempts),
         });
       } catch { /* bus may be in a weird state; swallow */ }
       _stats.failed += 1;
-      if (event.attempts >= maxAttempts) _stats.deadLetter += 1;
+      if (event.attempts >= effectiveMaxAttempts) _stats.deadLetter += 1;
     } finally {
       clearInterval(renewTimer);
       _inflight.delete(event.id);

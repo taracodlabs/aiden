@@ -310,6 +310,44 @@ export interface WorkbenchAppsSnapshot {
   configuration: { workbench: boolean; command?: string };
 }
 
+export interface WorkbenchAutomationSummary {
+  automationId: string;
+  name: string;
+  enabled: boolean;
+  revisionId: string;
+  revisionNumber: number;
+  trigger: { kind: string; expression?: string; timezone?: string };
+  nextFireAt: string | null;
+  lastOccurrence: { occurrenceId: string; state: string; jobId: string | null; createdAt: number } | null;
+}
+
+export interface WorkbenchAutomationSnapshot {
+  capability: { available: boolean; reason?: string };
+  scheduler: { ready: boolean; dueBindings: number };
+  automations: WorkbenchAutomationSummary[];
+  history: WorkbenchAutomationOccurrence[];
+  attention: Array<{ automationId: string; state: string; occurrenceId: string }>;
+}
+
+export interface WorkbenchAutomationOccurrence {
+  occurrenceId: string;
+  automationId: string;
+  revisionId: string;
+  triggerKind: string;
+  scheduledFor: string | null;
+  triggeredAt: number;
+  admittedAt: number | null;
+  jobId: string | null;
+  attemptId: string | null;
+  state: string;
+  replayOfOccurrenceId: string | null;
+  updatedAt: number;
+  detail: {
+    reason?: string;
+    delivery?: { state: 'completed' | 'failed' | 'unknown'; detail?: string; updatedAt?: number };
+  };
+}
+
 export interface WorkbenchAppConnection {
   connectionId: string;
   authorizationUrl?: string;
@@ -890,6 +928,53 @@ export function grantBrowserPermission(): Promise<WorkbenchBrowserSetup> {
 
 export function loadApps(): Promise<WorkbenchAppsSnapshot> {
   return appsRequest<WorkbenchAppsSnapshot>('/api/apps');
+}
+
+export function loadAutomations(): Promise<WorkbenchAutomationSnapshot> {
+  return appsRequest<WorkbenchAutomationSnapshot>('/api/automations');
+}
+
+export function previewAutomationSchedule(input: { expression: string; timezone: string }): Promise<{ instants: string[] }> {
+  return appsRequest('/api/automations/preview', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function createAutomation(input: {
+  name: string; prompt: string; expression: string; timezone: string;
+  overlap: 'queue' | 'skip' | 'cancel_previous';
+  misfire: 'run_once' | 'skip' | 'catch_up';
+  allowWrite: boolean;
+}): Promise<WorkbenchAutomationSummary> {
+  return appsRequest('/api/automations', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: input.name,
+      action: { kind: 'prompt', prompt: input.prompt },
+      trigger: { kind: 'schedule', expression: input.expression, timezone: input.timezone },
+      policies: {
+        misfire: input.misfire === 'catch_up'
+          ? { kind: 'catch_up', maxOccurrences: 3, maxAgeMs: 86400000 }
+          : { kind: input.misfire, maxAgeMs: input.misfire === 'run_once' ? 86400000 : undefined },
+        overlap: input.overlap,
+        retry: { maxAttempts: 2 },
+      },
+      capabilities: input.allowWrite ? ['repository.read', 'repository.write'] : ['repository.read'],
+      credentialRefs: [],
+      budget: { runtimeMs: 300000, modelCalls: 8, toolCalls: 40, effects: input.allowWrite ? 10 : 0 },
+      approval: { mode: 'policy' },
+    }),
+  });
+}
+
+export function runAutomationNow(automationId: string): Promise<{ triggerEventId: number }> {
+  return appsRequest(`/api/automations/${encodeURIComponent(automationId)}/run`, { method: 'POST' });
+}
+
+export function setAutomationEnabled(automationId: string, enabled: boolean): Promise<WorkbenchAutomationSummary> {
+  return appsRequest(`/api/automations/${encodeURIComponent(automationId)}/${enabled ? 'enable' : 'disable'}`, { method: 'POST' });
+}
+
+export function replayAutomationOccurrence(occurrenceId: string): Promise<{ triggerEventId: number }> {
+  return appsRequest(`/api/automation-occurrences/${encodeURIComponent(occurrenceId)}/replay`, { method: 'POST' });
 }
 
 export function configureAppsProvider(input: { providerId: string; credential: string }): Promise<WorkbenchAppProvider> {

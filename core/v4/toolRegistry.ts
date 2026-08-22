@@ -74,6 +74,9 @@ import {
   recordDurableToolApproval,
   type PreparedDurableToolCall,
 } from './daemon/jobExecutionContext';
+import { DurableJobHostDetachedError } from './daemon/jobLifecycle';
+import type { AutomationApprovalContinuationRuntime } from './automation/approvalContinuation';
+import type { AutomationApprovalContinuationAuthority } from './automation/approvalContinuation';
 import { DockerCancellationUnverifiedError } from './dockerSession';
 import { describeToolEffect, type DurableEffectDescriptor } from './effectContract';
 import {
@@ -187,6 +190,11 @@ export interface ToolContext {
   approvalEngine?: ApprovalEngine;
   /** Durable exact-action approval authority for an admitted Job. */
   actionAuthority?: ActionAuthority;
+  /** Script-step checkpoint used only by durable Automation approval waits. */
+  automationApprovalContinuation?: AutomationApprovalContinuationRuntime;
+  /** Durable store used by the Automation ScriptSpec adapter to resume the
+   * exact approval-bound step after a host restart. */
+  automationApprovalContinuations?: AutomationApprovalContinuationAuthority;
   /** Immutable inputs used to snapshot policy for each final action. */
   policySnapshot?: PolicySnapshotInput;
   /** Phase 9: SSRF check for any tool whose category is `network`. */
@@ -871,6 +879,7 @@ export class ToolRegistry {
             mutates: true,
             effect: effectDescriptor,
             approvalState: approvalGated ? 'pending' : 'not_required',
+            allowExactMutationRecovery: context.automationApprovalContinuation !== undefined,
           });
           if (preparedRepositoryChange && preparedToolCall?.effectId) {
             context.repositoryChange!.authority.bindEffect({
@@ -1002,6 +1011,11 @@ export class ToolRegistry {
           const persistedToolCallId = currentDurableToolCallId(call.id) ?? call.id;
           let record: ReturnType<ActionAuthority['request']>;
           try {
+            const continuation = context.automationApprovalContinuation?.prepareApproval({
+              toolCallId: persistedToolCallId,
+              effectId: preparedToolCall?.effectId ?? null,
+              normalized,
+            });
             record = context.actionAuthority.request({
               jobId: jobContext.jobId,
               attemptId: jobContext.attemptId,
@@ -1014,6 +1028,7 @@ export class ToolRegistry {
               riskReasons: reason ? [reason] : [],
               normalized,
             });
+            if (continuation) context.automationApprovalContinuation?.bindApproval(record);
           } catch (error) {
             try { recordDurableToolApproval({ prepared: preparedToolCall ?? null, state: 'blocked' }); } catch { /* binding failure remains authoritative */ }
             return finish({
@@ -1023,7 +1038,9 @@ export class ToolRegistry {
               error: error instanceof Error ? error.message : String(error),
             }, 'blocked');
           }
-          if (context.approvalEngine) context.actionAuthority.markDisplayed(record.approvalId);
+          if (context.approvalEngine && ['created', 'displayed'].includes(record.state)) {
+            context.actionAuthority.markDisplayed(record.approvalId);
+          }
           durableApproval = {
             approvalId: record.approvalId,
             toolCallId: persistedToolCallId,
@@ -1044,6 +1061,21 @@ export class ToolRegistry {
               approvalId: durableApproval.approvalId,
               actionDigest: durableApproval.actionDigest,
             });
+          }
+          if (preparedToolCall?.recoveryDisposition === 'committed') {
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: { recovered: true, status: 'already_completed' },
+            }, 'completed');
+          }
+          if (preparedToolCall?.recoveryDisposition === 'unknown') {
+            return finish({
+              id: call.id,
+              name: call.name,
+              result: null,
+              error: 'Prior mutating execution has an unknown outcome and requires reconciliation',
+            }, 'unknown');
           }
         }
         if (!context.approvalEngine) {
@@ -1100,6 +1132,7 @@ export class ToolRegistry {
             };
           }
         } catch (error) {
+          if (error instanceof DurableJobHostDetachedError) throw error;
           timing.approvalEndedAt = Date.now();
           const message = error instanceof Error ? error.message : String(error);
           if (durableApproval && context.actionAuthority && jobContext) {
@@ -1151,20 +1184,23 @@ export class ToolRegistry {
           }
         }
         if (durableApproval && context.actionAuthority && jobContext) {
-          context.actionAuthority.decide({
-            approvalId: durableApproval.approvalId,
-            jobId: jobContext.jobId,
-            attemptId: jobContext.attemptId,
-            generation: jobContext.generation,
-            actionDigest: durableApproval.actionDigest,
-            policySnapshotId: durableApproval.policySnapshotId,
-            decision: allowed
-              ? 'approved'
-              : approvalDecision?.state === 'interrupted' ? 'cancelled' : 'denied',
-            decidedBy: 'user',
-            decisionChannel: 'interactive',
-            decisionScope: approvalDecision?.scope ?? 'once',
-          });
+          const currentApproval = context.actionAuthority.get?.(durableApproval.approvalId);
+          if (!currentApproval || !['expired', 'invalidated'].includes(currentApproval.state)) {
+            context.actionAuthority.decide({
+              approvalId: durableApproval.approvalId,
+              jobId: jobContext.jobId,
+              attemptId: jobContext.attemptId,
+              generation: jobContext.generation,
+              actionDigest: durableApproval.actionDigest,
+              policySnapshotId: durableApproval.policySnapshotId,
+              decision: allowed
+                ? 'approved'
+                : approvalDecision?.state === 'interrupted' ? 'cancelled' : 'denied',
+              decidedBy: 'user',
+              decisionChannel: 'interactive',
+              decisionScope: approvalDecision?.scope ?? 'once',
+            });
+          }
         }
         if (!allowed) {
           try {

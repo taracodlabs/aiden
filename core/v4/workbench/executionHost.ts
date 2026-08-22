@@ -21,6 +21,7 @@ import { reconcileWorkbenchQueue } from './queueReconciliation';
 import type { ActionAuthority } from '../actionAuthority';
 import { buildWorkbenchApprovalCallbacks } from './approvalBridge';
 import type { JobControlAuthority } from '../daemon/jobControlAuthority';
+import type { AutomationApprovalContinuationAuthority } from '../automation/approvalContinuation';
 
 export interface WorkbenchExecutionSnapshot {
   available: boolean;
@@ -50,6 +51,7 @@ export interface CreateWorkbenchExecutionHostOptions {
   taskStore: TaskStore;
   artifactStore?: ArtifactStore;
   approvalAuthority?: ActionAuthority;
+  automationApprovalContinuations?: AutomationApprovalContinuationAuthority;
   sessionStore?: SessionStore;
   instanceId: string;
   agentBuilder: AgentBuilder;
@@ -150,10 +152,19 @@ export function createWorkbenchExecutionHost(
       recoveryTimer = null;
       if (options.approvalAuthority) {
         for (const job of options.jobEngine.listJobs({ terminal: false, limit: 1_000 })) {
-          options.approvalAuthority.cancelPendingForJob(
-            job.id,
-            'Workbench execution host shutdown',
-          );
+          const attempt = job.activeAttemptId ? options.jobEngine.getAttempt(job.activeAttemptId) : null;
+          const durableAutomationWait = attempt !== null
+            && options.automationApprovalContinuations?.hasPendingForAttempt(
+              job.id,
+              attempt.id,
+              attempt.generation,
+            ) === true;
+          if (!durableAutomationWait) {
+            options.approvalAuthority.cancelPendingForJob(
+              job.id,
+              'Workbench execution host shutdown',
+            );
+          }
         }
       }
       if (dispatcher) await dispatcher.stop(timeoutMs);

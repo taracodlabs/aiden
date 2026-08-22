@@ -47,6 +47,7 @@ import type { WorkbenchProviderSetupAuthority } from './providerSetupAuthority';
 import type { SystemReadinessProjection } from './systemReadiness';
 import type { ProductEdition } from '../commercial/edition';
 import type { WorkbenchLiveExecutionPort } from './liveExecution';
+import type { WorkbenchAutomationPort } from './automationPort';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -239,6 +240,8 @@ export interface WorkbenchBridgeOptions {
   liveExecution?: WorkbenchLiveExecutionPort;
   /** Exact browser-plugin grant adapter. */
   browserSetup?: WorkbenchBrowserSetupPort;
+  /** Reliable automation projection and commands over canonical SQLite authority. */
+  automations?: WorkbenchAutomationPort;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -538,6 +541,20 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && url.pathname === '/api/browser/setup/grant') {
       handleBrowserGrant(req, res); return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/automations') {
+      handleAutomationCreate(req, res); return;
+    }
+    if (req.method === 'POST' && url.pathname === '/api/automations/preview') {
+      handleAutomationPreview(req, res); return;
+    }
+    const automationActionMatch = url.pathname.match(/^\/api\/automations\/([^/]+)\/(run|enable|disable)$/);
+    if (req.method === 'POST' && automationActionMatch) {
+      handleAutomationAction(req, res, automationActionMatch[1], automationActionMatch[2] as 'run' | 'enable' | 'disable'); return;
+    }
+    const automationReplayMatch = url.pathname.match(/^\/api\/automation-occurrences\/([^/]+)\/replay$/);
+    if (req.method === 'POST' && automationReplayMatch) {
+      handleAutomationReplay(req, res, automationReplayMatch[1]); return;
+    }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The built-in self-contained dark page. The per-launch write token is
@@ -616,6 +633,13 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
           log(`Apps snapshot failed: ${error instanceof Error ? error.message : 'request failed'}`);
           sendJson(res, 503, { error: 'Apps are temporarily unavailable' });
         });
+      return;
+    }
+    if (url.pathname === '/api/automations') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.automations) { sendJson(res, 503, { error: 'Automations are unavailable' }); return; }
+      try { sendJson(res, 200, opts.automations.snapshot()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
       return;
     }
     if (url.pathname === '/api/providers') {
@@ -847,7 +871,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay'],
     });
   });
 
@@ -1048,6 +1072,68 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       try { sendJson(res, 200, await opts.browserSetup!.grant({ confirmed: true })); }
       catch (error) { sendJson(res, 400, { error: managementError(error) }); }
     }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleAutomationCreate(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.automations) { sendJson(res, 503, { error: 'Automations are unavailable' }); return; }
+    readJsonBody(req, 64 * 1024).then((body) => {
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name || !body.action || !body.trigger || !body.policies) {
+        sendJson(res, 400, { error: 'name, action, trigger and policies are required' }); return;
+      }
+      try {
+        const result = opts.automations!.create({
+          name,
+          action: body.action as never,
+          trigger: body.trigger as never,
+          policies: body.policies as never,
+          capabilities: Array.isArray(body.capabilities) ? body.capabilities.filter((v): v is string => typeof v === 'string') : [],
+          credentialRefs: Array.isArray(body.credentialRefs) ? body.credentialRefs.filter((v): v is string => typeof v === 'string') : [],
+          ...(body.budget && typeof body.budget === 'object' && !Array.isArray(body.budget)
+            ? { budget: body.budget as never } : {}),
+          ...(body.approval && typeof body.approval === 'object' && !Array.isArray(body.approval)
+            ? { approval: body.approval as never } : {}),
+          ...(body.delivery && typeof body.delivery === 'object' && !Array.isArray(body.delivery)
+            ? { delivery: body.delivery as never } : {}),
+          createdBy: 'workbench',
+        });
+        sendJson(res, 201, result);
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleAutomationPreview(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.automations) { sendJson(res, 503, { error: 'Automations are unavailable' }); return; }
+    readJsonBody(req, 8 * 1024).then((body) => {
+      const expression = typeof body.expression === 'string' ? body.expression.trim() : '';
+      const timezone = typeof body.timezone === 'string' ? body.timezone.trim() : '';
+      if (!expression || !timezone) { sendJson(res, 400, { error: 'expression and timezone are required' }); return; }
+      try { sendJson(res, 200, { instants: opts.automations!.preview({ expression, timezone, count: 5 }) }); }
+      catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleAutomationAction(req: http.IncomingMessage, res: http.ServerResponse, rawId: string, action: 'run' | 'enable' | 'disable'): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.automations) { sendJson(res, 503, { error: 'Automations are unavailable' }); return; }
+    req.resume();
+    try {
+      const automationId = decodeURIComponent(rawId);
+      const result = action === 'run'
+        ? opts.automations.runNow(automationId)
+        : opts.automations.setEnabled(automationId, action === 'enable');
+      sendJson(res, action === 'run' ? 202 : 200, result);
+    } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+  }
+
+  function handleAutomationReplay(req: http.IncomingMessage, res: http.ServerResponse, rawId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.automations) { sendJson(res, 503, { error: 'Automations are unavailable' }); return; }
+    req.resume();
+    try { sendJson(res, 202, opts.automations.replay(decodeURIComponent(rawId))); }
+    catch (error) { sendJson(res, 400, { error: managementError(error) }); }
   }
 
   function handleAppsConnect(req: http.IncomingMessage, res: http.ServerResponse): void {
