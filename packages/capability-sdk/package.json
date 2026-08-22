@@ -1,0 +1,20 @@
+{
+  "name": "@taracod/aiden-capability-sdk",
+  "version": "0.1.0-private.0",
+  "private": true,
+  "description": "Private contracts and conformance helpers for Aiden capabilities.",
+  "license": "AGPL-3.0-only",
+  "type": "commonjs",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20 <21 || >=22 <23"
+  }
+}
