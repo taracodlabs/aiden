@@ -102,7 +102,7 @@ export interface PresenceAuthority {
     revalidate(proposal: ProposedJob, item: PresenceItem): { ok: boolean; reason?: string };
     enqueue(task: { message: string; sessionId?: string; idempotencyKey: string }): PresenceEnqueueResult;
   }): ProposedJob;
-  feedback(input: { itemId: string; kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority' }): { accepted: true };
+  feedback(input: { itemId: string; kind: 'helpful' | 'not_helpful' | 'too_frequent' | 'wrong_priority' }): { accepted: true; eventId: string };
 }
 
 export function createPresenceAuthority(options: {
@@ -120,7 +120,7 @@ export function createPresenceAuthority(options: {
   const appendEvent = (input: {
     itemId: string; type: string; fromState?: string | null; toState?: string | null;
     idempotencyKey: string; reason?: Record<string, unknown>; at?: number;
-  }): void => {
+  }): string => {
     const eventId = `presence_event_${digest(`${input.itemId}:${input.idempotencyKey}`).slice(0, 32)}`;
     options.db.prepare(
       `INSERT OR IGNORE INTO presence_item_events
@@ -128,6 +128,7 @@ export function createPresenceAuthority(options: {
        VALUES (?,?,?,?,?,?,?,?)`,
     ).run(eventId, input.itemId, input.type, input.fromState ?? null, input.toState ?? null,
       JSON.stringify(input.reason ?? {}), input.idempotencyKey, input.at ?? now());
+    return eventId;
   };
 
   const refreshTemporalState = (scope?: { workspaceId?: string | null; ownerId?: string | null }): void => {
@@ -534,11 +535,11 @@ export function createPresenceAuthority(options: {
     feedback(input) {
       const item = authority.get(input.itemId);
       if (!item) throw new Error('Presence item not found');
-      appendEvent({
+      const eventId = appendEvent({
         itemId: item.id, type: 'feedback', fromState: item.state, toState: item.state,
         idempotencyKey: `feedback:${input.kind}:${nextId()}`, reason: { kind: input.kind },
       });
-      return { accepted: true };
+      return { accepted: true, eventId };
     },
   };
   return authority;
