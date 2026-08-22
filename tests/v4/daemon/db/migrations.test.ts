@@ -91,6 +91,16 @@ describe('runMigrations', () => {
     expect(names).toContain('presence_item_events');
     expect(names).toContain('attention_preferences');
     expect(names).toContain('presence_proposed_jobs');
+    expect(names).toContain('learning_events');
+    expect(names).toContain('learning_sources');
+    expect(names).toContain('learning_content_versions');
+    expect(names).toContain('learning_entries');
+    expect(names).toContain('learning_entry_sources');
+    expect(names).toContain('learning_conflicts');
+    expect(names).toContain('learning_fts');
+    const eventColumns = db.prepare('PRAGMA table_info(learning_events)').all() as Array<{ name: string; notnull: number }>;
+    expect(eventColumns).toContainEqual(expect.objectContaining({ name: 'source_id', notnull: 1 }));
+    expect(eventColumns).toContainEqual(expect.objectContaining({ name: 'expires_at' }));
   });
 
   it('enforces trigger_events UNIQUE(source, idempotency_key) when key present', () => {

@@ -70,6 +70,26 @@ describe('Workbench Presence port', () => {
     expect(() => port.propose({ itemId: 'missing', prompt: 'x', goal: 'x' })).toThrow(/Pro/i);
   });
 
+  it('projects exact feedback identity to an optional Learning adapter without changing Presence policy', () => {
+    const authority = createPresenceAuthority({ db, enabled: true, now: () => 10, idFactory: () => 'feedback_1' });
+    const item = authority.observe({
+      sourceKind: 'job', sourceIdentity: 'job_feedback', sourceRevision: '1', initiator: 'USER',
+      workspaceId: 'workspace_1', ownerId: 'owner_1', category: 'ready_review', priority: 50,
+      title: 'Review result', summary: 'A verified result is ready.', reasonCode: 'review_ready',
+      reason: 'The Job is ready for review.', active: true, observedAt: 10,
+    }).item;
+    const onFeedback = vi.fn();
+    const port = createWorkbenchPresencePort({
+      db, authority, edition: buildEditionAuthority('pro'), workspaceId: 'workspace_1', ownerId: 'owner_1', onFeedback,
+    });
+
+    expect(port.feedback({ itemId: item.id, kind: 'helpful' })).toMatchObject({
+      accepted: true, eventId: expect.stringMatching(/^presence_event_/),
+    });
+    expect(onFeedback).toHaveBeenCalledWith(expect.objectContaining({ item, kind: 'helpful', eventId: expect.any(String) }));
+    expect(authority.get(item.id)).toMatchObject({ priority: item.priority, state: item.state });
+  });
+
   it('rejects item actions outside the exact Workbench project and owner scope', () => {
     const authority = createPresenceAuthority({ db, enabled: true, now: () => 10 });
     const foreign = authority.observe({
