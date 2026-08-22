@@ -73,7 +73,7 @@ describe('Workbench execution host', () => {
     expect(stop).toHaveBeenCalledOnce();
   });
 
-  it('invalidates pending approvals before shutdown cancels active lifecycle work', async () => {
+  it('preserves only restart-safe Automation approvals when the Workbench host shuts down', async () => {
     const stop = vi.fn(async () => undefined);
     const cancelPendingForJob = vi.fn(() => []);
     const host = createWorkbenchExecutionHost({
@@ -82,11 +82,20 @@ describe('Workbench execution host', () => {
       runStore: { get: vi.fn() } as never,
       jobEngine: {
         listJobs: vi.fn(({ terminal }: { terminal?: boolean } = {}) => terminal === false
-          ? [{ id: 'job_waiting' }, { id: 'job_running' }]
+          ? [
+              { id: 'job_waiting', activeAttemptId: 'attempt_waiting' },
+              { id: 'job_running', activeAttemptId: 'attempt_running' },
+            ]
           : []),
-        getAttempt: vi.fn(), cancelJob: vi.fn(),
+        getAttempt: vi.fn((attemptId: string) => attemptId === 'attempt_waiting'
+          ? { id: attemptId, generation: 3 }
+          : { id: attemptId, generation: 1 }),
+        cancelJob: vi.fn(),
       } as never,
       approvalAuthority: { cancelPendingForJob } as never,
+      automationApprovalContinuations: {
+        hasPendingForAttempt: vi.fn((jobId: string) => jobId === 'job_waiting'),
+      } as never,
       jobControlAuthority: jobControlAuthority(),
       taskStore: {} as never,
       instanceId: 'workbench_shutdown', agentBuilder: vi.fn() as never,
@@ -100,10 +109,8 @@ describe('Workbench execution host', () => {
 
     host.start();
     await host.stop();
-    expect(cancelPendingForJob.mock.calls).toEqual([
-      ['job_waiting', 'Workbench execution host shutdown'],
-      ['job_running', 'Workbench execution host shutdown'],
-    ]);
+    expect(cancelPendingForJob).toHaveBeenCalledTimes(1);
+    expect(cancelPendingForJob).toHaveBeenCalledWith('job_running', 'Workbench execution host shutdown');
     expect(stop).toHaveBeenCalledOnce();
   });
 

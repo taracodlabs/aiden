@@ -22,6 +22,7 @@ import type {
   DaemonAgentInput,
   DaemonAgentResult,
 } from '../../../../core/v4/daemon/dispatcher';
+import { DurableJobHostDetachedError } from '../../../../core/v4/daemon/jobLifecycle';
 
 let db: Database.Database;
 let bus: ReturnType<typeof createTriggerBus>;
@@ -152,6 +153,21 @@ describe('dispatcher — failure handling', () => {
     const row = bus.get(id);
     expect(row?.status).toBe('pending');
     expect(row?.lastError).toMatch(/agent gave up/);
+  });
+
+  it('releases a host-detached approval wait without consuming a retry attempt', async () => {
+    const { id } = bus.insert({ source: 'manual', sourceKey: 'automation', idempotencyKey: 'host-detach', payload: {} });
+    const { dispatcher } = build({
+      invoke: async () => { throw new DurableJobHostDetachedError('Workbench host shutdown'); },
+      maxAttempts: 2,
+    });
+    await dispatcher._pumpOnce();
+    expect(bus.get(id)).toMatchObject({
+      status: 'pending',
+      attempts: 0,
+      lastError: null,
+    });
+    expect(dispatcher.stats()).toMatchObject({ failed: 0, deadLetter: 0 });
   });
 });
 

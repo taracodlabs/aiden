@@ -282,7 +282,9 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
     const cols = db.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>;
     const colNames = cols.map((c) => c.name).sort();
     expect(colNames).toEqual([
-      'active_attempt_id', 'artifact_ids', 'channel_id',
+      'active_attempt_id', 'artifact_ids',
+      'automation_id', 'automation_occurrence_id', 'automation_revision_id',
+      'channel_id',
       // v4.13 Gap 3 (v17 migration) — job-card columns.
       'constraints', 'crash_count', 'created_at', 'entry_point',
       // v4.13 Gap 1 (v16 migration) — verify-before-done evidence envelope.
@@ -304,6 +306,7 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
     ]);
     const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name NOT LIKE 'sqlite_%'`).all() as Array<{ name: string }>;
     expect(idx.map((i) => i.name).sort()).toEqual([
+      'idx_tasks_automation_occurrence',
       'idx_tasks_idempotency',
       'idx_tasks_root_job',
       'idx_tasks_session_created',

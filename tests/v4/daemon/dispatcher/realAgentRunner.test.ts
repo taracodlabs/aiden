@@ -30,6 +30,8 @@ import type {
 } from '../../../../core/v4/daemon/dispatcher/agentRunner';
 import type { AidenAgent, AidenAgentResult } from '../../../../core/v4/aidenAgent';
 import { SessionStore } from '../../../../core/v4/sessionStore';
+import { createAutomationAuthority } from '../../../../core/v4/automation/automationAuthority';
+import { createOccurrenceAuthority } from '../../../../core/v4/automation/occurrenceAuthority';
 
 let db: Database.Database;
 let runStore: ReturnType<typeof createRunStore>;
@@ -103,6 +105,101 @@ it('reads the immutable admitted provider/model binding instead of later mutable
 });
 
 describe('createRealAgentRunner durable identity', () => {
+  it('settles a typed automation ScriptSpec without invoking a model agent', async () => {
+    const event = createTriggerBus({ db }).insert({
+      source: 'manual', sourceKey: 'automation-script', idempotencyKey: 'automation-script-1', payload: {},
+    });
+    let agentBuilds = 0;
+    const builder = (() => { agentBuilds += 1; return stubAgent(mkResult()); }) as AgentBuilder;
+    builder.executeAutomationScript = async ({ onToolCall }) => {
+      const call = { id: 'automation-script-step-1', name: 'file_read', arguments: { path: 'package.json' } };
+      onToolCall(call, 'before');
+      const result = { id: call.id, name: call.name, result: { bytes: 10 } };
+      onToolCall(call, 'after', result);
+      return [result];
+    };
+    const engine = createJobEngine({ db });
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine: engine, taskStore: createTaskStore({ db }),
+      agentBuilder: builder, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput({
+      triggerEventId: event.id,
+      automationScriptSpec: {
+        version: 1, maxRuntimeMs: 5_000,
+        steps: [{ kind: 'read_file', path: 'package.json' }],
+      },
+    }));
+
+    expect(result).toMatchObject({ finishReason: 'stop', finalization: { status: 'completed', outcome: 'verified' } });
+    expect(agentBuilds).toBe(0);
+    expect(engine.listJobs()).toHaveLength(1);
+    expect(engine.listJobs()[0].status).toBe('completed');
+  });
+
+  it('records optional delivery failure without rewriting successful work as a failed Job', async () => {
+    db.prepare(
+      `INSERT INTO connected_accounts (
+         account_id,provider_id,toolkit_id,owner_id,workspace_id,label,
+         provider_account_ref,status,health,created_at,updated_at
+       ) VALUES ('account_delivery','composio','slack','owner-a','workspace-a','Ops',
+         'provider-account','active','healthy',1,1)`,
+    ).run();
+    const automation = createAutomationAuthority({ db }).create({
+      name: 'Optional notification',
+      action: { kind: 'prompt', prompt: 'Prepare the report.' },
+      trigger: { kind: 'manual' },
+      policies: { misfire: { kind: 'skip' }, overlap: 'skip', retry: { maxAttempts: 1 } },
+      capabilities: ['apps.use'], credentialRefs: ['account_delivery'],
+      delivery: {
+        destinationRef: 'account_delivery', providerId: 'composio', toolkitId: 'slack',
+        actionId: 'send_message', schemaVersion: 'schema-1', providerActionVersion: 'provider-7',
+        input: { channel: 'ops' }, contentField: 'text', mode: 'on_success',
+      },
+      createdBy: 'owner-a', ownerId: 'owner-a', workspaceId: 'workspace-a',
+    });
+    const bus = createTriggerBus({ db });
+    const event = bus.insert({
+      source: 'manual', sourceKey: automation.definition.id, idempotencyKey: 'optional-delivery', payload: {},
+    });
+    const claim = bus.claim({ source: 'manual', ownerId: 'inst-1', leaseMs: 60_000 });
+    if (!claim) throw new Error('claim');
+    const engine = createJobEngine({ db });
+    const admitted = createOccurrenceAuthority({ db, jobEngine: engine }).admitClaimed({
+      triggerEventId: event.id, claimToken: claim.claimToken,
+      automationId: automation.definition.id, revisionId: automation.revision.id,
+      triggerKind: 'manual', sourceIdentity: 'optional-delivery', instanceId: 'inst-1',
+    });
+    if (admitted.disposition !== 'admitted') throw new Error('admission');
+    const builder = (() => stubAgent({
+      ...mkResult(), finalContent: 'The report is complete.', turnCount: 1,
+    } as AidenAgentResult)) as AgentBuilder;
+    builder.executeAutomationDelivery = async () => ({
+      id: 'delivery', name: 'app_action', error: 'notification provider unavailable',
+    });
+    const runner = createRealAgentRunner({
+      db, runStore, jobEngine: engine, taskStore: createTaskStore({ db }),
+      agentBuilder: builder, persistedDefault: PERSISTED,
+    });
+
+    const result = await runner.invoke(mkInput({
+      triggerEventId: event.id,
+      initialMessage: admitted.goal,
+      admission: admitted,
+      automationOccurrenceId: admitted.occurrenceId,
+      automationDeliverySpec: admitted.deliverySpec,
+    }));
+
+    expect(result.finishReason).toBe('stop');
+    expect(engine.getJob(admitted.jobId)?.status).toBe('completed');
+    const occurrence = db.prepare('SELECT detail_json FROM automation_occurrences WHERE occurrence_id = ?')
+      .get(admitted.occurrenceId) as { detail_json: string };
+    expect(JSON.parse(occurrence.detail_json)).toMatchObject({
+      delivery: { state: 'failed', detail: 'notification provider unavailable' },
+    });
+  });
+
   it('loads the durable Workbench conversation and records one authoritative reply', async () => {
     const sessionStore = new SessionStore(':memory:');
     try {

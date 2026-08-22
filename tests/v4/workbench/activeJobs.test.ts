@@ -62,6 +62,33 @@ describe('Workbench active Job projection', () => {
     });
   });
 
+  it('includes automation Jobs in Active Work without admitting unrelated daemon Jobs', () => {
+    const base = fixture('running');
+    const automationJob = {
+      ...base.jobs.listJobs()[0]!,
+      id: 'automation_job',
+      entryPoint: 'automation',
+      source: 'automation',
+      goal: 'Scheduled repository report',
+    };
+    const daemonJob = { ...automationJob, id: 'daemon_job', entryPoint: 'daemon', source: 'daemon' };
+    const deps = fixture('running', {
+      jobs: {
+        listJobs: (filters?: { limit?: number; entryPoint?: string; terminal?: boolean }) => [automationJob, daemonJob]
+          .filter((job) => !filters?.entryPoint || job.entryPoint === filters.entryPoint)
+          .slice(0, filters?.limit ?? 100),
+        getAttempt: base.jobs.getAttempt,
+      } as never,
+      approvals: { listPending: (jobId: string) => jobId === 'automation_job' ? [{ approvalId: 'approval_1' }] : [] } as never,
+    });
+
+    expect(listWorkbenchActiveJobs(deps)).toMatchObject([{
+      jobId: 'automation_job',
+      title: 'Scheduled repository report',
+      status: 'approval_required',
+    }]);
+  });
+
   it('keeps recoverable blocked/unknown/crashed Jobs visible and excludes only real terminal Jobs', () => {
     for (const status of ['blocked', 'unknown', 'crashed', 'recovering']) {
       expect(listWorkbenchActiveJobs(fixture(status))).toHaveLength(1);

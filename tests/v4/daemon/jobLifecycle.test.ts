@@ -73,6 +73,90 @@ describe('executeDurableJob', () => {
     });
   });
 
+  it('detaches a host-owned approval wait and reattaches the same Attempt generation and fence', async () => {
+    const lifecycleScope = createDurableJobLifecycleScope();
+    const controls = createJobControlAuthority({ db, jobEngine: engine });
+    let started!: () => void;
+    const executing = new Promise<void>((resolve) => { started = resolve; });
+    const first = (executeDurableJob as unknown as (options: Record<string, unknown>) => Promise<unknown>)({
+      engine,
+      ownerId: 'instance_lifecycle',
+      lifecycleScope,
+      detachOnDispose: () => true,
+      controlAuthority: controls,
+      initialInput: {
+        sessionId: 'session_host_detach', source: 'automation', kind: 'message',
+        content: 'write approved file', idempotencyNamespace: 'automation-input',
+        idempotencyKey: 'approval_restart',
+      },
+      admission: {
+        entryPoint: 'automation', source: 'automation', sessionId: 'session_host_detach',
+        instanceId: 'instance_lifecycle', idempotencyNamespace: 'automation',
+        idempotencyKey: 'approval_restart', requestFingerprint: 'approval_restart', goal: 'write approved file',
+      },
+      execute: async (handle: { signal: AbortSignal }) => {
+        started();
+        await new Promise<void>((_resolve, reject) => {
+          handle.signal.addEventListener('abort', () => reject(handle.signal.reason), { once: true });
+        });
+      },
+      finalize: () => ({ status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {} }),
+    });
+
+    await executing;
+    const before = engine.listJobs({ sessionId: 'session_host_detach' })[0]!;
+    const beforeAttempt = engine.getAttempt(before.activeAttemptId!)!;
+    await lifecycleScope.dispose('Workbench host shutdown');
+    await expect(first).rejects.toMatchObject({ name: 'DurableJobHostDetachedError' });
+
+    const detachedJob = engine.getJob(before.id)!;
+    const detachedAttempt = engine.getAttempt(beforeAttempt.id)!;
+    expect(detachedJob).toMatchObject({ status: 'waiting', activeAttemptId: beforeAttempt.id });
+    expect(detachedAttempt).toMatchObject({
+      status: 'waiting',
+      generation: beforeAttempt.generation,
+      fenceToken: beforeAttempt.fenceToken,
+      leaseOwner: null,
+    });
+
+    const resumed = await (executeDurableJob as unknown as (options: Record<string, unknown>) => Promise<{
+      jobId: string; attemptId: string; generation: number; fenceToken: string;
+    }>)({
+      engine,
+      ownerId: 'instance_lifecycle',
+      admission: {
+        existing: {
+          jobId: before.id,
+          attemptId: beforeAttempt.id,
+          runId: beforeAttempt.rowId,
+          generation: beforeAttempt.generation,
+          fenceToken: beforeAttempt.fenceToken,
+          reused: true,
+        },
+        source: 'automation',
+      },
+      controlAuthority: controls,
+      initialInput: {
+        sessionId: 'session_host_detach', source: 'automation', kind: 'message',
+        content: 'write approved file', idempotencyNamespace: 'automation-input',
+        idempotencyKey: 'approval_restart',
+      },
+      execute: async () => 'approved once',
+      finalize: () => ({ status: 'completed', outcome: 'completed', finishReason: 'stop', evidence: {} }),
+    });
+
+    expect(resumed).toMatchObject({
+      jobId: before.id,
+      attemptId: beforeAttempt.id,
+      generation: beforeAttempt.generation,
+      fenceToken: beforeAttempt.fenceToken,
+    });
+    expect(engine.getJob(before.id)?.status).toBe('completed');
+    expect(engine.listAttempts(before.id)).toHaveLength(1);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM durable_inputs WHERE job_id = ? AND state = 'consumed'")
+      .get(before.id)).toEqual({ count: 1 });
+  });
+
   it('persists failure and never reports an unknown thrown operation as success', async () => {
     const result = await executeDurableJob({
       engine,
