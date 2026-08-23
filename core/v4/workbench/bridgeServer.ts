@@ -51,6 +51,8 @@ import type { ProductEdition } from '../commercial/edition';
 import type { WorkbenchLiveExecutionPort } from './liveExecution';
 import type { WorkbenchAutomationPort } from './automationPort';
 import type { WorkbenchLearningPort } from './learningPort';
+import type { WorkbenchSkillIntelligencePort } from './skillIntelligencePort';
+import type { CapabilityRequirement, SkillDraftStep } from '../skillIntelligence/types';
 
 /**
  * Strip bracketed-paste markers at the workbench INGEST boundary. A pasted
@@ -265,6 +267,8 @@ export interface WorkbenchBridgeOptions {
   presence?: WorkbenchPresencePort;
   /** Scoped privacy and review controls over the canonical Learning authority. */
   learning?: WorkbenchLearningPort;
+  /** Reviewed Skill candidate, evaluation, approval and version management. */
+  skillIntelligence?: WorkbenchSkillIntelligencePort;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -567,6 +571,28 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && url.pathname === '/api/capabilities/install') {
       handleCapabilityInstall(req, res); return;
     }
+    if (req.method === 'POST' && url.pathname === '/api/skill-intelligence/drafts') {
+      handleSkillDraftCreate(req, res); return;
+    }
+    const skillCandidateDismissMatch = url.pathname.match(/^\/api\/skill-intelligence\/candidates\/([^/]+)\/dismiss$/);
+    if (req.method === 'POST' && skillCandidateDismissMatch) {
+      handleSkillCandidateDismiss(req, res, skillCandidateDismissMatch[1]); return;
+    }
+    const skillDraftActionMatch = url.pathname.match(/^\/api\/skill-intelligence\/drafts\/([^/]+)\/(edit|evaluate|approval)$/);
+    if (req.method === 'POST' && skillDraftActionMatch) {
+      handleSkillDraftAction(req, res, skillDraftActionMatch[1], skillDraftActionMatch[2] as 'edit' | 'evaluate' | 'approval');
+      return;
+    }
+    const skillApprovalActionMatch = url.pathname.match(/^\/api\/skill-intelligence\/approvals\/([^/]+)\/(decision|activate)$/);
+    if (req.method === 'POST' && skillApprovalActionMatch) {
+      handleSkillApprovalAction(req, res, skillApprovalActionMatch[1], skillApprovalActionMatch[2] as 'decision' | 'activate');
+      return;
+    }
+    const managedSkillActionMatch = url.pathname.match(/^\/api\/skill-intelligence\/skills\/([^/]+)\/(disable|rollback)$/);
+    if (req.method === 'POST' && managedSkillActionMatch) {
+      handleManagedSkillAction(req, res, managedSkillActionMatch[1], managedSkillActionMatch[2] as 'disable' | 'rollback');
+      return;
+    }
     const capabilityActionMatch = url.pathname.match(/^\/api\/capabilities\/([^/]+)\/(activate|rollback|disable|test|uninstall)$/);
     if (req.method === 'POST' && capabilityActionMatch) {
       handleCapabilityAction(
@@ -779,6 +805,19 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
       if (!opts.learning) { sendJson(res, 503, { error: 'Learning is unavailable' }); return; }
       try { sendJson(res, 200, opts.learning.snapshot()); }
       catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    if (url.pathname === '/api/skill-intelligence') {
+      if (!opts.skillIntelligence) { sendJson(res, 503, { error: 'Skill Intelligence is unavailable' }); return; }
+      try { sendJson(res, 200, opts.skillIntelligence.snapshot()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
+      return;
+    }
+    const skillCandidateReviewMatch = url.pathname.match(/^\/api\/skill-intelligence\/candidates\/([^/]+)$/);
+    if (skillCandidateReviewMatch) {
+      if (!opts.skillIntelligence) { sendJson(res, 503, { error: 'Skill Intelligence is unavailable' }); return; }
+      try { sendJson(res, 200, opts.skillIntelligence.reviewCandidate(decodeURIComponent(skillCandidateReviewMatch[1]))); }
+      catch (error) { sendJson(res, 404, { error: managementError(error) }); }
       return;
     }
     if (url.pathname === '/api/learning/export') {
@@ -1056,7 +1095,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/presence', 'GET /api/learning', 'GET /api/learning/export', 'GET /api/learning/:id', 'GET /api/presence/proposals', 'GET /api/presence/preferences', 'GET /api/presence/briefing', 'GET /api/presence/:id/explain', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay', 'POST /api/presence/preferences', 'POST /api/presence/:id/snooze', 'POST /api/presence/:id/dismiss', 'POST /api/presence/:id/feedback', 'POST /api/presence/:id/proposals', 'POST /api/presence/proposals/:id/accept', 'POST /api/learning/remember', 'POST /api/learning/:id/edit', 'POST /api/learning/:id/rollback', 'POST /api/learning/:id/demote', 'POST /api/learning/:id/archive', 'POST /api/learning/:id/delete', 'POST /api/learning/rebuild'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/presence', 'GET /api/learning', 'GET /api/learning/export', 'GET /api/learning/:id', 'GET /api/skill-intelligence', 'GET /api/skill-intelligence/candidates/:id', 'GET /api/presence/proposals', 'GET /api/presence/preferences', 'GET /api/presence/briefing', 'GET /api/presence/:id/explain', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay', 'POST /api/presence/preferences', 'POST /api/presence/:id/snooze', 'POST /api/presence/:id/dismiss', 'POST /api/presence/:id/feedback', 'POST /api/presence/:id/proposals', 'POST /api/presence/proposals/:id/accept', 'POST /api/learning/remember', 'POST /api/learning/:id/edit', 'POST /api/learning/:id/rollback', 'POST /api/learning/:id/demote', 'POST /api/learning/:id/archive', 'POST /api/learning/:id/delete', 'POST /api/learning/rebuild', 'POST /api/skill-intelligence/candidates/:id/dismiss', 'POST /api/skill-intelligence/drafts', 'POST /api/skill-intelligence/drafts/:id/edit', 'POST /api/skill-intelligence/drafts/:id/evaluate', 'POST /api/skill-intelligence/drafts/:id/approval', 'POST /api/skill-intelligence/approvals/:id/decision', 'POST /api/skill-intelligence/approvals/:id/activate', 'POST /api/skill-intelligence/skills/:id/disable', 'POST /api/skill-intelligence/skills/:id/rollback'],
     });
   });
 
@@ -1273,6 +1312,201 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
         sendJson(res, 400, { error: managementError(error, [body.path]) });
       }
     }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
+  }
+
+  function boundedStringArray(value: unknown, field: string, maxItems = 64): string[] {
+    if (!Array.isArray(value) || value.length > maxItems) throw new Error(`${field} must be a bounded string array`);
+    return value.map((item) => {
+      if (typeof item !== 'string' || !item.trim()) throw new Error(`${field} contains an invalid value`);
+      return item.trim().slice(0, 512);
+    });
+  }
+
+  function parseSkillSteps(value: unknown): SkillDraftStep[] {
+    if (!Array.isArray(value) || value.length === 0 || value.length > 64) {
+      throw new Error('steps must contain 1-64 declarative steps');
+    }
+    return value.map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error(`steps[${index}] is invalid`);
+      const step = item as Record<string, unknown>;
+      const id = typeof step.id === 'string' ? step.id.trim() : '';
+      const operation = typeof step.operation === 'string' ? step.operation.trim() : '';
+      if (!id || !operation || (step.kind !== 'tool' && step.kind !== 'skill') || typeof step.mutates !== 'boolean') {
+        throw new Error(`steps[${index}] requires id, operation, kind and mutates`);
+      }
+      const childSkillVersionId = typeof step.childSkillVersionId === 'string' && step.childSkillVersionId.trim()
+        ? step.childSkillVersionId.trim().slice(0, 256)
+        : undefined;
+      const fallbackStepIds = step.fallbackStepIds === undefined
+        ? undefined
+        : boundedStringArray(step.fallbackStepIds, `steps[${index}].fallbackStepIds`, 16);
+      return {
+        id: id.slice(0, 128),
+        operation: operation.slice(0, 256),
+        kind: step.kind,
+        mutates: step.mutates,
+        ...(childSkillVersionId ? { childSkillVersionId } : {}),
+        ...(fallbackStepIds ? { fallbackStepIds } : {}),
+      };
+    });
+  }
+
+  function parseCapabilityRequirements(value: unknown): CapabilityRequirement[] {
+    if (!Array.isArray(value) || value.length > 64) throw new Error('capabilityRequirements must be a bounded array');
+    return value.map((item, index) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) {
+        throw new Error(`capabilityRequirements[${index}] is invalid`);
+      }
+      const requirement = item as Record<string, unknown>;
+      const capabilityId = typeof requirement.capabilityId === 'string' ? requirement.capabilityId.trim() : '';
+      if (!capabilityId || typeof requirement.required !== 'boolean') {
+        throw new Error(`capabilityRequirements[${index}] requires capabilityId and required`);
+      }
+      const versionRange = typeof requirement.versionRange === 'string' && requirement.versionRange.trim()
+        ? requirement.versionRange.trim().slice(0, 128)
+        : undefined;
+      const fallbackGroup = typeof requirement.fallbackGroup === 'string' && requirement.fallbackGroup.trim()
+        ? requirement.fallbackGroup.trim().slice(0, 128)
+        : undefined;
+      return {
+        capabilityId: capabilityId.slice(0, 256),
+        requiredPermissions: boundedStringArray(requirement.requiredPermissions ?? [], `capabilityRequirements[${index}].requiredPermissions`, 64),
+        required: requirement.required,
+        ...(versionRange ? { versionRange } : {}),
+        ...(fallbackGroup ? { fallbackGroup } : {}),
+      };
+    });
+  }
+
+  function handleSkillDraftCreate(req: http.IncomingMessage, res: http.ServerResponse): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.skillIntelligence) { sendJson(res, 503, { error: 'Skill Intelligence is unavailable' }); return; }
+    readJsonBody(req, 64 * 1024).then((body) => {
+      try {
+        const candidateId = typeof body.candidateId === 'string' ? body.candidateId.trim() : '';
+        const name = typeof body.name === 'string' ? body.name.trim() : '';
+        const description = typeof body.description === 'string' ? body.description.trim() : '';
+        if (!candidateId || !name || !description) throw new Error('candidateId, name and description are required');
+        sendJson(res, 201, opts.skillIntelligence!.createDraft({
+          candidateId: candidateId.slice(0, 256),
+          name: name.slice(0, 128),
+          description: description.slice(0, 2_000),
+          steps: parseSkillSteps(body.steps),
+          capabilityRequirements: body.capabilityRequirements === undefined ? [] : parseCapabilityRequirements(body.capabilityRequirements),
+          composition: body.composition === undefined ? [] : boundedStringArray(body.composition, 'composition'),
+          expectedEvidence: boundedStringArray(body.expectedEvidence, 'expectedEvidence'),
+        }));
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleSkillCandidateDismiss(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawCandidateId: string,
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.skillIntelligence) { sendJson(res, 503, { error: 'Skill Intelligence is unavailable' }); return; }
+    readJsonBody(req, 8 * 1024).then((body) => {
+      try {
+        if (!Number.isSafeInteger(body.expectedVersion) || Number(body.expectedVersion) < 0) {
+          throw new Error('expectedVersion is required');
+        }
+        sendJson(res, 200, opts.skillIntelligence!.dismissCandidate({
+          candidateId: decodeURIComponent(rawCandidateId),
+          expectedVersion: Number(body.expectedVersion),
+        }));
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleSkillDraftAction(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawDraftId: string,
+    action: 'edit' | 'evaluate' | 'approval',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.skillIntelligence) { sendJson(res, 503, { error: 'Skill Intelligence is unavailable' }); return; }
+    readJsonBody(req, 64 * 1024).then((body) => {
+      try {
+        const draftId = decodeURIComponent(rawDraftId);
+        if (action === 'evaluate') {
+          sendJson(res, 200, opts.skillIntelligence!.evaluate(draftId));
+          return;
+        }
+        if (action === 'approval') {
+          const evaluationId = typeof body.evaluationId === 'string' ? body.evaluationId.trim() : '';
+          if (!evaluationId) throw new Error('evaluationId is required');
+          sendJson(res, 201, opts.skillIntelligence!.requestApproval({ draftId, evaluationId: evaluationId.slice(0, 256) }));
+          return;
+        }
+        if (!Number.isSafeInteger(body.expectedVersion)) throw new Error('expectedVersion is required');
+        sendJson(res, 200, opts.skillIntelligence!.updateDraft({
+          draftId,
+          expectedVersion: Number(body.expectedVersion),
+          ...(typeof body.name === 'string' ? { name: body.name.trim().slice(0, 128) } : {}),
+          ...(typeof body.description === 'string' ? { description: body.description.trim().slice(0, 2_000) } : {}),
+          ...(body.steps === undefined ? {} : { steps: parseSkillSteps(body.steps) }),
+          ...(body.capabilityRequirements === undefined ? {} : { capabilityRequirements: parseCapabilityRequirements(body.capabilityRequirements) }),
+          ...(body.composition === undefined ? {} : { composition: boundedStringArray(body.composition, 'composition') }),
+          ...(body.expectedEvidence === undefined ? {} : { expectedEvidence: boundedStringArray(body.expectedEvidence, 'expectedEvidence') }),
+        }));
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleSkillApprovalAction(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawApprovalId: string,
+    action: 'decision' | 'activate',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.skillIntelligence) { sendJson(res, 503, { error: 'Skill Intelligence is unavailable' }); return; }
+    readJsonBody(req, 16 * 1024).then((body) => {
+      try {
+        const approvalId = decodeURIComponent(rawApprovalId);
+        if (action === 'activate') {
+          sendJson(res, 200, opts.skillIntelligence!.activate(approvalId));
+          return;
+        }
+        const decision = body.decision;
+        const draftDigest = typeof body.draftDigest === 'string' ? body.draftDigest.trim() : '';
+        const evaluationDigest = typeof body.evaluationDigest === 'string' ? body.evaluationDigest.trim() : '';
+        if ((decision !== 'approved' && decision !== 'denied') || !draftDigest || !evaluationDigest) {
+          throw new Error('decision, draftDigest and evaluationDigest are required');
+        }
+        sendJson(res, 200, opts.skillIntelligence!.decideApproval({
+          approvalId,
+          decision,
+          draftDigest: draftDigest.slice(0, 256),
+          evaluationDigest: evaluationDigest.slice(0, 256),
+        }));
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleManagedSkillAction(
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    rawSkillId: string,
+    action: 'disable' | 'rollback',
+  ): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.skillIntelligence) { sendJson(res, 503, { error: 'Skill Intelligence is unavailable' }); return; }
+    readJsonBody(req, 8 * 1024).then((body) => {
+      try {
+        const skillId = decodeURIComponent(rawSkillId);
+        if (action === 'disable') {
+          sendJson(res, 200, opts.skillIntelligence!.disable(skillId));
+          return;
+        }
+        const targetVersionId = typeof body.targetVersionId === 'string' ? body.targetVersionId.trim() : '';
+        if (!targetVersionId) throw new Error('targetVersionId is required');
+        sendJson(res, 200, opts.skillIntelligence!.rollback({ skillId, targetVersionId: targetVersionId.slice(0, 256) }));
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }
 
   function handleCapabilityAction(

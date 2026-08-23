@@ -92,6 +92,8 @@ const ERROR_MESSAGE_CAP = 200;
 export type ToolCallPhase = 'before' | 'after';
 
 export class SkillOutcomeTracker {
+  /** skill_view waiting for its result so managed/legacy authority is known. */
+  private pendingSkillView: string | null = null;
   /** Currently-loaded skill (last skill_view, while its window is open). */
   private currentSkill: string | null = null;
   /** Tool calls remaining in the current attribution window (lastError only). */
@@ -129,7 +131,7 @@ export class SkillOutcomeTracker {
     else                     this.onToolAfter(call, result);
   }
 
-  /** Called before each tool. Opens / supersedes the attribution window. */
+  /** Called before each tool. Captures skill_view until its exact result arrives. */
   onToolBefore(call: ToolCallRequest): void {
     if (call.name !== 'skill_view') return;
     const name = extractSkillName(call.arguments);
@@ -139,14 +141,13 @@ export class SkillOutcomeTracker {
     // skill), so the one-time sync read is cheap and avoids the
     // ordering hazard of awaiting in an inherently sync hook.
     this.ensureHydratedSync();
-    this.currentSkill = name;
-    this.remaining    = ATTRIBUTION_WINDOW;
-    this.activeThisTurn.add(name);   // graded at the turn's verdict
-    this.bump(name, (o) => {
-      o.loaded   += 1;
-      o.lastUsed  = new Date().toISOString();
-    });
-    void this.queuePersist();
+    // A managed v4.26 Skill is identified only by the successful result,
+    // where its immutable SkillVersion and invocation IDs are available.
+    // Delay legacy name-level attribution until then so one execution cannot
+    // be graded by both the exact durable ledger and this compatibility file.
+    this.pendingSkillView = name;
+    this.currentSkill = null;
+    this.remaining = 0;
   }
 
   /**
@@ -155,7 +156,20 @@ export class SkillOutcomeTracker {
    * (the window's purpose is to grade DOWNSTREAM tools).
    */
   onToolAfter(call: ToolCallRequest, result?: ToolCallResult): void {
-    if (call.name === 'skill_view')        return;
+    if (call.name === 'skill_view') {
+      const name = this.pendingSkillView ?? extractSkillName(call.arguments);
+      this.pendingSkillView = null;
+      if (!name || isFailure(result) || isManagedSkillView(result)) return;
+      this.currentSkill = name;
+      this.remaining = ATTRIBUTION_WINDOW;
+      this.activeThisTurn.add(name);
+      this.bump(name, (o) => {
+        o.loaded += 1;
+        o.lastUsed = new Date().toISOString();
+      });
+      void this.queuePersist();
+      return;
+    }
     if (!this.currentSkill || this.remaining <= 0) return;
 
     // v4.14 — the window no longer bumps a pass/fail counter (the verdict does
@@ -206,6 +220,7 @@ export class SkillOutcomeTracker {
     } catch { /* trust bookkeeping must never break the turn */ }
     finally {
       this.activeThisTurn.clear();
+      this.pendingSkillView = null;
       this.currentSkill = null;
       this.remaining    = 0;
     }
@@ -336,6 +351,17 @@ function extractSkillName(args: unknown): string {
   if (!args || typeof args !== 'object') return '';
   const v = (args as { name?: unknown }).name;
   return typeof v === 'string' ? v.trim() : '';
+}
+
+/** Managed Skills are graded only by the immutable Job-bound outcome ledger. */
+function isManagedSkillView(result: ToolCallResult | undefined): boolean {
+  const inner = result && typeof result === 'object'
+    ? (result as { result?: unknown }).result
+    : undefined;
+  if (!inner || typeof inner !== 'object' || Array.isArray(inner)) return false;
+  const value = inner as { skillVersionId?: unknown; skillInvocationId?: unknown };
+  return typeof value.skillVersionId === 'string' && value.skillVersionId.length > 0
+    && typeof value.skillInvocationId === 'string' && value.skillInvocationId.length > 0;
 }
 
 /**

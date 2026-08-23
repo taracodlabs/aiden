@@ -132,6 +132,14 @@ export interface ParsedSkill {
   body: string;
   rawText: string;
   filePath: string;
+  /** Exact durable identity when the bytes came from Skill Intelligence. */
+  managedIdentity?: {
+    skillId: string;
+    skillVersionId: string;
+    digest: string;
+    version: number;
+    scopeId: string;
+  };
 }
 
 const REQUIRED_FIELDS = ['name', 'description', 'version'] as const;

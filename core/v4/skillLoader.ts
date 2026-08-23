@@ -65,6 +65,17 @@ export interface SkillLoaderOptions {
   log?: (level: 'warn' | 'info', msg: string) => void;
   /** File-only logger that receives malformed-skill warnings. */
   logger?: AidenFileLogger;
+  /** Optional durable source for reviewed, active SkillVersions. */
+  managedSource?: ManagedSkillSource;
+}
+
+export interface ManagedSkillSource {
+  load(name: string): Promise<ParsedSkill | null>;
+  loadAll(): Promise<ParsedSkill[]>;
+  /** Names owned by a disabled or drifted managed pointer. Disk fallback must
+   * not silently bypass reviewed-version authority for these names. */
+  blockedNames?(): Promise<string[]>;
+  isBlocked?(name: string): Promise<boolean>;
 }
 
 /** Counts surfaced for the boot summary line. */
@@ -94,15 +105,40 @@ export class SkillLoader {
    *  Result is cached after the first call. Use `invalidate()` to force
    *  a re-scan (tests, hot-reload, future `/skills reload`). */
   async loadAll(): Promise<ParsedSkill[]> {
-    if (this.cache !== null) return this.cache;
-    const scan = await this.scanDisk();
-    this.cache = scan.skills;
+    if (this.cache === null) {
+      const scan = await this.scanDisk();
+      this.cache = scan.skills;
+      this.lastCounts = {
+        loaded: scan.skills.length,
+        skipped: scan.skipped.length,
+        skippedPaths: scan.skipped,
+      };
+    }
+    if (!this.options.managedSource) return this.cache;
+
+    // Disk discovery remains cached, but the durable active-pointer overlay is
+    // resolved on every enumeration. Activation, disable, drift, and rollback
+    // therefore become visible immediately without rescanning user files or
+    // requiring a process restart.
+    const managed = await this.options.managedSource.loadAll();
+    const blocked = new Set((this.options.managedSource.blockedNames
+      ? await this.options.managedSource.blockedNames()
+      : []).map((name) => name.toLowerCase()));
+    const byName = new Map<string, ParsedSkill>();
+    for (const skill of this.cache) {
+      const name = skill.frontmatter.name.toLowerCase();
+      if (!blocked.has(name)) byName.set(name, skill);
+    }
+    // A reviewed active pointer is authoritative for a matching Skill name.
+    for (const skill of managed) {
+      byName.set(skill.frontmatter.name.toLowerCase(), skill);
+    }
+    const resolved = [...byName.values()];
     this.lastCounts = {
-      loaded: scan.skills.length,
-      skipped: scan.skipped.length,
-      skippedPaths: scan.skipped,
+      ...this.lastCounts,
+      loaded: resolved.length,
     };
-    return this.cache;
+    return resolved;
   }
 
   /** Force the next `loadAll()` call to re-scan disk. */
@@ -124,6 +160,13 @@ export class SkillLoader {
     // case-insensitive cache hit succeeds — that gives us the actual
     // file-system path and the loader can serve it from cache.
     const target = name.toLowerCase();
+    if (this.options.managedSource) {
+      const managed = await this.options.managedSource.load(name);
+      if (managed) return managed;
+      if (this.options.managedSource.isBlocked && await this.options.managedSource.isBlocked(name)) {
+        return null;
+      }
+    }
     if (!this.cache) {
       // Trigger a one-time scan so case-insensitive lookup has data.
       try { await this.loadAll(); } catch { /* ignore — fall through to disk */ }
@@ -163,6 +206,12 @@ export class SkillLoader {
   /** Read a reference file inside a skill's directory. Used by
    *  `skill_view` for progressive-disclosure level 2. */
   async readSkillFile(skillName: string, relativePath: string): Promise<string> {
+    if (this.options.managedSource) {
+      if (await this.options.managedSource.load(skillName)
+          || (this.options.managedSource.isBlocked && await this.options.managedSource.isBlocked(skillName))) {
+        throw new Error('Managed Skills do not expose mutable filesystem reference files');
+      }
+    }
     const skillDir = path.join(this.paths.skillsDir, skillName);
     // Refuse path traversal: resolve, then check it stays inside skillDir.
     const target = path.resolve(skillDir, relativePath);

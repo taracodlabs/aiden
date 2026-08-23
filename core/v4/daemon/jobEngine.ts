@@ -71,6 +71,11 @@ import {
   createExternalCodingPromotionAuthority,
   type ExternalCodingPromotionAuthority,
 } from '../coding/promotionAuthority';
+import {
+  createSkillIntelligenceAuthority,
+  type SkillIntelligenceAuthority,
+  type SkillIntelligenceAuthorityOptions,
+} from '../skillIntelligence';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -258,6 +263,8 @@ export interface JobEngine {
   readonly understanding: RepositoryUnderstandingAuthority;
   /** Durable browser authority bound to this engine's Job and Attempt ledger. */
   readonly browser: BrowserSessionAuthority;
+  /** Durable reviewed SkillVersion learning and runtime attribution. */
+  readonly skillIntelligence: SkillIntelligenceAuthority;
   /** Canonical durable continuity projection for this JobEngine. Optional only
    * for narrow legacy test doubles; production engines always provide it. */
   readonly continuity?: ContinuityCheckpointAuthority;
@@ -525,6 +532,7 @@ export interface CreateJobEngineOptions {
   db: Db;
   safeChangeIo?: SafeChangeIo;
   gitEffectIo?: GitEffectIo;
+  skillIntelligence?: Omit<SkillIntelligenceAuthorityOptions, 'db'>;
 }
 
 export class IdempotencyConflictError extends Error {
@@ -758,6 +766,13 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
   const resources = createJobResourceAuthority(db);
   const proof = createJobProofAuthority(db);
   const projection = createJobEventProjectionAuthority(db);
+  const skillIntelligence = createSkillIntelligenceAuthority({
+    db,
+    enabled: false,
+    ownerId: 'local-owner',
+    defaultScopeId: 'local',
+    ...opts.skillIntelligence,
+  });
 
   const getJobRow = (jobId: string): JobSqlRow | undefined => db.prepare(
     `SELECT id, status, state_version, active_attempt_id, root_job_id,
@@ -2948,6 +2963,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     gitEffects,
     understanding,
     browser,
+    skillIntelligence,
     get continuity() { return continuity; },
     submitJob: submitTx,
     getJob(jobId) {

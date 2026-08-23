@@ -79,6 +79,10 @@ import {
 } from '../../../core/v4/daemon';
 import { VERSION as AIDEN_VERSION } from '../../../core/version';
 import { createJobEngine, type JobEngine } from '../../../core/v4/daemon/jobEngine';
+import {
+  createManagedSkillSource,
+  resolveSkillIntelligenceRuntimeOptions,
+} from '../../../core/v4/skillIntelligence';
 import { createActionAuthority } from '../../../core/v4/actionAuthority';
 import type { RunStore } from '../../../core/v4/daemon/runStore';
 import type { Db } from '../../../core/v4/daemon/db/connection';
@@ -156,9 +160,6 @@ async function buildMcpRuntime(opts: RunMcpOptions = {}) {
   const registry = new ToolRegistry();
   registerAllTools(registry);
 
-  const skillLoader = new SkillLoader(paths);
-  await skillLoader.loadAll().catch(() => undefined);
-
   const store = new SessionStore(paths.sessionsDb);
   const sessions = new SessionManager(store);
 
@@ -174,7 +175,18 @@ async function buildMcpRuntime(opts: RunMcpOptions = {}) {
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(mcpInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), AIDEN_VERSION);
   const mcpRunStore = createRunStore({ db: mcpDb });
-  const mcpJobEngine = createJobEngine({ db: mcpDb });
+  const skillIntelligenceOptions = resolveSkillIntelligenceRuntimeOptions(process.cwd());
+  const mcpJobEngine = createJobEngine({
+    db: mcpDb,
+    skillIntelligence: skillIntelligenceOptions,
+  });
+  const skillLoader = new SkillLoader(paths, {
+    managedSource: createManagedSkillSource(
+      mcpJobEngine.skillIntelligence,
+      skillIntelligenceOptions.defaultScopeId,
+    ),
+  });
+  await skillLoader.loadAll().catch(() => undefined);
   const actionAuthority = createActionAuthority({ db: mcpDb, jobEngine: mcpJobEngine });
 
   const toolContext = {

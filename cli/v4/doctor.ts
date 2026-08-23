@@ -50,6 +50,7 @@ import {
 } from '../../core/v4/commercial/productDoctor';
 import type { SystemReadinessProjection } from '../../core/v4/workbench/systemReadiness';
 import type { CapabilityDoctorProjection } from '../../core/v4/capabilities/management';
+import type { SkillIntelligenceDoctor } from '../../core/v4/skillIntelligence';
 
 /**
  * v4.1.3-essentials doctor-polish: stable group identifiers used by the
@@ -73,6 +74,7 @@ export type DoctorGroup =
   | 'Presence'
   | 'Learning'
   | 'Capabilities'
+  | 'Skill Intelligence'
   | 'Workbench'
   | 'Commercial'
   | 'Inference'
@@ -105,6 +107,7 @@ export const DOCTOR_GROUP_ORDER: readonly DoctorGroup[] = [
   'Presence',
   'Learning',
   'Capabilities',
+  'Skill Intelligence',
   'Workbench',
   'Commercial',
   'Inference',
@@ -195,6 +198,8 @@ export interface DoctorOptions {
   commercial?: CommercialDoctorContext;
   /** Read-only capability diagnostics supplied by the canonical management authority. */
   capabilityDoctor?: () => Promise<CapabilityDoctorProjection>;
+  /** Durable Skill Intelligence diagnostics; zero candidates is healthy. */
+  skillIntelligenceDoctor?: () => SkillIntelligenceDoctor | Promise<SkillIntelligenceDoctor>;
   /** Injectable output for tests and embedding. */
   write?: (text: string) => void;
 }
@@ -241,6 +246,45 @@ export function capabilityDoctorResults(projection: CapabilityDoctorProjection):
       passed: projection.stagingPending === 0,
       message: `${projection.stagingPending} interrupted staging entr${projection.stagingPending === 1 ? 'y' : 'ies'}`,
       ...(projection.stagingPending === 0 ? {} : { suggestion: 'Restart Aiden to clean interrupted capability staging safely.' }),
+    },
+  ];
+}
+
+export function skillIntelligenceDoctorResults(projection: SkillIntelligenceDoctor): CheckResult[] {
+  return [
+    {
+      name: 'skill intelligence schema',
+      group: 'Skill Intelligence',
+      passed: projection.schemaReady,
+      message: projection.schemaReady ? 'durable schema is ready' : 'durable schema is unavailable',
+      ...(projection.schemaReady ? {} : { suggestion: 'Run the additive database migrations before using Skill Intelligence.' }),
+    },
+    {
+      name: 'workflow patterns',
+      group: 'Skill Intelligence',
+      passed: true,
+      message: `${projection.traces} traces · ${projection.patterns} patterns`,
+    },
+    {
+      name: 'skill candidates',
+      group: 'Skill Intelligence',
+      passed: true,
+      message: `${projection.candidates} candidate${projection.candidates === 1 ? '' : 's'} awaiting or completing review`,
+    },
+    {
+      name: 'active skill pointers',
+      group: 'Skill Intelligence',
+      passed: true,
+      message: `${projection.active} active immutable version${projection.active === 1 ? '' : 's'}`,
+    },
+    {
+      name: 'skill prerequisites and drift',
+      group: 'Skill Intelligence',
+      passed: projection.degraded === 0 && projection.drifted === 0 && projection.prerequisiteIssues === 0,
+      message: `${projection.degraded} degraded · ${projection.drifted} drifted · ${projection.prerequisiteIssues} prerequisite issue${projection.prerequisiteIssues === 1 ? '' : 's'}`,
+      ...(projection.degraded === 0 && projection.drifted === 0 && projection.prerequisiteIssues === 0
+        ? {}
+        : { suggestion: 'Review degraded versions, Capability prerequisites, and exact rollback targets.' }),
     },
   ];
 }
@@ -1473,6 +1517,19 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
         passed: false,
         message: error instanceof Error ? error.message : String(error),
         suggestion: 'Capability execution remains unavailable until diagnostics can read the canonical registry.',
+      });
+    }
+  }
+  if (opts.skillIntelligenceDoctor) {
+    try {
+      results.push(...skillIntelligenceDoctorResults(await opts.skillIntelligenceDoctor()));
+    } catch (error) {
+      results.push({
+        name: 'skill intelligence diagnostics',
+        group: 'Skill Intelligence',
+        passed: false,
+        message: error instanceof Error ? error.message : String(error),
+        suggestion: 'Skill Intelligence remains unavailable until the durable projection can be read.',
       });
     }
   }

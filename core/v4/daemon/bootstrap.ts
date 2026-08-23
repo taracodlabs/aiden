@@ -50,6 +50,10 @@ import type { IdempotencyStore } from './idempotencyStore';
 import { createRunStore } from './runStore';
 import { createTaskStore } from './taskStore';
 import { createJobEngine } from './jobEngine';
+import {
+  resolveSkillIntelligenceRuntimeOptions,
+  type SkillOutcomeProjection,
+} from '../skillIntelligence';
 import { sweepDurableJobRecovery } from './jobRecoverySweep';
 import { sweepResumePending } from './resumeSweep';
 import type { RunStore } from './runStore';
@@ -549,7 +553,10 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     });
     const idempotencyStore      = createIdempotencyStore({ db });
     const runStore              = createRunStore({ db });
-    const jobEngine             = createJobEngine({ db });
+    const jobEngine             = createJobEngine({
+      db,
+      skillIntelligence: resolveSkillIntelligenceRuntimeOptions(),
+    });
     const restartFailureCounter = createRestartFailureCounter({ db, threshold: cfg.restartFailureThreshold });
     const resourceRegistry      = getResourceRegistry();
     try { idempotencyStore.reseed(); } catch { /* best-effort */ }
@@ -1116,6 +1123,7 @@ export function installDaemonAgentBuilder(
   agentBuilder:          AgentBuilder,
   persistedDefaultModel: { provider: string; model: string } | undefined,
   log?:                  BootstrapOptions['log'],
+  skillOutcomeProjector?: (projection: SkillOutcomeProjection) => void,
 ): boolean {
   if (!handle.active || !handle.dispatcher || !handle.triggerBus || !handle.runStore) {
     return false;
@@ -1137,7 +1145,11 @@ export function installDaemonAgentBuilder(
   try {
     const dbHandle = openDaemonDb(handle.dbPath!);
     const taskStore = createTaskStore({ db: dbHandle });
-    const jobEngine = createJobEngine({ db: dbHandle });
+    const jobEngine = createJobEngine({
+      db: dbHandle,
+      skillIntelligence: resolveSkillIntelligenceRuntimeOptions(),
+    });
+    jobEngine.skillIntelligence.setOutcomeProjector(skillOutcomeProjector);
     const realRunner = createRealAgentRunner({
       db:               dbHandle,
       runStore:         handle.runStore,

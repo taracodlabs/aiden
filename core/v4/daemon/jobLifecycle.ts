@@ -936,6 +936,7 @@ function settle(
         handle,
       );
     }
+    observeSkillSettlement(engine, handle, producer);
     return;
   }
 
@@ -958,5 +959,28 @@ function settle(
       `Durable Job finalization rejected: ${jobFinished.conflict ?? 'unknown'}`,
       handle,
     );
+  }
+  observeSkillSettlement(engine, handle, producer);
+}
+
+function observeSkillSettlement(
+  engine: JobEngine,
+  handle: DurableJobHandle,
+  producer: string,
+): void {
+  try {
+    engine.skillIntelligence.observeSettlement(handle.jobId);
+  } catch (error) {
+    // Learning is an observational projection. It cannot rewrite or falsify
+    // already-durable Job truth, but its failure remains visible and ordered.
+    engine.appendJobEvent({
+      jobId: handle.jobId,
+      attemptId: handle.attemptId,
+      generation: handle.generation,
+      type: 'skill_intelligence.observation_failed',
+      payload: { errorClass: error instanceof Error ? error.name : 'Error' },
+      producer,
+      idempotencyKey: `skill-intelligence-observation-failed:${handle.jobId}:${handle.generation}`,
+    });
   }
 }

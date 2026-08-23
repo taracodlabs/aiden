@@ -3435,6 +3435,297 @@ function applyV52(db: Database.Database): void {
   `);
 }
 
+function applyV53(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS workflow_traces (
+      workflow_trace_id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT,
+      project_id TEXT,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      automation_occurrence_id TEXT,
+      independent_key TEXT NOT NULL,
+      pattern_digest TEXT NOT NULL,
+      objective_class TEXT NOT NULL,
+      scope_kind TEXT NOT NULL,
+      normalized_steps_json TEXT NOT NULL,
+      skill_invocation_ids_json TEXT NOT NULL DEFAULT '[]',
+      capability_invocation_ids_json TEXT NOT NULL DEFAULT '[]',
+      required_capabilities_json TEXT NOT NULL DEFAULT '[]',
+      effect_ids_json TEXT NOT NULL DEFAULT '[]',
+      effect_classes_json TEXT NOT NULL DEFAULT '[]',
+      evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+      learning_entry_ids_json TEXT NOT NULL DEFAULT '[]',
+      classification TEXT NOT NULL CHECK(classification IN ('positive','negative','unknown')),
+      verdict TEXT NOT NULL,
+      source_digest TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(owner_id,job_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_traces_pattern
+      ON workflow_traces(owner_id,workspace_id,pattern_digest,classification,observed_at);
+    CREATE INDEX IF NOT EXISTS idx_workflow_traces_cursor
+      ON workflow_traces(owner_id,created_at,workflow_trace_id);
+
+    CREATE TABLE IF NOT EXISTS workflow_patterns (
+      workflow_pattern_id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      workspace_id TEXT,
+      project_id TEXT,
+      pattern_digest TEXT NOT NULL,
+      objective_class TEXT NOT NULL,
+      scope_kind TEXT NOT NULL,
+      normalized_steps_json TEXT NOT NULL,
+      required_capabilities_json TEXT NOT NULL DEFAULT '[]',
+      observed_count INTEGER NOT NULL DEFAULT 0,
+      verified_count INTEGER NOT NULL DEFAULT 0,
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      unknown_count INTEGER NOT NULL DEFAULT 0,
+      independent_positive_count INTEGER NOT NULL DEFAULT 0,
+      confidence REAL NOT NULL DEFAULT 0,
+      state TEXT NOT NULL CHECK(state IN ('observing','eligible','stale','dismissed')),
+      state_version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(owner_id,workspace_id,pattern_digest)
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_patterns_state
+      ON workflow_patterns(owner_id,workspace_id,state,updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS workflow_pattern_traces (
+      workflow_pattern_id TEXT NOT NULL,
+      workflow_trace_id TEXT NOT NULL,
+      classification TEXT NOT NULL,
+      independent_key TEXT NOT NULL,
+      linked_at INTEGER NOT NULL,
+      PRIMARY KEY(workflow_pattern_id,workflow_trace_id),
+      FOREIGN KEY(workflow_pattern_id) REFERENCES workflow_patterns(workflow_pattern_id) ON DELETE CASCADE,
+      FOREIGN KEY(workflow_trace_id) REFERENCES workflow_traces(workflow_trace_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_workflow_pattern_traces_independent
+      ON workflow_pattern_traces(workflow_pattern_id,classification,independent_key);
+
+    CREATE TABLE IF NOT EXISTS skill_candidates (
+      skill_candidate_id TEXT PRIMARY KEY,
+      owner_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      workflow_pattern_id TEXT NOT NULL,
+      candidate_digest TEXT NOT NULL,
+      proposed_name TEXT NOT NULL,
+      purpose TEXT NOT NULL,
+      steps_json TEXT NOT NULL,
+      capability_requirements_json TEXT NOT NULL DEFAULT '[]',
+      positive_trace_ids_json TEXT NOT NULL,
+      negative_trace_ids_json TEXT NOT NULL,
+      learning_entry_ids_json TEXT NOT NULL DEFAULT '[]',
+      state TEXT NOT NULL CHECK(state IN ('candidate','accepted','dismissed','stale')),
+      executable INTEGER NOT NULL DEFAULT 0 CHECK(executable = 0),
+      state_version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(owner_id,scope_id,workflow_pattern_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_candidates_state
+      ON skill_candidates(owner_id,scope_id,state,updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS skill_drafts (
+      skill_draft_id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL,
+      skill_candidate_id TEXT,
+      owner_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      steps_json TEXT NOT NULL,
+      capability_requirements_json TEXT NOT NULL DEFAULT '[]',
+      composition_json TEXT NOT NULL DEFAULT '[]',
+      expected_evidence_json TEXT NOT NULL DEFAULT '[]',
+      canonical_spec_json TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('draft','evaluating','evaluated','stale','archived')),
+      executable INTEGER NOT NULL DEFAULT 0 CHECK(executable = 0),
+      state_version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(skill_candidate_id,content_digest),
+      FOREIGN KEY(skill_candidate_id) REFERENCES skill_candidates(skill_candidate_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_drafts_candidate
+      ON skill_drafts(skill_candidate_id,updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_skill_drafts_identity
+      ON skill_drafts(owner_id,scope_id,skill_id,updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS skill_evaluations (
+      skill_evaluation_id TEXT PRIMARY KEY,
+      skill_draft_id TEXT NOT NULL,
+      draft_digest TEXT NOT NULL,
+      evaluation_digest TEXT NOT NULL,
+      evaluator_version INTEGER NOT NULL,
+      capability_environment_digest TEXT NOT NULL,
+      source_fixture_digest TEXT NOT NULL,
+      source_fixtures_json TEXT NOT NULL,
+      result_json TEXT NOT NULL,
+      passed INTEGER NOT NULL CHECK(passed IN (0,1)),
+      state TEXT NOT NULL CHECK(state IN ('running','passed','failed','interrupted')),
+      started_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      UNIQUE(
+        skill_draft_id,draft_digest,evaluator_version,
+        capability_environment_digest,source_fixture_digest
+      ),
+      FOREIGN KEY(skill_draft_id) REFERENCES skill_drafts(skill_draft_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_evaluations_draft
+      ON skill_evaluations(skill_draft_id,started_at DESC);
+    CREATE TRIGGER IF NOT EXISTS skill_evaluations_immutable_update
+      BEFORE UPDATE ON skill_evaluations
+      WHEN OLD.state IN ('passed','failed','interrupted')
+      BEGIN SELECT RAISE(ABORT, 'skill evaluations are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS skill_evaluations_immutable_delete
+      BEFORE DELETE ON skill_evaluations
+      BEGIN SELECT RAISE(ABORT, 'skill evaluations are immutable'); END;
+
+    CREATE TABLE IF NOT EXISTS skill_management_approvals (
+      skill_approval_id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL,
+      skill_draft_id TEXT NOT NULL,
+      skill_evaluation_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      draft_digest TEXT NOT NULL,
+      evaluation_digest TEXT NOT NULL,
+      capability_requirements_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK(state IN ('pending','approved','denied','stale')),
+      requested_by TEXT NOT NULL,
+      requested_at INTEGER NOT NULL,
+      decided_by TEXT,
+      decided_at INTEGER,
+      state_version INTEGER NOT NULL DEFAULT 1,
+      FOREIGN KEY(skill_draft_id) REFERENCES skill_drafts(skill_draft_id) ON DELETE RESTRICT,
+      FOREIGN KEY(skill_evaluation_id) REFERENCES skill_evaluations(skill_evaluation_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_approvals_state
+      ON skill_management_approvals(owner_id,scope_id,state,requested_at DESC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_skill_approvals_exact_open
+      ON skill_management_approvals(
+        owner_id,scope_id,skill_draft_id,skill_evaluation_id,draft_digest,evaluation_digest
+      ) WHERE state IN ('pending','approved');
+
+    CREATE TABLE IF NOT EXISTS skill_versions (
+      skill_version_id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL,
+      version_number INTEGER NOT NULL,
+      content_digest TEXT NOT NULL,
+      canonical_spec_json TEXT NOT NULL,
+      capability_requirements_json TEXT NOT NULL DEFAULT '[]',
+      composition_json TEXT NOT NULL DEFAULT '[]',
+      skill_evaluation_id TEXT,
+      skill_approval_id TEXT,
+      workflow_pattern_id TEXT,
+      skill_candidate_id TEXT,
+      source_kind TEXT NOT NULL CHECK(source_kind IN ('intelligence','legacy')),
+      source_path TEXT,
+      trust_level TEXT,
+      legacy INTEGER NOT NULL DEFAULT 0 CHECK(legacy IN (0,1)),
+      created_at INTEGER NOT NULL,
+      UNIQUE(skill_id,version_number),
+      UNIQUE(skill_id,content_digest),
+      UNIQUE(skill_approval_id),
+      FOREIGN KEY(skill_evaluation_id) REFERENCES skill_evaluations(skill_evaluation_id) ON DELETE RESTRICT,
+      FOREIGN KEY(skill_approval_id) REFERENCES skill_management_approvals(skill_approval_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_versions_identity
+      ON skill_versions(skill_id,version_number DESC);
+    CREATE TRIGGER IF NOT EXISTS skill_versions_immutable_update
+      BEFORE UPDATE ON skill_versions
+      BEGIN SELECT RAISE(ABORT, 'skill versions are immutable'); END;
+    CREATE TRIGGER IF NOT EXISTS skill_versions_immutable_delete
+      BEFORE DELETE ON skill_versions
+      BEGIN SELECT RAISE(ABORT, 'skill versions are immutable'); END;
+
+    CREATE TABLE IF NOT EXISTS skill_active_pointers (
+      skill_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      skill_version_id TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      enabled INTEGER NOT NULL DEFAULT 1 CHECK(enabled IN (0,1)),
+      drift_state TEXT NOT NULL DEFAULT 'clean' CHECK(drift_state IN ('clean','drifted','missing','unknown')),
+      state_version INTEGER NOT NULL DEFAULT 1,
+      activated_at INTEGER NOT NULL,
+      PRIMARY KEY(skill_id,scope_id),
+      FOREIGN KEY(skill_version_id) REFERENCES skill_versions(skill_version_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_pointers_version_scope
+      ON skill_active_pointers(skill_version_id,scope_id,enabled);
+
+    CREATE TABLE IF NOT EXISTS skill_activation_history (
+      activation_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      skill_id TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      skill_version_id TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('activate','rollback','disable','enable','drift')),
+      requested_by TEXT NOT NULL,
+      activated_at INTEGER NOT NULL,
+      FOREIGN KEY(skill_version_id) REFERENCES skill_versions(skill_version_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_activation_history
+      ON skill_activation_history(skill_id,scope_id,activation_id DESC);
+
+    CREATE TABLE IF NOT EXISTS skill_invocations (
+      skill_invocation_id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL,
+      skill_version_id TEXT NOT NULL,
+      content_digest TEXT NOT NULL,
+      scope_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      attempt_id TEXT NOT NULL,
+      generation INTEGER NOT NULL,
+      tool_call_id TEXT NOT NULL,
+      capability_versions_json TEXT NOT NULL DEFAULT '[]',
+      composition_path_json TEXT NOT NULL DEFAULT '[]',
+      fallback_from_invocation_id TEXT,
+      state TEXT NOT NULL CHECK(state IN ('admitted','running','completed','failed','cancelled','unknown')),
+      started_at INTEGER NOT NULL,
+      terminal_at INTEGER,
+      UNIQUE(job_id,attempt_id,generation,tool_call_id,skill_version_id),
+      FOREIGN KEY(skill_version_id) REFERENCES skill_versions(skill_version_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_invocations_job
+      ON skill_invocations(job_id,attempt_id,generation,started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_skill_invocations_version
+      ON skill_invocations(skill_version_id,started_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_skill_invocations_version_scope
+      ON skill_invocations(skill_version_id,scope_id,job_id);
+
+    CREATE TABLE IF NOT EXISTS skill_version_outcomes (
+      skill_outcome_id TEXT PRIMARY KEY,
+      skill_id TEXT NOT NULL,
+      skill_version_id TEXT NOT NULL,
+      job_id TEXT NOT NULL,
+      invocation_ids_json TEXT NOT NULL,
+      attempt_ids_json TEXT NOT NULL,
+      generations_json TEXT NOT NULL,
+      capability_versions_json TEXT NOT NULL,
+      evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+      outcome TEXT NOT NULL,
+      verdict TEXT NOT NULL,
+      attributable INTEGER NOT NULL CHECK(attributable IN (0,1)),
+      reason TEXT,
+      learning_projected_at INTEGER,
+      recorded_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(skill_version_id,job_id),
+      FOREIGN KEY(skill_version_id) REFERENCES skill_versions(skill_version_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_skill_outcomes_version
+      ON skill_version_outcomes(skill_version_id,recorded_at DESC);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -3488,6 +3779,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 50, name: 'durable Agentic Presence projection', apply: applyV50 },
   { version: 51, name: 'evidence-linked learning ledger', apply: applyV51 },
   { version: 52, name: 'secure capability SDK foundation', apply: applyV52 },
+  { version: 53, name: 'durable Skill Intelligence authority', apply: applyV53 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -3552,7 +3844,11 @@ function validateLatestSchema(db: Database.Database): void {
     'automation_migration_receipts', 'automation_approval_continuations',
     'capability_packages', 'capability_versions', 'capability_active_versions',
     'capability_activation_history', 'capability_grants', 'capability_health',
-    'capability_invocations'];
+    'capability_invocations', 'workflow_traces', 'workflow_patterns',
+    'workflow_pattern_traces', 'skill_candidates', 'skill_drafts',
+    'skill_evaluations', 'skill_management_approvals', 'skill_versions',
+    'skill_active_pointers', 'skill_activation_history', 'skill_invocations',
+    'skill_version_outcomes'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

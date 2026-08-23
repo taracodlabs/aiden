@@ -18,6 +18,10 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import {
+  currentJobExecutionContext,
+  currentPreparedDurableToolCall,
+} from '../../../core/v4/daemon/jobExecutionContext';
 
 export const skillViewTool: ToolHandler = {
   schema: {
@@ -82,6 +86,32 @@ export const skillViewTool: ToolHandler = {
           .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
           .map((t) => t.trim())
       : [];
+    let skillInvocationId: string | undefined;
+    if (skill.managedIdentity) {
+      const execution = currentJobExecutionContext();
+      const toolCall = currentPreparedDurableToolCall();
+      if (!execution || !toolCall) {
+        return {
+          success: false,
+          error: 'Managed Skill invocation requires exact durable Job and ToolCall authority',
+          name: skill.frontmatter.name,
+        };
+      }
+      const capabilityVersions = execution.engine.skillIntelligence.resolveCapabilityVersions(
+        skill.managedIdentity.skillVersionId,
+        skill.managedIdentity.scopeId,
+      );
+      const invocation = execution.engine.skillIntelligence.recordInvocation({
+        skillVersionId: skill.managedIdentity.skillVersionId,
+        scopeId: skill.managedIdentity.scopeId,
+        jobId: execution.jobId,
+        attemptId: execution.attemptId,
+        generation: execution.generation,
+        toolCallId: toolCall.toolCallId,
+        capabilityVersions,
+      });
+      skillInvocationId = invocation.id;
+    }
     return {
       success: true,
       name: skill.frontmatter.name,
@@ -93,6 +123,12 @@ export const skillViewTool: ToolHandler = {
       content: skill.rawText,
       filePath: skill.filePath,
       requiredTools,
+      ...(skill.managedIdentity ? {
+        skillId: skill.managedIdentity.skillId,
+        skillVersionId: skill.managedIdentity.skillVersionId,
+        skillDigest: skill.managedIdentity.digest,
+        skillInvocationId,
+      } : {}),
     };
   },
 };
