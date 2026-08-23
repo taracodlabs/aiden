@@ -280,6 +280,34 @@ export interface WorkbenchCapabilities {
   extensions?: CapabilityExtensionsSnapshot;
 }
 
+export interface WorkbenchExternalProtocolSnapshot {
+  entitlements: { mcpExternal: boolean; a2aPreview: boolean };
+  mcp: {
+    canonicalProtocolVersion: string;
+    servers: Array<{
+      name: string; endpoint: string; transport: string; protocolVersion: string | null;
+      status: string; identityId: string | null; trustState: string;
+      authState: 'ready' | 'required' | 'unavailable'; capabilityChange: string;
+      reviewRequired: boolean; toolCount: number; readToolCount: number;
+      mutationToolCount: number; mutationBlocked: boolean; resourcesAvailable: boolean;
+    }>;
+  };
+  a2a: {
+    protocolVersion: string; binding: string; mutationEnabled: false;
+    agents: Array<{
+      identityId: string; name: string; endpoint: string; trustState: string;
+      identityKeyDigest: string | null; capabilityDigest: string | null;
+      capabilityChange: string; reviewRequired: boolean;
+    }>;
+    recoverableTasks: Array<{
+      recordId: string; identityId: string; localJobId: string; localAttemptId: string;
+      generation: number; remoteTaskId: string | null; state: string;
+      locallyVerified: boolean; updatedAt: number;
+    }>;
+    quarantinedArtifacts: number;
+  };
+}
+
 export interface CapabilityExtensionItem {
   capabilityId: string;
   displayName: string;
@@ -944,6 +972,40 @@ export async function loadWorkbenchCapabilities(): Promise<WorkbenchCapabilities
     plugins: Array.isArray(body.plugins) ? body.plugins : [],
     ...(body.extensions && Array.isArray(body.extensions.items) ? { extensions: body.extensions } : {}),
   };
+}
+
+export async function loadWorkbenchExternalProtocols(): Promise<WorkbenchExternalProtocolSnapshot> {
+  const response = await fetch('/api/external-protocols', {
+    cache: 'no-store', headers: { 'x-workbench-token': token() },
+  });
+  if (!response.ok) throw new Error(`External protocol projection unavailable (HTTP ${response.status})`);
+  return response.json() as Promise<WorkbenchExternalProtocolSnapshot>;
+}
+
+async function externalRemoteTaskControl(
+  recordId: string,
+  action: 'cancel' | 'reconcile',
+  body: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const response = await fetch(
+    `/api/external-protocols/a2a/tasks/${encodeURIComponent(recordId)}/${action}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-workbench-token': token() },
+      body: JSON.stringify(body),
+    },
+  );
+  const value = await response.json() as { task?: Record<string, unknown>; error?: string };
+  if (!response.ok || !value.task) throw new Error(value.error || `RemoteTask ${action} failed (HTTP ${response.status})`);
+  return value.task;
+}
+
+export function cancelExternalRemoteTask(recordId: string, reason = 'cancelled from Workbench'): Promise<Record<string, unknown>> {
+  return externalRemoteTaskControl(recordId, 'cancel', { reason });
+}
+
+export function reconcileExternalRemoteTask(recordId: string): Promise<Record<string, unknown>> {
+  return externalRemoteTaskControl(recordId, 'reconcile');
 }
 
 async function capabilityRequest(path: string, body: Record<string, unknown>): Promise<CapabilityExtensionsSnapshot> {

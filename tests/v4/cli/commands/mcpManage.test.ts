@@ -22,6 +22,8 @@ import { mcp } from '../../../../cli/v4/commands/mcpManage';
 import { CommandRegistry, type SlashCommandContext } from '../../../../cli/v4/commandRegistry';
 import { ConfigManager } from '../../../../core/v4/config';
 import { resolveAidenPaths } from '../../../../core/v4/paths';
+import { hasTokens, saveTokens } from '../../../../core/v4/auth/tokenStore';
+import { mcpTokenId } from '../../../../core/v4/mcp/oauthDiscovery';
 
 // ── Fakes ────────────────────────────────────────────────────────────────
 
@@ -51,6 +53,7 @@ function fakeServer(
 interface ClientOpts {
   connect?: ReturnType<typeof vi.fn>;
   disconnect?: ReturnType<typeof vi.fn>;
+  revoke?: ReturnType<typeof vi.fn>;
 }
 
 function fakeClient(servers: ReturnType<typeof fakeServer>[], opts: ClientOpts = {}) {
@@ -72,6 +75,10 @@ function fakeClient(servers: ReturnType<typeof fakeServer>[], opts: ClientOpts =
     get: (n: string) => servers.find((s) => s.config.name === n),
     connect,
     disconnect,
+    revoke: opts.revoke ?? vi.fn(async (n: string) => {
+      await disconnect(n);
+      return { trustState: 'revoked' };
+    }),
   };
 }
 
@@ -181,6 +188,29 @@ describe('/mcp status', () => {
     expect(out).toContain('mcp_fs_list_directory');
     expect(out).toContain('mcp_fs_read_file');
     expect(out).toContain('Tool list_directory description.');
+  });
+
+  it('status <name> exposes protocol, endpoint, trust and capability-review truth', async () => {
+    const server = fakeServer('repo', 'ready', ['read_file', 'write_file']) as ReturnType<typeof fakeServer> & Record<string, unknown>;
+    server.config = { name: 'repo', type: 'http', http: { baseUrl: 'https://mcp.example.test/service', transport: 'streamable' } };
+    server.protocolVersion = '2025-11-25';
+    server.externalTrustState = 'verified_endpoint';
+    server.capabilityChangeClass = 'mutation';
+    server.capabilityReviewRequired = true;
+    server.mutationBlocked = true;
+    server.capabilities = { resources: { listChanged: true } };
+    const { ctx, display } = buildCtx(['status', 'repo'], fakeClient([server]));
+
+    await mcp.handler(ctx);
+
+    const out = text(display);
+    expect(out).toContain('https://mcp.example.test/service');
+    expect(out).toContain('streamable');
+    expect(out).toContain('2025-11-25');
+    expect(out).toContain('verified_endpoint');
+    expect(out).toMatch(/capabilit.*mutation.*review/i);
+    expect(out).toMatch(/mutation.*blocked/i);
+    expect(out).toMatch(/resources.*available/i);
   });
 
   it('status with no name shows all servers + total tool count', async () => {
@@ -307,6 +337,33 @@ describe('/mcp remove', () => {
     await mcp.handler(ctx);
     expect(text(display)).toContain("No MCP server named 'ghost'");
     expect(confirm).not.toHaveBeenCalled();
+  });
+});
+
+describe('/mcp revoke', () => {
+  it('revokes durable trust and clears only the exact server credential', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-mcp-revoke-'));
+    process.env.AIDEN_TOKEN_KEY = 'mcp-revoke-test';
+    try {
+      const paths = resolveAidenPaths({ rootOverride: root });
+      await saveTokens(paths, {
+        provider: mcpTokenId('repo'), accessToken: 'TOKEN', refreshToken: null,
+        expiresAtMs: Date.now() + 60_000,
+      });
+      const revoke = vi.fn(async () => ({ trustState: 'revoked' }));
+      const client = fakeClient([fakeServer('repo', 'ready', ['read'])], { revoke });
+      const confirm = vi.fn(async () => true);
+      const { ctx, display } = buildCtx(['revoke', 'repo'], client, { paths, confirm });
+
+      await mcp.handler(ctx);
+
+      expect(revoke).toHaveBeenCalledWith('repo');
+      expect(await hasTokens(paths, mcpTokenId('repo'))).toBe(false);
+      expect(text(display)).toMatch(/Revoked 'repo'/);
+    } finally {
+      delete process.env.AIDEN_TOKEN_KEY;
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
 

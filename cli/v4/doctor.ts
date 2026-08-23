@@ -47,6 +47,7 @@ import {
   productDoctorResults,
   toDoctorJson,
   type CommercialDoctorContext,
+  type ExternalProtocolDoctorContext,
 } from '../../core/v4/commercial/productDoctor';
 import type { SystemReadinessProjection } from '../../core/v4/workbench/systemReadiness';
 import type { CapabilityDoctorProjection } from '../../core/v4/capabilities/management';
@@ -73,6 +74,8 @@ export type DoctorGroup =
   | 'Automations'
   | 'Presence'
   | 'Learning'
+  | 'MCP'
+  | 'A2A'
   | 'Capabilities'
   | 'Skill Intelligence'
   | 'Workbench'
@@ -106,6 +109,8 @@ export const DOCTOR_GROUP_ORDER: readonly DoctorGroup[] = [
   'Automations',
   'Presence',
   'Learning',
+  'MCP',
+  'A2A',
   'Capabilities',
   'Skill Intelligence',
   'Workbench',
@@ -196,6 +201,8 @@ export interface DoctorOptions {
   readinessProjection?: SystemReadinessProjection;
   /** Commercial diagnostics are present only in a commercial build context. */
   commercial?: CommercialDoctorContext;
+  /** Read-only projections supplied by the existing MCP and external-task authorities. */
+  externalProtocols?: ExternalProtocolDoctorContext;
   /** Read-only capability diagnostics supplied by the canonical management authority. */
   capabilityDoctor?: () => Promise<CapabilityDoctorProjection>;
   /** Durable Skill Intelligence diagnostics; zero candidates is healthy. */
@@ -1506,6 +1513,7 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
       entitlementState: 'unavailable',
       updateChannel: 'pro-preview',
     } : undefined),
+    externalProtocols: opts.externalProtocols,
   }));
   if (opts.capabilityDoctor) {
     try {

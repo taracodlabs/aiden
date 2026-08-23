@@ -683,6 +683,9 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createWorkbenchPresencePort } = await import('../../core/v4/workbench/presencePort');
       const { createWorkbenchLearningPort } = await import('../../core/v4/workbench/learningPort');
       const { createWorkbenchSkillIntelligencePort } = await import('../../core/v4/workbench/skillIntelligencePort');
+      const { createWorkbenchExternalProtocolsPort } = await import('../../core/v4/workbench/externalProtocolsPort');
+      const { createA2aRuntime } = await import('../../core/v4/a2a/runtime');
+      const { createSdkA2aRemoteClient } = await import('../../core/v4/a2a/sdkClient');
       const { createAutomationScheduler } = await import('../../core/v4/automation/scheduler');
       const { recoverCancelledExternalCodingSessions } = await import('../../core/v4/coding/cancellationRecovery');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
@@ -814,6 +817,20 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         : undefined;
       const productEdition = detectProductEdition();
       const editionAuthority = buildEditionAuthority(productEdition);
+      const a2aRuntime = createA2aRuntime({
+        engine: jobEngine,
+        ownerId: `workbench-a2a:${workbenchInstanceId}`,
+        instanceId: workbenchInstanceId,
+        clientFactory: (card) => createSdkA2aRemoteClient(card, {
+          ...(workbenchRuntime?.ssrfProtection ? { ssrfProtection: workbenchRuntime.ssrfProtection } : {}),
+        }),
+      });
+      const externalProtocols = createWorkbenchExternalProtocolsPort({
+        mcpClient: workbenchRuntime?.mcpClient,
+        external: jobEngine.external,
+        edition: editionAuthority,
+        a2aRuntime,
+      });
       const automationsPort = createWorkbenchAutomationPort({
         db, triggerBus, edition: editionAuthority,
         ownerId: workbenchIntegrationRuntime.scope.ownerId,
@@ -967,6 +984,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           },
         },
         apps: appsPort,
+        externalProtocols,
         automations: automationsPort,
         presence: presencePort,
         learning: learningPort,
@@ -2922,6 +2940,7 @@ export async function buildAgentRuntime(
   const mcpLog = new CoreLogger({ sinks: paths.logsDir ? [new FileSink({ dir: paths.logsDir, name: 'aiden-mcp' })] : [] });
   const mcpResult = await setupMcpFromConfig(config, toolRegistry, {
     paths,
+    externalAuthority: jobEngine.external,
     log: (level, msg) => { const fn = (mcpLog as unknown as Record<string, (m: string) => void>)[level]; if (typeof fn === 'function') fn.call(mcpLog, msg); },
   }).catch(
     () => ({ client: null, connected: [], failures: {} }),

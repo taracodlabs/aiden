@@ -78,6 +78,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   'reload-mcp': 'System',
   // v4.12 Slice 1a — /mcp read-only surfacing of connected MCP servers.
   mcp: 'System',
+  // v4.27 — durable read-only external-agent identity and RemoteTask inspection.
+  a2a: 'System',
   tools: 'System',
   skills: 'System',
   quit: 'System',
@@ -154,7 +156,7 @@ const DEFAULT_HELP_GROUPS: ReadonlyArray<{ title: string; commands: readonly str
   { title: 'Models and setup', commands: ['model', 'doctor', 'auth'] },
   { title: 'Tasks and recovery', commands: ['status', 'queue', 'busy', 'retry'] },
   { title: 'Memory and skills', commands: ['memory', 'skills', 'history'] },
-  { title: 'Integrations', commands: ['apps', 'mcp', 'plugins', 'channel'] },
+  { title: 'Integrations', commands: ['apps', 'mcp', 'a2a', 'plugins', 'channel'] },
   { title: 'Settings and diagnostics', commands: ['providers', 'usage', 'setup'] },
 ];
 

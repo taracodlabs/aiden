@@ -50,6 +50,57 @@ describe('product doctor', () => {
     }));
   });
 
+  it('reports canonical external protocol readiness when nothing is configured', async () => {
+    const results = await productDoctorResults({ paths: await paths(), installedVersion: '4.20.0' });
+
+    expect(results).toContainEqual(expect.objectContaining({
+      group: 'MCP', name: 'MCP protocol', passed: true,
+      message: expect.stringContaining('2025-11-25'),
+    }));
+    expect(results).toContainEqual(expect.objectContaining({
+      group: 'MCP', name: 'MCP servers', passed: true,
+      message: expect.stringContaining('no servers configured'),
+    }));
+    expect(results).toContainEqual(expect.objectContaining({
+      group: 'A2A', name: 'A2A preview', passed: true,
+      message: expect.stringContaining('read-only'),
+    }));
+    expect(results).toContainEqual(expect.objectContaining({
+      group: 'A2A', name: 'A2A agents', passed: true,
+      message: expect.stringContaining('no agents configured'),
+    }));
+  });
+
+  it('surfaces exact MCP drift and A2A recovery truth from existing authorities', async () => {
+    const results = await productDoctorResults({
+      paths: await paths(), installedVersion: '4.20.0',
+      externalProtocols: {
+        mcpServers: [{
+          name: 'repo', endpoint: 'https://mcp.example.test', transport: 'streamable',
+          protocolVersion: '2025-11-25', status: 'ready', trustState: 'changed',
+          capabilityChangeClass: 'mutation', reviewRequired: true, toolCount: 4,
+          resourcesAvailable: true,
+        }],
+        a2aIdentities: [{ displayName: 'repo-reader', trustState: 'verified_key' }],
+        a2aRecoverableTasks: [{ state: 'unknown', locallyVerified: false }],
+        quarantinedArtifacts: 2,
+      },
+    });
+
+    expect(results).toContainEqual(expect.objectContaining({
+      group: 'MCP', name: 'MCP repo', passed: false,
+      message: expect.stringContaining('mutation drift'),
+    }));
+    expect(results).toContainEqual(expect.objectContaining({
+      group: 'A2A', name: 'A2A RemoteTasks', passed: false,
+      message: expect.stringContaining('1 recoverable'),
+    }));
+    expect(results).toContainEqual(expect.objectContaining({
+      group: 'A2A', name: 'A2A quarantine', passed: true,
+      message: '2 quarantined artifacts',
+    }));
+  });
+
   it('produces stable JSON and redacts credential-shaped values', () => {
     const report: DoctorReport = {
       passed: false, totalMs: 12,
@@ -77,7 +128,11 @@ describe('product doctor', () => {
 
   it('keeps unsafe repairs out of fix mode', async () => {
     const source = await fs.readFile(path.resolve(__dirname, '../../../core/v4/commercial/productDoctor.ts'), 'utf8');
-    expect(source).not.toMatch(/install Docker|firewall|trust store|OAuth|provider login/i);
+    const fixMode = source.slice(
+      source.indexOf('export async function applySafeDoctorFixes'),
+      source.indexOf('const SECRET_PATTERN'),
+    );
+    expect(fixMode).not.toMatch(/install Docker|firewall|trust store|OAuth|provider login/i);
   });
 });
 

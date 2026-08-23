@@ -87,6 +87,7 @@ import { cls } from './cls';
 import { newSession } from './newSession';
 import { session } from './session';
 import { apps } from './apps';
+import { a2a } from './a2a';
 
 export {
   help,
@@ -165,6 +166,7 @@ export {
   newSession,
   session,
   apps,
+  a2a,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -250,6 +252,7 @@ export const allCommands: SlashCommand[] = [
   newSession,
   session,
   apps,
+  a2a,
   clear,
   quit,
 ];
