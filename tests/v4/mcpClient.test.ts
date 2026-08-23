@@ -122,7 +122,7 @@ function stdioConfig(name: string, overrides?: Partial<McpServerConfig>): McpSer
 }
 
 const initOk = {
-  result: { capabilities: { tools: { listChanged: true } } },
+  result: { protocolVersion: '2025-11-25', capabilities: { tools: { listChanged: true } } },
 };
 
 // ─── Tests ─────────────────────────────────────────────────────────────

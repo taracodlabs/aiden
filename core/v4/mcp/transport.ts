@@ -25,6 +25,23 @@ import { spawnCommand, killProcessTree } from '../util/spawnCommand';
 
 export type McpNotificationHandler = (method: string, params: unknown) => void;
 
+export interface McpRequestOptions {
+  timeoutMs?: number;
+  signal?: AbortSignal;
+  /** Mutating requests set false so a lost session is never replayed blindly. */
+  retryOnSessionExpiry?: boolean;
+  /** Maximum buffered JSON response bytes. */
+  maxResponseBytes?: number;
+}
+
+export class McpUnknownOutcomeError extends Error {
+  readonly code = 'MCP_UNKNOWN_OUTCOME';
+  constructor(readonly method: string, message: string) {
+    super(`MCP ${method} outcome is unknown: ${message}`);
+    this.name = 'McpUnknownOutcomeError';
+  }
+}
+
 /**
  * Why a transport died. `error` is set when the failure is a spawn error
  * (e.g. ENOENT — bad command) → permanent; a clean exit with code/signal
@@ -53,7 +70,7 @@ export interface McpRpcError {
  */
 export interface McpTransport {
   /** Send a JSON-RPC request and await its matching response. */
-  request(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<unknown>;
+  request(method: string, params?: unknown, opts?: McpRequestOptions): Promise<unknown>;
 
   /** Send a JSON-RPC notification (no response expected). */
   notify(method: string, params?: unknown): void;
@@ -79,9 +96,13 @@ interface PendingRequest {
   resolve: (value: unknown) => void;
   reject: (reason: Error) => void;
   timer: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  onAbort?: () => void;
+  maxResponseBytes: number;
 }
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const SIGTERM_GRACE_MS = 5_000;
 
 // ─── Stdio ──────────────────────────────────────────────────────────────
@@ -94,6 +115,8 @@ export interface StdioTransportOptions {
   cwd?: string;
   /** Override default 30s per-request timeout. */
   defaultTimeoutMs?: number;
+  /** Hard cap for any newline-delimited server frame, including notifications. */
+  maxFrameBytes?: number;
   /** Optional logger (level + msg) for stderr/diagnostic output. */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
   /** Inject a child_process spawn — only used for tests. */
@@ -108,17 +131,20 @@ export class StdioTransport implements McpTransport {
   private readonly pending = new Map<number, PendingRequest>();
   private readonly handlers: McpNotificationHandler[] = [];
   private readonly defaultTimeout: number;
+  private readonly maxFrameBytes: number;
   private readonly log?: StdioTransportOptions['log'];
   private nextId = 1;
   private buffer = '';
   private closed = false;
   private exitedOnce = false;
+  private rejectedFrame = false;
   private readonly exitHandlers: McpExitHandler[] = [];
   private readonly killTreeFn: (child: ChildProcess, signal: NodeJS.Signals) => void;
 
   constructor(opts: StdioTransportOptions) {
     this.label = `stdio:${opts.command}`;
     this.defaultTimeout = opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.maxFrameBytes = opts.maxFrameBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.log = opts.log;
     this.killTreeFn = opts.killTreeFn ?? ((c, s) => killProcessTree(c, s));
 
@@ -160,15 +186,33 @@ export class StdioTransport implements McpTransport {
   }
 
   private onStdout(chunk: string): void {
+    if (this.rejectedFrame) return;
     this.buffer += chunk;
     // Newline-delimited frames. Partial lines stay in buffer for next chunk.
     let idx = this.buffer.indexOf('\n');
     while (idx !== -1) {
       const line = this.buffer.slice(0, idx).trim();
       this.buffer = this.buffer.slice(idx + 1);
-      if (line) this.handleLine(line);
+      if (line) {
+        if (Buffer.byteLength(line, 'utf8') > this.maxFrameBytes) {
+          this.rejectOversizedFrame();
+          return;
+        }
+        this.handleLine(line);
+      }
       idx = this.buffer.indexOf('\n');
     }
+    if (Buffer.byteLength(this.buffer, 'utf8') > this.maxFrameBytes) this.rejectOversizedFrame();
+  }
+
+  private rejectOversizedFrame(): void {
+    if (this.rejectedFrame) return;
+    this.rejectedFrame = true;
+    this.buffer = '';
+    const error = new Error(`MCP stdio frame exceeds ${this.maxFrameBytes} bytes`);
+    this.failPending(error);
+    this.log?.('error', `[${this.label}] ${error.message}`);
+    try { this.killTreeFn(this.proc, 'SIGTERM'); } catch { /* best effort */ }
   }
 
   private handleLine(line: string): void {
@@ -183,7 +227,10 @@ export class StdioTransport implements McpTransport {
       const entry = this.pending.get(msg.id)!;
       this.pending.delete(msg.id);
       clearTimeout(entry.timer);
-      if (msg.error) {
+      if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
+      if (Buffer.byteLength(line, 'utf8') > entry.maxResponseBytes) {
+        entry.reject(new Error(`MCP response exceeds ${entry.maxResponseBytes} bytes`));
+      } else if (msg.error) {
         entry.reject(new Error(`MCP error ${msg.error.code}: ${msg.error.message}`));
       } else {
         entry.resolve(msg.result);
@@ -202,18 +249,33 @@ export class StdioTransport implements McpTransport {
     }
   }
 
-  request(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<unknown> {
+  request(method: string, params?: unknown, opts?: McpRequestOptions): Promise<unknown> {
     if (this.closed || this.exitedOnce) {
       return Promise.reject(new Error(`MCP transport ${this.label} is closed`));
     }
+    if (opts?.signal?.aborted) return Promise.reject(new DOMException('aborted', 'AbortError'));
     return new Promise((resolve, reject) => {
       const id = this.nextId++;
       const timeoutMs = opts?.timeoutMs ?? this.defaultTimeout;
       const timer = setTimeout(() => {
+        const current = this.pending.get(id);
         this.pending.delete(id);
+        if (current?.signal && current.onAbort) current.signal.removeEventListener('abort', current.onAbort);
         reject(new Error(`MCP request timed out after ${timeoutMs}ms: ${method}`));
       }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
+      const onAbort = opts?.signal ? () => {
+        const current = this.pending.get(id);
+        if (!current) return;
+        this.pending.delete(id);
+        clearTimeout(current.timer);
+        opts.signal?.removeEventListener('abort', onAbort);
+        reject(new DOMException('aborted', 'AbortError'));
+      } : undefined;
+      if (opts?.signal && onAbort) opts.signal.addEventListener('abort', onAbort, { once: true });
+      this.pending.set(id, {
+        resolve, reject, timer, signal: opts?.signal, onAbort,
+        maxResponseBytes: opts?.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES,
+      });
       const payload = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n';
       try {
         this.proc.stdin?.write(payload);
@@ -290,6 +352,7 @@ export class StdioTransport implements McpTransport {
   private failPending(err: Error): void {
     for (const entry of this.pending.values()) {
       clearTimeout(entry.timer);
+      if (entry.signal && entry.onAbort) entry.signal.removeEventListener('abort', entry.onAbort);
       entry.reject(err);
     }
     this.pending.clear();
@@ -300,6 +363,26 @@ export class StdioTransport implements McpTransport {
 
 /** Fetch's resolved Response type (so helpers work with injected `fetchFn`). */
 type FetchResponse = Awaited<ReturnType<typeof fetch>>;
+
+async function parseBoundedJson(
+  res: FetchResponse,
+  maxBytes = DEFAULT_MAX_RESPONSE_BYTES,
+): Promise<unknown> {
+  const declared = Number(res.headers?.get?.('content-length') ?? '0');
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new Error(`MCP response exceeds ${maxBytes} bytes`);
+  }
+  if (typeof (res as FetchResponse & { text?: () => Promise<string> }).text === 'function') {
+    const text = await (res as FetchResponse & { text: () => Promise<string> }).text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error(`MCP response exceeds ${maxBytes} bytes`);
+    return JSON.parse(text);
+  }
+  const value = await res.json();
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > maxBytes) {
+    throw new Error(`MCP response exceeds ${maxBytes} bytes`);
+  }
+  return value;
+}
 
 /**
  * v4.12 Slice 3b/3c — shared reactive-401 retry. Send once; on a 401 with an
@@ -325,15 +408,20 @@ async function sendWithAuthRetry(
  * (The `eventsource` package can't be used here: it's GET-only and can't read a
  * POST response body stream.)
  */
-async function* parseSseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator<string> {
+async function* parseSseFrames(
+  body: ReadableStream<Uint8Array>,
+  maxEventBytes = DEFAULT_MAX_RESPONSE_BYTES,
+): AsyncGenerator<string> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
   let dataLines: string[] = [];
+  let dataBytes = 0;
   const flush = (): string | null => {
     if (dataLines.length === 0) return null;
     const out = dataLines.join('\n');
     dataLines = [];
+    dataBytes = 0;
     return out;
   };
   try {
@@ -345,13 +433,22 @@ async function* parseSseFrames(body: ReadableStream<Uint8Array>): AsyncGenerator
       while ((nl = buf.indexOf('\n')) >= 0) {
         const line = buf.slice(0, nl).replace(/\r$/, '');
         buf = buf.slice(nl + 1);
+        if (Buffer.byteLength(line, 'utf8') > maxEventBytes) {
+          throw new Error(`MCP SSE event exceeds ${maxEventBytes} bytes`);
+        }
         if (line === '') {
           const frame = flush(); // blank line = end of event
           if (frame !== null) yield frame;
         } else if (line.startsWith('data:')) {
-          dataLines.push(line.slice(5).replace(/^ /, ''));
+          const data = line.slice(5).replace(/^ /, '');
+          dataBytes += Buffer.byteLength(data, 'utf8') + (dataLines.length > 0 ? 1 : 0);
+          if (dataBytes > maxEventBytes) throw new Error(`MCP SSE event exceeds ${maxEventBytes} bytes`);
+          dataLines.push(data);
         }
         // event:/id:/retry:/comments ignored
+      }
+      if (Buffer.byteLength(buf, 'utf8') > maxEventBytes) {
+        throw new Error(`MCP SSE event exceeds ${maxEventBytes} bytes`);
       }
     }
     const last = flush();
@@ -473,6 +570,10 @@ export class HttpTransport implements McpTransport {
   }
 
   private onSseMessage(data: string): void {
+    if (Buffer.byteLength(data, 'utf8') > DEFAULT_MAX_RESPONSE_BYTES) {
+      this.log?.('warn', `[${this.label}] ignored oversized SSE notification`);
+      return;
+    }
     let msg: { method?: string; params?: unknown };
     try {
       msg = JSON.parse(data);
@@ -495,8 +596,12 @@ export class HttpTransport implements McpTransport {
     method: string,
     params: unknown,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<Awaited<ReturnType<typeof fetch>>> {
     const ctrl = new AbortController();
+    const onAbort = () => ctrl.abort();
+    if (signal?.aborted) ctrl.abort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
       return await this.fetchImpl(`${this.baseUrl}/messages`, {
@@ -512,23 +617,24 @@ export class HttpTransport implements McpTransport {
       throw err;
     } finally {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
     }
   }
 
-  async request(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<unknown> {
+  async request(method: string, params?: unknown, opts?: McpRequestOptions): Promise<unknown> {
     if (this.closed) throw new Error(`MCP transport ${this.label} is closed`);
     const id = this.nextId++;
     const timeoutMs = opts?.timeoutMs ?? this.defaultTimeout;
 
     // 3b — reactive 401: force a refresh and retry ONCE with a fresh bearer.
-    const res = await sendWithAuthRetry(() => this.sendOnce(id, method, params, timeoutMs), this.onAuthError);
+    const res = await sendWithAuthRetry(() => this.sendOnce(id, method, params, timeoutMs, opts?.signal), this.onAuthError);
     if (!res.ok) {
       if (res.status === 401) {
         throw new Error(`HTTP 401 Unauthorized from ${this.label} — token rejected (auth failed)`);
       }
       throw new Error(`HTTP ${res.status} ${res.statusText} from ${this.label}`);
     }
-    const data = (await res.json()) as { result?: unknown; error?: McpRpcError };
+    const data = (await parseBoundedJson(res, opts?.maxResponseBytes)) as { result?: unknown; error?: McpRpcError };
     if (data.error) {
       throw new Error(`MCP error ${data.error.code}: ${data.error.message}`);
     }
@@ -635,6 +741,7 @@ export class StreamableHttpTransport implements McpTransport {
   private sessionId?: string;
   private initParams: unknown;
   private everInitialized = false;
+  private protocolVersion?: string;
   private closed = false;
   // 3c.2 — server-push GET stream + session-reinit dedup.
   private readonly sleep: (ms: number) => Promise<void>;
@@ -673,6 +780,7 @@ export class StreamableHttpTransport implements McpTransport {
         ...(this.authHeader ? await this.authHeader() : {}),
       };
       if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId;
+      if (this.protocolVersion) headers['MCP-Protocol-Version'] = this.protocolVersion;
       return await this.fetchImpl(this.baseUrl, { method: 'POST', headers, body, signal: ctrl.signal });
     } catch (err) {
       if ((err as Error).name === 'AbortError') throw new Error(`MCP request timed out after ${timeoutMs}ms`);
@@ -702,8 +810,8 @@ export class StreamableHttpTransport implements McpTransport {
   }
 
   /** Read the POST's SSE body until the frame answering `id` arrives. */
-  private async readSseReply(body: ReadableStream<Uint8Array>, id: number): Promise<unknown> {
-    for await (const frame of parseSseFrames(body)) {
+  private async readSseReply(body: ReadableStream<Uint8Array>, id: number, maxResponseBytes: number): Promise<unknown> {
+    for await (const frame of parseSseFrames(body, maxResponseBytes)) {
       let msg: JsonRpcMsg;
       try { msg = JSON.parse(frame) as JsonRpcMsg; } catch { continue; }
       if (msg.id === id) return this.unwrapReply(msg);
@@ -712,7 +820,13 @@ export class StreamableHttpTransport implements McpTransport {
     throw new Error(`${this.label}: event stream ended before a reply to request ${id}`);
   }
 
-  private async postAndParse(id: number, method: string, params: unknown, timeoutMs: number): Promise<unknown> {
+  private async postAndParse(
+    id: number,
+    method: string,
+    params: unknown,
+    timeoutMs: number,
+    maxResponseBytes?: number,
+  ): Promise<unknown> {
     const res = await sendWithAuthRetry(
       () => this.doPost(JSON.stringify({ jsonrpc: '2.0', id, method, params }), timeoutMs),
       this.onAuthError,
@@ -726,9 +840,9 @@ export class StreamableHttpTransport implements McpTransport {
     const ct = (res.headers.get('content-type') ?? '').toLowerCase();
     if (ct.includes('text/event-stream')) {
       if (!res.body) throw new Error(`${this.label}: event-stream response had no body`);
-      return await this.readSseReply(res.body, id);
+      return await this.readSseReply(res.body, id, maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES);
     }
-    return this.unwrapReply((await res.json()) as JsonRpcMsg);
+    return this.unwrapReply((await parseBoundedJson(res, maxResponseBytes)) as JsonRpcMsg);
   }
 
   /** Replay initialize on a fresh session after a 404. */
@@ -749,22 +863,29 @@ export class StreamableHttpTransport implements McpTransport {
     return this.reinitInFlight;
   }
 
-  async request(method: string, params?: unknown, opts?: { timeoutMs?: number }): Promise<unknown> {
+  async request(method: string, params?: unknown, opts?: McpRequestOptions): Promise<unknown> {
     if (this.closed) throw new Error(`MCP transport ${this.label} is closed`);
     const timeoutMs = opts?.timeoutMs ?? this.defaultTimeout;
     if (method === 'initialize') this.initParams = params;
     try {
-      const out = await this.postAndParse(this.nextId++, method, params, timeoutMs);
+      const out = await this.postAndParse(this.nextId++, method, params, timeoutMs, opts?.maxResponseBytes);
       if (method === 'initialize') {
+        const requested = params && typeof params === 'object'
+          ? (params as { protocolVersion?: unknown }).protocolVersion
+          : undefined;
+        if (typeof requested === 'string') this.protocolVersion = requested;
         this.everInitialized = true;
         this.startPushLoop(); // lazy, once — needs the session id from initialize
       }
       return out;
     } catch (err) {
       if (err instanceof SessionExpiredError && method !== 'initialize' && this.everInitialized) {
+        if (opts?.retryOnSessionExpiry === false) {
+          throw new McpUnknownOutcomeError(method, 'the server session expired after request transmission');
+        }
         this.log?.('info', `[${this.label}] session expired — re-initializing`);
         await this.ensureReinit(timeoutMs);
-        return await this.postAndParse(this.nextId++, method, params, timeoutMs); // retry once
+        return await this.postAndParse(this.nextId++, method, params, timeoutMs, opts?.maxResponseBytes); // retry once
       }
       throw err;
     }
@@ -809,6 +930,7 @@ export class StreamableHttpTransport implements McpTransport {
       ...(this.authHeader ? await this.authHeader() : {}),
     };
     if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId;
+    if (this.protocolVersion) headers['MCP-Protocol-Version'] = this.protocolVersion;
 
     const res = await this.fetchImpl(this.baseUrl, { method: 'GET', headers, signal: this.pushAbort.signal });
     this.captureSession(res);
@@ -818,7 +940,7 @@ export class StreamableHttpTransport implements McpTransport {
     if (!res.ok || !res.body) return 'drop';
 
     this.pushAttempt = 0; // connected — reset backoff
-    for await (const frame of parseSseFrames(res.body)) {
+    for await (const frame of parseSseFrames(res.body, DEFAULT_MAX_RESPONSE_BYTES)) {
       if (this.closed) break;
       let msg: JsonRpcMsg;
       try { msg = JSON.parse(frame) as JsonRpcMsg; } catch { continue; }

@@ -76,7 +76,7 @@ describe('setupMcpFromConfig', () => {
     const made = new Map<string, StubTransport>();
     const stdioFactory = (_c: unknown, _e: unknown, label: string) => {
       const t = new StubTransport(label);
-      t.queue('initialize', { result: { capabilities: {} } });
+      t.queue('initialize', { result: { protocolVersion: '2025-11-25', capabilities: {} } });
       t.queue('tools/list', { result: { tools: [{ name: 't' }] } });
       made.set(label, t);
       return t;
@@ -107,7 +107,7 @@ describe('setupMcpFromConfig', () => {
       if (label === 'bad') {
         t.queue('initialize', { error: new Error('connect failed') });
       } else {
-        t.queue('initialize', { result: { capabilities: {} } });
+        t.queue('initialize', { result: { protocolVersion: '2025-11-25', capabilities: {} } });
         t.queue('tools/list', { result: { tools: [] } });
       }
       return t;
@@ -142,7 +142,7 @@ describe('setupMcpFromConfig', () => {
     const registry = new ToolRegistry();
     const stdioFactory = (_c: unknown, _e: unknown, label: string) => {
       const t = new StubTransport(label);
-      t.queue('initialize', { result: { capabilities: {} } });
+      t.queue('initialize', { result: { protocolVersion: '2025-11-25', capabilities: {} } });
       t.queue('tools/list', { result: { tools: [] } });
       return t;
     };

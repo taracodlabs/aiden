@@ -53,6 +53,8 @@ export interface DeviceFlowConfig {
   clientId: string;
   /** Space-delimited scopes to request, or undefined for the provider default. */
   scope?: string;
+  /** RFC 8707 protected resource for this exact MCP server. */
+  resource?: string;
 }
 
 /** RFC 8628 §3.2 device-authorization response (the fields we consume). */
@@ -113,6 +115,7 @@ export async function requestDeviceAuthorization(
 ): Promise<DeviceAuthorization> {
   const body = new URLSearchParams({ client_id: cfg.clientId });
   if (cfg.scope) body.set('scope', cfg.scope);
+  if (cfg.resource) body.set('resource', cfg.resource);
   const res = await fetchImpl(cfg.deviceAuthorizationEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': CONTENT_TYPE_FORM, Accept: CONTENT_TYPE_JSON },
@@ -155,6 +158,7 @@ export async function pollDeviceTokenOnce(
     device_code: deviceCode,
     client_id: cfg.clientId,
   });
+  if (cfg.resource) body.set('resource', cfg.resource);
   const res = await fetchImpl(cfg.tokenEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': CONTENT_TYPE_FORM, Accept: CONTENT_TYPE_JSON },

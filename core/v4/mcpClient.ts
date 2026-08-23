@@ -5,32 +5,33 @@
  * Aiden — local-first agent.
  */
 /**
- * core/v4/mcpClient.ts — Aiden v4.0.0
+ * core/v4/mcpClient.ts — canonical v4 MCP client
  *
  * MCP client. Connects to external MCP servers (stdio + HTTP), discovers
  * their tools, registers each as `mcp_<server>_<tool>` in the v4
  * `ToolRegistry`, and dispatches calls back through the transport.
  *
- * Phase 11 scope:
+ * Supported scope:
  *   - stdio + HTTP transports
- *   - initialize → tools/list discovery
+ *   - stable 2025-11-25 negotiation with explicitly tested compatibility revisions
+ *   - initialize → tools/list and resources discovery
  *   - tool prefix `mcp_<server>_<tool>` (replaces v3's `<server>:<tool>`)
  *   - dynamic re-discovery on `notifications/tools/list_changed`
  *   - per-server include/exclude filtering
  *   - credential-filtered stdio env
  *   - error redaction
- *   - sampling/createMessage refused (lands in v4.1)
+ *   - sampling/createMessage refused
  *
- * Deferred:
- *   - Sampling support (v4.1, needs loop control changes)
- *   - resources / prompts capabilities (v4.1, most servers don't use)
- *   - Per-server health UI / `aiden mcp status` (Phase 14 CLI)
+ * Deferred optional surfaces:
+ *   - sampling, prompts, roots, and generalized MCP tasks
  *
- * Replaces the Phase 1 stub. v3's `core/mcpClient.ts` stays untouched —
- * it's still wired into v3 paths and we don't reuse it from v4.
- *
- * Status: PHASE 11.
+ * The older `core/mcpClient.ts` remains a bounded v3 compatibility path. New
+ * production call sites must use this client and the canonical ToolRegistry.
  */
+
+import { createHash } from 'node:crypto';
+
+import { SSRFProtection } from '../../moat/ssrfProtection';
 
 import type {
   ToolSchema,
@@ -55,6 +56,23 @@ import { McpCredentialFilter } from './mcp/credentialFilter';
 import { scrubString } from './logger/redact';
 import type { McpAuthProvider } from './mcp/mcpAuth';
 import { buildMcpAuthRequiredResult } from './mcp/authRequired';
+import type {
+  ExternalCapabilityChangeClass,
+  ExternalAuthority,
+  ExternalCapabilitySnapshotRecord,
+  ExternalIdentityRecord,
+  ExternalTrustState,
+} from './external/externalAuthority';
+import { VERSION as AIDEN_VERSION } from '../version';
+import {
+  MCP_PROTOCOL_VERSION,
+  classifyMcpTool,
+  digestMcpCapabilities,
+  negotiateMcpProtocol,
+  normalizeMcpToolSchema,
+  type McpToolDescriptor,
+  type McpToolEffectClassification,
+} from './mcp/protocol';
 
 // v4.12 — MCP success results are EXTERNAL, untrusted content reaching the model
 // (same threat class as B5.1 browser-extracted content): T1 secrets-into-model
@@ -89,6 +107,8 @@ export interface McpHttpConfig {
    * loop against an un-authorized endpoint.
    */
   oauth?: { clientId?: string; deviceAuthorizationEndpoint?: string; scopes?: string[] };
+  /** Explicit controlled-local opt-in; ordinary remote endpoints remain subject to network policy. */
+  allowLoopbackHttp?: boolean;
 }
 
 export interface McpServerConfig {
@@ -119,6 +139,8 @@ export interface McpTool {
   rawName: string;
   description: string;
   inputSchema: ToolSchema['inputSchema'];
+  annotations?: McpToolDescriptor['annotations'];
+  effect: McpToolEffectClassification['effect'];
 }
 
 export type McpServerStatus =
@@ -163,6 +185,17 @@ export interface McpServer {
   everReady?: boolean;
   /** v4.12 Slice 2b — tool-call circuit breaker. */
   breaker: McpBreakerState;
+  /** Exact server-selected compatible revision from initialize. */
+  protocolVersion?: string;
+  /** Durable shared external identity, when authority is configured. */
+  externalIdentityId?: string;
+  /** Latest durable capability snapshot, when authority is configured. */
+  capabilitySnapshotId?: string;
+  externalTrustState?: ExternalTrustState;
+  capabilityChangeClass?: ExternalCapabilityChangeClass;
+  capabilityReviewRequired?: boolean;
+  /** Mutating tools remain unavailable until the latest capability set is accepted. */
+  mutationBlocked: boolean;
 }
 
 export interface McpClientOptions {
@@ -213,6 +246,10 @@ export interface McpClientOptions {
   };
   /** Clock seam (ms). Default () => Date.now() — inject to test cooldown without real time. */
   now?: () => number;
+  /** Shared durable identity and capability-drift authority. */
+  externalAuthority?: ExternalAuthority;
+  /** Pre-egress HTTP endpoint policy. Production defaults to SSRFProtection. */
+  endpointPolicy?: Pick<SSRFProtection, 'check'>;
 }
 
 interface ReconnectCfg {
@@ -228,9 +265,11 @@ interface BreakerCfg {
   cooldownMs: number;
 }
 
-const PROTOCOL_VERSION = '2024-11-05';
-const CLIENT_INFO = { name: 'aiden', version: '4.0.0' };
+const CLIENT_INFO = { name: 'aiden', version: AIDEN_VERSION };
 const DEFAULT_CALL_TIMEOUT = 30_000;
+const MAX_DISCOVERED_TOOLS = 1_024;
+const MAX_TOOL_NAME_LENGTH = 256;
+const MAX_TOOL_DESCRIPTION_LENGTH = 16_384;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -241,6 +280,17 @@ function safeServerSlug(raw: string): string {
 
 function buildPrefixedName(serverName: string, rawToolName: string): string {
   return `mcp_${safeServerSlug(serverName)}_${rawToolName}`;
+}
+
+function configuredExternalEndpoint(config: McpServerConfig): string {
+  if (config.type === 'http') return config.http?.baseUrl ?? `https://invalid.local/${safeServerSlug(config.name)}`;
+  const descriptor = JSON.stringify({
+    command: config.stdio?.command ?? '',
+    args: config.stdio?.args ?? [],
+    cwd: config.stdio?.cwd ?? '',
+  });
+  const digest = createHash('sha256').update(descriptor).digest('hex');
+  return `stdio://local/${digest}`;
 }
 
 // ─── McpClient ──────────────────────────────────────────────────────────
@@ -272,6 +322,8 @@ export class McpClient {
   private readonly reconnectCfg: ReconnectCfg;
   private readonly breakerCfg: BreakerCfg;
   private readonly now: () => number;
+  private readonly externalAuthority?: ExternalAuthority;
+  private readonly endpointPolicy?: Pick<SSRFProtection, 'check'>;
   /** v4.12 Slice 3a.3 — injected OAuth resolver + the resolved per-server bearer hooks. */
   private readonly authProvider?: McpAuthProvider;
   private readonly authHooks = new Map<string, () => Promise<Record<string, string>>>();
@@ -299,6 +351,9 @@ export class McpClient {
       cooldownMs: opts.breaker?.cooldownMs ?? 60_000,
     };
     this.now = opts.now ?? (() => Date.now());
+    this.externalAuthority = opts.externalAuthority;
+    this.endpointPolicy = opts.endpointPolicy
+      ?? (opts.httpFactory || opts.streamableFactory ? undefined : new SSRFProtection());
     this.authProvider = opts.authProvider;
     const eventSourceFactory = opts.eventSourceFactory;
     this.stdioFactory = opts.stdioFactory ?? ((cfg, env, label) => new StdioTransport({
@@ -345,10 +400,17 @@ export class McpClient {
     if (this.servers.has(config.name)) {
       throw new Error(`MCP server "${config.name}" is already connected`);
     }
+    await this.assertEndpointAllowed(config);
+    const configuredIdentity = this.externalAuthority?.observeIdentity({
+      kind: 'mcp', endpoint: configuredExternalEndpoint(config), displayName: config.name,
+    });
+    if (configuredIdentity && ['revoked', 'changed'].includes(configuredIdentity.trustState)) {
+      throw new Error(`MCP server "${config.name}" external identity is ${configuredIdentity.trustState}`);
+    }
 
     // v4.12 Slice 3a.3 — resolve OAuth state for hosted servers before connecting.
     if (config.type === 'http' && this.authProvider) {
-      const auth = await this.authProvider.resolve(config.name);
+      const auth = await this.authProvider.resolve(config.name, { serverUrl: config.http?.baseUrl ?? '' });
       // v4.14 Fix 2 — a server whose config DECLARES OAuth but has no token yet
       // resolves to 'none' (nothing persisted until /mcp auth runs). Treat that
       // exactly like 'needs-auth': mark it quietly, do NOT establish, do NOT run
@@ -367,6 +429,9 @@ export class McpClient {
           status: 'needs-auth',
           reconnectAttempts: 0,
           breaker: this.freshBreaker(),
+          mutationBlocked: true,
+          externalIdentityId: configuredIdentity?.externalIdentityId,
+          externalTrustState: configuredIdentity?.trustState,
         };
         this.servers.set(config.name, locked);
         this.log('info', `[${config.name}] needs auth — run /mcp auth ${config.name}`);
@@ -386,6 +451,9 @@ export class McpClient {
       status: 'initializing',
       reconnectAttempts: 0,
       breaker: this.freshBreaker(),
+      mutationBlocked: false,
+      externalIdentityId: configuredIdentity?.externalIdentityId,
+      externalTrustState: configuredIdentity?.trustState,
     };
     this.servers.set(config.name, server);
 
@@ -419,7 +487,7 @@ export class McpClient {
     }
     if (!this.authProvider) throw new Error('MCP auth provider is not configured.');
 
-    const auth = await this.authProvider.resolve(name);
+    const auth = await this.authProvider.resolve(name, { serverUrl: server.config.http?.baseUrl ?? '' });
     if (auth.state !== 'ready') {
       throw new Error(`MCP server "${name}" still has no valid token.`);
     }
@@ -458,10 +526,15 @@ export class McpClient {
 
     try {
       const initResult = (await transport.request('initialize', {
-        protocolVersion: PROTOCOL_VERSION,
+        protocolVersion: MCP_PROTOCOL_VERSION,
         capabilities: {},
         clientInfo: CLIENT_INFO,
-      })) as { capabilities?: McpCapabilities } | undefined;
+      })) as {
+        protocolVersion?: unknown;
+        capabilities?: McpCapabilities;
+        serverInfo?: { name?: unknown; version?: unknown };
+      } | undefined;
+      server.protocolVersion = negotiateMcpProtocol(initResult?.protocolVersion);
       server.capabilities = initResult?.capabilities ?? {};
       transport.notify('notifications/initialized');
 
@@ -626,6 +699,7 @@ export class McpClient {
     serverName: string,
     rawName: string,
     args: Record<string, unknown>,
+    effect?: McpToolEffectClassification['effect'],
   ): Promise<unknown> {
     const server = this.servers.get(serverName);
     if (!server) {
@@ -657,6 +731,14 @@ export class McpClient {
         `Run /mcp auth ${serverName} to authorize.`,
       );
     }
+    const resolvedEffect = effect
+      ?? server.tools.find((tool) => tool.rawName === rawName)?.effect
+      ?? 'mutating';
+    if (resolvedEffect === 'mutating' && server.mutationBlocked) {
+      throw new Error(
+        `MCP server "${serverName}" mutation capabilities require review before this tool can run`,
+      );
+    }
     // Slice 2b — tool-call circuit breaker. Only for a ready server: 2a's
     // reconnecting/initializing/failed guards above already short-circuit
     // connection-down states, so the breaker never double-counts those.
@@ -679,7 +761,7 @@ export class McpClient {
       raw = await server.transport.request(
         'tools/call',
         { name: rawName, arguments: args },
-        { timeoutMs },
+        { timeoutMs, retryOnSessionExpiry: resolvedEffect === 'read_only' },
       );
     } catch (err) {
       const message = (err as Error).message;
@@ -763,6 +845,89 @@ export class McpClient {
     for (const n of names) await this.disconnect(n);
   }
 
+  /** Revoke the exact durable identity before disconnecting its local projection. */
+  async revoke(serverName: string): Promise<ExternalIdentityRecord> {
+    const server = this.servers.get(serverName);
+    if (!server) throw new Error(`MCP server "${serverName}" is not connected`);
+    if (!this.externalAuthority || !server.externalIdentityId) {
+      throw new Error(`MCP server "${serverName}" has no durable external identity`);
+    }
+    const identity = this.externalAuthority.getIdentity(server.externalIdentityId);
+    if (!identity) throw new Error(`MCP server "${serverName}" external identity is unavailable`);
+    const revoked = this.externalAuthority.setTrust({
+      externalIdentityId: identity.externalIdentityId,
+      expectedStateVersion: identity.stateVersion,
+      to: 'revoked',
+    });
+    this.authHooks.delete(serverName);
+    this.authErrorHooks.delete(serverName);
+    await this.disconnect(serverName);
+    return revoked;
+  }
+
+  /** Accept the exact latest capability snapshot for one configured server. */
+  approveCapabilities(serverName: string, acceptedBy: string): ExternalCapabilitySnapshotRecord {
+    const server = this.servers.get(serverName);
+    if (!server) throw new Error(`MCP server "${serverName}" is not connected`);
+    if (!this.externalAuthority || !server.capabilitySnapshotId) {
+      throw new Error(`MCP server "${serverName}" has no durable capability snapshot`);
+    }
+    const latest = this.externalAuthority.latestCapabilities(server.externalIdentityId!);
+    if (!latest || latest.capabilitySnapshotId !== server.capabilitySnapshotId) {
+      throw new Error(`MCP server "${serverName}" capability snapshot is stale`);
+    }
+    const accepted = this.externalAuthority.acceptCapabilities({
+      capabilitySnapshotId: latest.capabilitySnapshotId,
+      expectedStateVersion: latest.stateVersion,
+      acceptedBy,
+    });
+    server.mutationBlocked = !this.externalAuthority.canUseMutation(server.externalIdentityId!);
+    server.capabilityReviewRequired = accepted.reviewRequired;
+    server.capabilityChangeClass = accepted.changeClass;
+    return accepted;
+  }
+
+  async listResources(serverName: string): Promise<Array<{ uri: string; name?: string; mimeType?: string }>> {
+    const server = this.requireReadyServer(serverName);
+    const result = await server.transport.request('resources/list', undefined, {
+      timeoutMs: server.config.callTimeoutMs ?? this.defaultCallTimeoutMs,
+      retryOnSessionExpiry: true,
+    }) as { resources?: unknown } | undefined;
+    if (!Array.isArray(result?.resources) || result.resources.length > 10_000) {
+      throw new Error(`MCP server "${serverName}" returned an invalid resource list`);
+    }
+    return result.resources.map((value) => {
+      if (!value || typeof value !== 'object' || typeof (value as { uri?: unknown }).uri !== 'string') {
+        throw new Error(`MCP server "${serverName}" returned an invalid resource descriptor`);
+      }
+      const resource = value as { uri: string; name?: unknown; mimeType?: unknown };
+      return {
+        uri: resource.uri,
+        ...(typeof resource.name === 'string' ? { name: resource.name } : {}),
+        ...(typeof resource.mimeType === 'string' ? { mimeType: resource.mimeType } : {}),
+      };
+    });
+  }
+
+  async readResource(serverName: string, uri: string): Promise<{ contents: Array<Record<string, unknown>> }> {
+    if (!uri || uri.length > 8_192) throw new Error('MCP resource URI is invalid');
+    const server = this.requireReadyServer(serverName);
+    const result = await server.transport.request('resources/read', { uri }, {
+      timeoutMs: server.config.callTimeoutMs ?? this.defaultCallTimeoutMs,
+      retryOnSessionExpiry: true,
+      maxResponseBytes: 4 * 1024 * 1024,
+    }) as { contents?: unknown } | undefined;
+    if (!Array.isArray(result?.contents) || result.contents.length > 1_000) {
+      throw new Error(`MCP server "${serverName}" returned invalid resource content`);
+    }
+    return { contents: result.contents.map((entry) => {
+      if (!entry || typeof entry !== 'object') {
+        throw new Error(`MCP server "${serverName}" returned invalid resource content`);
+      }
+      return entry as Record<string, unknown>;
+    }) };
+  }
+
   // ─── Internals ───────────────────────────────────────────────────────
 
   private buildTransport(config: McpServerConfig): McpTransport {
@@ -785,21 +950,67 @@ export class McpClient {
     throw new Error(`MCP server "${config.name}" has unsupported type "${(config as McpServerConfig).type}"`);
   }
 
+  private async assertEndpointAllowed(config: McpServerConfig): Promise<void> {
+    if (config.type !== 'http') return;
+    const raw = config.http?.baseUrl;
+    if (!raw || raw.length > 2_048) throw new Error(`MCP server "${config.name}" has an invalid HTTP endpoint`);
+    let endpoint: URL;
+    try { endpoint = new URL(raw); } catch { throw new Error(`MCP server "${config.name}" has an invalid HTTP endpoint`); }
+    if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) {
+      throw new Error(`MCP server "${config.name}" has an unsafe HTTP endpoint`);
+    }
+    const hostname = endpoint.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+    const explicitLoopback = config.http?.allowLoopbackHttp === true
+      && endpoint.protocol === 'http:'
+      && ['localhost', '127.0.0.1', '::1'].includes(hostname);
+    if (explicitLoopback || !this.endpointPolicy) return;
+    const result = await this.endpointPolicy.check(endpoint.toString());
+    if (result.blocked) {
+      throw new Error(`MCP endpoint blocked by network policy: ${result.reason ?? 'unsafe endpoint'}`);
+    }
+  }
+
+  private requireReadyServer(serverName: string): McpServer {
+    const server = this.servers.get(serverName);
+    if (!server) throw new Error(`MCP server "${serverName}" is not connected`);
+    if (server.status !== 'ready') throw new Error(`MCP server "${serverName}" is not ready`);
+    return server;
+  }
+
   private async discoverAndRegister(server: McpServer): Promise<void> {
     const result = (await server.transport.request('tools/list')) as {
-      tools?: Array<{ name: string; description?: string; inputSchema?: ToolSchema['inputSchema'] }>;
+      tools?: McpToolDescriptor[];
     } | undefined;
     const rawTools = result?.tools ?? [];
+    if (!Array.isArray(rawTools) || rawTools.length > MAX_DISCOVERED_TOOLS) {
+      throw new Error(`MCP tool catalog exceeds the bounded limit of ${MAX_DISCOVERED_TOOLS}`);
+    }
 
-    const candidates: McpTool[] = rawTools.map((t) => ({
-      serverName: server.config.name,
-      rawName: t.name,
-      prefixedName: buildPrefixedName(server.config.name, t.name),
-      description: t.description ?? t.name,
-      inputSchema: t.inputSchema ?? { type: 'object', properties: {} },
-    }));
+    const candidates: McpTool[] = rawTools.map((t) => {
+      if (!t || typeof t !== 'object' || typeof t.name !== 'string'
+        || t.name.length < 1 || t.name.length > MAX_TOOL_NAME_LENGTH
+        || /[\u0000-\u001f\u007f]/u.test(t.name)) {
+        throw new Error(`MCP tool name exceeds the bounded limit or is invalid`);
+      }
+      if (t.description !== undefined
+        && (typeof t.description !== 'string' || t.description.length > MAX_TOOL_DESCRIPTION_LENGTH)) {
+        throw new Error('MCP tool description exceeds the bounded limit');
+      }
+      const classification = classifyMcpTool(t);
+      return {
+        serverName: server.config.name,
+        rawName: t.name,
+        prefixedName: buildPrefixedName(server.config.name, t.name),
+        description: t.description ?? t.name,
+        inputSchema: normalizeMcpToolSchema(t.inputSchema),
+        annotations: t.annotations,
+        effect: classification.effect,
+      };
+    });
     const allowed = this.filter.filter(candidates, server.config.toolFilter);
     const newNames = new Set(allowed.map((t) => t.prefixedName));
+
+    this.recordExternalCapabilities(server, allowed);
 
     // Upsert the new set FIRST (register = overwrite), THEN prune names no
     // longer advertised. No unregister-all-first → no window where a tool
@@ -809,15 +1020,13 @@ export class McpClient {
         schema: {
           name: tool.prefixedName,
           description: tool.description,
-          inputSchema: this.normalizeSchema(tool.inputSchema),
+          inputSchema: tool.inputSchema,
         },
-        // MCP tools can do anything — treat as `execute` with mutates=true
-        // so the Phase 9 approval engine gates them.
-        category: 'execute',
-        mutates: true,
+        category: tool.effect === 'read_only' ? 'network' : 'execute',
+        mutates: tool.effect !== 'read_only',
         toolset: 'mcp',
         execute: async (args: Record<string, unknown>, _ctx: ToolContext) => {
-          return this.callTool(server.config.name, tool.rawName, args);
+          return this.callTool(server.config.name, tool.rawName, args, tool.effect);
         },
       };
       this.registry.register(handler);
@@ -831,17 +1040,50 @@ export class McpClient {
       (rawTools.length !== allowed.length ? ` (${rawTools.length - allowed.length} filtered)` : ''));
   }
 
-  /** Ensure schema has a valid object shape — some servers report partial. */
-  private normalizeSchema(schema: ToolSchema['inputSchema']): ToolSchema['inputSchema'] {
-    if (!schema || typeof schema !== 'object') {
-      return { type: 'object', properties: {} };
+  private recordExternalCapabilities(server: McpServer, tools: McpTool[]): void {
+    if (!this.externalAuthority || !server.protocolVersion) {
+      server.mutationBlocked = false;
+      return;
     }
-    const s = schema as Record<string, unknown>;
-    return {
-      type: 'object',
-      properties: (s.properties as Record<string, unknown>) ?? {},
-      required: Array.isArray(s.required) ? (s.required as string[]) : undefined,
-    };
+    let identity = this.externalAuthority.observeIdentity({
+      kind: 'mcp',
+      endpoint: configuredExternalEndpoint(server.config),
+      displayName: server.config.name,
+    });
+    if (identity.trustState === 'unverified') {
+      identity = this.externalAuthority.setTrust({
+        externalIdentityId: identity.externalIdentityId,
+        expectedStateVersion: identity.stateVersion,
+        to: 'verified_endpoint',
+      });
+    }
+    const descriptors = tools.map((tool) => ({
+      name: tool.rawName,
+      description: tool.description,
+      inputSchema: tool.inputSchema,
+      annotations: tool.annotations ?? {},
+      effect: tool.effect,
+    }));
+    const read = descriptors.filter((tool) => tool.effect === 'read_only');
+    const mutation = descriptors.filter((tool) => tool.effect === 'mutating');
+    const capabilities = { server: server.capabilities, tools: descriptors };
+    const capabilityDigest = digestMcpCapabilities(capabilities);
+    const snapshot = this.externalAuthority.recordCapabilities({
+      externalIdentityId: identity.externalIdentityId,
+      protocol: 'mcp',
+      protocolVersion: server.protocolVersion,
+      capabilityDigest,
+      readCapabilityDigest: digestMcpCapabilities(read),
+      mutationCapabilityDigest: digestMcpCapabilities(mutation),
+      capabilities,
+      idempotencyKey: `mcp:${capabilityDigest}`,
+    });
+    server.externalIdentityId = identity.externalIdentityId;
+    server.externalTrustState = identity.trustState;
+    server.capabilitySnapshotId = snapshot.capabilitySnapshotId;
+    server.capabilityChangeClass = snapshot.changeClass;
+    server.capabilityReviewRequired = snapshot.reviewRequired;
+    server.mutationBlocked = !this.externalAuthority.canUseMutation(identity.externalIdentityId);
   }
 
   private onNotification(server: McpServer, method: string, params: unknown): void {

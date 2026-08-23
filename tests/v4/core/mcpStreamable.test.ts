@@ -128,7 +128,7 @@ describe('StreamableHttpTransport — request/response', () => {
 class StubTransport implements McpTransport {
   readonly label = 'stub';
   request(method: string): Promise<unknown> {
-    if (method === 'initialize') return Promise.resolve({ capabilities: {} });
+    if (method === 'initialize') return Promise.resolve({ protocolVersion: '2025-11-25', capabilities: {} });
     if (method === 'tools/list') return Promise.resolve({ tools: [] });
     return Promise.resolve({});
   }

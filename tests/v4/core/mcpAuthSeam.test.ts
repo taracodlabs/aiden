@@ -103,7 +103,10 @@ describe('createMcpAuthProvider.resolve (real tokenStore)', () => {
   it("'ready' + a bearer hook when a valid token is stored", async () => {
     const paths = resolveAidenPaths({ rootOverride: tmp });
     await saveMcpOAuthConfig(paths, 'srv', CONFIG);
-    await saveTokens(paths, { provider: mcpTokenId('srv'), accessToken: 'LIVE', refreshToken: 'r', expiresAtMs: Date.now() + 3_600_000, extras: { oauth: CONFIG } });
+    await saveTokens(paths, {
+      provider: mcpTokenId('srv'), accessToken: 'LIVE', refreshToken: 'r', expiresAtMs: Date.now() + 3_600_000,
+      extras: { oauth: CONFIG, mcpBinding: { server: 'srv', serverUrl: CONFIG.resource!, resource: CONFIG.resource!, clientId: CONFIG.clientId, scopes: [] } },
+    });
     const res = await createMcpAuthProvider(paths).resolve('srv');
     expect(res.state).toBe('ready');
     if (res.state === 'ready') expect(await res.authHeader()).toEqual({ Authorization: 'Bearer LIVE' });
@@ -115,7 +118,7 @@ describe('createMcpAuthProvider.resolve (real tokenStore)', () => {
 class StubTransport implements McpTransport {
   readonly label = 'stub';
   request(method: string): Promise<unknown> {
-    if (method === 'initialize') return Promise.resolve({ capabilities: {} });
+    if (method === 'initialize') return Promise.resolve({ protocolVersion: '2025-11-25', capabilities: {} });
     if (method === 'tools/list') return Promise.resolve({ tools: [{ name: 't' }] });
     return Promise.resolve({});
   }
