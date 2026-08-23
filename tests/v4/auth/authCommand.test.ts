@@ -203,6 +203,63 @@ describe('/auth login', () => {
     await auth.handler(ctx);
     expect(display.errs[0]).toMatch(/Unknown provider/);
   });
+
+  it('refreshes the active provider adapter after successful login', async () => {
+    const setProvider = vi.fn(async () => undefined);
+    const verifyProviderReadiness = vi.fn(async () => undefined);
+    const { ctx } = await buildCtx({
+      prompt: async () => 'AUTHCODE#STATE',
+      verifyProviderReadiness,
+      session: {
+        history: [],
+        setHistory: vi.fn(),
+        clearHistory: vi.fn(),
+        getCurrentProvider: () => 'chatgpt-plus',
+        getCurrentModel: () => 'gpt-5.5',
+        setProvider,
+      },
+    });
+    const restore = stubPluginBuildProvider(
+      'plugins/aiden-plugin-chatgpt-plus/index.js',
+      { accessToken: 'login-AT', refreshToken: 'login-RT', expiresInSeconds: 3600 },
+    );
+    try {
+      ctx.args = ['login', 'chatgpt-plus'];
+      await auth.handler(ctx);
+      expect(setProvider).toHaveBeenCalledOnce();
+      expect(setProvider).toHaveBeenCalledWith('chatgpt-plus', 'gpt-5.5');
+      expect(verifyProviderReadiness).toHaveBeenCalledOnce();
+      expect(verifyProviderReadiness).toHaveBeenCalledWith('chatgpt-plus', 'gpt-5.5');
+    } finally {
+      restore();
+    }
+  });
+
+  it('does not switch an unrelated active provider after login', async () => {
+    const setProvider = vi.fn(async () => undefined);
+    const { ctx } = await buildCtx({
+      prompt: async () => 'AUTHCODE#STATE',
+      session: {
+        history: [],
+        setHistory: vi.fn(),
+        clearHistory: vi.fn(),
+        getCurrentProvider: () => 'custom_openai',
+        getCurrentModel: () => 'custom-default',
+        setProvider,
+      },
+    });
+    const restore = stubPluginBuildProvider(
+      'plugins/aiden-plugin-chatgpt-plus/index.js',
+      { accessToken: 'login-AT', refreshToken: 'login-RT', expiresInSeconds: 3600 },
+    );
+    try {
+      ctx.args = ['login', 'chatgpt-plus'];
+      await auth.handler(ctx);
+      expect(setProvider).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
 });
 
 describe('/auth logout', () => {
@@ -269,6 +326,39 @@ describe('/auth refresh', () => {
       await auth.handler(ctx);
       expect(display.errs.join('\n')).toMatch(/refresh failed/);
       expect(display.errs.join('\n')).toMatch(/\/auth login chatgpt-plus/);
+    } finally {
+      restore();
+    }
+  });
+
+  it('refreshes the active provider adapter after token refresh', async () => {
+    const setProvider = vi.fn(async () => undefined);
+    const verifyProviderReadiness = vi.fn(async () => undefined);
+    const { ctx } = await buildCtx({
+      verifyProviderReadiness,
+      session: {
+        history: [],
+        setHistory: vi.fn(),
+        clearHistory: vi.fn(),
+        getCurrentProvider: () => 'chatgpt-plus',
+        getCurrentModel: () => 'gpt-5.5',
+        setProvider,
+      },
+    });
+    await saveTokens(ctx.paths!, {
+      provider: 'chatgpt-plus', accessToken: 'OLD', refreshToken: 'OLD-RT', expiresAtMs: Date.now() - 1,
+    });
+    const restore = stubPluginBuildProvider(
+      'plugins/aiden-plugin-chatgpt-plus/index.js',
+      { accessToken: 'NEW', refreshToken: 'NEW-RT', expiresInSeconds: 3600 },
+    );
+    try {
+      ctx.args = ['refresh', 'chatgpt-plus'];
+      await auth.handler(ctx);
+      expect(setProvider).toHaveBeenCalledOnce();
+      expect(setProvider).toHaveBeenCalledWith('chatgpt-plus', 'gpt-5.5');
+      expect(verifyProviderReadiness).toHaveBeenCalledOnce();
+      expect(verifyProviderReadiness).toHaveBeenCalledWith('chatgpt-plus', 'gpt-5.5');
     } finally {
       restore();
     }

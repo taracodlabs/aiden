@@ -154,6 +154,25 @@ export function evaluatePermissionState(
   manifest: PluginManifest,
   fsSync: FsLikeSync = require('node:fs') as FsLikeSync,
 ): PermissionEvaluation {
+  const bundledProviderOnly =
+    manifest.kind === 'bundled' &&
+    manifest.source === 'bundled' &&
+    manifest.providers.length > 0 &&
+    manifest.tools.length === 0 &&
+    manifest.skills.length === 0 &&
+    manifest.permissions.length > 0 &&
+    manifest.permissions.every((permission) =>
+      permission === 'auth-providers' || permission === 'network',
+    );
+  if (bundledProviderOnly) {
+    return {
+      state: 'granted',
+      declared: manifest.permissions,
+      granted: manifest.permissions,
+      missing: [],
+      grantedFileExists: false,
+    };
+  }
   if (!manifest.path) {
     // No path means we can't read a granted file — treat as fresh install.
     return {

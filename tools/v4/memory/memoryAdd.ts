@@ -28,11 +28,16 @@ import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { truncatePreview } from '../../../core/v4/dryRun';
 import { normalizeMemoryFile, fileLabel } from './namespaceNormalize';
 import { isMemorySource, type MemorySource } from '../../../core/v4/memory/provenance';
+import { createHash } from 'node:crypto';
 
 /** Model-supplied source, defaulting to the honest lower-trust `guess` — never
  *  `said` for a model-initiated write unless the model explicitly says so. */
 function pickSource(raw: unknown): MemorySource {
   return isMemorySource(raw) ? raw : 'guess';
+}
+
+function learningScopeKind(file: 'memory' | 'user' | 'project') {
+  return file === 'user' ? 'USER_GLOBAL' : file === 'project' ? 'REPOSITORY' : 'WORKSPACE';
 }
 
 export const memoryAddTool: ToolHandler = {
@@ -84,6 +89,43 @@ export const memoryAddTool: ToolHandler = {
     const source = pickSource(args.source);
     try {
       const r = await ctx.memoryGuard.guardedAdd(file, content, source);
+      if (r.ok && r.verified && source === 'said' && ctx.learning) {
+        const scopeKind = learningScopeKind(file);
+        const scope = ctx.learning.scopes.find((candidate) => candidate.kind === scopeKind);
+        if (!scope) {
+          return {
+            success: false,
+            verified: false,
+            error: `Learning scope ${scopeKind} is unavailable`,
+            file,
+            fileLength: r.fileLength,
+          };
+        }
+        const contentDigest = createHash('sha256').update(content.trim()).digest('hex');
+        try {
+          ctx.learning.authority.capture({
+            scope,
+            type: file === 'user' ? 'USER_PREFERENCE' : 'WORKSPACE_CONVENTION',
+            subjectKey: `explicit.${file}.${contentDigest.slice(0, 32)}`,
+            content,
+            source: {
+              kind: 'USER_EXPLICIT',
+              identity: `memory_add:${file}:${contentDigest}`,
+              revision: contentDigest,
+              independentKey: `user:${scope.ownerId}`,
+              metadata: { namespace: file, provenance: 'said', provenanceVerified: true },
+            },
+          });
+        } catch (error) {
+          return {
+            success: false,
+            verified: false,
+            error: `Learning capture failed: ${error instanceof Error ? error.message : String(error)}`,
+            file,
+            fileLength: r.fileLength,
+          };
+        }
+      }
       return {
         success: r.ok,
         verified: r.verified,

@@ -56,6 +56,24 @@ import path from 'node:path';
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
+async function refreshActiveProvider(
+  ctx: import('../commandRegistry').SlashCommandContext,
+  providerId: string,
+): Promise<void> {
+  const session = ctx.session;
+  if (!session || session.getCurrentProvider() !== providerId) return;
+  await session.setProvider(providerId, session.getCurrentModel());
+}
+
+async function verifyActiveProviderReadiness(
+  ctx: import('../commandRegistry').SlashCommandContext,
+  providerId: string,
+): Promise<void> {
+  const session = ctx.session;
+  if (!session || session.getCurrentProvider() !== providerId || !ctx.verifyProviderReadiness) return;
+  await ctx.verifyProviderReadiness(providerId, session.getCurrentModel());
+}
+
 /** "expires in 47 minutes" / "expired 2 days ago". Pure. */
 function formatRelativeExpiry(expiresAtMs: number, nowMs = Date.now()): string {
   const delta = expiresAtMs - nowMs;
@@ -255,6 +273,16 @@ export const auth: SlashCommand = {
       const ua = buildUserAgent(ctx);
       try {
         const tokens = await runtime.login(ua);
+        try {
+          await refreshActiveProvider(ctx, providerId);
+          await verifyActiveProviderReadiness(ctx, providerId);
+        } catch (err) {
+          ctx.display.printError(
+            `${providerId} signed in, but the active runtime could not refresh: ${(err as Error).message}`,
+            'Choose the provider again with /model to retry the runtime refresh.',
+          );
+          return {};
+        }
         const accountSuffix = tokens.account ? ` as ${tokens.account}` : '';
         ctx.display.success(`${providerId} authed${accountSuffix}.`);
       } catch (err) {
@@ -325,6 +353,16 @@ export const auth: SlashCommand = {
       const runtime = new OAuthProviderRuntime(provider, ctx.paths);
       try {
         const tokens = await runtime.refreshNow();
+        try {
+          await refreshActiveProvider(ctx, providerId);
+          await verifyActiveProviderReadiness(ctx, providerId);
+        } catch (err) {
+          ctx.display.printError(
+            `${providerId} tokens refreshed, but the active runtime could not refresh: ${(err as Error).message}`,
+            'Choose the provider again with /model to retry the runtime refresh.',
+          );
+          return {};
+        }
         ctx.display.success(
           `${providerId} refreshed. ${formatRelativeExpiry(tokens.expiresAtMs)}.`,
         );

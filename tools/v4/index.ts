@@ -90,6 +90,8 @@ import { appInputTool } from './system/appInput';
 // Routes through the same shared executeInstall executor as `/update install`.
 import { aidenSelfUpdateTool } from './system/aidenSelfUpdate';
 import { toolResultArtifactReadTool } from './system/toolResultArtifactRead';
+import { aidenStatusTool } from './system/aidenStatus';
+import { automationManageTool, automationStatusTool } from './automation/automationTools';
 
 import { shellExecTool } from './terminal/shellExec';
 import { executeCodeTool } from './executeCode';
@@ -163,6 +165,8 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   register(skillViewTool);
 
   register(systemInfoTool);
+  register(aidenStatusTool);
+  register(automationStatusTool);
   register(nowPlayingTool);
   register(naturalEventsTool);
   register(toolResultArtifactReadTool);
@@ -297,6 +301,7 @@ export function registerWriteTools(registry: ToolRegistry): void {
   register(memoryAddTool);
   register(memoryReplaceTool);
   register(memoryRemoveTool);
+  register(automationManageTool);
   // Phase v4.1.2 alive-core: cross-session continuity via /quit auto-summary.
   register(sessionSummaryTool);
 

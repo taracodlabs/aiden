@@ -123,9 +123,9 @@ export async function productDoctorResults(input: {
       results.push(result(
         item.title,
         groupByCategory[item.category] ?? 'Workbench',
-        item.healthy || (!item.blocking && item.state === 'setup_available'),
-        item.detail,
-        item.healthy ? undefined : nextAction(item.availableActions),
+        item.ready || (!item.blocking && item.state === 'setup_available'),
+        item.reason ?? item.detail,
+        item.ready ? undefined : item.recommendedAction ?? nextAction(item.availableActions),
       ));
     }
   }

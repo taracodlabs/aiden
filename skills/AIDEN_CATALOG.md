@@ -12,7 +12,7 @@
 | **powershell-pro** | Expert PowerShell operations — process management, services, WMI queries, REST calls, scheduled tasks, and script automation | powershell, process, wmi, service, automation, scripting, windows, rest |
 | **onenote** | Read and write OneNote notebooks, sections, and pages via Microsoft Graph API or COM automation | onenote, notes, notebook, microsoft, graph, pages, sections |
 | **wsl-bridge** | Run Linux commands inside WSL from Windows, share files between Windows and WSL, and manage WSL distributions | wsl, linux, ubuntu, bash, bridge, windows, distro, shell |
-| **taskscheduler** | Create, list, enable, disable, and delete Windows Task Scheduler jobs using PowerShell ScheduledTasks module | taskscheduler, scheduled, task, automation, cron, windows, powershell, trigger |
+| **taskscheduler** | Explicitly administer Windows Task Scheduler jobs using PowerShell ScheduledTasks | taskscheduler, schtasks, windows, powershell, scheduled-task |
 | **clipboard-history** | Read, write, and manage Windows clipboard content including text, HTML, images, and clipboard history via PowerShell | clipboard, copy, paste, history, windows, powershell, text |
 | **windows-registry** | Read, write, and query Windows Registry keys and values via PowerShell Registry provider | registry, regedit, windows, powershell, hklm, hkcu, settings, config |
 | **windows-services** | List, start, stop, restart, and configure Windows services via PowerShell Get-Service and Set-Service | services, windows, powershell, daemon, startup, get-service, set-service |

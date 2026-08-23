@@ -122,6 +122,33 @@ describe('evaluatePermissionState', () => {
     expect(e.state).toBe('suspended');
     expect(e.missing).toEqual(['shell']);
   });
+
+  it('treats a bundled provider-only auth plugin as loaded without a separate tool grant', async () => {
+    const dir = await writePlugin(tmpRoot, 'bundled-auth', ['auth-providers', 'network']);
+    const e = evaluatePermissionState({
+      manifestVersion: MANIFEST_VERSION,
+      name: 'bundled-auth', version: '1.0.0', author: 't', description: 'd',
+      kind: 'bundled', source: 'bundled',
+      tools: [], skills: [], providers: ['chatgpt-plus'],
+      permissions: ['auth-providers', 'network'], requiresEnv: [],
+      path: dir,
+    });
+    expect(e.state).toBe('granted');
+    expect(e.missing).toEqual([]);
+  });
+
+  it('does not auto-grant provider permissions to a user-installed plugin', async () => {
+    const dir = await writePlugin(tmpRoot, 'user-auth', ['auth-providers', 'network']);
+    const e = evaluatePermissionState({
+      manifestVersion: MANIFEST_VERSION,
+      name: 'user-auth', version: '1.0.0', author: 't', description: 'd',
+      kind: 'bundled', source: 'user',
+      tools: [], skills: [], providers: ['user-provider'],
+      permissions: ['auth-providers', 'network'], requiresEnv: [],
+      path: dir,
+    });
+    expect(e.state).toBe('pending-grant');
+  });
 });
 
 describe('PluginLoader pending-grant + suspended end-to-end', () => {

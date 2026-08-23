@@ -4,6 +4,7 @@
  */
 
 import type { WorkbenchProviderSnapshot } from './providerSetupAuthority';
+import type { ExternalCodingHealthProjection } from './codingPort';
 
 export type ReadinessState = 'ready' | 'setup_available' | 'needs_setup' | 'needs_attention' | 'unavailable' | 'checking' | 'degraded';
 
@@ -16,6 +17,14 @@ export interface SystemReadinessItem {
   configured: boolean;
   available: boolean;
   healthy: boolean;
+  supported: boolean;
+  authenticated: boolean;
+  runtimeAvailable: boolean;
+  permissionAvailable: boolean;
+  validationAvailable: boolean;
+  ready: boolean;
+  reason: string;
+  recommendedAction: string | null;
   blocking: boolean;
   severity: 'info' | 'warning' | 'error';
   availableActions: string[];
@@ -29,13 +38,31 @@ export interface SystemReadinessProjection {
   checkedAt: number;
 }
 
-function item(input: Omit<SystemReadinessItem, 'checkedAt'>, checkedAt: number): SystemReadinessItem {
-  return { ...input, checkedAt };
+type ReadinessDimensions = Pick<SystemReadinessItem,
+  'supported' | 'authenticated' | 'runtimeAvailable' | 'permissionAvailable'
+  | 'validationAvailable' | 'ready' | 'reason' | 'recommendedAction'>;
+
+function item(
+  input: Omit<SystemReadinessItem, 'checkedAt' | keyof ReadinessDimensions> & Partial<ReadinessDimensions>,
+  checkedAt: number,
+): SystemReadinessItem {
+  return {
+    ...input,
+    supported: input.supported ?? input.available,
+    authenticated: input.authenticated ?? input.configured,
+    runtimeAvailable: input.runtimeAvailable ?? input.available,
+    permissionAvailable: input.permissionAvailable ?? input.available,
+    validationAvailable: input.validationAvailable ?? input.healthy,
+    ready: input.ready ?? input.healthy,
+    reason: input.reason ?? input.detail,
+    recommendedAction: input.recommendedAction ?? input.availableActions[0] ?? null,
+    checkedAt,
+  };
 }
 
 export function createSystemReadinessAuthority(options: {
   providers(sessionId?: string): Promise<WorkbenchProviderSnapshot>;
-  coding(): Promise<{ ready: boolean; reason: string; isolation: string }>;
+  coding(): Promise<ExternalCodingHealthProjection>;
   apps(): Promise<{ providers: Array<{ id: string; label: string; health: string }>; accounts: unknown[] }>;
   browser(): Promise<{ ready: boolean; detail: string; grantRequired: boolean }>;
   workspace(): Promise<{ ready: boolean; detail: string }>;
@@ -57,6 +84,22 @@ export function createSystemReadinessAuthority(options: {
         ? providerSnapshot.providers.find((provider) => provider.id === selected.providerId)
         : undefined;
       const appConfigured = apps.providers.some((provider) => !['not_configured', 'unavailable'].includes(provider.health));
+      const codingConfigured = coding.model !== null;
+      const codingRuntimeAvailable = coding.executable !== null && coding.state !== 'provider_unreachable';
+      const codingSupported = coding.state !== 'unsupported_cli';
+      const codingAuthenticated = coding.authentication === 'ready';
+      const codingValidationAvailable = coding.modelValidation === 'ready' && coding.isolation === 'available';
+      const codingAction = !codingRuntimeAvailable
+        ? 'Install or repair the supported coding runtime.'
+        : !codingSupported
+          ? 'Install a supported coding runtime version.'
+          : !codingConfigured || coding.state === 'unsupported_model' || coding.state === 'model_unavailable_for_auth_mode'
+            ? 'Choose a supported coding model.'
+            : !codingAuthenticated
+              ? 'Authenticate the coding provider.'
+              : !codingValidationAvailable
+                ? 'Restore independent coding validation.'
+                : null;
       const items: SystemReadinessItem[] = [
         item({
           id: 'chat-provider', category: 'chat', title: 'Chat provider',
@@ -67,9 +110,13 @@ export function createSystemReadinessAuthority(options: {
         }, checkedAt),
         item({
           id: 'coding-provider', category: 'coding', title: 'Coding provider',
-          state: coding.ready ? 'ready' : 'needs_setup', detail: coding.reason,
-          configured: coding.ready, available: true, healthy: coding.ready,
-          blocking: false, severity: coding.ready ? 'info' : 'warning', availableActions: ['manage_coding', 'recheck'],
+          state: coding.ready ? 'ready' : codingConfigured ? 'needs_attention' : 'setup_available', detail: coding.reason,
+          configured: codingConfigured, available: codingRuntimeAvailable, healthy: coding.ready,
+          supported: codingSupported, authenticated: codingAuthenticated,
+          runtimeAvailable: codingRuntimeAvailable, permissionAvailable: true,
+          validationAvailable: codingValidationAvailable, ready: coding.ready,
+          reason: coding.reason, recommendedAction: codingAction,
+          blocking: false, severity: codingConfigured && !coding.ready ? 'warning' : 'info', availableActions: ['manage_coding', 'recheck'],
         }, checkedAt),
         item({
           id: 'validation', category: 'validation', title: 'Independent validation',
@@ -80,7 +127,7 @@ export function createSystemReadinessAuthority(options: {
         }, checkedAt),
         item({
           id: 'browser', category: 'browser', title: 'Browser',
-          state: browser.ready ? 'ready' : browser.grantRequired ? 'needs_setup' : 'unavailable', detail: browser.detail,
+          state: browser.ready ? 'ready' : browser.grantRequired ? 'setup_available' : 'unavailable', detail: browser.detail,
           configured: browser.ready, available: browser.ready || browser.grantRequired, healthy: browser.ready,
           blocking: false, severity: browser.ready ? 'info' : 'warning', availableActions: browser.grantRequired ? ['review_browser_permission'] : ['recheck'],
         }, checkedAt),
@@ -96,14 +143,14 @@ export function createSystemReadinessAuthority(options: {
           state: automations.ready ? 'ready' : automations.entitled ? 'needs_attention' : 'unavailable',
           detail: automations.detail,
           configured: automations.ready, available: automations.entitled, healthy: automations.ready,
-          blocking: false, severity: automations.ready ? 'info' : 'warning', availableActions: ['manage_automations'],
+          blocking: false, severity: automations.entitled && !automations.ready ? 'warning' : 'info', availableActions: ['manage_automations'],
         }, checkedAt)] : []),
         ...(presence ? [item({
           id: 'presence', category: 'presence' as const, title: 'Agentic Presence',
           state: presence.ready ? 'ready' : presence.entitled ? 'needs_attention' : 'unavailable',
           detail: presence.detail,
           configured: presence.ready, available: presence.entitled, healthy: presence.ready,
-          blocking: false, severity: presence.ready ? 'info' : 'warning', availableActions: ['open_attention'],
+          blocking: false, severity: presence.entitled && !presence.ready ? 'warning' : 'info', availableActions: ['open_attention'],
         }, checkedAt)] : []),
         item({
           id: 'workspace', category: 'workspace', title: 'Coding workspace',
@@ -124,7 +171,11 @@ export function createSystemReadinessAuthority(options: {
           blocking: true, severity: evidence.ready ? 'info' : 'error', availableActions: [],
         }, checkedAt),
       ];
-      const issues = items.filter((candidate) => candidate.state !== 'ready' && candidate.state !== 'setup_available');
+      const issues = items.filter((candidate) =>
+        (candidate.blocking && candidate.state !== 'ready')
+        || candidate.state === 'needs_attention'
+        || candidate.state === 'degraded',
+      );
       return { overall: issues.some((candidate) => candidate.blocking) ? 'needs_attention' : 'ready', items, issues, checkedAt };
     },
   };

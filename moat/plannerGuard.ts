@@ -123,11 +123,29 @@ const RULES: KeywordRule[] = [
   {
     keywords:
       /\b(remember|forget|memory|preference|recall|note that|memorize)\b/i,
-    toolsets: ['memory'],
+    toolsets: ['memory', 'status'],
   },
   // Skills
   {
     keywords: /\b(skill|skills|plugin|extension)\b/i,
+    toolsets: ['skills', 'status'],
+  },
+  // Canonical Aiden product readiness and durable self-awareness.
+  {
+    keywords:
+      /\b(readiness|ready|needs? attention|configured|configuration|authenticated|available|presence|learning|managed skill|skill candidate|health)\b/i,
+    toolsets: ['status'],
+  },
+  // Ordinary schedules belong to Reliable Automations. Explicit Windows
+  // Task Scheduler wording also activates skills so its dedicated skill can
+  // be loaded instead of silently substituting Aiden's scheduler.
+  {
+    keywords:
+      /\b(remind|reminder|recurring|repeat(?:ing)?|daily|weekly|monthly|every\s+(?:day|weekday|week|month|hour|morning|evening)|schedule(?:d|s|ing)?|later|tomorrow|cron|automation)\b/i,
+    toolsets: ['automation'],
+  },
+  {
+    keywords: /\b(windows\s+task\s+scheduler|schtasks|scheduled\s+task)\b/i,
     toolsets: ['skills'],
   },
   // Sessions

@@ -10,6 +10,10 @@ import { memoryReplaceTool } from '../../../tools/v4/memory/memoryReplace';
 import { memoryRemoveTool } from '../../../tools/v4/memory/memoryRemove';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import type { ToolContext } from '../../../core/v4/toolRegistry';
+import Database from 'better-sqlite3';
+import { runMigrations } from '../../../core/v4/daemon/db/migrations';
+import { createLearningAuthority } from '../../../core/v4/learning/learningAuthority';
+import { localLearningScopes } from '../../../core/v4/learning/scopes';
 
 let tmp: string;
 let projectDir: string;
@@ -115,6 +119,44 @@ describe('memory tool wrappers — file=memory and file=user (legacy coverage)',
       expect(tool.category).toBe('write');
       expect(tool.mutates).toBe(true);
       expect(tool.toolset).toBe('memory');
+    }
+  });
+});
+
+describe('memory_add canonical Learning bridge', () => {
+  it('records one trusted workspace Learning entry while preserving the legacy projection', async () => {
+    const dbPath = path.join(tmp, 'learning.db');
+    let db = new Database(dbPath);
+    runMigrations(db);
+    const learning = createLearningAuthority({ db, enabled: true });
+    const scopes = localLearningScopes({ ownerId: 'local-user', workspaceId: 'workspace-test' });
+    const learningCtx: ToolContext = { ...ctx, learning: { authority: learning, scopes } };
+    try {
+      const args = { file: 'project', content: 'Prefer pnpm in this workspace.', source: 'said' };
+      const first = await memoryAddTool.execute(args, learningCtx) as { success: boolean; verified: boolean };
+      const second = await memoryAddTool.execute(args, learningCtx) as { success: boolean; verified: boolean };
+      expect(first).toMatchObject({ success: true, verified: true });
+      expect(second).toMatchObject({ success: true, verified: true });
+
+      const entries = learning.list({ scopes: [scopes.find((scope) => scope.kind === 'REPOSITORY')!] });
+      expect(entries).toHaveLength(1);
+      expect(entries[0]).toMatchObject({
+        type: 'WORKSPACE_CONVENTION', confidence: 'TRUSTED', lifecycle: 'ACTIVE',
+        content: 'Prefer pnpm in this workspace.', eligible: true,
+      });
+      expect(learning.export({ scopes }).sources).toContainEqual(expect.objectContaining({
+        kind: 'USER_EXPLICIT', verification: 'explicit_user',
+      }));
+      expect((await mgr.loadSnapshot()).files?.project?.content).toContain('Prefer pnpm in this workspace.');
+
+      db.close();
+      db = new Database(dbPath);
+      runMigrations(db);
+      const reopened = createLearningAuthority({ db, enabled: true });
+      expect(reopened.list({ scopes: [scopes.find((scope) => scope.kind === 'REPOSITORY')!] }))
+        .toHaveLength(1);
+    } finally {
+      if (db.open) db.close();
     }
   });
 });

@@ -45,7 +45,7 @@ function fakeSecrets(): ProviderSetupSecretAuthority & { values: Map<string, str
   };
 }
 
-function harness() {
+function harness(overrides: { oauthRegistry?: any } = {}) {
   const config = new MemoryConfig();
   const secrets = fakeSecrets();
   const sessions = new Map<string, { providerId: string | null; modelId: string | null }>();
@@ -59,7 +59,11 @@ function harness() {
       baseUrl: PROVIDER_REGISTRY[providerId].baseUrl,
       apiKey: null,
       source: 'config',
-      effectiveCredential: { configured: true },
+      effectiveCredential: {
+        configured: true,
+        credentialFingerprint: null,
+        endpointFingerprint: 'endpoint',
+      },
     })),
     getLocalModelInventory: vi.fn(async () => ({
       source: 'live',
@@ -80,13 +84,18 @@ function harness() {
       sessions.set(id, { ...current, ...value });
     },
   };
-  const probe = vi.fn(async ({ providerId, modelId }: { providerId: string; modelId: string }) => ({
-    state: 'complete', provider: providerId, model: modelId,
+  const probe = vi.fn(async ({ providerId, modelId }: { providerId: string; modelId: string }) => {
+    const record = {
+    state: 'complete' as const, provider: providerId, model: modelId,
     plainCompletionStatus: 'verified', streamingStatus: 'verified', toolCallStatus: 'verified',
     toolResultReplayStatus: 'verified', structuredArgumentsStatus: 'verified',
-    endpointFingerprint: 'endpoint', credentialSource: 'secure_store', transportMode: PROVIDER_REGISTRY[providerId].apiMode,
+    endpointFingerprint: 'endpoint', credentialFingerprint: null,
+    credentialSource: 'secure_store' as const, transportMode: PROVIDER_REGISTRY[providerId].apiMode,
     verificationTimestamp: new Date().toISOString(), verificationErrorCategory: null,
-  }));
+    };
+    config.set(`providers.${providerId}.readiness`, record);
+    return record;
+  });
   return {
     config, secrets, resolver, sessionStore, probe,
     authority: createWorkbenchProviderSetupAuthority({
@@ -97,6 +106,7 @@ function harness() {
       secretScope: { ownerId: 'local-user', workspaceId: 'workspace_test' },
       sessionStore: sessionStore as any,
       probe: probe as any,
+      oauthRegistry: overrides.oauthRegistry,
     }),
   };
 }
@@ -180,5 +190,66 @@ describe('Workbench provider setup authority', () => {
     expect(resolver.getLocalModelInventory).toHaveBeenCalledWith(expect.objectContaining({ forceRefresh: true }));
     expect(provider.models.map((model) => model.id)).toEqual(['qwen2.5:7b']);
     expect(provider.authKinds).toEqual(['local']);
+  });
+
+  it('does not project a readiness failure from a replaced credential', async () => {
+    const { authority, config, resolver } = harness();
+    config.set('providers.groq.apiKey', 'current-credential');
+    config.set('providers.groq.readiness', {
+      state: 'failed_requires_user_action',
+      provider: 'groq',
+      model: PROVIDER_REGISTRY.groq.modelIds[0],
+      credentialFingerprint: 'replaced-credential',
+      endpointFingerprint: 'endpoint',
+      credentialSource: 'managed_environment',
+      transportMode: PROVIDER_REGISTRY.groq.apiMode,
+      plainCompletionStatus: 'failed',
+      streamingStatus: 'failed',
+      toolCallStatus: 'failed',
+      toolResultReplayStatus: 'failed',
+      structuredArgumentsStatus: 'failed',
+      verificationTimestamp: new Date().toISOString(),
+      verificationErrorCategory: 'credential_invalid',
+    });
+    resolver.describe.mockResolvedValue({
+      provider: 'groq',
+      model: PROVIDER_REGISTRY.groq.modelIds[0],
+      apiMode: PROVIDER_REGISTRY.groq.apiMode,
+      baseUrl: PROVIDER_REGISTRY.groq.baseUrl,
+      apiKey: null,
+      source: 'config',
+      effectiveCredential: {
+        configured: true,
+        credentialFingerprint: 'current-credential',
+        endpointFingerprint: 'endpoint',
+      },
+    });
+
+    const snapshot = await authority.snapshot();
+    const groq = snapshot.providers.find((provider) => provider.id === 'groq')!;
+    expect(groq.configured).toBe(true);
+    expect(groq.healthy).toBe(false);
+    expect(groq.detail).toBe('Runtime verification is required for the current credential.');
+    expect(groq.detail).not.toContain('credential invalid');
+  });
+
+  it('does not report Workbench OAuth connected until runtime readiness is verified', async () => {
+    const login = vi.fn(async () => ({ account: 'connected@example.com' }));
+    const { authority, config, probe } = harness({
+      oauthRegistry: { runtimeFor: () => ({ login }) },
+    });
+    config.set('providers.chatgpt-plus.apiKey', 'configured-for-test');
+
+    const started = await authority.startOAuth('chatgpt-plus');
+    await vi.waitFor(() => {
+      expect(authority.authSession(started.authSessionId)?.state).toBe('connected');
+    });
+
+    expect(login).toHaveBeenCalledOnce();
+    expect(probe).toHaveBeenCalledWith(expect.objectContaining({
+      providerId: 'chatgpt-plus',
+      modelId: expect.any(String),
+    }));
+    expect(authority.authSession(started.authSessionId)?.detail).toBe('Connected and verified');
   });
 });

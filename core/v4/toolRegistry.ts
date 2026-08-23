@@ -177,6 +177,20 @@ export interface ToolContext {
   /** Memory manager — currently unused (memory loads via prompt snapshot)
    *  but plumbed through so Phase 9 memory-write tools can hook in. */
   memory?: MemoryManager;
+  /** Canonical Learning authority used by explicit durable-memory writes.
+   *  Legacy Memory remains a compatibility projection; Learning owns the
+   *  trusted user-facing fact and scope. */
+  learning?: {
+    authority: import('./learning/learningAuthority').LearningAuthority;
+    scopes: import('./learning/types').LearningScope[];
+  };
+  /** Existing v4.22 authority projection used by natural-language automation tools. */
+  automation?: import('./workbench/automationPort').WorkbenchAutomationPort;
+  /** Bounded read-only projection over existing runtime authorities. */
+  runtimeStatus?: (
+    topic: 'readiness' | 'learning' | 'presence' | 'skills',
+    query?: string,
+  ) => Promise<unknown> | unknown;
   /** Process registry shared across `process_*` tools (Phase 8). */
   processes?: ProcessRegistry;
   /** Which terminal backend `shell_exec` should route to. Phase 9

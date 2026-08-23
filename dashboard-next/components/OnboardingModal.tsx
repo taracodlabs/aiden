@@ -22,6 +22,8 @@ const FIRST_SUCCESS = [
   'Create something',
 ] as const
 
+const STEP_STORAGE_KEY = 'aiden:first-run:step:v1'
+
 export function OnboardingModal({
   onComplete,
   onOpenSettings,
@@ -31,7 +33,11 @@ export function OnboardingModal({
   onOpenSettings: (tab: 'runtime' | 'model') => void
   onOpenApps: () => void
 }) {
-  const [index, setIndex] = useState(0)
+  const [index, setIndex] = useState(() => {
+    if (typeof window === 'undefined') return 0
+    const stored = Number.parseInt(window.localStorage.getItem(STEP_STORAGE_KEY) ?? '0', 10)
+    return Number.isFinite(stored) ? Math.min(Math.max(stored, 0), STEP_ORDER.length - 1) : 0
+  })
   const [readiness, setReadiness] = useState<aiden.SystemReadinessProjection | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [checking, setChecking] = useState(false)
@@ -45,13 +51,16 @@ export function OnboardingModal({
   }
 
   useEffect(() => { void refresh() }, [])
+  useEffect(() => { window.localStorage.setItem(STEP_STORAGE_KEY, String(index)) }, [index])
 
   const current = STEP_ORDER[index]
   const readinessItem = useMemo(
     () => current.readinessId ? readiness?.items.find((item) => item.id === current.readinessId) : undefined,
     [current.readinessId, readiness],
   )
-  const complete = readinessItem?.healthy === true
+  const complete = readinessItem?.ready ?? readinessItem?.healthy === true
+  const optionalNotConfigured = current.optional === true && !complete
+    && ['setup_available', 'needs_setup', 'unavailable'].includes(readinessItem?.state ?? '')
   const next = () => setIndex((value) => Math.min(STEP_ORDER.length - 1, value + 1))
   const back = () => setIndex((value) => Math.max(0, value - 1))
   const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
@@ -111,7 +120,9 @@ export function OnboardingModal({
               </div>
             ) : readinessItem ? (
               <div>
-                <p style={{ ...mono, color: complete ? '#22c55e' : '#f59e0b', fontSize: 12 }}>{complete ? '✓ Ready' : '○ Needs attention'}</p>
+                <p style={{ ...mono, color: complete ? '#22c55e' : optionalNotConfigured ? '#999' : '#f59e0b', fontSize: 12 }}>
+                  {complete ? '✓ Ready' : optionalNotConfigured ? 'Optional · Not configured' : '○ Needs attention'}
+                </p>
                 <p style={{ ...mono, color: '#aaa', fontSize: 12, lineHeight: 1.7 }}>{readinessItem.detail}</p>
                 {!complete ? action() : null}
               </div>
