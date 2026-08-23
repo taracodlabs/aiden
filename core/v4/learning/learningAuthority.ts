@@ -123,7 +123,7 @@ function normalizeKey(value: string, label: string): string {
 
 function metadataForPersistence(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
   if (!metadata) return {};
-  const allowed = /^(?:kind|category|code|status|tool|count|durationMs|reasonCode|provenance|provenanceVerified|namespace)$/;
+  const allowed = /^(?:kind|category|code|status|tool|count|durationMs|reasonCode|provenance|provenanceVerified|namespace|skillId|skillVersionId|skillVersionDigest)$/;
   return Object.fromEntries(Object.entries(metadata).filter(([key, value]) =>
     allowed.test(key) && (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean')));
 }

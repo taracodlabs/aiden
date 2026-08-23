@@ -6,7 +6,8 @@
 export type PresenceInitiator = 'USER' | 'AUTOMATION' | 'SYSTEM' | 'EXTERNAL_EVENT' | 'PROPOSED';
 export type PresenceSourceKind =
   | 'approval' | 'effect' | 'job' | 'browser' | 'connected_account'
-  | 'automation' | 'continuity' | 'delivery' | 'budget' | 'external_event';
+  | 'automation' | 'continuity' | 'delivery' | 'budget' | 'external_event'
+  | 'skill_intelligence';
 export type PresenceState = 'active' | 'snoozed' | 'dismissed' | 'resolved' | 'expired' | 'suppressed';
 export type PresenceCategory =
   | 'approval_required' | 'unknown_effect' | 'browser_takeover' | 'verification_failure'

@@ -305,6 +305,97 @@ export interface CapabilityExtensionsSnapshot {
   items: CapabilityExtensionItem[];
 }
 
+export interface WorkbenchSkillStep {
+  id: string;
+  operation: string;
+  kind: 'tool' | 'skill';
+  mutates: boolean;
+  childSkillVersionId?: string;
+  fallbackStepIds?: string[];
+}
+
+export interface WorkbenchSkillCapabilityRequirement {
+  capabilityId: string;
+  versionRange?: string;
+  requiredPermissions: string[];
+  required: boolean;
+  fallbackGroup?: string;
+}
+
+export interface WorkbenchSkillCandidate {
+  id: string; scopeId: string; patternId: string; digest: string; proposedName: string; purpose: string;
+  steps: WorkbenchSkillStep[]; capabilityRequirements: WorkbenchSkillCapabilityRequirement[];
+  positiveTraceIds: string[]; negativeTraceIds: string[]; learningEntryIds: string[];
+  state: 'candidate' | 'accepted' | 'dismissed' | 'stale'; executable: false; stateVersion: number;
+  createdAt: number; updatedAt: number;
+}
+
+export interface WorkbenchSkillDraft {
+  id: string; skillId: string; candidateId: string | null; scopeId: string; name: string; description: string;
+  steps: WorkbenchSkillStep[]; capabilityRequirements: WorkbenchSkillCapabilityRequirement[];
+  composition: string[]; expectedEvidence: string[]; digest: string;
+  state: 'draft' | 'evaluating' | 'evaluated' | 'stale' | 'archived'; executable: false;
+  stateVersion: number; createdAt: number; updatedAt: number;
+}
+
+export interface WorkbenchSkillEvaluation {
+  id: string; draftId: string; draftDigest: string; digest: string; evaluatorVersion: number;
+  capabilityEnvironmentDigest: string;
+  sourceFixtureDigest: string;
+  sourceFixtures: Array<{
+    traceId: string;
+    classification: 'positive' | 'negative';
+    sourceDigest: string;
+    evidenceIds: string[];
+  }>;
+  checks: Array<{ code: string; passed: boolean; detail: string }>;
+  passed: boolean; state: 'running' | 'passed' | 'failed' | 'interrupted';
+  startedAt: number; completedAt: number | null;
+}
+
+export interface WorkbenchSkillApproval {
+  id: string; skillId: string; draftId: string; evaluationId: string; scopeId: string;
+  draftDigest: string; evaluationDigest: string; capabilityRequirementsDigest: string;
+  state: 'pending' | 'approved' | 'denied' | 'stale'; requestedAt: number; decidedAt: number | null;
+  stateVersion: number;
+}
+
+export interface WorkbenchSkillVersion {
+  id: string; skillId: string; version: number; digest: string;
+  canonicalSpec: Record<string, unknown>;
+  capabilityRequirements: WorkbenchSkillCapabilityRequirement[]; composition: string[];
+  evaluationId: string | null; approvalId: string | null; patternId: string | null; candidateId: string | null;
+  sourceKind: 'intelligence' | 'legacy'; legacy: boolean; createdAt: number;
+}
+
+export interface WorkbenchSkillActiveItem {
+  pointer: {
+    skillId: string; scopeId: string; skillVersionId: string; digest: string; enabled: boolean;
+    driftState: 'clean' | 'drifted' | 'missing' | 'unknown'; stateVersion: number; activatedAt: number;
+  };
+  version: WorkbenchSkillVersion;
+  versions: WorkbenchSkillVersion[];
+  health: { state: 'insufficient_data' | 'healthy' | 'degraded' | 'disabled'; attributableSamples: number; successes: number; failures: number; unknowns: number; failureRate: number | null };
+  outcomes: Array<{ id: string; skillVersionId: string; outcome: string; verdict: string; attributable: boolean; reason: string | null; recordedAt: number }>;
+  rollbackTarget: WorkbenchSkillVersion | null;
+}
+
+export interface WorkbenchSkillIntelligenceSnapshot {
+  enabled: boolean;
+  doctor: { enabled: boolean; schemaReady: boolean; traces: number; patterns: number; candidates: number; drafts: number; active: number; degraded: number; drifted: number; prerequisiteIssues: number };
+  candidates: WorkbenchSkillCandidate[];
+  drafts: WorkbenchSkillDraft[];
+  evaluations: WorkbenchSkillEvaluation[];
+  approvals: WorkbenchSkillApproval[];
+  active: WorkbenchSkillActiveItem[];
+}
+
+export interface WorkbenchSkillCandidateReview {
+  candidate: WorkbenchSkillCandidate;
+  pattern: { objectiveClass: string; observedCount: number; verifiedCount: number; failureCount: number; unknownCount: number; confidence: number };
+  traces: Array<{ id: string; classification: 'positive' | 'negative' | 'unknown'; verdict: string; evidenceIds: string[]; observedAt: number }>;
+}
+
 export interface WorkbenchAppProvider {
   id: string;
   label: string;
@@ -891,6 +982,75 @@ export async function testCapability(capabilityId: string): Promise<CapabilityEx
 
 export async function uninstallCapability(capabilityId: string, version: string): Promise<CapabilityExtensionsSnapshot> {
   return capabilityRequest(`/api/capabilities/${encodeURIComponent(capabilityId)}/uninstall`, { version });
+}
+
+export function loadSkillIntelligence(): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest('/api/skill-intelligence');
+}
+
+export function loadSkillCandidate(candidateId: string): Promise<WorkbenchSkillCandidateReview> {
+  return managementRequest(`/api/skill-intelligence/candidates/${encodeURIComponent(candidateId)}`);
+}
+
+export function dismissSkillCandidate(candidateId: string, expectedVersion: number): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/candidates/${encodeURIComponent(candidateId)}/dismiss`, {
+    method: 'POST', body: JSON.stringify({ expectedVersion }),
+  });
+}
+
+export function createSkillDraft(input: {
+  candidateId: string; name: string; description: string; steps: WorkbenchSkillStep[];
+  capabilityRequirements: WorkbenchSkillCapabilityRequirement[]; composition: string[]; expectedEvidence: string[];
+}): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest('/api/skill-intelligence/drafts', { method: 'POST', body: JSON.stringify(input) });
+}
+
+export function updateSkillDraft(draftId: string, input: {
+  expectedVersion: number; name?: string; description?: string; steps?: WorkbenchSkillStep[];
+  capabilityRequirements?: WorkbenchSkillCapabilityRequirement[]; composition?: string[]; expectedEvidence?: string[];
+}): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/drafts/${encodeURIComponent(draftId)}/edit`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+}
+
+export function evaluateSkillDraft(draftId: string): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/drafts/${encodeURIComponent(draftId)}/evaluate`, {
+    method: 'POST', body: JSON.stringify({}),
+  });
+}
+
+export function requestSkillApproval(draftId: string, evaluationId: string): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/drafts/${encodeURIComponent(draftId)}/approval`, {
+    method: 'POST', body: JSON.stringify({ evaluationId }),
+  });
+}
+
+export function decideSkillApproval(
+  approvalId: string,
+  input: { decision: 'approved' | 'denied'; draftDigest: string; evaluationDigest: string },
+): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/approvals/${encodeURIComponent(approvalId)}/decision`, {
+    method: 'POST', body: JSON.stringify(input),
+  });
+}
+
+export function activateSkillApproval(approvalId: string): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/approvals/${encodeURIComponent(approvalId)}/activate`, {
+    method: 'POST', body: JSON.stringify({}),
+  });
+}
+
+export function disableManagedSkill(skillId: string): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/skills/${encodeURIComponent(skillId)}/disable`, {
+    method: 'POST', body: JSON.stringify({}),
+  });
+}
+
+export function rollbackManagedSkill(skillId: string, targetVersionId: string): Promise<WorkbenchSkillIntelligenceSnapshot> {
+  return managementRequest(`/api/skill-intelligence/skills/${encodeURIComponent(skillId)}/rollback`, {
+    method: 'POST', body: JSON.stringify({ targetVersionId }),
+  });
 }
 
 async function appsRequest<T>(path: string, init?: RequestInit): Promise<T> {

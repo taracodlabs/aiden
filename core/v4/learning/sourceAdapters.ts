@@ -43,6 +43,9 @@ export function capturePresenceFeedbackLearning(input: {
 
 export function captureSkillOutcomeLearning(input: VerifiedSourceInput & {
   skillName: string;
+  skillId: string;
+  skillVersionId: string;
+  skillVersionDigest: string;
   outcomeIdentity: string;
 }) {
   return input.authority.capture({
@@ -53,7 +56,7 @@ export function captureSkillOutcomeLearning(input: VerifiedSourceInput & {
     source: {
       kind: 'SKILL_OUTCOME',
       identity: input.outcomeIdentity,
-      revision: `${input.jobId}:${input.attemptId}:${input.generation}`,
+      revision: `${input.skillVersionId}:${input.skillVersionDigest}:${input.jobId}:${input.attemptId}:${input.generation}`,
       independentKey: input.jobId,
       jobId: input.jobId,
       attemptId: input.attemptId,
@@ -61,6 +64,11 @@ export function captureSkillOutcomeLearning(input: VerifiedSourceInput & {
       evidenceId: input.evidenceId,
       effectId: input.effectId,
       skillName: input.skillName,
+      metadata: {
+        skillId: input.skillId,
+        skillVersionId: input.skillVersionId,
+        skillVersionDigest: input.skillVersionDigest,
+      },
     },
   });
 }

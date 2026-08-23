@@ -3992,27 +3992,273 @@ const SOURCE_COLORS: Record<string, string> = {
   'approved':  '#a78bfa',
 }
 
+function managedSkillName(version: aiden.WorkbenchSkillVersion): string {
+  const frontmatter = version.canonicalSpec.frontmatter
+  if (!frontmatter || typeof frontmatter !== 'object') return version.skillId
+  const name = (frontmatter as Record<string, unknown>).name
+  return typeof name === 'string' && name.trim() ? name.trim() : version.skillId
+}
+
 function SkillsManager() {
   const { capabilities } = useDevOS()
-  const [skills, setSkills]       = useState<any[]>(capabilities?.skills ?? [])
-  const [loading, setLoading]     = useState(capabilities === null)
-  const [filter, setFilter]       = useState<'all' | 'built-in' | 'learned' | 'approved' | 'workspace'>('all')
+  const [skills, setSkills] = useState<any[]>(capabilities?.skills ?? [])
+  const [loading, setLoading] = useState(capabilities === null)
+  const [filter, setFilter] = useState<'all' | 'built-in' | 'learned' | 'approved' | 'workspace'>('all')
+  const [intelligence, setIntelligence] = useState<aiden.WorkbenchSkillIntelligenceSnapshot | null>(null)
+  const [review, setReview] = useState<aiden.WorkbenchSkillCandidateReview | null>(null)
+  const [draftEdits, setDraftEdits] = useState<Record<string, { description: string; operations: string[] }>>({})
+  const [busy, setBusy] = useState<string | null>(null)
+  const [error, setError] = useState('')
 
   useEffect(() => {
     setSkills((capabilities?.skills ?? []).map((skill) => ({ ...skill, source: skill.category || 'runtime', enabled: true })))
     setLoading(capabilities === null)
   }, [capabilities])
 
-  const refresh = () => undefined
+  const refresh = useCallback(async () => {
+    setError('')
+    try { setIntelligence(await aiden.loadSkillIntelligence()) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Skill Intelligence is unavailable') }
+  }, [])
+
+  useEffect(() => { void refresh() }, [refresh])
+
+  const act = async (identity: string, operation: () => Promise<aiden.WorkbenchSkillIntelligenceSnapshot>) => {
+    setBusy(identity); setError('')
+    try { setIntelligence(await operation()); setReview(null) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Skill operation failed') }
+    finally { setBusy(null) }
+  }
+
+  const openCandidate = async (candidate: aiden.WorkbenchSkillCandidate) => {
+    setBusy(`candidate:${candidate.id}`); setError('')
+    try { setReview(await aiden.loadSkillCandidate(candidate.id)) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : 'Candidate review is unavailable') }
+    finally { setBusy(null) }
+  }
+
+  const createDraft = async (candidate: aiden.WorkbenchSkillCandidate) => {
+    const evidence = Array.from(new Set((review?.candidate.id === candidate.id ? review.traces : [])
+      .flatMap((trace) => trace.evidenceIds)))
+    await act(`candidate:${candidate.id}`, () => aiden.createSkillDraft({
+      candidateId: candidate.id,
+      name: candidate.proposedName,
+      description: candidate.purpose,
+      steps: candidate.steps,
+      capabilityRequirements: candidate.capabilityRequirements,
+      composition: candidate.steps.flatMap((step) => step.childSkillVersionId ? [step.childSkillVersionId] : []),
+      expectedEvidence: evidence,
+    }))
+  }
 
   const visible = filter === 'all' ? skills : skills.filter(s => s.source === filter)
   const counts  = skills.reduce((acc: Record<string, number>, s) => {
     acc[s.source] = (acc[s.source] || 0) + 1; return acc
   }, {})
+  const candidates = intelligence?.candidates.filter((candidate) => candidate.state === 'candidate' || candidate.state === 'stale') ?? []
+  const drafts = intelligence?.drafts.filter((draft) => draft.state !== 'archived') ?? []
+  const evaluationsFor = (draft: aiden.WorkbenchSkillDraft) => (intelligence?.evaluations ?? [])
+    .filter((evaluation) => evaluation.draftId === draft.id && evaluation.draftDigest === draft.digest)
+    .sort((left, right) => right.startedAt - left.startedAt)
+  const approvalFor = (draft: aiden.WorkbenchSkillDraft, evaluation?: aiden.WorkbenchSkillEvaluation) =>
+    intelligence?.approvals.find((approval) => approval.draftId === draft.id
+      && approval.draftDigest === draft.digest
+      && (!evaluation || approval.evaluationDigest === evaluation.digest))
+  const sectionTitle: CSSProperties = {
+    margin: '18px 0 8px', color: 'var(--muted)', fontSize: 9,
+    letterSpacing: '0.12em', textTransform: 'uppercase',
+  }
+  const card: CSSProperties = {
+    padding: '10px 12px', marginBottom: 6, background: 'var(--bg)',
+    border: '1px solid var(--border)', borderRadius: 6, minWidth: 0,
+  }
+  const button: CSSProperties = {
+    padding: '4px 9px', borderRadius: 4, border: '1px solid var(--border2)',
+    background: 'var(--bg2)', color: 'var(--text)', fontSize: 10, cursor: 'pointer',
+  }
 
   return (
     <div style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
-      {/* Summary bar */}
+      {error && <div role="alert" style={{ marginBottom: 10, color: 'var(--red)', lineHeight: 1.4 }}>{error}</div>}
+
+      <div style={sectionTitle}>Active Skills</div>
+      {!intelligence?.active.length && (
+        <div style={{ ...card, color: 'var(--muted2)' }}>No reviewed managed Skill is active. Existing Skills continue to work normally.</div>
+      )}
+      {intelligence?.active.map((item) => (
+        <div key={item.pointer.skillId} style={card}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ color: 'var(--text)', fontWeight: 600 }}>{managedSkillName(item.version)} · Version {item.version.version}</div>
+              <div style={{ color: item.health.state === 'degraded' ? 'var(--red)' : item.health.state === 'healthy' ? '#34d399' : 'var(--muted2)', marginTop: 2 }}>
+                {item.health.state.replaceAll('_', ' ')} · {item.health.successes} verified · {item.health.failures} failed · {item.health.unknowns} unknown
+              </div>
+              <div style={{ color: 'var(--muted)', marginTop: 3, overflowWrap: 'anywhere' }}>
+                Capabilities: {item.version.capabilityRequirements.map((requirement) => `${requirement.capabilityId}${requirement.versionRange ? ` ${requirement.versionRange}` : ''}`).join(', ') || 'No managed Capability prerequisite'}
+                {' · '}{item.pointer.driftState} · {item.version.digest.slice(0, 12)}
+              </div>
+              {item.version.evaluationId && (
+                <div style={{ color: 'var(--muted)', marginTop: 3 }}>
+                  Evaluated {new Date(intelligence.evaluations.find((entry) => entry.id === item.version.evaluationId)?.completedAt ?? item.version.createdAt).toLocaleString()}
+                </div>
+              )}
+              {item.pointer.driftState !== 'clean' && (
+                <div style={{ color: 'var(--red)', marginTop: 5 }}>
+                  Skill changed outside Aiden. The modified version will not be used until reviewed.
+                </div>
+              )}
+              {item.rollbackTarget && (
+                <div style={{ color: 'var(--muted)', marginTop: 5, overflowWrap: 'anywhere' }}>
+                  Rollback available: v{item.rollbackTarget.version} · {item.rollbackTarget.digest.slice(0, 12)}
+                </div>
+              )}
+            </div>
+            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+              {item.rollbackTarget && <button type="button" style={button} disabled={busy !== null}
+                onClick={() => void act(`rollback:${item.pointer.skillId}`, () => aiden.rollbackManagedSkill(item.pointer.skillId, item.rollbackTarget!.id))}>Rollback to v{item.rollbackTarget!.version}</button>}
+              <button type="button" style={{ ...button, color: 'var(--red)' }} disabled={busy !== null}
+                onClick={() => void act(`disable:${item.pointer.skillId}`, () => aiden.disableManagedSkill(item.pointer.skillId))}>Disable</button>
+            </div>
+          </div>
+        </div>
+      ))}
+
+      <div style={sectionTitle}>Candidates</div>
+      {!intelligence?.enabled && (
+        <div style={{ ...card, color: 'var(--muted2)' }}>Skill Intelligence creation is unavailable in this edition. Existing Skills remain inspectable.</div>
+      )}
+      {intelligence && candidates.length === 0 && (
+        <div style={{ ...card, color: 'var(--muted2)' }}>No candidate is waiting. Zero candidates is healthy.</div>
+      )}
+      {candidates.map((candidate) => (
+        <div key={candidate.id} style={card}>
+          <div style={{ color: 'var(--text)', fontWeight: 600 }}>{candidate.proposedName}</div>
+          <div style={{ color: 'var(--muted2)', marginTop: 3, lineHeight: 1.45 }}>{candidate.purpose}</div>
+          <div style={{ color: 'var(--muted)', marginTop: 5 }}>
+            {candidate.positiveTraceIds.length} verified runs · {candidate.negativeTraceIds.length} failed variants · {candidate.state === 'stale' ? 'Sources changed; review required' : 'Candidate is inert'}
+          </div>
+          <button type="button" style={{ ...button, marginTop: 8 }} disabled={busy !== null}
+            onClick={() => void openCandidate(candidate)}>Review candidate</button>
+        </div>
+      ))}
+
+      {review && (
+        <div style={{ ...card, borderColor: 'rgba(249,115,22,0.45)' }}>
+          <div style={{ color: 'var(--orange)', fontWeight: 600 }}>Why Aiden noticed this</div>
+          <div style={{ color: 'var(--muted2)', marginTop: 4 }}>
+            The same verified sequence was used {review.pattern.verifiedCount} times in this scope.
+            {review.pattern.failureCount > 0 ? ` ${review.pattern.failureCount} failed variant is retained for review.` : ''}
+          </div>
+          <div style={{ color: 'var(--muted)', marginTop: 5 }}>
+            Scope: {review.candidate.scopeId} · {review.candidate.positiveTraceIds.length} positive · {review.candidate.negativeTraceIds.length} negative
+          </div>
+          <div style={{ marginTop: 8 }}>
+            {review.candidate.steps.map((step, index) => (
+              <div key={step.id} style={{ color: 'var(--text)', padding: '2px 0' }}>{index + 1}. {step.operation}</div>
+            ))}
+          </div>
+          <div style={{ color: 'var(--muted)', marginTop: 7, overflowWrap: 'anywhere' }}>
+            Evidence: {review.traces.flatMap((trace) => trace.evidenceIds).join(', ') || 'No raw evidence content is exposed'}
+          </div>
+          <div style={{ color: 'var(--muted)', marginTop: 5, overflowWrap: 'anywhere' }}>
+            Capabilities: {review.candidate.capabilityRequirements.map((requirement) => `${requirement.capabilityId}${requirement.versionRange ? ` ${requirement.versionRange}` : ''}`).join(', ') || 'No managed Capability prerequisite'}
+          </div>
+          <div style={{ color: 'var(--muted)', marginTop: 5 }}>
+            Security: declarative, inert, and subject to deterministic scan before approval.
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginTop: 9, flexWrap: 'wrap' }}>
+            <button type="button" style={button} disabled={!intelligence?.enabled || busy !== null || review.candidate.state !== 'candidate'}
+              onClick={() => void createDraft(review.candidate)}>Accept as inert draft</button>
+            <button type="button" style={{ ...button, color: 'var(--red)' }} disabled={!intelligence?.enabled || busy !== null || review.candidate.state !== 'candidate'}
+              onClick={() => void act(`dismiss:${review.candidate.id}`, () => aiden.dismissSkillCandidate(review.candidate.id, review.candidate.stateVersion))}>Dismiss candidate</button>
+            <button type="button" style={button} onClick={() => setReview(null)}>Close</button>
+          </div>
+        </div>
+      )}
+
+      <div style={sectionTitle}>Needs review</div>
+      {drafts.length === 0 && <div style={{ ...card, color: 'var(--muted2)' }}>No draft or approval needs review.</div>}
+      {drafts.map((draft) => {
+        const evaluations = evaluationsFor(draft)
+        const evaluation = evaluations[0]
+        const approval = approvalFor(draft, evaluation)
+        const edit = draftEdits[draft.id] ?? { description: draft.description, operations: draft.steps.map((step) => step.operation) }
+        return (
+          <div key={draft.id} style={card}>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'space-between', flexWrap: 'wrap' }}>
+              <span style={{ color: 'var(--text)', fontWeight: 600 }}>{draft.name}</span>
+              <span style={{ color: 'var(--muted)' }}>{draft.state} · Draft is inert</span>
+            </div>
+            <textarea aria-label={`Description for ${draft.name}`} value={edit.description}
+              onChange={(event) => setDraftEdits((current) => ({ ...current, [draft.id]: { ...edit, description: event.target.value } }))}
+              style={{ width: '100%', boxSizing: 'border-box', marginTop: 8, minHeight: 52, resize: 'vertical', background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: 7, fontFamily: 'var(--mono)', fontSize: 11 }} />
+            {edit.operations.map((operation, index) => (
+              <input key={draft.steps[index]?.id ?? index} aria-label={`Step ${index + 1}`} value={operation}
+                onChange={(event) => setDraftEdits((current) => ({ ...current, [draft.id]: { ...edit, operations: edit.operations.map((value, cursor) => cursor === index ? event.target.value : value) } }))}
+                style={{ width: '100%', boxSizing: 'border-box', marginTop: 5, background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 4, padding: 6, fontFamily: 'var(--mono)', fontSize: 11 }} />
+            ))}
+            <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+              <button type="button" style={button} disabled={!intelligence?.enabled || busy !== null}
+                onClick={() => void act(`edit:${draft.id}`, () => aiden.updateSkillDraft(draft.id, {
+                  expectedVersion: draft.stateVersion,
+                  description: edit.description,
+                  steps: draft.steps.map((step, index) => ({ ...step, operation: edit.operations[index] ?? step.operation })),
+                }))}>Save draft</button>
+              <button type="button" style={button} disabled={!intelligence?.enabled || busy !== null}
+                onClick={() => void act(`evaluate:${draft.id}`, () => aiden.evaluateSkillDraft(draft.id))}>Deterministic evaluation</button>
+              {evaluation?.passed && !approval && (
+                <button type="button" style={button} disabled={!intelligence?.enabled || busy !== null}
+                  onClick={() => void act(`approval:${draft.id}`, () => aiden.requestSkillApproval(draft.id, evaluation.id))}>Request exact approval</button>
+              )}
+            </div>
+            <div style={{ color: 'var(--muted)', marginTop: 7 }}>Evaluation does not activate this Skill.</div>
+            {evaluation && (
+              <div style={{ marginTop: 8 }}>
+                {evaluation.checks.map((check) => (
+                  <div key={check.code} style={{ color: check.passed ? '#34d399' : 'var(--red)', padding: '2px 0' }}>
+                    {check.passed ? '✓' : '×'} {check.detail}
+                  </div>
+                ))}
+              </div>
+            )}
+            {approval?.state === 'pending' && (
+              <div style={{ marginTop: 9, padding: 8, border: '1px solid rgba(249,115,22,0.4)', borderRadius: 4 }}>
+                <div style={{ color: 'var(--orange)' }}>Approve exact draft</div>
+                <div style={{ color: 'var(--muted)', marginTop: 3, overflowWrap: 'anywhere' }}>
+                  Draft {approval.draftDigest.slice(0, 12)} · Evaluation {approval.evaluationDigest.slice(0, 12)} · Scope {approval.scopeId}
+                </div>
+                <div style={{ color: 'var(--muted)', marginTop: 3, overflowWrap: 'anywhere' }}>
+                  Capabilities: {draft.capabilityRequirements.map((requirement) => `${requirement.capabilityId}${requirement.versionRange ? ` ${requirement.versionRange}` : ''}`).join(', ') || 'No managed Capability prerequisite'}
+                </div>
+                <div style={{ display: 'flex', gap: 6, marginTop: 7 }}>
+                  <button type="button" style={button} disabled={busy !== null}
+                    onClick={() => void act(`approve:${approval.id}`, () => aiden.decideSkillApproval(approval.id, { decision: 'approved', draftDigest: approval.draftDigest, evaluationDigest: approval.evaluationDigest }))}>Approve</button>
+                  <button type="button" style={{ ...button, color: 'var(--red)' }} disabled={busy !== null}
+                    onClick={() => void act(`deny:${approval.id}`, () => aiden.decideSkillApproval(approval.id, { decision: 'denied', draftDigest: approval.draftDigest, evaluationDigest: approval.evaluationDigest }))}>Deny</button>
+                </div>
+              </div>
+            )}
+            {approval?.state === 'approved' && (
+              <button type="button" style={{ ...button, marginTop: 9, color: '#34d399' }} disabled={busy !== null}
+                onClick={() => void act(`activate:${approval.id}`, () => aiden.activateSkillApproval(approval.id))}>Activate approved version</button>
+            )}
+            {approval?.state === 'denied' && <div style={{ color: 'var(--red)', marginTop: 8 }}>Activation denied. No active version was created.</div>}
+          </div>
+        )
+      })}
+
+      <div style={sectionTitle}>History</div>
+      {!intelligence?.active.some((item) => item.versions.length > 0) && (
+        <div style={{ ...card, color: 'var(--muted2)' }}>No reviewed version history yet.</div>
+      )}
+      {intelligence?.active.flatMap((item) => item.versions.map((version) => (
+        <div key={version.id} style={{ ...card, display: 'flex', justifyContent: 'space-between', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ color: 'var(--text)' }}>{managedSkillName(version)} · Version {version.version} · {version.sourceKind}</span>
+          <span style={{ color: 'var(--muted)', overflowWrap: 'anywhere' }}>{version.digest.slice(0, 16)} · {new Date(version.createdAt).toLocaleString()}</span>
+        </div>
+      )))}
+
+      <div style={sectionTitle}>Existing Skills</div>
       <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
         {(['all', 'built-in', 'learned', 'approved', 'workspace'] as const).map(f => {
           const count = f === 'all' ? skills.length : (counts[f] || 0)
@@ -4027,14 +4273,13 @@ function SkillsManager() {
             }}>{f} ({count})</button>
           )
         })}
-        <button type="button" onClick={refresh} disabled title="Managed by the Aiden runtime" style={{
+        <button type="button" onClick={() => void refresh()} disabled={busy !== null} style={{
           marginLeft: 'auto', padding: '3px 10px', borderRadius: 4,
           border: '1px solid var(--border)', background: 'transparent',
           color: 'var(--muted2)', fontSize: 10, cursor: 'pointer',
         }}>⟲ Refresh</button>
       </div>
 
-      {/* List */}
       {loading && <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 20 }}>Loading skills…</div>}
       {!loading && visible.length === 0 && (
         <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 20 }}>No skills found</div>

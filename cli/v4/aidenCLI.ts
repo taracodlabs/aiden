@@ -93,6 +93,7 @@ import {
   createLearningAuthority,
   createLearningContextProvider,
   capturePresenceFeedbackLearning,
+  captureSkillOutcomeLearning,
   legacyLearningScope,
   localLearningScopes,
   migrateLegacyMemorySnapshot,
@@ -102,6 +103,13 @@ import {
 } from '../../core/v4/learning';
 import { createWorkbenchBrowserSetupPort } from '../../core/v4/workbench/browserSetupPort';
 import { SkillLoader } from '../../core/v4/skillLoader';
+import {
+  createManagedSkillSource,
+  resolveLegacySkillCreationPolicy,
+  resolveSkillIntelligenceRuntimeOptions,
+  SkillIntelligenceAuthority,
+  type SkillOutcomeProjection,
+} from '../../core/v4/skillIntelligence';
 import { makeExternalCodingTool, makeSubagentFanoutTool } from '../../tools/v4/index';
 import type { ProviderOption } from '../../core/v4/subagent/providerRotation';
 // v4.6 Phase 1 — spawn_sub_agent: always-on runStore + LLM-callable tool.
@@ -674,6 +682,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const { createPresenceReadinessAuthority } = await import('../../core/v4/presence/readiness');
       const { createWorkbenchPresencePort } = await import('../../core/v4/workbench/presencePort');
       const { createWorkbenchLearningPort } = await import('../../core/v4/workbench/learningPort');
+      const { createWorkbenchSkillIntelligencePort } = await import('../../core/v4/workbench/skillIntelligencePort');
       const { createAutomationScheduler } = await import('../../core/v4/automation/scheduler');
       const { recoverCancelledExternalCodingSessions } = await import('../../core/v4/coding/cancellationRecovery');
       const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
@@ -682,7 +691,8 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       const dbPath   = daemonDbPath(paths.root);
       const db       = openDaemonDb(dbPath);
       const runStore = createRunStore({ db });
-      const jobEngine = createJobEngine({ db });
+      const skillIntelligenceOptions = resolveSkillIntelligenceRuntimeOptions(process.cwd());
+      const jobEngine = createJobEngine({ db, skillIntelligence: skillIntelligenceOptions });
       const workbenchInstanceId = `workbench_${process.pid}`;
       const workbenchStartedAt = Date.now();
       db.prepare(
@@ -850,6 +860,13 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           });
         },
       });
+      const skillIntelligencePort = createWorkbenchSkillIntelligencePort({
+        authority: jobEngine.skillIntelligence,
+        edition: editionAuthority,
+        scopeId: skillIntelligenceOptions.defaultScopeId,
+        ownerId: skillIntelligenceOptions.ownerId,
+        onPresence: (observation) => { presenceAuthority.observe(observation); },
+      });
       const presenceReadiness = createPresenceReadinessAuthority({ db, edition: editionAuthority });
       const automationScheduler = createAutomationScheduler({ db, triggerBus, maxPerScan: 100 });
       const scanAutomations = (): void => {
@@ -953,6 +970,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         automations: automationsPort,
         presence: presencePort,
         learning: learningPort,
+        skillIntelligence: skillIntelligencePort,
         coding: codingPort,
         providerSetup,
         readiness: readiness ? { snapshot: (sessionId?: string) => readiness.snapshot(sessionId) } : undefined,
@@ -1138,6 +1156,18 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
           aidenVersion: VERSION,
           workspaceRoot: process.cwd(),
         }),
+        skillIntelligenceDoctor: () => {
+          const databasePath = daemonDbPath(paths.root);
+          const database = openDaemonDb(databasePath);
+          try {
+            return new SkillIntelligenceAuthority({
+              db: database,
+              ...resolveSkillIntelligenceRuntimeOptions(process.cwd()),
+            }).doctor();
+          } finally {
+            closeDaemonDb(databasePath);
+          }
+        },
       });
       // Non-interactive subcommand: exit cleanly instead of hanging on a
       // lingering handle. runDoctorCli already set process.exitCode honestly
@@ -1736,7 +1766,11 @@ export async function buildAgentRuntime(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
-  const jobEngine = opts.jobEngineOverride ?? createJobEngine({ db: replDb });
+  const skillIntelligenceOptions = resolveSkillIntelligenceRuntimeOptions(process.cwd());
+  const jobEngine = opts.jobEngineOverride ?? createJobEngine({
+    db: replDb,
+    skillIntelligence: skillIntelligenceOptions,
+  });
   const jobControlAuthority = createJobControlAuthority({ db: replDb, jobEngine });
   const actionAuthority = opts.actionAuthorityOverride ?? createActionAuthority({ db: replDb, jobEngine });
   const automationApprovalContinuations = createAutomationApprovalContinuationAuthority({
@@ -2135,6 +2169,33 @@ export async function buildAgentRuntime(
     enabled: learningEdition.can('learning.enabled'),
   });
   const learningScopes = localLearningScopes(integrationScope);
+  const skillOutcomeProjector = ({ outcome, invocation, version }: SkillOutcomeProjection): void => {
+    const evidenceId = outcome.evidenceIds[0];
+    const scope = learningScopes.find((candidate) => candidate.kind === 'REPOSITORY')
+      ?? learningScopes.find((candidate) => candidate.kind === 'WORKSPACE')
+      ?? learningScopes[0];
+    if (!evidenceId || !scope) return;
+    const frontmatter = version.canonicalSpec.frontmatter;
+    const skillName = frontmatter && typeof frontmatter === 'object'
+      && typeof (frontmatter as Record<string, unknown>).name === 'string'
+      ? String((frontmatter as Record<string, unknown>).name)
+      : version.skillId;
+    captureSkillOutcomeLearning({
+      authority: learningAuthority,
+      scope,
+      skillName,
+      skillId: version.skillId,
+      skillVersionId: version.id,
+      skillVersionDigest: version.digest,
+      outcomeIdentity: outcome.id,
+      content: `${skillName} version ${version.version} produced a verified outcome.`,
+      jobId: outcome.jobId,
+      attemptId: invocation.attemptId,
+      generation: invocation.generation,
+      evidenceId,
+    });
+  };
+  jobEngine.skillIntelligence.setOutcomeProjector(skillOutcomeProjector);
   const learningContext = createLearningContextProvider(learningAuthority);
   const providerSecretAuthority = new SecretAuthority({
     db: replDb,
@@ -2456,7 +2517,13 @@ export async function buildAgentRuntime(
   // skillCommands, skill_manage, etc.) reads the cache.
   const skillsLogger = createFileLogger(paths.logsDir, 'skills');
   const preflightLogger = createFileLogger(paths.logsDir, 'preflight');
-  const skillLoader = new SkillLoader(paths, { logger: skillsLogger });
+  const skillLoader = new SkillLoader(paths, {
+    logger: skillsLogger,
+    managedSource: createManagedSkillSource(
+      jobEngine.skillIntelligence,
+      skillIntelligenceOptions.defaultScopeId,
+    ),
+  });
   await skillLoader.loadAll().catch(() => undefined);
   const skillCounts = skillLoader.getLastCounts();
   const skipNote =
@@ -2895,6 +2962,11 @@ export async function buildAgentRuntime(
     'skill_teacher_tier',
     warnSink,
   );
+  const legacySkillCreation = resolveLegacySkillCreationPolicy({
+    skillIntelligenceEnabled: learningEdition.can('skill.intelligence'),
+    configuredTeacherTier: skillTeacherTier,
+    mcpServeMode: isMcpServeMode(),
+  });
 
   // PlannerGuard — pre-loop tool subset classifier. llm_classified mode
   // routes through the main provider adapter; we don't have a separate
@@ -2980,7 +3052,7 @@ export async function buildAgentRuntime(
   const skillTeacher = new SkillTeacher(
     skillLoader,
     skillManageProxy,
-    skillTeacherTier,
+    legacySkillCreation.teacherTier,
     undefined,
     (name) => toolRegistry.get(name),
     skillTeacherHealth,
@@ -3196,9 +3268,9 @@ export async function buildAgentRuntime(
   // CandidateStore handle. Skipped entirely in MCP serve mode (the
   // serve binary doesn't run the agent loop the same way and shouldn't
   // mutate skill state from inside JSON-RPC handling).
-  const skillMiner = isMcpServeMode()
-    ? undefined
-    : new SkillMiner({ auxiliaryClient, healthTracker: skillMinerHealth });
+  const skillMiner = legacySkillCreation.miningEnabled
+    ? new SkillMiner({ auxiliaryClient, healthTracker: skillMinerHealth })
+    : undefined;
 
   // Phase v4.1.2-slice3: the structured CoreLogger isn't yet plumbed
   // through buildAgentRuntime — it's created via factory at boot but
@@ -4462,7 +4534,7 @@ export async function buildAgentRuntime(
     skillTeacher,
     plannerGuardMode,
     honestyMode,
-    skillTeacherTier,
+    skillTeacherTier: legacySkillCreation.teacherTier,
     agent,
     // v4.11 preflight compression — expose the wired compressor so
     // the REPL session can hand it to the /compress slash command
@@ -4512,6 +4584,7 @@ export async function buildAgentRuntime(
     setWorkingDir,
     // v4.12 PM.1 — background-process registry (reaped on session shutdown).
     processRegistry,
+    skillOutcomeProjector,
   };
 }
 
@@ -4647,6 +4720,8 @@ export interface AgentRuntime {
   setWorkingDir: (absPath: string) => void;
   /** v4.12 PM.1 — background-process registry (reaped on session shutdown). */
   processRegistry: import('../../core/v4/processRegistry').ProcessRegistry;
+  /** Exact verified Skill outcome projection reused by daemon Job authority. */
+  skillOutcomeProjector: (projection: SkillOutcomeProjection) => void;
   /**
    * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
    * id (set once at ChatSession.run() init, never cleared between turns).
@@ -4915,6 +4990,8 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
           handle,
           runtime.daemonAgentBuilder,
           { provider: runtime.providerId, model: runtime.modelId },
+          undefined,
+          runtime.skillOutcomeProjector,
         );
         if (!ok) {
           runtime.projectStartupDiagnostic(
@@ -5238,49 +5315,62 @@ async function runSkillsSubcommand(
   opts: MainOptions,
 ): Promise<void> {
   const paths = opts.pathsOverride ?? resolveAidenPaths();
-  const skillLoader = new SkillLoader(paths);
+  const skillDbPath = daemonDbPath(paths.root);
+  const skillDb = openDaemonDb(skillDbPath);
+  const skillOptions = resolveSkillIntelligenceRuntimeOptions(process.cwd());
+  const skillEngine = createJobEngine({ db: skillDb, skillIntelligence: skillOptions });
+  const skillLoader = new SkillLoader(paths, {
+    managedSource: createManagedSkillSource(
+      skillEngine.skillIntelligence,
+      skillOptions.defaultScopeId,
+    ),
+  });
   const out = opts.writeOut ?? ((t) => process.stdout.write(t));
 
-  switch (action) {
-    case 'list': {
-      const skills = await skillLoader.list();
-      if (skills.length === 0) {
-        out('No skills installed.\n');
-      } else {
-        for (const s of skills) {
-          out(`${s.name.padEnd(28)}  ${s.category ?? '-'}  ${s.description}\n`);
+  try {
+    switch (action) {
+      case 'list': {
+        const skills = await skillLoader.list();
+        if (skills.length === 0) {
+          out('No skills installed.\n');
+        } else {
+          for (const s of skills) {
+            out(`${s.name.padEnd(28)}  ${s.category ?? '-'}  ${s.description}\n`);
+          }
         }
-      }
-      break;
-    }
-    case 'view': {
-      if (!arg) {
-        out('Usage: aiden skills view <name>\n');
         break;
       }
-      const skill = await skillLoader.load(arg);
-      if (!skill) {
-        out(`Skill '${arg}' not found.\n`);
-      } else {
-        out(await fs.readFile(skill.filePath, 'utf8'));
-        out('\n');
+      case 'view': {
+        if (!arg) {
+          out('Usage: aiden skills view <name>\n');
+          break;
+        }
+        const skill = await skillLoader.load(arg);
+        if (!skill) {
+          out(`Skill '${arg}' not found.\n`);
+        } else {
+          out(skill.rawText);
+          out('\n');
+        }
+        break;
       }
-      break;
+      case 'search':
+      case 'browse':
+      case 'check':
+      case 'update':
+      case 'audit':
+      case 'publish':
+      case 'snapshot':
+      case 'install':
+      case 'uninstall':
+      case 'reset':
+        out(`'aiden skills ${action}' is not yet implemented.\n`);
+        break;
+      default:
+        out(`Unknown skills action '${action}'. Use: list | view <name>.\n`);
     }
-    case 'search':
-    case 'browse':
-    case 'check':
-    case 'update':
-    case 'audit':
-    case 'publish':
-    case 'snapshot':
-    case 'install':
-    case 'uninstall':
-    case 'reset':
-      out(`'aiden skills ${action}' is not yet implemented.\n`);
-      break;
-    default:
-      out(`Unknown skills action '${action}'. Use: list | view <name>.\n`);
+  } finally {
+    closeDaemonDb(skillDbPath);
   }
 }
 

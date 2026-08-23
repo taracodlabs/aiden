@@ -14,6 +14,7 @@ export const COMMERCIAL_CAPABILITIES = [
   'presence.active',
   'learning.enabled',
   'capability.sdk',
+  'skill.intelligence',
   'relay.remote',
   'workflow.premium',
   'team.shared',

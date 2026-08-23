@@ -50,6 +50,7 @@ import { resolveRuntimeStorageRoot } from '../core/v4/runtimeStorage'
 import { daemonDbPath } from '../core/v4/daemon/daemonConfig'
 import { openDaemonDb } from '../core/v4/daemon/db/connection'
 import { createJobEngine } from '../core/v4/daemon/jobEngine'
+import { resolveSkillIntelligenceRuntimeOptions } from '../core/v4/skillIntelligence'
 import { createHttpJobCoordinator } from '../core/v4/daemon/httpJobIngress'
 import { currentJobExecutionContext } from '../core/v4/daemon/jobExecutionContext'
 import { estimateCompatibilityUsage } from '../core/v4/compatibilityUsage'
@@ -508,7 +509,10 @@ export function createApiServer(): Express {
      VALUES (?, ?, 'localhost', ?, ?, ?)`,
   ).run(apiInstanceId, process.pid, apiNow, apiNow, VERSION)
   const apiJobCoordinator = createHttpJobCoordinator({
-    engine: createJobEngine({ db: apiDb }),
+    engine: createJobEngine({
+      db: apiDb,
+      skillIntelligence: resolveSkillIntelligenceRuntimeOptions(),
+    }),
     instanceId: apiInstanceId,
   })
   const app = express()
