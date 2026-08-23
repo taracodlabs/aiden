@@ -94,6 +94,12 @@ export interface CreateArtifactOptions {
   preview?:   string | null;
 }
 
+export interface CreateVerifiedContentArtifactOptions extends Omit<CreateArtifactOptions, 'bytes'> {
+  /** Stable caller-owned identity makes release replay idempotent. */
+  artifactId: string;
+  bytes: Buffer;
+}
+
 export interface ListRecentArtifactsOptions {
   /** Scope to one session. Omit to list across ALL sessions (`/artifacts all`). */
   sessionId?: string;
@@ -104,6 +110,8 @@ export interface ListRecentArtifactsOptions {
 export interface ArtifactStore {
   /** Register a new artifact. Returns the generated id. */
   create(opts: CreateArtifactOptions): string;
+  /** Release already-verified bytes without rereading an untrusted workspace path. */
+  createFromVerifiedContent(opts: CreateVerifiedContentArtifactOptions): string;
   /** Read one artifact by id. Returns null when missing. */
   get(id: string): Artifact | null;
   /** Listing surface for /artifacts. Newest-first by created_at. */
@@ -232,30 +240,60 @@ export function createArtifactStore(opts: CreateArtifactStoreOptions): ArtifactS
     return row ? rowToArtifact(row) : null;
   };
 
+  const insertArtifact = (id: string, input: CreateArtifactOptions): void => {
+    db.prepare(
+      `INSERT INTO artifacts (
+         id, path, kind, tool, action,
+         run_id, task_id, session_id, created_at, bytes, preview
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      id,
+      input.path,
+      input.kind,
+      input.tool,
+      input.action,
+      input.runId ?? null,
+      input.taskId ?? null,
+      input.sessionId,
+      Date.now(),
+      typeof input.bytes === 'number' ? input.bytes : null,
+      input.preview ? input.preview.slice(0, PREVIEW_CAP) : null,
+    );
+  };
+
   return {
     create({ path, kind, tool, action, sessionId, runId, taskId, bytes, preview }) {
-      const now = Date.now();
       const id = newArtifactId();
-      db.prepare(
-        `INSERT INTO artifacts (
-           id, path, kind, tool, action,
-           run_id, task_id, session_id, created_at, bytes, preview
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run(
-        id,
-        path,
-        kind,
-        tool,
-        action,
-        runId   ?? null,
-        taskId  ?? null,
-        sessionId,
-        now,
-        typeof bytes === 'number' ? bytes : null,
-        preview ? preview.slice(0, PREVIEW_CAP) : null,
-      );
+      insertArtifact(id, { path, kind, tool, action, sessionId, runId, taskId, bytes, preview });
       if (kind === 'file') archiveContent(id, path);
       return id;
+    },
+    createFromVerifiedContent({ artifactId, bytes, ...metadata }) {
+      if (!/^art_[a-z0-9_-]{8,80}$/i.test(artifactId)) throw new Error('Artifact identity is invalid');
+      if (bytes.byteLength > maxContentBytes) throw new Error('Verified artifact exceeds content limit');
+      const existing = getArtifact(artifactId);
+      if (existing) {
+        const content = path.join(contentRoot, artifactId, 'content');
+        const archived = fs.readFileSync(content);
+        if (!archived.equals(bytes)
+          || existing.path !== metadata.path
+          || existing.sessionId !== metadata.sessionId
+          || existing.taskId !== (metadata.taskId ?? null)) {
+          throw new Error('Verified artifact release identity conflict');
+        }
+        return artifactId;
+      }
+      const directory = path.join(contentRoot, artifactId);
+      const destination = path.join(directory, 'content');
+      fs.mkdirSync(directory, { recursive: true });
+      fs.writeFileSync(destination, bytes, { flag: 'wx', mode: 0o600 });
+      try {
+        insertArtifact(artifactId, { ...metadata, bytes: bytes.byteLength });
+      } catch (error) {
+        fs.rmSync(directory, { recursive: true, force: true });
+        throw error;
+      }
+      return artifactId;
     },
     get(id) {
       return getArtifact(id);
