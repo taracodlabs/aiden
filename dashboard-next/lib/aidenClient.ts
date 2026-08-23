@@ -1865,6 +1865,13 @@ export interface FollowRunOptions {
   maxUncertainMs?: number;
 }
 
+/** Keep the model's written context, but never let it hide authoritative
+ * terminal failure. Durable Job truth is always appended prominently. */
+export function failedRunAssistantText(reply: string, error: string): string {
+  const warning = `⚠ ${error}`;
+  return reply.trim() ? `${reply}\n\n${warning}` : warning;
+}
+
 export function followRun(
   handle: WorkbenchRunHandle,
   handlers: TurnHandlers,

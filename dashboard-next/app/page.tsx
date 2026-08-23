@@ -7223,7 +7223,12 @@ export default function Home() {
         if (!restorationStillOwnsSelection()) return
         aiden.clearRunHandle(restored.admission)
         settle()
-        setMessages((prev) => fullReply ? prev : [...prev, { id: recoveredMessageId, role: 'assistant', content: `⚠ ${message}`, timestamp: Date.now(), isStreaming: false }])
+        const failedContent = aiden.failedRunAssistantText(fullReply, message)
+        setMessages((prev) => {
+          const recovered = prev.some((item) => item.id === recoveredMessageId)
+          const next: Message = { id: recoveredMessageId, role: 'assistant', content: failedContent, timestamp: Date.now(), isStreaming: false }
+          return recovered ? prev.map((item) => item.id === recoveredMessageId ? next : item) : [...prev, next]
+        })
       },
       }, { signal: controller.signal, stallMs: 2_000, maxUncertainMs: 15_000 })
     }
@@ -7872,7 +7877,7 @@ export default function Home() {
         activeRunFollowControllersRef.current.delete(followController)
         if (isForeground()) { setThinking(null); setBudget(null); setIsExecuting(false); setIsStreaming(false) }
         turnMessages = turnMessages.map(msg => msg.id === thinkingId
-          ? { ...msg, content: fullReply || `⚠ ${message}`, isStreaming: false }
+          ? { ...msg, content: aiden.failedRunAssistantText(fullReply, message), isStreaming: false }
           : msg)
         persistTurn()
         if (isForeground()) refreshProjection()

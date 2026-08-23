@@ -24,6 +24,7 @@ import {
   explainPresenceItem,
   snoozePresenceItem,
   dismissPresenceItem,
+  failedRunAssistantText,
   proposePresenceJob,
   acceptPresenceProposal,
   loadProviderSetup,
@@ -1080,5 +1081,14 @@ describe('Workbench exact task admission and run following', () => {
     expect(JSON.parse(String(calls[6][1]?.body))).toEqual({ credential: 'apps_private_value' });
     expect(JSON.parse(String(calls[7][1]?.body))).toEqual({ model: 'gpt-coding-exact' });
     expect((window as any).localStorage).toBeUndefined();
+  });
+});
+
+describe('terminal failure presentation', () => {
+  it('never lets model prose hide the authoritative failed run outcome', () => {
+    expect(failedRunAssistantText('GPT55_TERMINAL_OK', 'Could not verify required outcome')).toBe(
+      'GPT55_TERMINAL_OK\n\n⚠ Could not verify required outcome',
+    );
+    expect(failedRunAssistantText('', 'Execution denied')).toBe('⚠ Execution denied');
   });
 });
