@@ -142,6 +142,29 @@ describe('aiden-plugin-chatgpt-plus: login() flow', () => {
     expect(text).toMatch(/┌─+┐/);
   });
 
+  it('39a. boxes the real two-line device-code prompt emitted by the auth flow', async () => {
+    const auth = fakeAuth({
+      runDeviceCodeFlow: vi.fn(async (_cfg: any, innerUa: OAuthUserAgent) => {
+        innerUa.log('To continue, follow these steps:');
+        innerUa.log('  1. Open this URL in your browser:');
+        innerUa.log('     https://auth.openai.com/codex/device');
+        innerUa.log('  2. Enter this code:');
+        innerUa.log('     ABCD-1234');
+        return { accessToken: 'AT', refreshToken: null, expiresInSeconds: 0 };
+      }),
+    });
+    const provider = subscriptionPlugin.buildProvider(auth);
+    const ua = fakeUa();
+    await provider.login(ua);
+    const lines = ua.log.mock.calls.map((c) => c[0] as string);
+    const text = lines.join('\n');
+
+    expect(text).toContain('Enter this code on that page');
+    expect(text).toContain('ABCD-1234');
+    expect(text).toMatch(/┌─+┐/);
+    expect(lines.some((line) => /^\s*ABCD-1234\s*$/.test(line))).toBe(false);
+  });
+
   it('40. timeout error appends "Code expired. Run /auth login chatgpt-plus to retry"', async () => {
     const auth = fakeAuth({
       runDeviceCodeFlow: vi.fn(async () => {

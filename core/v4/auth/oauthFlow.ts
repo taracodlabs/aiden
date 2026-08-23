@@ -293,6 +293,7 @@ export async function runDeviceCodeFlow(
   ua.log('  2. Enter this code:');
   ua.log(`     ${userCode}`);
   ua.log('');
+  await ua.openBrowser(verifyUrl);
   ua.log('Waiting for sign-in...');
   // First sleep is documentation-fairness — give the user a moment to
   // open the page before we start polling. Tests pin this `sleep` count.
