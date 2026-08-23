@@ -41,7 +41,7 @@ export default function ChatHeader() {
   if (!cost) return null
 
   return (
-    <div style={{ position: 'relative', display: 'inline-block' }}>
+    <div className="topbar-cost" style={{ position: 'relative', display: 'inline-block' }}>
       {/* Cost badge */}
       <button
         onClick={() => setExpanded(v => !v)}

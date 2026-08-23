@@ -1,7 +1,8 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as aiden from '../lib/aidenClient'
+import { ProductButton, StatusBadge } from './ProductUI'
 
 type StepId = 'welcome' | 'computer' | 'ai' | 'browser' | 'coding' | 'apps' | 'ready'
 
@@ -33,6 +34,7 @@ export function OnboardingModal({
   onOpenSettings: (tab: 'runtime' | 'model') => void
   onOpenApps: () => void
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null)
   const [index, setIndex] = useState(() => {
     if (typeof window === 'undefined') return 0
     const stored = Number.parseInt(window.localStorage.getItem(STEP_STORAGE_KEY) ?? '0', 10)
@@ -63,26 +65,38 @@ export function OnboardingModal({
     && ['setup_available', 'needs_setup', 'unavailable'].includes(readinessItem?.state ?? '')
   const next = () => setIndex((value) => Math.min(STEP_ORDER.length - 1, value + 1))
   const back = () => setIndex((value) => Math.max(0, value - 1))
-  const mono: React.CSSProperties = { fontFamily: 'JetBrains Mono, monospace' }
+
+  useEffect(() => {
+    const dialog = dialogRef.current
+    const firstControl = dialog?.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled])')
+    firstControl?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && index > 0) {
+        event.preventDefault()
+        back()
+      }
+    }
+    dialog?.addEventListener('keydown', onKeyDown)
+    return () => dialog?.removeEventListener('keydown', onKeyDown)
+  }, [index])
 
   const action = () => {
     if (!readinessItem) return null
     if (readinessItem.availableActions.includes('manage_provider')) {
-      return <button type="button" className="nav-btn" onClick={() => onOpenSettings('model')}>Open AI &amp; Models</button>
+      return <ProductButton variant="primary" onClick={() => onOpenSettings('model')}>Open AI &amp; Models</ProductButton>
     }
     if (readinessItem.availableActions.includes('manage_apps')) {
-      return <button type="button" className="nav-btn" onClick={onOpenApps}>Open Apps</button>
+      return <ProductButton variant="primary" onClick={onOpenApps}>Open Apps</ProductButton>
     }
-    return <button type="button" className="nav-btn" onClick={() => onOpenSettings('runtime')}>Open Readiness</button>
+    return <ProductButton variant="primary" onClick={() => onOpenSettings('runtime')}>Open Readiness</ProductButton>
   }
 
   return (
     <>
       <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.85)', backdropFilter: 'blur(6px)', zIndex: 1000 }} />
-      <div role="dialog" aria-modal="true" aria-label="Aiden first run" style={{
+      <div ref={dialogRef} className="onboarding-dialog" role="dialog" aria-modal="true" aria-labelledby="onboarding-title" aria-describedby="onboarding-detail" style={{
         position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
-        width: 'min(90vw, 520px)', background: '#141414', border: '1px solid #2a2a2a',
-        borderRadius: 16, padding: 36, zIndex: 1001,
+        zIndex: 1001,
       }}>
         <div style={{ display: 'flex', gap: 5, marginBottom: 28 }}>
           {STEP_ORDER.map((step, stepIndex) => <div key={step.id} style={{ height: 3, flex: 1, borderRadius: 2, background: stepIndex <= index ? '#f97316' : '#2a2a2a' }} />)}
@@ -90,46 +104,46 @@ export function OnboardingModal({
 
         {current.id === 'welcome' ? (
           <div>
-            <h2 style={{ color: '#e8e8e8', margin: '0 0 8px' }}>Welcome to Aiden</h2>
-            <p style={{ ...mono, color: '#999', fontSize: 12, lineHeight: 1.7, marginBottom: 24 }}>
+            <span className="onboarding-icon" aria-hidden="true">A</span>
+            <h2 id="onboarding-title">Welcome to Aiden</h2>
+            <p id="onboarding-detail">
               Aiden will check this computer, show what is ready, and explain the next action. Browser, coding, and Apps setup can be skipped.
             </p>
-            <button type="button" className="nav-btn" onClick={next}>Check this computer →</button>
+            <ProductButton variant="primary" onClick={next}>Check this computer →</ProductButton>
           </div>
         ) : current.id === 'ready' ? (
           <div>
-            <h2 style={{ color: '#e8e8e8', margin: '0 0 8px' }}>{readiness?.overall === 'ready' ? 'Aiden is ready' : 'Setup can continue later'}</h2>
-            <p style={{ ...mono, color: '#999', fontSize: 12, lineHeight: 1.7 }}>
+            <span className="onboarding-icon" aria-hidden="true">✓</span>
+            <h2 id="onboarding-title">{readiness?.overall === 'ready' ? 'Aiden is ready' : 'Setup can continue later'}</h2>
+            <p id="onboarding-detail">
               {readiness?.overall === 'ready' ? 'Choose what you want to accomplish first.' : 'Required issues remain visible in Settings → Readiness. Optional capabilities do not block Chat.'}
             </p>
             <div style={{ display: 'grid', gap: 8, marginTop: 20 }}>
-              {FIRST_SUCCESS.map((choice) => <button key={choice} type="button" className="nav-btn" onClick={() => onComplete(choice)}>{choice}</button>)}
+              {FIRST_SUCCESS.map((choice, choiceIndex) => <ProductButton key={choice} variant={choiceIndex === 0 ? 'primary' : 'secondary'} onClick={() => onComplete(choice)}>{choice}</ProductButton>)}
             </div>
           </div>
         ) : (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' }}>
-              <h2 style={{ color: '#e8e8e8', margin: '0 0 8px' }}>{current.title}</h2>
-              {current.optional ? <span style={{ ...mono, color: '#777', fontSize: 10 }}>OPTIONAL</span> : null}
+              <div><span className="onboarding-icon" aria-hidden="true">{current.id === 'computer' ? '⌁' : current.id === 'ai' ? '◆' : current.id === 'browser' ? '◎' : current.id === 'coding' ? '</>' : '+'}</span><h2 id="onboarding-title">{current.title}</h2></div>
+              {current.optional ? <span className="onboarding-optional">Optional</span> : null}
             </div>
-            {checking ? <p style={{ ...mono, color: '#999', fontSize: 12 }}>Checking…</p> : error ? (
+            {checking ? <p id="onboarding-detail">Checking…</p> : error ? (
               <div>
-                <p style={{ ...mono, color: '#ef4444', fontSize: 12 }}>What failed: readiness could not be loaded.</p>
-                <p style={{ ...mono, color: '#999', fontSize: 12 }}>What Aiden knows: {error}</p>
-                <button type="button" className="nav-btn" onClick={() => { void refresh() }}>Recheck</button>
+                <p id="onboarding-detail" role="alert" className="onboarding-error">What failed: readiness could not be loaded.</p>
+                <p>What Aiden knows: {error}</p>
+                <ProductButton variant="secondary" onClick={() => { void refresh() }}>Recheck</ProductButton>
               </div>
             ) : readinessItem ? (
               <div>
-                <p style={{ ...mono, color: complete ? '#22c55e' : optionalNotConfigured ? '#999' : '#f59e0b', fontSize: 12 }}>
-                  {complete ? '✓ Ready' : optionalNotConfigured ? 'Optional · Not configured' : '○ Needs attention'}
-                </p>
-                <p style={{ ...mono, color: '#aaa', fontSize: 12, lineHeight: 1.7 }}>{readinessItem.detail}</p>
+                <StatusBadge tone={complete ? 'ready' : optionalNotConfigured ? 'disabled' : 'attention'}>{complete ? 'Ready' : optionalNotConfigured ? 'Not configured' : 'Needs attention'}</StatusBadge>
+                <p id="onboarding-detail">{readinessItem.detail}</p>
                 {!complete ? action() : null}
               </div>
-            ) : <p style={{ ...mono, color: '#f59e0b', fontSize: 12 }}>Readiness information is unavailable. Open Settings → Readiness and recheck.</p>}
-            <div style={{ display: 'flex', gap: 8, marginTop: 24 }}>
-              <button type="button" className="nav-btn" onClick={back}>← Back</button>
-              <button type="button" className="nav-btn" onClick={next}>{complete ? 'Continue →' : current.optional ? 'Skip for now →' : 'Continue and recheck later →'}</button>
+            ) : <p id="onboarding-detail" className="onboarding-warning">Readiness information is unavailable. Open Settings → Readiness and recheck.</p>}
+            <div className="onboarding-actions">
+              <ProductButton variant="ghost" onClick={back}>← Back</ProductButton>
+              <ProductButton variant="secondary" onClick={next}>{complete ? 'Continue →' : current.optional ? 'Skip for now →' : 'Continue and recheck later →'}</ProductButton>
             </div>
           </div>
         )}

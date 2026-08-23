@@ -167,8 +167,8 @@ export interface WorkbenchResultReceipt {
 }
 
 export interface WorkbenchRunProjection {
-  identity: { jobId: string; attemptId: string; runId: number; generation?: number };
-  job?: { id?: string; status?: string; terminalOutcome?: string | null; finishReason?: string | null };
+  identity: { jobId: string; attemptId: string; runId: number; generation?: number; sessionId?: string | null };
+  job?: { id?: string; status?: string; goal?: string; terminalOutcome?: string | null; finishReason?: string | null };
   receipt: WorkbenchResultReceipt;
   attempts?: Array<{ rowId?: number; id: string; generation: number; status: string }>;
   timeline?: Array<{ eventId: number; jobSequence: number; type: string; createdAt: number }>;

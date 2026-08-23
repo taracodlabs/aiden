@@ -12,6 +12,9 @@ import ChatHeader from '../components/ChatHeader'
 import Sidebar from '../components/Sidebar'
 import WorkflowView from '../components/WorkflowView'
 import LiveExecutionTerminal from '../components/LiveExecutionTerminal'
+import { SafeMarkdown } from '../components/SafeMarkdown'
+import { StatusBadge } from '../components/ProductUI'
+import { skillSourceLabel } from '../lib/skillPresentation'
 import * as aiden from '../lib/aidenClient'
 import { PUBLIC_SPONSORS, SPONSOR_URL } from '../lib/publicSponsors'
 import {
@@ -43,9 +46,11 @@ import {
   groupActiveWork,
   presentAssistantContent,
   presentApproval,
+  presentAutomationOccurrence,
   presentResult,
   presentRuntimeDetail,
   presentRuntimeStatus,
+  projectTerminalActiveJob,
   projectAttentionItems,
   projectSemanticProgress,
 } from '../lib/workbenchPresentation'
@@ -156,17 +161,7 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
   const activeWorkItems = useMemo(() => {
     if (!projection?.receipt.terminal || !projection.identity.jobId) return activeJobs
     if (activeJobs.some((job) => job.jobId === projection.identity.jobId)) return activeJobs
-    const completed: ActiveJobView = {
-      sessionId: null,
-      jobId: projection.identity.jobId,
-      attemptId: projection.identity.attemptId,
-      runId: projection.identity.runId,
-      status: 'terminal',
-      updatedAt: 0,
-      title: projection.receipt.summary || 'Completed work',
-      statusDetail: presentRuntimeStatus(projection.receipt.status).detail,
-    }
-    return [...activeJobs, completed]
+    return [...activeJobs, projectTerminalActiveJob(projection)]
   }, [activeJobs, projection])
   const workGroups = groupActiveWork(activeWorkItems)
   const fallbackAttention = projectAttentionItems({ jobs: activeJobs, approvals: pendingApprovals })
@@ -836,7 +831,7 @@ function ExportButton() {
   }
 
   return (
-    <div style={{ position: 'relative' }}>
+    <div className="topbar-export" style={{ position: 'relative' }}>
       <button
         onClick={() => setOpen(v => !v)}
         title="Export conversation"
@@ -873,43 +868,6 @@ function ExportButton() {
         </>
       )}
     </div>
-  )
-}
-
-// ── MarkdownContent ───────────────────────────────────────────
-
-function MarkdownContent({ content }: { content: string }) {
-  const parts = content.split(/(```[\s\S]*?```)/g)
-  return (
-    <>
-      {parts.map((part, i) => {
-        if (part.startsWith('```')) {
-          const lines = part.slice(3).split('\n')
-          const lang  = lines[0]
-          const code  = lines.slice(1, -1).join('\n')
-          return (
-            <div key={i} style={{
-              background: 'var(--bg)', border: '1px solid var(--border)',
-              borderRadius: 6, padding: '10px 14px', margin: '8px 0',
-              overflow: 'auto',
-            }}>
-              {lang && (
-                <div style={{ fontSize: 9, color: 'var(--muted)', marginBottom: 6, textTransform: 'uppercase' }}>
-                  {lang}
-                </div>
-              )}
-              <pre style={{ margin: 0, fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--text)', whiteSpace: 'pre-wrap' }}>
-                {code}
-              </pre>
-            </div>
-          )
-        }
-        const formatted = part
-          .replace(/\*\*(.*?)\*\*/g, '<strong style="color:var(--text);font-weight:600">$1</strong>')
-          .replace(/`(.*?)`/g,       '<code style="background:var(--bg3);border:1px solid var(--border);border-radius:3px;padding:1px 5px;font-family:var(--mono);font-size:12px">$1</code>')
-        return <span key={i} dangerouslySetInnerHTML={{ __html: formatted }} />
-      })}
-    </>
   )
 }
 
@@ -1201,7 +1159,7 @@ function ChatMessage({ message }: { message: Message }) {
             color: isUser ? 'var(--text)' : 'var(--muted3)',
             lineHeight: 1.65, whiteSpace: 'pre-wrap',
           }}>
-            <MarkdownContent content={presentedContent} />
+            <SafeMarkdown content={presentedContent} />
           </div>
         )}
 
@@ -1237,15 +1195,10 @@ function ChatMessage({ message }: { message: Message }) {
 
 function SettingsSection({ title, children }: { title: string; children: ReactNode }) {
   return (
-    <div style={{ marginBottom: 24 }}>
-      <div style={{
-        fontSize: 10, color: 'var(--muted)', textTransform: 'uppercase',
-        letterSpacing: '0.12em', marginBottom: 10, fontFamily: 'var(--mono)',
-      }}>
-        {title}
-      </div>
+    <section className="settings-section">
+      <h2>{title}</h2>
       {children}
-    </div>
+    </section>
   )
 }
 
@@ -2051,14 +2004,14 @@ function NavBar() {
     : activeJobs.filter((job) => ['approval_required', 'blocked', 'paused', 'state_unknown'].includes(job.status)).length
 
   return (
-    <nav style={{
+    <nav className="workbench-topbar" style={{
       height: 48, display: 'flex', alignItems: 'center',
       justifyContent: 'space-between', padding: '0 16px',
       background: 'var(--topbar)', backdropFilter: 'blur(12px)',
       borderBottom: '1px solid var(--border)', flexShrink: 0, zIndex: 100,
     }}>
       {/* Brand */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+      <div className="workbench-brand" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <button
           type="button"
           className="nav-btn"
@@ -2107,10 +2060,10 @@ function NavBar() {
       )}
 
       {/* Controls */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+      <div className="workbench-topbar-actions" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <ModelControl />
-        <button type="button" className="nav-btn" onClick={startNewChat} title="New Chat (Ctrl+K)" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>New Chat</button>
-        <button type="button" className="nav-btn" onClick={clearCurrentView} title="Clear only the current browser view" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>Clear view</button>
+        <button type="button" className="nav-btn topbar-new-chat" onClick={startNewChat} title="New Chat (Ctrl+K)" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>New Chat</button>
+        <button type="button" className="nav-btn topbar-clear-view" onClick={clearCurrentView} title="Clear only the current browser view" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>Clear view</button>
         <ExportButton />
         <ChatHeader />
         <div style={{ width: 1, height: 20, background: 'var(--border2)', margin: '0 4px' }} />
@@ -2933,11 +2886,12 @@ function AutomationsView() {
           <div className="artifact-gallery automation-grid" aria-label="Automations">
             {snapshot.automations.length === 0 ? <div className="workspace-empty-state"><strong>No automations yet</strong><span>Create a safe schedule above.</span></div> : snapshot.automations.map((automation) => (
               <article className="surface-card automation-card" key={automation.automationId}>
-                <span className="eyebrow">Revision {automation.revisionNumber} · {automation.enabled ? 'Active' : 'Paused'}</span>
+                <span className="eyebrow">{automation.enabled ? 'Active' : 'Paused'}</span>
                 <h3>{automation.name}</h3>
                 <p>{automation.trigger.kind === 'schedule' ? `${describeAutomationSchedule(automation.trigger.expression)} · ${automation.trigger.timezone}` : automation.trigger.kind}</p>
                 <p className="automation-meta">Next: {automation.nextFireAt ? new Date(automation.nextFireAt).toLocaleString() : 'Not scheduled'}</p>
-                {automation.lastOccurrence && <p className="automation-meta">Last: {automation.lastOccurrence.state} · {automation.lastOccurrence.occurrenceId}</p>}
+                {automation.lastOccurrence && <p className="automation-meta">Last run: {automation.lastOccurrence.state.replaceAll('_', ' ')}</p>}
+                <details className="automation-advanced"><summary>Advanced details</summary><p className="automation-meta">Revision {automation.revisionNumber} · Automation ID {automation.automationId}</p></details>
                 <div className="automation-actions">
                   <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'run') }}>Run now</button>
                   <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'toggle') }}>{automation.enabled ? 'Pause' : 'Resume'}</button>
@@ -2952,12 +2906,10 @@ function AutomationsView() {
               <div className="automation-history-list">
                 {snapshot.history.map((occurrence) => (
                   <article key={occurrence.occurrenceId} className="automation-history-row">
-                    <strong>{occurrence.state}</strong>
-                    <span>{occurrence.triggerKind} · {new Date(occurrence.triggeredAt).toLocaleString()}</span>
-                    <code>{occurrence.occurrenceId}</code>
-                    {occurrence.jobId && <code>Job {occurrence.jobId}</code>}
-                    {occurrence.replayOfOccurrenceId && <span>Replay of {occurrence.replayOfOccurrenceId}</span>}
-                    {occurrence.detail.delivery && <span>Work {occurrence.state === 'completed' ? 'completed' : occurrence.state} · Delivery {occurrence.detail.delivery.state}</span>}
+                    <strong>{occurrence.state.replaceAll('_', ' ')}</strong>
+                    <span>{new Date(occurrence.triggeredAt).toLocaleString()}</span>
+                    <span>{presentAutomationOccurrence({ state: occurrence.state, delivery: occurrence.detail.delivery ?? null }).label}</span>
+                    <details className="automation-advanced"><summary>Advanced details</summary><div><code>Occurrence ID {occurrence.occurrenceId}</code>{occurrence.jobId && <code>Job {occurrence.jobId}</code>}{occurrence.replayOfOccurrenceId && <code>Replay of {occurrence.replayOfOccurrenceId}</code>}<code>Trigger {occurrence.triggerKind}</code></div></details>
                   </article>
                 ))}
               </div>
@@ -3912,7 +3864,8 @@ function LiveViewPanel() {
 // ── StatusBar (replaces ActivityBar + DisclaimerBar) ─────────
 
 function StatusBar() {
-  const { runtimeConnection, runtimeVersion, runtimeEdition, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
+  const { runtimeConnection, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
+  const activeExecutionCount = foregroundExecutionCount(activeJobs)
 
   return (
     <div className="system-awareness-strip" style={{
@@ -3922,18 +3875,12 @@ function StatusBar() {
       fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--muted)',
       userSelect: 'none',
     }}>
-      <span style={{ color: 'var(--muted3)' }}>Aiden v{runtimeVersion}</span>
-      <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>{runtimeEdition === 'community' ? 'Community' : runtimeEdition[0].toUpperCase() + runtimeEdition.slice(1)}</span>
-      <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>Local</span>
-      <span style={{ color: 'var(--border2)' }}>·</span>
       <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-         {runtimeConnection}
+        <span style={{ width: 5, height: 5, borderRadius: '50%', background: runtimeConnection === 'connected' ? 'var(--green)' : 'var(--orange)', display: 'inline-block' }} />
+         {runtimeConnection === 'connected' ? 'Connected' : 'Reconnecting'}
       </span>
       <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>{activeJobs.length > 0 ? `${activeJobs.length} active` : 'Your work stays on this computer'}</span>
+      <span>{activeExecutionCount > 0 ? `${activeExecutionCount} active` : 'Private and local'}</span>
       {updateBanner && (
         <>
           <span style={{ color: 'var(--border2)' }}>·</span>
@@ -3945,10 +3892,6 @@ function StatusBar() {
           </span>
         </>
       )}
-      <span style={{ color: 'var(--border2)' }}>·</span>
-      <a href="https://taracod.com" target="_blank" rel="noopener" style={{ color: 'var(--muted)', textDecoration: 'none' }}>
-        taracod.com
-      </a>
     </div>
   )
 }
@@ -4011,6 +3954,8 @@ function SkillsManager() {
   const [skills, setSkills] = useState<any[]>(capabilities?.skills ?? [])
   const [loading, setLoading] = useState(capabilities === null)
   const [filter, setFilter] = useState<'all' | 'built-in' | 'learned' | 'approved' | 'workspace'>('all')
+  const [query, setQuery] = useState('')
+  const [visibleLimit, setVisibleLimit] = useState(24)
   const [intelligence, setIntelligence] = useState<aiden.WorkbenchSkillIntelligenceSnapshot | null>(null)
   const [review, setReview] = useState<aiden.WorkbenchSkillCandidateReview | null>(null)
   const [draftEdits, setDraftEdits] = useState<Record<string, { description: string; operations: string[] }>>({})
@@ -4058,7 +4003,9 @@ function SkillsManager() {
     }))
   }
 
-  const visible = filter === 'all' ? skills : skills.filter(s => s.source === filter)
+  const visible = (filter === 'all' ? skills : skills.filter(s => s.source === filter))
+    .filter((skill) => `${skill.name} ${skill.description ?? ''} ${(skill.tags ?? []).join(' ')}`.toLowerCase().includes(query.trim().toLowerCase()))
+  useEffect(() => { setVisibleLimit(24) }, [filter, query])
   const counts  = skills.reduce((acc: Record<string, number>, s) => {
     acc[s.source] = (acc[s.source] || 0) + 1; return acc
   }, {})
@@ -4085,7 +4032,7 @@ function SkillsManager() {
   }
 
   return (
-    <div style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+    <div style={{ fontSize: 13 }}>
       {error && <div role="alert" style={{ marginBottom: 10, color: 'var(--red)', lineHeight: 1.4 }}>{error}</div>}
 
       <div style={sectionTitle}>Active Skills</div>
@@ -4266,6 +4213,7 @@ function SkillsManager() {
       )))}
 
       <div style={sectionTitle}>Existing Skills</div>
+      <input className="aiden-field" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search Skills" aria-label="Search Skills" style={{ marginBottom: 9 }} />
       <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
         {(['all', 'built-in', 'learned', 'approved', 'workspace'] as const).map(f => {
           const count = f === 'all' ? skills.length : (counts[f] || 0)
@@ -4291,7 +4239,7 @@ function SkillsManager() {
       {!loading && visible.length === 0 && (
         <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 20 }}>No skills found</div>
       )}
-      {visible.map((skill: any) => {
+      {visible.slice(0, visibleLimit).map((skill: any) => {
         const isBuiltIn  = skill.source === 'built-in'
         const srcColor   = SOURCE_COLORS[skill.source] || 'var(--muted)'
         const isToggling = false
@@ -4307,7 +4255,7 @@ function SkillsManager() {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                   <span style={{ color: 'var(--text)', fontWeight: 600 }}>{skill.name}</span>
-                  <span style={{ fontSize: 9, color: srcColor, border: `1px solid ${srcColor}`, borderRadius: 3, padding: '0 4px', opacity: 0.8 }}>{skill.source}</span>
+                  <span style={{ fontSize: 9, color: srcColor, border: `1px solid ${srcColor}`, borderRadius: 3, padding: '0 4px', opacity: 0.8 }}>{skillSourceLabel(skill.source)}</span>
                   {skill.version && <span style={{ fontSize: 9, color: 'var(--muted)', opacity: 0.6 }}>v{skill.version}</span>}
                 </div>
                 <div style={{ color: 'var(--muted2)', fontSize: 11, lineHeight: 1.4 }}>{skill.description || '—'}</div>
@@ -4340,6 +4288,9 @@ function SkillsManager() {
           </div>
         )
       })}
+      {visible.length > visibleLimit && (
+        <button type="button" className="nav-btn" onClick={() => setVisibleLimit((limit) => limit + 24)}>Show more · {visible.length - visibleLimit} remaining</button>
+      )}
     </div>
   )
 }
@@ -4378,53 +4329,48 @@ function MCPView() {
   }
   const fact: CSSProperties = { color: 'var(--muted2)', lineHeight: 1.55 }
   return (
-    <div style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
+    <div style={{ fontSize: 13 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
         <div>
           <div style={{ color: 'var(--text)', fontWeight: 600 }}>External protocols</div>
-          <div style={{ color: 'var(--muted)', fontSize: 10 }}>Private read-only status from the Aiden runtime</div>
+          <div style={{ color: 'var(--muted3)', fontSize: 13 }}>Connection health, available access, and reviews that need you.</div>
         </div>
         <button type="button" onClick={() => { void refresh() }} className="nav-btn">Refresh</button>
       </div>
       {error && <div style={{ ...card, color: 'var(--red)' }}>{error}</div>}
       {!snapshot && !error && <div style={{ color: 'var(--muted)', padding: 12 }}>Loading protocol status…</div>}
       {snapshot && <>
-        <div style={{ fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>
-          MCP servers · {snapshot.mcp.canonicalProtocolVersion} · {snapshot.entitlements.mcpExternal ? 'entitled' : 'not entitled'}
+        <div style={{ fontSize: 10, color: 'var(--muted2)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>
+          MCP connections
         </div>
         {snapshot.mcp.servers.length === 0
-          ? <div style={card}>No MCP servers configured.</div>
+          ? <div style={card}><strong style={{ color: 'var(--text)' }}>No MCP servers</strong><div style={fact}>Connect a trusted server when you want Aiden to use its tools or resources.</div></div>
           : snapshot.mcp.servers.map((server) => (
             <div key={server.name} style={card}>
               <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
                 <strong style={{ color: 'var(--text)' }}>{server.name}</strong>
-                <span style={{ color: server.reviewRequired ? 'var(--orange)' : 'var(--green)' }}>{server.status}</span>
+                <span style={{ color: server.reviewRequired ? 'var(--orange)' : server.authState === 'required' ? 'var(--red)' : 'var(--green)' }}>{server.reviewRequired ? 'New permissions need review' : server.authState === 'required' ? 'Authentication required' : 'Connected'}</span>
               </div>
-              <div style={fact}>{server.endpoint}</div>
-              <div style={fact}>{server.transport} · protocol {server.protocolVersion ?? 'not negotiated'} · auth {server.authState}</div>
-              <div style={fact}>trust {server.trustState} · identity {server.identityId ?? 'not observed'}</div>
-              <div style={fact}>capabilities {server.capabilityChange}{server.reviewRequired ? ' · review required' : ''}</div>
-              <div style={fact}>{server.toolCount} tools · {server.readToolCount} read-only · {server.mutationToolCount} mutating · resources {server.resourcesAvailable ? 'available' : 'not advertised'}</div>
-              <div style={fact}>mutation {server.mutationBlocked ? 'blocked pending exact review' : 'requires normal approval authority'}</div>
+              <div style={fact}>{server.readToolCount} read-only tools available{server.resourcesAvailable ? ' · resources available' : ''}</div>
+              <div style={fact}>{server.mutationBlocked ? 'Mutation is blocked until the connection review is complete.' : 'Mutation requires normal Aiden approval.'}</div>
+              <details style={{ marginTop: 8 }}><summary>Advanced details</summary><div style={{ ...fact, marginTop: 6 }}>{server.endpoint}</div><div style={fact}>{server.transport} · protocol {server.protocolVersion ?? 'not negotiated'} · auth {server.authState}</div><div style={fact}>trust {server.trustState} · identity {server.identityId ?? 'not observed'}</div><div style={fact}>capabilities {server.capabilityChange} · {server.toolCount} total tools · {server.mutationToolCount} mutating</div></details>
             </div>
           ))}
 
-        <div style={{ fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', margin: '14px 0 6px' }}>
-          A2A private preview · {snapshot.a2a.protocolVersion} {snapshot.a2a.binding} · {snapshot.entitlements.a2aPreview ? 'entitled' : 'not entitled'}
+        <div style={{ fontSize: 10, color: 'var(--muted2)', textTransform: 'uppercase', letterSpacing: '0.1em', margin: '18px 0 6px' }}>
+          A2A Preview
         </div>
-        <div style={{ ...card, color: 'var(--muted2)' }}>Mutation delegation is disabled. Agent Card claims do not grant authority.</div>
+        <div style={{ ...card, color: 'var(--muted2)' }}><strong style={{ color: 'var(--text)' }}>Read-only delegation</strong><div style={{ marginTop: 4 }}>Mutation delegation is disabled. Local verification is always required.</div><details style={{ marginTop: 8 }}><summary>Advanced details</summary><div style={{ ...fact, marginTop: 6 }}>Protocol {snapshot.a2a.protocolVersion} · {snapshot.a2a.binding} · {snapshot.entitlements.a2aPreview ? 'available in this edition' : 'not available in this edition'}</div><div style={fact}>Agent Card claims do not grant authority.</div></details></div>
         {snapshot.a2a.agents.length === 0
-          ? <div style={card}>No A2A agents configured.</div>
+          ? <div style={card}><strong style={{ color: 'var(--text)' }}>No A2A agents</strong><div style={fact}>No read-only delegation target is configured.</div></div>
           : snapshot.a2a.agents.map((agent) => (
             <div key={agent.identityId} style={card}>
-              <strong style={{ color: 'var(--text)' }}>{agent.name}</strong>
-              <div style={fact}>{agent.endpoint}</div>
-              <div style={fact}>trust {agent.trustState} · identity {agent.identityId}</div>
-              <div style={fact}>capabilities {agent.capabilityChange}{agent.reviewRequired ? ' · review required' : ''}</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}><strong style={{ color: 'var(--text)' }}>{agent.name}</strong><span style={{ color: agent.reviewRequired ? 'var(--orange)' : 'var(--green)' }}>{agent.reviewRequired ? 'Review required' : 'Ready for read-only work'}</span></div>
+              <details style={{ marginTop: 8 }}><summary>Advanced details</summary><div style={{ ...fact, marginTop: 6 }}>{agent.endpoint}</div><div style={fact}>trust {agent.trustState} · identity {agent.identityId}</div><div style={fact}>capabilities {agent.capabilityChange}</div></details>
             </div>
           ))}
-        {snapshot.a2a.recoverableTasks.map((task) => (
-          <div key={task.recordId} style={card}>
+        {snapshot.a2a.recoverableTasks.length > 0 && <details style={card}><summary>Recoverable remote work · {snapshot.a2a.recoverableTasks.length}</summary>{snapshot.a2a.recoverableTasks.map((task) => (
+          <div key={task.recordId} style={{ marginTop: 9, paddingTop: 9, borderTop: '1px solid var(--border)' }}>
             <strong style={{ color: 'var(--text)' }}>RemoteTask {task.recordId}</strong>
             <div style={fact}>{task.state} · local {task.localJobId}/{task.localAttemptId} · generation {task.generation}</div>
             <div style={fact}>remote {task.remoteTaskId ?? 'not assigned'} · locally verified {String(task.locallyVerified)}</div>
@@ -4445,8 +4391,8 @@ function MCPView() {
               >{workingTask === `${task.recordId}:reconcile` ? 'Reconciling…' : 'Reconcile remote task'}</button>
             </div>
           </div>
-        ))}
-        <div style={{ color: 'var(--muted)', fontSize: 10 }}>{snapshot.a2a.quarantinedArtifacts} quarantined artifacts</div>
+        ))}</details>}
+        {snapshot.a2a.quarantinedArtifacts > 0 && <div style={{ color: 'var(--orange)', fontSize: 11 }}>{snapshot.a2a.quarantinedArtifacts} quarantined artifacts need review</div>}
       </>}
     </div>
   )
@@ -5991,6 +5937,15 @@ function CapabilitiesSettings() {
       {snapshot.items.map((item) => {
         const latest = item.versions[item.versions.length - 1]
         const pendingPermissions = item.permissionChanges.added
+        const statusLabel = pendingPermissions.length > 0
+          ? 'New permissions need review'
+          : item.health?.state === 'healthy' && item.active?.enabled
+            ? 'Ready'
+            : item.active?.enabled
+              ? 'Degraded'
+              : latest
+                ? 'Update needs review'
+                : 'Disabled'
         return (
           <div key={item.capabilityId} style={{ padding: 12, border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)', minWidth: 0 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8, alignItems: 'start' }}>
@@ -5998,14 +5953,12 @@ function CapabilitiesSettings() {
                 <strong style={{ color: 'var(--text)', overflowWrap: 'anywhere' }}>{item.displayName}</strong>
                 <div style={{ ...settingsTextStyle, overflowWrap: 'anywhere' }}>{item.capabilityId}</div>
               </div>
-              <span style={{ color: item.health?.state === 'healthy' ? 'var(--green)' : 'var(--orange)', fontFamily: 'var(--mono)', fontSize: 10 }}>{item.health?.state ?? 'unknown'}</span>
+              <span style={{ color: statusLabel === 'Ready' ? 'var(--green)' : statusLabel === 'Degraded' ? 'var(--red)' : 'var(--orange)', fontSize: 12 }}>{statusLabel}</span>
             </div>
-            <p style={settingsTextStyle}>Active: {item.active ? `${item.active.version} · ${item.active.enabled ? 'enabled' : 'disabled'}` : 'none'}</p>
-            <p style={{ ...settingsTextStyle, overflowWrap: 'anywhere' }}>Digest: {item.active?.digest ?? latest?.digest ?? '—'}</p>
-            <p style={settingsTextStyle}>Requested: {item.requestedPermissions.map((permission) => permission.kind).join(', ') || 'none'}</p>
-            <p style={settingsTextStyle}>Granted: {item.grantedPermissions.map((permission) => permission.permission).join(', ') || 'none'}</p>
+            <p style={settingsTextStyle}>{item.active ? `Version ${item.active.version} is ${item.active.enabled ? 'enabled' : 'disabled'}.` : 'No version is active.'}</p>
             {pendingPermissions.length > 0 && <p style={{ ...settingsTextStyle, color: 'var(--orange)' }}>New permission review: {pendingPermissions.map((permission) => permission.kind).join(', ')}</p>}
-            <p style={settingsTextStyle}>Recent: {item.recentInvocations[0]?.state ?? 'no invocations'}</p>
+            {item.rollbackTarget && <p style={settingsTextStyle}>Rollback available to {item.rollbackTarget.version}.</p>}
+            <details><summary>Advanced details</summary><p style={{ ...settingsTextStyle, overflowWrap: 'anywhere' }}>Digest: {item.active?.digest ?? latest?.digest ?? '—'}</p><p style={settingsTextStyle}>Requested permissions: {item.requestedPermissions.map((permission) => permission.kind).join(', ') || 'none'}</p><p style={settingsTextStyle}>Granted permissions: {item.grantedPermissions.map((permission) => permission.permission).join(', ') || 'none'}</p><p style={settingsTextStyle}>Recent invocation: {item.recentInvocations[0]?.state ?? 'none'}</p></details>
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
               {latest && (!item.active?.enabled || item.active.version !== latest.version) && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => {
                 const permissions = item.requestedPermissions.map((permission) => `${permission.kind} ${JSON.stringify(permission.scope)}`).join('\n') || 'No permissions'
@@ -6056,7 +6009,7 @@ function ReadinessSettings({ sessionId, onOpenModels, onOpenApps }: {
         <div key={item.id} style={{ padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
             <strong style={{ color: 'var(--text)', fontSize: 12 }}>{item.title}</strong>
-            <span style={{ color: item.healthy ? 'var(--green)' : item.severity === 'error' ? 'var(--red)' : 'var(--orange)', fontSize: 11, fontFamily: 'var(--mono)' }}>{item.state.replace(/_/g, ' ')}</span>
+            <StatusBadge tone={item.healthy ? 'ready' : ['setup_available', 'needs_setup'].includes(item.state) ? 'disabled' : item.severity === 'error' ? 'failed' : 'attention'}>{item.healthy ? 'Ready' : ['setup_available', 'needs_setup'].includes(item.state) ? 'Not configured' : 'Needs attention'}</StatusBadge>
           </div>
           <p style={{ ...settingsTextStyle, margin: '6px 0 0' }}>{item.detail}</p>
           {item.availableActions.includes('manage_provider') && <button type="button" className="nav-btn" onClick={onOpenModels}>Manage AI & Models</button>}
@@ -6210,13 +6163,13 @@ function SettingsDrawer() {
         zIndex: 200, backdropFilter: 'blur(2px)',
       }} />
       <div className="settings-drawer" style={{
-        position: 'fixed', top: 0, right: 0, bottom: 0, width: 420,
+        position: 'fixed', top: 0, right: 0, bottom: 0,
         background: 'var(--bg1)', borderLeft: '1px solid var(--border)',
         zIndex: 201, display: 'flex', flexDirection: 'column',
         animation: 'slideIn 0.25s ease-out',
       }}>
         {/* Header */}
-        <div style={{
+        <div className="settings-header" style={{
           height: 52, display: 'flex', alignItems: 'center',
           justifyContent: 'space-between', padding: '0 20px',
           borderBottom: '1px solid var(--border)', flexShrink: 0,
@@ -6228,8 +6181,9 @@ function SettingsDrawer() {
           }}>✕</button>
         </div>
 
+        <div className="settings-body">
         {/* Tabs */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '8px 8px', borderBottom: '1px solid var(--border)', flexShrink: 0 }}>
+        <nav className="settings-navigation" aria-label="Settings sections">
           {SETTINGS_TABS.map((tab, index) => (
             <Fragment key={tab.id}>
             {(index === 0 || SETTINGS_TABS[index - 1]?.section !== tab.section) && <span className="settings-section-label">{tab.section}</span>}
@@ -6246,10 +6200,10 @@ function SettingsDrawer() {
             </button>
             </Fragment>
           ))}
-        </div>
+        </nav>
 
         {/* Content */}
-        <div style={{ flex: 1, overflowY: 'auto', padding: 20 }}>
+        <div className="settings-content">
           {settingsTab === 'runtime' && (
             <>
               <SettingsSection title="System Readiness">
@@ -6758,6 +6712,7 @@ function SettingsDrawer() {
 
           {settingsTab === 'debug' && <DebugPanel />}
         </div>
+        </div>
       </div>
     </>
   )
@@ -7179,6 +7134,7 @@ export default function Home() {
       && workbenchControllerRef.current.isCurrent(restorationSelectionGeneration)
     const replay = { admission: restored.admission, lastEventId: 0 }
     const recoveredMessageId = `recovered_${restored.admission.attemptId}`
+    let restoredSessionId: string | null = null
     let fullReply = ''
     const nowTime = () => new Date().toLocaleTimeString('en', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })
     const settle = () => {
@@ -7189,7 +7145,7 @@ export default function Home() {
     const startReplay = () => {
       if (!restorationStillOwnsSelection()) return
       activeRunIdRef.current = restored.admission.runId
-      workbenchControllerRef.current.register(restored.admission, restored.admission.jobId)
+      workbenchControllerRef.current.register(restored.admission, restoredSessionId)
       publishController()
       setActiveJobId(restored.admission.jobId)
       setActiveAttemptId(restored.admission.attemptId)
@@ -7287,29 +7243,33 @@ export default function Home() {
       if (!restorationStillOwnsSelection()) return
       if (resolution.kind === 'missing') throw new Error('stale Workbench run handle')
       restored = resolution.handle
+      const durableConversation = conversationForExactRun(
+        conversationsRef.current,
+        restored.admission,
+      )
+      restoredSessionId = resolution.projection.identity.sessionId
+        ?? durableConversation?.sessionId
+        ?? durableConversation?.id
+        ?? null
       setActiveJobId(restored.admission.jobId)
       setActiveAttemptId(restored.admission.attemptId)
       setActiveRunId(restored.admission.runId)
       activeRunIdRef.current = restored.admission.runId
       selectContext({
-        sessionId: null,
+        sessionId: restoredSessionId,
         jobId: restored.admission.jobId,
         attemptId: restored.admission.attemptId,
         runId: restored.admission.runId,
       }, true)
       restorationSelectionGeneration = workbenchControllerRef.current.snapshot().selectionGeneration
       if (resolution.kind === 'terminal') {
-        workbenchControllerRef.current.register(restored.admission, null)
+        workbenchControllerRef.current.register(restored.admission, restoredSessionId)
         workbenchControllerRef.current.settle(restored.admission.jobId)
         publishController()
         aiden.clearRunHandle(restored.admission)
         settle()
         const summary = aiden.assistantOutputText(resolution.projection)
           || resolution.projection.receipt.summary
-        const durableConversation = conversationForExactRun(
-          conversationsRef.current,
-          restored.admission,
-        )
         const durableResponseExists = durableConversation?.messages.at(-1)?.role === 'assistant'
           && durableConversation.messages.at(-1)?.isStreaming !== true
           && Boolean(durableConversation.messages.at(-1)?.content.trim())
@@ -7325,7 +7285,7 @@ export default function Home() {
       }
       if (resolution.kind === 'inactive') {
         workbenchControllerRef.current.registerView({
-          sessionId: null,
+          sessionId: restoredSessionId,
           jobId: restored.admission.jobId,
           attemptId: restored.admission.attemptId,
           runId: restored.admission.runId,
@@ -7553,6 +7513,12 @@ export default function Home() {
   // ── Save conversations to localStorage ──────────────────────
   useEffect(() => {
     conversationsRef.current = conversations
+    const messagesByConversation = new Map<string, Message[]>()
+    for (const conversation of conversations) {
+      messagesByConversation.set(conversation.id, conversation.messages)
+      if (conversation.sessionId) messagesByConversation.set(conversation.sessionId, conversation.messages)
+    }
+    conversationMessagesRef.current = messagesByConversation
     try { localStorage.setItem('devos_conversations', JSON.stringify(conversations)) } catch {}
   }, [conversations])
 
@@ -7735,12 +7701,20 @@ export default function Home() {
 
   const selectActiveJob = useCallback((job: ReturnType<WorkbenchController['active']>[number]) => {
     selectContext({ sessionId: job.sessionId, jobId: job.jobId, attemptId: job.attemptId, runId: job.runId })
-    setCurrentConvId(job.sessionId || job.jobId)
+    const exactConversation = job.attemptId && job.runId !== null
+      ? conversationForExactRun(conversationsRef.current, {
+          jobId: job.jobId,
+          attemptId: job.attemptId,
+          runId: job.runId,
+        })
+      : null
+    setCurrentConvId(exactConversation?.id || job.sessionId || job.jobId)
     setActiveJobId(job.jobId)
     setActiveAttemptId(job.attemptId)
     setActiveRunId(job.runId)
     activeRunIdRef.current = job.runId
-    const stored = conversationMessagesRef.current.get(job.sessionId || job.jobId)
+    const stored = exactConversation?.messages
+      ?? conversationMessagesRef.current.get(job.sessionId || job.jobId)
     setMessages(stored ?? [])
     setLiveActivity(liveActivityByJobRef.current.get(job.jobId) ?? [])
     syncForegroundLifecycle(job.jobId)

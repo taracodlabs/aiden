@@ -23,6 +23,11 @@ export interface ResultPresentation {
   primaryAction: string | null;
 }
 
+export interface AutomationOccurrencePresentation {
+  label: string;
+  tone: PresentationTone;
+}
+
 const STATUS_PRESENTATIONS: Record<string, RuntimeStatusPresentation> = {
   queued: { label: 'Queued', detail: 'Waiting to start.', nextAction: null, tone: 'neutral' },
   running: { label: 'In progress', detail: 'Aiden is working on this now.', nextAction: null, tone: 'running' },
@@ -113,6 +118,25 @@ export function presentResult(input: {
   };
 }
 
+export function presentAutomationOccurrence(input: {
+  state: string;
+  delivery?: { state: 'completed' | 'failed' | 'unknown' } | null;
+}): AutomationOccurrencePresentation {
+  if (input.delivery) {
+    if (input.delivery.state === 'completed') return { label: 'Result delivered', tone: 'success' };
+    if (input.delivery.state === 'failed') return { label: 'Delivery failed', tone: 'danger' };
+    return { label: 'Delivery outcome unknown', tone: 'danger' };
+  }
+  switch (input.state) {
+    case 'completed': return { label: 'Task completed', tone: 'success' };
+    case 'failed': return { label: 'Task failed', tone: 'danger' };
+    case 'blocked': return { label: 'Task needs attention', tone: 'attention' };
+    case 'unknown': return { label: 'Task outcome unknown', tone: 'danger' };
+    case 'skipped_overlap': return { label: 'Task skipped', tone: 'neutral' };
+    default: return { label: 'Task in progress', tone: 'running' };
+  }
+}
+
 export interface ActiveWorkGroups {
   needsYou: ActiveJobView[];
   running: ActiveJobView[];
@@ -129,6 +153,28 @@ export function groupActiveWork(jobs: readonly ActiveJobView[]): ActiveWorkGroup
     else groups.readyForReview.push(job);
   }
   return groups;
+}
+
+export function projectTerminalActiveJob(projection: {
+  identity: {
+    sessionId?: string | null;
+    jobId: string;
+    attemptId: string;
+    runId: number;
+  };
+  job?: { goal?: string };
+  receipt: { status: string; summary?: string | null };
+}): ActiveJobView {
+  return {
+    sessionId: projection.identity.sessionId ?? null,
+    jobId: projection.identity.jobId,
+    attemptId: projection.identity.attemptId,
+    runId: projection.identity.runId,
+    status: 'terminal',
+    updatedAt: 0,
+    title: projection.job?.goal?.trim() || projection.receipt.summary?.trim() || 'Completed work',
+    statusDetail: presentRuntimeStatus(projection.receipt.status).detail,
+  };
 }
 
 export interface AttentionItem {

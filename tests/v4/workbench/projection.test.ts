@@ -53,6 +53,13 @@ describe('canonical Workbench projection', () => {
     const value = projectWorkbenchJob(fixture({ status: 'completed', terminalAt: 20, terminalOutcome: 'completed' }), { jobId: 'job_1' })!;
     expect(value.receipt).toMatchObject({ terminal: true, status: 'unknown' });
   });
+  it('B9a distinguishes a completed no-claim Job from an unknown outcome without calling it verified', () => {
+    const reader = fixture({ status: 'completed', terminalAt: 20, terminalOutcome: 'completed', finishReason: 'stop' });
+    reader.proof!.listClaims = () => [];
+    const value = projectWorkbenchJob(reader, { jobId: 'job_1' })!;
+    expect(value.receipt).toMatchObject({ terminal: true, status: 'completed', summary: 'completed' });
+    expect(value.receipt.status).not.toBe('verified');
+  });
   it('B10 maps a durable verified verdict to a verified receipt', () => {
     const reader = fixture({ status: 'completed', terminalAt: 20, terminalOutcome: 'completed' });
     reader.proof!.getVerdict = () => ({ jobId: 'job_1', attemptId: 'attempt_1', generation: 1, verdict: 'verified', summary: {}, finalizedAt: 20 });

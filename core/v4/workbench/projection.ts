@@ -17,7 +17,7 @@ import { operatorStatusMessage } from '../operatorStatusMessage';
 
 export type WorkbenchProjectionStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
-  | 'verified' | 'partially_verified' | 'failed' | 'cancelled'
+  | 'completed' | 'verified' | 'partially_verified' | 'failed' | 'cancelled'
   | 'unknown' | 'blocked';
 
 export interface WorkbenchJobProjectionReader {
@@ -77,13 +77,18 @@ const TERMINAL_JOBS = new Set([
   'completed_unverified', 'verification_failed', 'abandoned',
 ]);
 
-export function projectWorkbenchStatus(job: JobRecord, verdict: JobVerdictRecord | null): WorkbenchProjectionStatus {
+export function projectWorkbenchStatus(
+  job: JobRecord,
+  verdict: JobVerdictRecord | null,
+  hasRequiredClaims = false,
+): WorkbenchProjectionStatus {
   if (verdict?.verdict === 'verified') return 'verified';
   if (verdict?.verdict === 'partially_verified') return 'partially_verified';
   if (verdict?.verdict === 'failed') return 'failed';
   if (verdict?.verdict === 'cancelled') return 'cancelled';
   if (verdict?.verdict === 'unknown') return 'unknown';
-  if (job.status === 'completed' || job.status === 'completed_unverified' || job.status === 'abandoned') return 'unknown';
+  if (job.status === 'completed') return hasRequiredClaims ? 'unknown' : 'completed';
+  if (job.status === 'completed_unverified' || job.status === 'abandoned') return 'unknown';
   if (job.status === 'failed' || job.status === 'dead_letter' || job.status === 'verification_failed') return 'failed';
   if (job.status === 'cancelled') return 'cancelled';
   if (job.status === 'blocked') return 'blocked';
@@ -105,7 +110,7 @@ function failureSummary(
   timeline: JobEventRecord[],
 ): string {
   if (!['failed', 'unknown', 'blocked'].includes(status)) {
-    return job.finishReason ?? verdict?.verdict ?? status;
+    return verdict?.verdict ?? job.terminalOutcome ?? status;
   }
   for (const event of [...timeline].reverse()) {
     const payload = event.payload ?? {};
@@ -133,7 +138,7 @@ export function projectWorkbenchJob(
   const evidence = proof?.listEvidence(job.id) ?? [];
   const verdict = proof?.getVerdict(job.id) ?? null;
   const exported = proof ? proof.exportJson(job.id) : {};
-  const status = projectWorkbenchStatus(job, verdict);
+  const status = projectWorkbenchStatus(job, verdict, claims.some((claim) => claim.required));
   const terminal = TERMINAL_JOBS.has(job.status);
   return {
     schemaVersion: 1,

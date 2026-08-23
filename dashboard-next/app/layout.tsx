@@ -1,18 +1,12 @@
 import type { Metadata } from 'next'
-import { DM_Mono, Outfit } from 'next/font/google'
+import { DM_Mono } from 'next/font/google'
 import './globals.css'
 
-// Taracod design system: Outfit for display/body, DM Mono for numbers.
+// Aiden uses the native system sans for product copy and DM Mono for technical data.
 const dmMono = DM_Mono({
   subsets: ['latin'],
   variable: '--font-mono',
   weight: ['400', '500'],
-})
-
-const outfit = Outfit({
-  subsets: ['latin'],
-  variable: '--font-sans',
-  weight: ['400', '500', '600', '700'],
 })
 
 export const metadata: Metadata = {
@@ -23,7 +17,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${dmMono.variable} ${outfit.variable}`}>
+    <html lang="en" className={dmMono.variable}>
       <body>{children}</body>
     </html>
   )
