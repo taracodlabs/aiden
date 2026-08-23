@@ -239,9 +239,10 @@
     "asarUnpack": []
   },
   "dependencies": {
+    "@a2a-js/sdk": "1.0.1",
     "@inquirer/core": "^11.1.9",
     "@inquirer/prompts": "^8.4.2",
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@slack/bolt": "^4.6.0",
     "@slack/web-api": "^7.15.0",
     "ansi-escapes": "^4.3.2",
