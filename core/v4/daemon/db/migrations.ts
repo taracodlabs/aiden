@@ -3726,6 +3726,145 @@ function applyV53(db: Database.Database): void {
   `);
 }
 
+function applyV54(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS external_identities (
+      external_identity_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL CHECK(kind IN ('mcp','a2a')),
+      canonical_endpoint TEXT NOT NULL,
+      display_name TEXT NOT NULL,
+      observed_identity_key_digest TEXT,
+      trusted_identity_key_digest TEXT,
+      trust_state TEXT NOT NULL CHECK(trust_state IN (
+        'unverified','verified_endpoint','verified_key','revoked','changed'
+      )),
+      state_version INTEGER NOT NULL DEFAULT 1,
+      first_observed_at INTEGER NOT NULL,
+      last_observed_at INTEGER NOT NULL,
+      verified_at INTEGER,
+      revoked_at INTEGER,
+      UNIQUE(kind,canonical_endpoint)
+    );
+    CREATE INDEX IF NOT EXISTS idx_external_identities_trust
+      ON external_identities(kind,trust_state,last_observed_at DESC);
+
+    CREATE TABLE IF NOT EXISTS external_capability_snapshots (
+      capability_snapshot_id TEXT PRIMARY KEY,
+      external_identity_id TEXT NOT NULL,
+      protocol TEXT NOT NULL CHECK(protocol IN ('mcp','a2a')),
+      protocol_version TEXT NOT NULL,
+      capability_digest TEXT NOT NULL,
+      read_capability_digest TEXT NOT NULL,
+      mutation_capability_digest TEXT NOT NULL,
+      capabilities_json TEXT NOT NULL,
+      prior_snapshot_id TEXT,
+      change_class TEXT NOT NULL CHECK(change_class IN ('initial','same','read_only','mutation','identity')),
+      review_required INTEGER NOT NULL CHECK(review_required IN (0,1)),
+      accepted_by TEXT,
+      accepted_at INTEGER,
+      state_version INTEGER NOT NULL DEFAULT 1,
+      idempotency_key TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      UNIQUE(external_identity_id,capability_digest),
+      UNIQUE(external_identity_id,idempotency_key),
+      FOREIGN KEY(external_identity_id) REFERENCES external_identities(external_identity_id) ON DELETE RESTRICT,
+      FOREIGN KEY(prior_snapshot_id) REFERENCES external_capability_snapshots(capability_snapshot_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_external_capabilities_latest
+      ON external_capability_snapshots(external_identity_id,observed_at DESC,capability_snapshot_id);
+
+    CREATE TABLE IF NOT EXISTS remote_tasks (
+      remote_task_record_id TEXT PRIMARY KEY,
+      external_identity_id TEXT NOT NULL,
+      capability_snapshot_id TEXT NOT NULL,
+      capability_digest TEXT NOT NULL,
+      protocol_version TEXT NOT NULL,
+      binding TEXT NOT NULL,
+      parent_job_id TEXT NOT NULL,
+      local_job_id TEXT NOT NULL,
+      local_attempt_id TEXT NOT NULL,
+      local_generation INTEGER NOT NULL,
+      local_fence_digest TEXT NOT NULL,
+      request_digest TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      remote_task_id TEXT,
+      remote_context_id TEXT,
+      remote_message_id TEXT,
+      state TEXT NOT NULL CHECK(state IN (
+        'admitted','sending','submitted','working','input_required',
+        'completed_observed','failed_observed','cancel_requested',
+        'cancelled_observed','unknown','verified','rejected'
+      )),
+      locally_verified INTEGER NOT NULL DEFAULT 0 CHECK(locally_verified IN (0,1)),
+      verification_id TEXT,
+      evidence_ids_json TEXT NOT NULL DEFAULT '[]',
+      state_version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      cancel_requested_at INTEGER,
+      terminal_at INTEGER,
+      UNIQUE(external_identity_id,idempotency_key),
+      UNIQUE(external_identity_id,remote_task_id),
+      FOREIGN KEY(external_identity_id) REFERENCES external_identities(external_identity_id) ON DELETE RESTRICT,
+      FOREIGN KEY(capability_snapshot_id) REFERENCES external_capability_snapshots(capability_snapshot_id) ON DELETE RESTRICT,
+      FOREIGN KEY(parent_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY(local_job_id) REFERENCES tasks(id) ON DELETE RESTRICT,
+      FOREIGN KEY(local_attempt_id) REFERENCES runs(attempt_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_tasks_local
+      ON remote_tasks(local_job_id,local_attempt_id,local_generation,created_at);
+    CREATE INDEX IF NOT EXISTS idx_remote_tasks_recovery
+      ON remote_tasks(state,updated_at) WHERE state NOT IN ('verified','rejected','cancelled_observed');
+
+    CREATE TABLE IF NOT EXISTS remote_task_events (
+      remote_task_event_id TEXT PRIMARY KEY,
+      remote_task_record_id TEXT NOT NULL,
+      remote_event_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK(kind IN (
+        'created','sent','accepted','status_observed','artifact_observed',
+        'cancel_requested','cancel_observed','reconnected','identity_changed',
+        'unknown','verified','settled'
+      )),
+      task_state TEXT NOT NULL,
+      payload_digest TEXT NOT NULL,
+      observed_at INTEGER NOT NULL,
+      UNIQUE(remote_task_record_id,remote_event_id),
+      UNIQUE(remote_task_record_id,sequence),
+      FOREIGN KEY(remote_task_record_id) REFERENCES remote_tasks(remote_task_record_id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_task_events_ordered
+      ON remote_task_events(remote_task_record_id,sequence);
+
+    CREATE TABLE IF NOT EXISTS remote_artifacts (
+      remote_artifact_id TEXT PRIMARY KEY,
+      remote_task_record_id TEXT NOT NULL,
+      external_identity_id TEXT NOT NULL,
+      remote_artifact_key TEXT NOT NULL,
+      declared_name TEXT NOT NULL,
+      declared_media_type TEXT,
+      detected_media_type TEXT,
+      byte_length INTEGER NOT NULL,
+      content_digest TEXT NOT NULL,
+      quarantine_state TEXT NOT NULL CHECK(quarantine_state IN (
+        'quarantined','rejected','released'
+      )),
+      rejection_reason TEXT,
+      artifact_id TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      state_version INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      released_at INTEGER,
+      UNIQUE(remote_task_record_id,remote_artifact_key),
+      FOREIGN KEY(remote_task_record_id) REFERENCES remote_tasks(remote_task_record_id) ON DELETE RESTRICT,
+      FOREIGN KEY(external_identity_id) REFERENCES external_identities(external_identity_id) ON DELETE RESTRICT,
+      FOREIGN KEY(artifact_id) REFERENCES artifacts(id) ON DELETE RESTRICT
+    );
+    CREATE INDEX IF NOT EXISTS idx_remote_artifacts_state
+      ON remote_artifacts(quarantine_state,created_at);
+  `);
+}
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -3780,6 +3919,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 51, name: 'evidence-linked learning ledger', apply: applyV51 },
   { version: 52, name: 'secure capability SDK foundation', apply: applyV52 },
   { version: 53, name: 'durable Skill Intelligence authority', apply: applyV53 },
+  { version: 54, name: 'secure external protocol authority', apply: applyV54 },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
@@ -3848,7 +3988,8 @@ function validateLatestSchema(db: Database.Database): void {
     'workflow_pattern_traces', 'skill_candidates', 'skill_drafts',
     'skill_evaluations', 'skill_management_approvals', 'skill_versions',
     'skill_active_pointers', 'skill_activation_history', 'skill_invocations',
-    'skill_version_outcomes'];
+    'skill_version_outcomes', 'external_identities', 'external_capability_snapshots',
+    'remote_tasks', 'remote_task_events', 'remote_artifacts'];
   const missing = required.filter((table) => !tableExists(db, table));
   if (missing.length > 0) throw new Error(`Database schema is incomplete at version ${LATEST_SCHEMA_VERSION}: missing ${missing.join(', ')}`);
   if (!tableExists(db, 'job_event_cursors')) {

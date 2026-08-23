@@ -15,8 +15,8 @@ import {
 let db: Database.Database | undefined;
 afterEach(() => { db?.close(); db = undefined; });
 
-describe('Skill Intelligence migration v53', () => {
-  it('upgrades v52 additively with immutable versions and one scoped active pointer', () => {
+describe('Skill Intelligence migration v53 preservation', () => {
+  it('preserves the v53 immutable-version schema when upgrading v52 through the latest migration', () => {
     db = new Database(':memory:');
     db.pragma('foreign_keys = ON');
     for (const migration of MIGRATIONS_FOR_TESTS.filter((entry) => entry.version <= 52)) {
@@ -30,8 +30,8 @@ describe('Skill Intelligence migration v53', () => {
 
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='workflow_traces'").get())
       .toBeUndefined();
-    expect(runMigrations(db)).toEqual({ from: 52, to: 53 });
-    expect(LATEST_SCHEMA_VERSION).toBe(53);
+    expect(runMigrations(db)).toEqual({ from: 52, to: LATEST_SCHEMA_VERSION });
+    expect(LATEST_SCHEMA_VERSION).toBe(54);
 
     const expected = [
       'workflow_traces', 'workflow_patterns', 'workflow_pattern_traces',
@@ -70,6 +70,6 @@ describe('Skill Intelligence migration v53', () => {
       'idx_skill_versions_identity',
     ]));
 
-    expect(runMigrations(db)).toEqual({ from: 53, to: 53 });
+    expect(runMigrations(db)).toEqual({ from: 54, to: 54 });
   });
 });
