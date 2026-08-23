@@ -29,6 +29,8 @@ import type { McpServer, McpServerConfig } from '../../../core/v4/mcpClient';
 import { promises as fs } from 'node:fs';
 import { mapStandardMcpServers } from '../../../tools/v4/mcpImport';
 import { ensureMcpOAuthConfig, type StaticOAuthClient } from '../../../core/v4/mcp/oauthDiscovery';
+import { mcpTokenId } from '../../../core/v4/mcp/oauthDiscovery';
+import { clearTokens } from '../../../core/v4/auth/tokenStore';
 import {
   runLoopbackAuthFlow,
   loopbackRedirectUris,
@@ -107,6 +109,33 @@ function renderServerDetail(ctx: SlashCommandContext, server: McpServer): void {
   const note = breakerNote(server);
   const glyph = note ? '⚠' : (STATUS_GLYPH[server.status] ?? '·');
   ctx.display.info(`${glyph} ${server.config.name} — ${server.status} (${server.config.type})${note}`);
+  const endpoint = server.config.type === 'http'
+    ? server.config.http?.baseUrl
+    : server.config.stdio
+      ? [server.config.stdio.command, ...server.config.stdio.args].join(' ')
+      : undefined;
+  if (endpoint) ctx.display.dim(`  endpoint: ${endpoint}`);
+  const transport = server.config.type === 'http'
+    ? (server.config.http?.transport ?? 'streamable')
+    : 'stdio';
+  ctx.display.dim(`  transport: ${transport} · protocol: ${server.protocolVersion ?? 'not negotiated'}`);
+  ctx.display.dim(
+    `  identity: ${server.externalTrustState ?? 'local session only'} · auth: `
+    + `${server.status === 'needs-auth' ? 'required' : server.config.http?.oauth ? 'authorized' : 'not required'}`,
+  );
+  if (server.capabilityChangeClass || server.capabilityReviewRequired !== undefined) {
+    ctx.display.dim(
+      `  capabilities: ${server.capabilityChangeClass ?? 'same'} · `
+      + `${server.capabilityReviewRequired ? 'review needed' : 'reviewed'}`,
+    );
+  }
+  const reads = server.tools.filter((tool) => tool.effect === 'read_only').length;
+  const mutations = server.tools.length - reads;
+  ctx.display.dim(
+    `  access: ${reads} read-only · ${mutations} mutation${mutations === 1 ? '' : 's'} `
+    + `(${server.mutationBlocked ? 'blocked pending trust review' : 'approval required'})`,
+  );
+  ctx.display.dim(`  resources: ${server.capabilities.resources ? 'available' : 'not advertised'}`);
   if (server.status === 'needs-auth') ctx.display.dim(`  run /mcp auth ${server.config.name} to sign in`);
   if (server.lastError) ctx.display.dim(`  last error: ${server.lastError}`);
   if (server.tools.length === 0) { ctx.display.dim('  (no tools exposed)'); return; }
@@ -364,6 +393,23 @@ async function handleRemove(ctx: SlashCommandContext): Promise<void> {
   display.success(`Removed '${name}'.`);
 }
 
+/** `/mcp revoke <name>` — revoke durable trust before clearing the exact credential. */
+async function handleRevoke(ctx: SlashCommandContext): Promise<void> {
+  const { display } = ctx;
+  if (!ctx.mcpClient) { display.warn('MCP client is not available in this session.'); return; }
+  if (!ctx.confirm) { display.printError('Cannot confirm in this context — aborting for safety.'); return; }
+  const name = ctx.args[1];
+  if (!name) { display.printError('Usage: /mcp revoke <name>.'); return; }
+  if (!ctx.mcpClient.get(name)) {
+    display.printError(`No connected MCP server named '${name}'.`, 'Connect it before revoking its durable identity.');
+    return;
+  }
+  if (!await ctx.confirm(`Revoke trust and stored authorization for MCP server '${name}'?`)) return;
+  await ctx.mcpClient.revoke(name);
+  if (ctx.paths) await clearTokens(ctx.paths, mcpTokenId(name));
+  display.success(`Revoked '${name}'. Its tools are unavailable until it is explicitly trusted again.`);
+}
+
 /** `/mcp import <path>` — map a standard mcpServers JSON file, batch-confirm, import. */
 async function handleImport(ctx: SlashCommandContext): Promise<void> {
   const { display } = ctx;
@@ -526,6 +572,7 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
       fetchFn: fetch,
       redirectUris: loopbackRedirectUris(),
       staticClient,
+      requestedScopes: oauthCfg?.scopes,
     });
     // Route by what the resolved config carries: a device-authorization endpoint
     // ⇒ RFC 8628 device flow; otherwise the DCR + loopback flow. Both hand the
@@ -537,12 +584,13 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
             tokenEndpoint: config.endpoints.tokenEndpoint,
             clientId: config.clientId,
             scope: config.scopes?.join(' '),
+            resource: config.resource,
           },
           server: name,
           ua: buildMcpUserAgent(ctx),
         })
       : await runLoopbackAuthFlow({ config, server: name, ua: buildMcpUserAgent(ctx) });
-    await persistMcpTokens(ctx.paths, name, result);
+    await persistMcpTokens(ctx.paths, name, result, config);
 
     // Handoff: token persisted → (re)connect so the tools register immediately.
     if (ctx.mcpClient && ctx.mcpClient.get(name)) {
@@ -691,6 +739,7 @@ export const mcp: SlashCommand = {
     // Slice 1b — mutating subcommands (config write + subprocess spawn).
     if (sub === 'add')    { await handleAdd(ctx);    return {}; }
     if (sub === 'remove') { await handleRemove(ctx); return {}; }
+    if (sub === 'revoke') { await handleRevoke(ctx); return {}; }
 
     // Slice 1c — import a standard mcpServers JSON file.
     if (sub === 'import') { await handleImport(ctx); return {}; }

@@ -12,8 +12,10 @@ import { classifyPlatform } from './platformSupport';
 import { snapshotAutomationReadiness } from '../automation/readiness';
 import { snapshotPresenceReadiness } from '../presence/readiness';
 import { snapshotLearningReadiness } from '../learning/readiness';
+import { MCP_COMPATIBLE_PROTOCOL_VERSIONS, MCP_PROTOCOL_VERSION } from '../mcp/protocol';
+import { A2A_JSONRPC_BINDING, A2A_PROTOCOL_VERSION } from '../a2a/protocol';
 
-export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Automations' | 'Presence' | 'Learning' | 'Workbench' | 'Commercial';
+export type ProductDoctorGroup = 'System' | 'Runtime' | 'AI' | 'Coding' | 'Browser' | 'Apps' | 'Automations' | 'Presence' | 'Learning' | 'MCP' | 'A2A' | 'Workbench' | 'Commercial';
 export interface ProductDoctorResult {
   name: string;
   group: ProductDoctorGroup;
@@ -34,6 +36,24 @@ export interface CommercialDoctorContext {
   entitlementState: string;
   updateChannel: string;
   serviceConnectivity?: 'ready' | 'unavailable' | 'not_configured';
+}
+
+export interface ExternalProtocolDoctorContext {
+  mcpServers?: Array<{
+    name: string;
+    endpoint: string;
+    transport: string;
+    protocolVersion?: string;
+    status: string;
+    trustState?: string;
+    capabilityChangeClass?: string;
+    reviewRequired?: boolean;
+    toolCount: number;
+    resourcesAvailable: boolean;
+  }>;
+  a2aIdentities?: Array<{ displayName: string; trustState: string }>;
+  a2aRecoverableTasks?: Array<{ state: string; locallyVerified: boolean }>;
+  quarantinedArtifacts?: number;
 }
 
 export interface DoctorJsonReport {
@@ -62,6 +82,7 @@ export async function productDoctorResults(input: {
   installedVersion: string;
   readiness?: SystemReadinessProjection;
   commercial?: CommercialDoctorContext;
+  externalProtocols?: ExternalProtocolDoctorContext;
 }): Promise<ProductDoctorResult[]> {
   const support = classifyPlatform();
   const results: ProductDoctorResult[] = [
@@ -90,6 +111,8 @@ export async function productDoctorResults(input: {
   } catch (error) {
     results.push(result('SQLite', 'Runtime', false, error instanceof Error ? error.message : 'unavailable', 'Reinstall Aiden under a supported Node runtime.'));
   }
+
+  results.push(...externalProtocolDoctorResults(input.externalProtocols));
 
   if (input.readiness) {
     const groupByCategory: Record<string, ProductDoctorGroup> = {
@@ -129,6 +152,89 @@ export async function productDoctorResults(input: {
       results.push(result('commercial services', 'Commercial', input.commercial.serviceConnectivity === 'ready', input.commercial.serviceConnectivity));
     }
   }
+  return results;
+}
+
+export function externalProtocolDoctorResults(
+  context: ExternalProtocolDoctorContext | undefined,
+): ProductDoctorResult[] {
+  const mcpServers = context?.mcpServers ?? [];
+  const a2aIdentities = context?.a2aIdentities ?? [];
+  const recoverableTasks = context?.a2aRecoverableTasks ?? [];
+  const quarantinedArtifacts = context?.quarantinedArtifacts ?? 0;
+  const results: ProductDoctorResult[] = [
+    result(
+      'MCP protocol', 'MCP', true,
+      `canonical ${MCP_PROTOCOL_VERSION} · compatible ${MCP_COMPATIBLE_PROTOCOL_VERSIONS.join(', ')}`,
+    ),
+  ];
+
+  if (mcpServers.length === 0) {
+    results.push(result('MCP servers', 'MCP', true, 'no servers configured · canonical client ready'));
+    results.push(result('MCP OAuth and capability review', 'MCP', true, 'inactive until a server is configured'));
+  } else {
+    for (const server of mcpServers) {
+      const drift = server.capabilityChangeClass && server.capabilityChangeClass !== 'same'
+        ? `${server.capabilityChangeClass} drift`
+        : 'capabilities stable';
+      const trust = server.trustState ?? 'unverified';
+      const healthyStatus = ['ready', 'needs-auth'].includes(server.status);
+      const safeTrust = !['changed', 'revoked'].includes(trust);
+      const passed = healthyStatus && safeTrust && server.reviewRequired !== true;
+      const message = [
+        server.endpoint,
+        server.transport,
+        server.protocolVersion ?? 'protocol unknown',
+        server.status,
+        `trust ${trust}`,
+        drift,
+        `${server.toolCount} tools`,
+        server.resourcesAvailable ? 'resources advertised' : 'no resources advertised',
+      ].join(' · ');
+      results.push(result(
+        `MCP ${server.name}`, 'MCP', passed, message,
+        server.reviewRequired
+          ? 'Review the exact capability change before enabling mutating tools.'
+          : server.status === 'needs-auth'
+            ? `Authorize ${server.name} with the exact OAuth resource and scopes.`
+            : passed ? undefined : 'Inspect identity, transport, and capability state before reconnecting.',
+      ));
+    }
+    const legacy = mcpServers.filter((server) => server.protocolVersion && server.protocolVersion !== MCP_PROTOCOL_VERSION).length;
+    const needsAuth = mcpServers.filter((server) => server.status === 'needs-auth').length;
+    results.push(result(
+      'MCP OAuth and compatibility', 'MCP', true,
+      `${needsAuth} awaiting OAuth · ${legacy} deliberate compatible-revision connection${legacy === 1 ? '' : 's'}`,
+    ));
+  }
+
+  results.push(result(
+    'A2A preview', 'A2A', true,
+    `${A2A_PROTOCOL_VERSION} ${A2A_JSONRPC_BINDING} · read-only delegation · mutation disabled`,
+  ));
+  if (a2aIdentities.length === 0) {
+    results.push(result('A2A agents', 'A2A', true, 'no agents configured · identity store ready'));
+  } else {
+    const unsafe = a2aIdentities.filter((identity) => ['changed', 'revoked'].includes(identity.trustState));
+    results.push(result(
+      'A2A agents', 'A2A', unsafe.length === 0,
+      `${a2aIdentities.length} configured · ${unsafe.length} changed or revoked`,
+      unsafe.length > 0 ? 'Review the exact Agent Card identity before any further contact.' : undefined,
+    ));
+  }
+  const unresolvedTasks = recoverableTasks.filter((task) => task.state === 'unknown' || !task.locallyVerified).length;
+  results.push(result(
+    'A2A RemoteTasks', 'A2A', recoverableTasks.length === 0,
+    recoverableTasks.length === 0
+      ? 'no recoverable tasks · durable task store ready'
+      : `${recoverableTasks.length} recoverable · ${unresolvedTasks} awaiting local reconciliation`,
+    recoverableTasks.length > 0 ? 'Reconcile exact RemoteTask identity and local Proof before declaring completion.' : undefined,
+  ));
+  results.push(result(
+    'A2A quarantine', 'A2A', true,
+    `${quarantinedArtifacts} quarantined artifact${quarantinedArtifacts === 1 ? '' : 's'}`,
+  ));
+  results.push(result('A2A transport', 'A2A', true, 'bounded JSON-RPC streaming · local budgets and cancellation authority'));
   return results;
 }
 

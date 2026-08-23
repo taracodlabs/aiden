@@ -52,6 +52,7 @@ import type { WorkbenchLiveExecutionPort } from './liveExecution';
 import type { WorkbenchAutomationPort } from './automationPort';
 import type { WorkbenchLearningPort } from './learningPort';
 import type { WorkbenchSkillIntelligencePort } from './skillIntelligencePort';
+import type { WorkbenchExternalProtocolsPort } from './externalProtocolsPort';
 import type { CapabilityRequirement, SkillDraftStep } from '../skillIntelligence/types';
 
 /**
@@ -269,6 +270,8 @@ export interface WorkbenchBridgeOptions {
   learning?: WorkbenchLearningPort;
   /** Reviewed Skill candidate, evaluation, approval and version management. */
   skillIntelligence?: WorkbenchSkillIntelligencePort;
+  /** Private projection plus exact durable A2A cancel/reconcile controls. */
+  externalProtocols?: WorkbenchExternalProtocolsPort;
   /** Per-launch local write token. REQUIRED for any write to execute — POST
    *  /api/tasks must present it (x-workbench-token / Bearer). Absent → all
    *  writes are refused. Injected into the served page so only the local
@@ -706,6 +709,29 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && proposalAcceptMatch) {
       handlePresenceProposalAccept(req, res, proposalAcceptMatch[1]); return;
     }
+    const externalTaskActionMatch = url.pathname.match(
+      /^\/api\/external-protocols\/a2a\/tasks\/([^/]+)\/(cancel|reconcile)$/,
+    );
+    if (req.method === 'POST' && externalTaskActionMatch) {
+      if (!passesWriteGate(req, res)) return;
+      if (!opts.externalProtocols) { sendJson(res, 503, { error: 'External protocol control is unavailable' }); return; }
+      const recordId = decodeURIComponent(externalTaskActionMatch[1]);
+      const action = externalTaskActionMatch[2] as 'cancel' | 'reconcile';
+      if (action === 'reconcile') {
+        void opts.externalProtocols.reconcileRemoteTask(recordId)
+          .then((task) => sendJson(res, 200, { task }))
+          .catch((error) => sendJson(res, 400, { error: managementError(error) }));
+        return;
+      }
+      readJsonBody(req, 4 * 1024).then(async (body) => {
+        if (typeof body.reason !== 'string') { sendJson(res, 400, { error: 'reason is required' }); return; }
+        try {
+          const task = await opts.externalProtocols!.cancelRemoteTask(recordId, body.reason);
+          sendJson(res, 200, { task });
+        } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+      }).catch((error) => sendJson(res, 400, { error: managementError(error) }));
+      return;
+    }
     if (req.method !== 'GET') { sendJson(res, 405, { error: 'method not allowed' }); return; }
 
     // The built-in self-contained dark page. The per-launch write token is
@@ -784,6 +810,13 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
           log(`Apps snapshot failed: ${error instanceof Error ? error.message : 'request failed'}`);
           sendJson(res, 503, { error: 'Apps are temporarily unavailable' });
         });
+      return;
+    }
+    if (url.pathname === '/api/external-protocols') {
+      if (!passesTokenGate(req, res)) return;
+      if (!opts.externalProtocols) { sendJson(res, 503, { error: 'External protocol projection is unavailable' }); return; }
+      try { sendJson(res, 200, opts.externalProtocols.snapshot()); }
+      catch (error) { sendJson(res, 503, { error: managementError(error) }); }
       return;
     }
     if (url.pathname === '/api/automations') {

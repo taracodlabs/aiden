@@ -39,7 +39,40 @@ export const doctor: SlashCommand = {
       return {};
     }
     ctx.display.info('Running diagnostic checks...');
-    const report = await runDoctor({ paths: ctx.paths });
+    const external = ctx.jobEngine?.external;
+    const recoverable = external?.listRecoverableRemoteTasks() ?? [];
+    const report = await runDoctor({
+      paths: ctx.paths,
+      externalProtocols: {
+        mcpServers: (ctx.mcpClient?.list() ?? []).map((server) => ({
+          name: server.config.name,
+          endpoint: server.config.type === 'http'
+            ? server.config.http?.baseUrl ?? 'HTTP endpoint unavailable'
+            : `${server.config.stdio?.command ?? 'stdio'} ${(server.config.stdio?.args ?? []).join(' ')}`.trim(),
+          transport: server.config.type === 'http'
+            ? server.config.http?.transport ?? 'streamable'
+            : 'stdio',
+          protocolVersion: server.protocolVersion,
+          status: server.status,
+          trustState: server.externalTrustState,
+          capabilityChangeClass: server.capabilityChangeClass,
+          reviewRequired: server.capabilityReviewRequired,
+          toolCount: server.tools.length,
+          resourcesAvailable: server.capabilities.resources !== undefined,
+        })),
+        a2aIdentities: (external?.listIdentities('a2a') ?? []).map((identity) => ({
+          displayName: identity.displayName,
+          trustState: identity.trustState,
+        })),
+        a2aRecoverableTasks: recoverable.map((task) => ({
+          state: task.state,
+          locallyVerified: task.locallyVerified,
+        })),
+        quarantinedArtifacts: recoverable.reduce((total, task) => total
+          + (external?.listRemoteArtifacts(task.remoteTaskRecordId)
+            .filter((artifact) => artifact.quarantineState === 'quarantined').length ?? 0), 0),
+      },
+    });
     // v4.14.x — Setup group with LIVE runtime state: the session's active
     // model, the approval engine's mode, and the live tool registry. Anything
     // a live source doesn't provide falls back to saved config (labelled).

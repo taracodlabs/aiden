@@ -15,6 +15,8 @@ export const COMMERCIAL_CAPABILITIES = [
   'learning.enabled',
   'capability.sdk',
   'skill.intelligence',
+  'mcp.external',
+  'a2a.preview',
   'relay.remote',
   'workflow.premium',
   'team.shared',

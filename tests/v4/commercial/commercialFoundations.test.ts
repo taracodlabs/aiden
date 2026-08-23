@@ -76,6 +76,21 @@ describe('commercial edition authority', () => {
     expect(authority.can('relay.remote')).toBe(false);
     expect(authority.can('unknown.capability')).toBe(false);
   });
+
+  it('gates external protocol product surfaces without treating entitlement as permission', () => {
+    const community = new EditionAuthority({ edition: 'community', grants: [] });
+    const pro = new EditionAuthority({
+      edition: 'pro',
+      grants: ['mcp.external', 'a2a.preview'],
+    });
+
+    expect(community.can('mcp.external')).toBe(false);
+    expect(community.can('a2a.preview')).toBe(false);
+    expect(pro.can('mcp.external')).toBe(true);
+    expect(pro.can('a2a.preview')).toBe(true);
+    expect(pro.can('safety.approvals')).toBe(true);
+    expect(pro.can('external.mutation')).toBe(false);
+  });
 });
 
 describe('signed entitlement authority', () => {

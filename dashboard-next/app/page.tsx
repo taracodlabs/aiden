@@ -4340,55 +4340,107 @@ function SkillsManager() {
 // ── MCPView ───────────────────────────────────────────────────
 
 function MCPView() {
-  const [url, setUrl] = useState('')
-  const [plugins, setPlugins] = useState<any[]>([])
-  useEffect(() => {
-    fetch('http://localhost:4200/api/mcp/list').then(r => r.json()).then(d => setPlugins(d.plugins || [])).catch(() => {})
-  }, [])
-  const connect = async () => {
-    if (!url.trim()) return
+  const [snapshot, setSnapshot] = useState<aiden.WorkbenchExternalProtocolSnapshot | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [workingTask, setWorkingTask] = useState<string | null>(null)
+  const refresh = useCallback(async () => {
     try {
-      await fetch('http://localhost:4200/api/mcp/connect', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: url.trim() }),
-      })
-      setUrl('')
-      fetch('http://localhost:4200/api/mcp/list').then(r => r.json()).then(d => setPlugins(d.plugins || [])).catch(() => {})
-    } catch {}
+      setSnapshot(await aiden.loadWorkbenchExternalProtocols())
+      setError(null)
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : 'External protocol status is unavailable.')
+    }
+  }, [])
+  useEffect(() => { void refresh() }, [refresh])
+  const controlTask = useCallback(async (recordId: string, action: 'cancel' | 'reconcile') => {
+    setWorkingTask(`${recordId}:${action}`)
+    try {
+      if (action === 'cancel') await aiden.cancelExternalRemoteTask(recordId)
+      else await aiden.reconcileExternalRemoteTask(recordId)
+      await refresh()
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : `RemoteTask ${action} failed.`)
+    } finally {
+      setWorkingTask(null)
+    }
+  }, [refresh])
+
+  const card: CSSProperties = {
+    padding: '10px 12px', marginBottom: 8, background: 'var(--bg)',
+    border: '1px solid var(--border)', borderRadius: 6, overflowWrap: 'anywhere',
   }
+  const fact: CSSProperties = { color: 'var(--muted2)', lineHeight: 1.55 }
   return (
     <div style={{ fontFamily: 'var(--mono)', fontSize: 12 }}>
-      <div style={{ marginBottom: 14 }}>
-        <div style={{ fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 8 }}>Add Plugin</div>
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input value={url} onChange={e => setUrl(e.target.value)}
-            onKeyDown={e => e.key === 'Enter' && connect()}
-            placeholder="Plugin URL or npm package..."
-            style={{
-              flex: 1, background: 'var(--bg)', border: '1px solid var(--border2)',
-              borderRadius: 5, padding: '7px 10px', fontFamily: 'var(--mono)',
-              fontSize: 11, color: 'var(--text)', outline: 'none',
-            }} />
-          <button onClick={connect} style={{
-            padding: '7px 14px', background: 'var(--orange)', border: 'none',
-            borderRadius: 5, color: '#000', fontFamily: 'var(--mono)',
-            fontSize: 11, fontWeight: 600, cursor: 'pointer',
-          }}>Add</button>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 12 }}>
+        <div>
+          <div style={{ color: 'var(--text)', fontWeight: 600 }}>External protocols</div>
+          <div style={{ color: 'var(--muted)', fontSize: 10 }}>Private read-only status from the Aiden runtime</div>
         </div>
+        <button type="button" onClick={() => { void refresh() }} className="nav-btn">Refresh</button>
       </div>
-      {plugins.length === 0
-        ? <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 20 }}>No plugins connected</div>
-        : plugins.map((p: any, i: number) => (
-          <div key={i} style={{
-            padding: '8px 12px', marginBottom: 6,
-            background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6,
-            display: 'flex', alignItems: 'center', gap: 8,
-          }}>
-            <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'var(--green)', flexShrink: 0 }} />
-            <span style={{ flex: 1, color: 'var(--muted2)' }}>{p.name || p.url}</span>
+      {error && <div style={{ ...card, color: 'var(--red)' }}>{error}</div>}
+      {!snapshot && !error && <div style={{ color: 'var(--muted)', padding: 12 }}>Loading protocol status…</div>}
+      {snapshot && <>
+        <div style={{ fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', marginBottom: 6 }}>
+          MCP servers · {snapshot.mcp.canonicalProtocolVersion} · {snapshot.entitlements.mcpExternal ? 'entitled' : 'not entitled'}
+        </div>
+        {snapshot.mcp.servers.length === 0
+          ? <div style={card}>No MCP servers configured.</div>
+          : snapshot.mcp.servers.map((server) => (
+            <div key={server.name} style={card}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 8 }}>
+                <strong style={{ color: 'var(--text)' }}>{server.name}</strong>
+                <span style={{ color: server.reviewRequired ? 'var(--orange)' : 'var(--green)' }}>{server.status}</span>
+              </div>
+              <div style={fact}>{server.endpoint}</div>
+              <div style={fact}>{server.transport} · protocol {server.protocolVersion ?? 'not negotiated'} · auth {server.authState}</div>
+              <div style={fact}>trust {server.trustState} · identity {server.identityId ?? 'not observed'}</div>
+              <div style={fact}>capabilities {server.capabilityChange}{server.reviewRequired ? ' · review required' : ''}</div>
+              <div style={fact}>{server.toolCount} tools · {server.readToolCount} read-only · {server.mutationToolCount} mutating · resources {server.resourcesAvailable ? 'available' : 'not advertised'}</div>
+              <div style={fact}>mutation {server.mutationBlocked ? 'blocked pending exact review' : 'requires normal approval authority'}</div>
+            </div>
+          ))}
+
+        <div style={{ fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em', margin: '14px 0 6px' }}>
+          A2A private preview · {snapshot.a2a.protocolVersion} {snapshot.a2a.binding} · {snapshot.entitlements.a2aPreview ? 'entitled' : 'not entitled'}
+        </div>
+        <div style={{ ...card, color: 'var(--muted2)' }}>Mutation delegation is disabled. Agent Card claims do not grant authority.</div>
+        {snapshot.a2a.agents.length === 0
+          ? <div style={card}>No A2A agents configured.</div>
+          : snapshot.a2a.agents.map((agent) => (
+            <div key={agent.identityId} style={card}>
+              <strong style={{ color: 'var(--text)' }}>{agent.name}</strong>
+              <div style={fact}>{agent.endpoint}</div>
+              <div style={fact}>trust {agent.trustState} · identity {agent.identityId}</div>
+              <div style={fact}>capabilities {agent.capabilityChange}{agent.reviewRequired ? ' · review required' : ''}</div>
+            </div>
+          ))}
+        {snapshot.a2a.recoverableTasks.map((task) => (
+          <div key={task.recordId} style={card}>
+            <strong style={{ color: 'var(--text)' }}>RemoteTask {task.recordId}</strong>
+            <div style={fact}>{task.state} · local {task.localJobId}/{task.localAttemptId} · generation {task.generation}</div>
+            <div style={fact}>remote {task.remoteTaskId ?? 'not assigned'} · locally verified {String(task.locallyVerified)}</div>
+            <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+              <button
+                type="button"
+                className="nav-btn"
+                disabled={!task.remoteTaskId || workingTask !== null}
+                title="Cancel remote task"
+                onClick={() => { void controlTask(task.recordId, 'cancel') }}
+              >{workingTask === `${task.recordId}:cancel` ? 'Cancelling…' : 'Cancel remote task'}</button>
+              <button
+                type="button"
+                className="nav-btn"
+                disabled={!task.remoteTaskId || workingTask !== null}
+                title="Reconcile remote task"
+                onClick={() => { void controlTask(task.recordId, 'reconcile') }}
+              >{workingTask === `${task.recordId}:reconcile` ? 'Reconciling…' : 'Reconcile remote task'}</button>
+            </div>
           </div>
-        ))
-      }
+        ))}
+        <div style={{ color: 'var(--muted)', fontSize: 10 }}>{snapshot.a2a.quarantinedArtifacts} quarantined artifacts</div>
+      </>}
     </div>
   )
 }
@@ -6304,6 +6356,9 @@ function SettingsDrawer() {
           {settingsTab === 'plugins' && (
             <SettingsSection title="Plugins">
               <PluginsList />
+              <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
+                <MCPView />
+              </div>
             </SettingsSection>
           )}
 
