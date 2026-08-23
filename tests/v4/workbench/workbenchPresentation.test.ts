@@ -13,6 +13,7 @@ import {
   presentRuntimeDetail,
   presentRuntimeStatus,
   projectAttentionItems,
+  presentAutomationOccurrence,
   projectSemanticProgress,
 } from '../../../dashboard-next/lib/workbenchPresentation';
 
@@ -154,5 +155,20 @@ describe('Workbench product presentation', () => {
     expect(phases[1]).toMatchObject({ status: 'complete', sourceIds: ['read_1', 'search_1'] });
     expect(phases[2]).toMatchObject({ status: 'running', sourceIds: ['verify_1'] });
     expect(phases.every((phase) => phase.sourceIds.length > 0)).toBe(true);
+  });
+
+  it('presents a completed prompt-only automation as completed without inventing missing delivery', () => {
+    expect(presentAutomationOccurrence({ state: 'completed', delivery: null })).toEqual({
+      label: 'Task completed',
+      tone: 'success',
+    });
+    expect(presentAutomationOccurrence({ state: 'running', delivery: null })).toEqual({
+      label: 'Task in progress',
+      tone: 'running',
+    });
+    expect(presentAutomationOccurrence({ state: 'completed', delivery: { state: 'completed' } })).toEqual({
+      label: 'Result delivered',
+      tone: 'success',
+    });
   });
 });
