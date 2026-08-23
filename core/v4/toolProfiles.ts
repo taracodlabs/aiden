@@ -83,6 +83,7 @@ const MINIMAL_TOOLSETS: readonly string[] = [
   'web',
   'memory',
   'skills',
+  'status',
   'ui',
   // v4.11 — the `clarify` tool is a core interaction primitive (ask the
   // user when blocked rather than guess); it belongs in every profile,
@@ -106,6 +107,7 @@ const STANDARD_TOOLSETS: readonly string[] = [
   'subagent',
   'trace',
   'apps',
+  'automation',
 ];
 
 /**
@@ -118,12 +120,12 @@ export const BUILT_IN_PROFILES: Readonly<Record<ToolProfileName, ToolProfile>> =
   minimal: {
     name:        'minimal',
     toolsets:    MINIMAL_TOOLSETS,
-    description: 'Cold-context essentials (files, shell, exec, web, memory, skills, ui). Best for rate-limited free-tier providers.',
+    description: 'Cold-context essentials (files, shell, exec, web, memory, skills, status, ui). Best for rate-limited free-tier providers.',
   },
   standard: {
     name:        'standard',
     toolsets:    STANDARD_TOOLSETS,
-    description: 'Default. Minimal + browser, process, sessions, subagent, trace.',
+    description: 'Default. Minimal + browser, process, sessions, subagent, trace, apps, automation.',
   },
   full: {
     name:        'full',

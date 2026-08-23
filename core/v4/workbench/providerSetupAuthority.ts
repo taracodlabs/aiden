@@ -17,6 +17,7 @@ import type { ProviderRegistryEntry } from '../../../providers/v4/registry';
 import type { ModelEntry } from '../../../providers/v4/modelCatalog';
 import {
   runRuntimeReadinessTransaction,
+  readinessMatchesRuntime,
   type ProviderReadinessRecord,
 } from '../../../providers/v4/providerReadiness';
 
@@ -229,7 +230,7 @@ export function createWorkbenchProviderSetupAuthority(options: {
     const provider = entry(providerId);
     const handle = options.config.get(CREDENTIAL_HANDLE_KEY(providerId));
     const hint = options.config.get(CREDENTIAL_HINT_KEY(providerId));
-    const readiness = options.config.getValue<ProviderReadinessRecord>(`providers.${providerId}.readiness`);
+    const persistedReadiness = options.config.getValue<ProviderReadinessRecord>(`providers.${providerId}.readiness`);
     const oauth = provider.oauth ? await loadTokens(options.paths, provider.oauth.providerId) : null;
     const envConfigured = Boolean(provider.apiKeyEnvVar && process.env[provider.apiKeyEnvVar]);
     const inlineConfigured = Boolean(options.config.get(`providers.${providerId}.apiKey`));
@@ -237,6 +238,25 @@ export function createWorkbenchProviderSetupAuthority(options: {
     const configured = provider.apiMode === 'ollama_prompt_tools'
       ? localModels.has(providerId)
       : Boolean(oauth || secureConfigured || envConfigured || inlineConfigured);
+    let readiness = persistedReadiness;
+    let readinessIsStale = false;
+    if (configured && readiness && provider.apiMode !== 'ollama_prompt_tools') {
+      try {
+        const resolution = await options.resolver.describe({
+          providerId,
+          modelId: readiness.model,
+          config: options.config,
+          paths: options.paths,
+        });
+        if (!readinessMatchesRuntime(readiness, resolution, readiness.model)) {
+          readiness = undefined;
+          readinessIsStale = true;
+        }
+      } catch {
+        readiness = undefined;
+        readinessIsStale = true;
+      }
+    }
     const healthy = readinessHealthy(readiness)
       || (provider.apiMode === 'ollama_prompt_tools' && (localModels.get(providerId)?.length ?? 0) > 0);
     const defaultProvider = options.config.get('model.provider');
@@ -261,7 +281,9 @@ export function createWorkbenchProviderSetupAuthority(options: {
       models: models(providerId).map(projectModel),
       currentModel,
       default: defaultProvider === providerId,
-      ...(readiness?.verificationErrorCategory
+      ...(readinessIsStale
+        ? { detail: 'Runtime verification is required for the current credential.' }
+        : readiness?.verificationErrorCategory
         ? { detail: readiness.verificationErrorCategory.replace(/_/g, ' ') }
         : {}),
     };
@@ -410,8 +432,16 @@ export function createWorkbenchProviderSetupAuthority(options: {
         },
         async prompt() { throw new Error('This OAuth flow requires an interactive browser response'); },
         async sleep(ms) { await new Promise<void>((resolve) => setTimeout(resolve, ms)); },
-      }).then((tokens) => {
-        update({ state: 'connected', ...(tokens.account ? { account: tokens.account } : {}), detail: 'Connected' });
+      }).then(async (tokens) => {
+        const selectedModel = options.config.get('model.provider') === providerId
+          ? options.config.get('model.modelId')
+          : models(providerId).find((model) => model.isDefault)?.id ?? models(providerId)[0]?.id;
+        if (!selectedModel) throw new Error(`No model is available for ${provider.displayName}`);
+        const projection = await test({ providerId, modelId: selectedModel });
+        if (!projection.healthy) {
+          throw new Error(projection.detail ?? 'Runtime readiness verification did not complete');
+        }
+        update({ state: 'connected', ...(tokens.account ? { account: tokens.account } : {}), detail: 'Connected and verified' });
       }).catch((error) => {
         update({ state: now() >= session.expiresAt ? 'expired' : 'failed', detail: safeDetail(error) });
       });

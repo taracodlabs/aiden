@@ -55,6 +55,12 @@ import {
   shouldAutoOpenLiveExecution,
   type LiveExecutionSelection,
 } from '../lib/liveExecutionUx'
+import {
+  applyWorkbenchDestination,
+  applyWorkbenchSelection,
+  parseWorkbenchDestination,
+  type WorkbenchDestination,
+} from '../lib/workbenchNavigation'
 
 // ── Types ─────────────────────────────────────────────────────
 
@@ -463,6 +469,7 @@ interface DevOSCtxType {
   setSettingsTab: (v: string) => void
   mainView:       MainView
   setMainView:    Dispatch<SetStateAction<MainView>>
+  openWorkbenchDestination: (destination: WorkbenchDestination) => void
   appearance:     WorkbenchAppearance
   setAppearance:  Dispatch<SetStateAction<WorkbenchAppearance>>
   // Execution
@@ -6176,7 +6183,7 @@ function SettingsDrawer() {
     validateKey, clearProLicense, setPricingOpen, runtimeVersion,
     activeProvider, activeModel, runtimeConnection, executionAvailable,
     executionQueue, workbenchReadOnly, capabilities, startNewChat, clearCurrentView,
-    appearance, setAppearance, setMainView, sessionId,
+    appearance, setAppearance, setMainView, openWorkbenchDestination, sessionId,
   } = useDevOS()
   const [codingHealth, setCodingHealth] = useState<aiden.ExternalCodingHealth | null>(null)
   const [codingHealthError, setCodingHealthError] = useState<string | null>(null)
@@ -6253,7 +6260,11 @@ function SettingsDrawer() {
                 </strong></p>
                 <p style={settingsTextStyle}>Queue: {executionQueue.inflight} running · {executionQueue.pending} pending · {executionQueue.claimed} claimed</p>
                 <p style={settingsTextStyle}>{workbenchReadOnly ? 'This browser surface is read-only.' : 'Setup commands use the same local runtime authorities as the CLI.'}</p>
-                <ReadinessSettings sessionId={sessionId} onOpenModels={() => setSettingsTab('model')} onOpenApps={() => { setMainView('apps'); setSettingsOpen(false) }} />
+                <ReadinessSettings
+                  sessionId={sessionId}
+                  onOpenModels={() => setSettingsTab('model')}
+                  onOpenApps={() => openWorkbenchDestination({ view: 'apps' })}
+                />
               </SettingsSection>
               <SettingsSection title="External Coding">
                 {codingHealth ? (
@@ -6761,6 +6772,7 @@ export default function Home() {
 
   // ── Onboarding ──────────────────────────────────────────────
   const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null)
+  const [onboardingVisible, setOnboardingVisible] = useState(true)
 
   useEffect(() => {
     setOnboardingDone(window.localStorage.getItem('aiden:first-run:v1') === 'complete')
@@ -6859,6 +6871,33 @@ export default function Home() {
   const [screenshot,     setScreenshot]     = useState<string | null>(null)
   // ── Main view (chat | activity) + the run currently attached to the chat ──
   const [mainView,       setMainView]       = useState<MainView>('chat')
+  const openWorkbenchDestination = useCallback((destination: WorkbenchDestination) => {
+    if ('settings' in destination && destination.settings) {
+      setSettingsTab(destination.settings)
+      setSettingsOpen(true)
+    } else {
+      setSettingsOpen(false)
+    }
+    if ('view' in destination && destination.view) setMainView(destination.view)
+    setOnboardingVisible(false)
+    if (typeof window !== 'undefined') {
+      const next = applyWorkbenchDestination(window.location.href, destination)
+      window.history.pushState(window.history.state, '', next)
+    }
+  }, [])
+  useEffect(() => {
+    const destination = parseWorkbenchDestination(window.location.search)
+    if ('settings' in destination && destination.settings) {
+      setSettingsTab(destination.settings)
+      setSettingsOpen(true)
+      setOnboardingVisible(false)
+    }
+    if ('view' in destination && destination.view) {
+      setMainView(destination.view)
+      setSettingsOpen(false)
+      setOnboardingVisible(false)
+    }
+  }, [])
   const activeRunIdRef = useRef<number | null>(null)
   const activeRunFollowAbortRef = useRef<AbortController | null>(null)
   const activeRunFollowControllersRef = useRef<Set<AbortController>>(new Set())
@@ -6872,10 +6911,11 @@ export default function Home() {
   const selectContext = useCallback((selection: WorkbenchSelection, replace = false) => {
     workbenchControllerRef.current.select(selection)
     publishController()
-    setMainView('chat')
     if (typeof window !== 'undefined') {
       const next = selectionToSearch(selection)
-      const url = `${window.location.pathname}${next}`
+      const destination = replace ? parseWorkbenchDestination(window.location.search) : {}
+      if (!('view' in destination) && !('settings' in destination)) setMainView('chat')
+      const url = applyWorkbenchSelection(window.location.href, next, replace)
       if (replace) window.history.replaceState(window.history.state, '', url)
       else window.history.pushState(window.history.state, '', url)
     }
@@ -7100,6 +7140,17 @@ export default function Home() {
     if (typeof window === 'undefined') return
     const onPopState = () => {
       const selection = selectionFromSearch(window.location.search)
+      const destination = parseWorkbenchDestination(window.location.search)
+      if ('settings' in destination && destination.settings) {
+        setSettingsTab(destination.settings)
+        setSettingsOpen(true)
+      } else if ('view' in destination && destination.view) {
+        setMainView(destination.view)
+        setSettingsOpen(false)
+      } else {
+        setMainView('chat')
+        setSettingsOpen(false)
+      }
       const conversation = conversations.find((item) =>
         (selection.jobId && item.jobId === selection.jobId)
         || (selection.sessionId && (item.id === selection.sessionId || item.sessionId === selection.sessionId)))
@@ -8092,7 +8143,7 @@ export default function Home() {
     uiMode, setUIMode, execMode, setExecMode,
     historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen, collapseLiveExecution, reopenLiveExecution,
     activityOpen, setActivityOpen, settingsOpen, setSettingsOpen,
-    settingsTab, setSettingsTab, mainView, setMainView, appearance, setAppearance,
+    settingsTab, setSettingsTab, mainView, setMainView, openWorkbenchDestination, appearance, setAppearance,
     isExecuting, isStreaming, thinking, budget, activeModel, activeProvider, runtimeConnection, runtimeVersion, runtimeEdition,
     executionAvailable, executionQueue, workbenchReadOnly,
     runProjection, runArtifacts, capabilities, browserSession, controlBrowser,
@@ -8238,12 +8289,13 @@ export default function Home() {
             onUpgrade={(message) => setUpgradeToast({ message, action: 'Upgrade to Pro', onAction: () => setPricingOpen(true) })}
           />
         )}
-        {onboardingDone === false && (
+        {onboardingDone === false && onboardingVisible && (
           <OnboardingModal
-            onOpenSettings={(tab) => { setSettingsTab(tab); setSettingsOpen(true) }}
-            onOpenApps={() => { setMainView('apps') }}
+            onOpenSettings={(tab) => { openWorkbenchDestination({ settings: tab }) }}
+            onOpenApps={() => { openWorkbenchDestination({ view: 'apps' }) }}
             onComplete={(choice) => {
               window.localStorage.setItem('aiden:first-run:v1', 'complete')
+              window.localStorage.removeItem('aiden:first-run:step:v1')
               if (choice === 'Work with Apps') setMainView('apps')
               setOnboardingDone(true)
             }}

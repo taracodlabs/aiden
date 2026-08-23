@@ -480,6 +480,9 @@ export interface ChatSessionOptions {
   replRunStore?:    import('../../core/v4/daemon/runStore').RunStore;
   /** Authoritative durable Job/Attempt admission and transition service. */
   jobEngine?:       import('../../core/v4/daemon/jobEngine').JobEngine;
+  /** Canonical runtime readiness projection shared by Workbench and /doctor. */
+  systemReadiness?: () => Promise<import('../../core/v4/workbench/systemReadiness').SystemReadinessProjection>;
+  verifyProviderReadiness?: (providerId: string, modelId: string) => Promise<void>;
   /** Durable input, steering, pause, resume, and cancellation authority. */
   jobControlAuthority?: import('../../core/v4/daemon/jobControlAuthority').JobControlAuthority;
   replInstanceId?:  string;
@@ -1274,6 +1277,8 @@ export class ChatSession implements ChatSessionLike {
             pluginLoader: this.opts.pluginLoader,
             channelManager: this.opts.channelManager,
             jobEngine: this.opts.jobEngine,
+            systemReadiness: this.opts.systemReadiness,
+            verifyProviderReadiness: this.opts.verifyProviderReadiness,
             // v4.12 /commands slice — /home working-directory change seam.
             setWorkingDir: this.opts.setWorkingDir,
             // v4.9.2 Slice 3 — UX-rebuilt confirmation primitive.

@@ -76,7 +76,7 @@ export function projectExternalCodingHealth(input: {
       : !input.health.healthy
         ? input.health.detail
         : input.model === null
-          ? 'External coding model is not configured; set coding.external_model or AIDEN_CODING_MODEL.'
+          ? 'Coding model is not selected.'
           : !input.modelHealth?.ready
             ? (input.modelHealth?.detail ?? 'The exact configured model has not been validated.')
             : input.isolation === 'unavailable'

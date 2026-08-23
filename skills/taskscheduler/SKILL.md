@@ -1,24 +1,25 @@
 ---
 name: taskscheduler
-description: "Windows Task Scheduler: create, list, enable, disable, delete (PS)"
+description: "Explicit Windows Task Scheduler administration: create, list, enable, disable, delete (PS)"
 category: windows
 version: 1.0.0
 platform: windows
-tags: taskscheduler, scheduled, task, automation, cron, windows, powershell, trigger
+tags: taskscheduler, schtasks, windows, powershell, scheduled-task
 license: Apache-2.0
 ---
 
 # Task Scheduler
 
-Manage Windows Task Scheduler jobs via PowerShell — create triggers, set actions, enable/disable tasks, and inspect run history. The Windows equivalent of cron.
+Manage Windows Task Scheduler jobs via PowerShell when the user explicitly asks for Task Scheduler, a Windows scheduled task, or `schtasks`. Ordinary recurring or later Aiden work belongs to Reliable Automations.
 
 ## When to Use
 
-- User wants to schedule a script or program to run at a specific time or interval
+- User explicitly asks to use Windows Task Scheduler or `schtasks`
+- User explicitly wants a Windows scheduled task for a script or program
 - User asks to list all scheduled tasks or find a specific one
 - User wants to enable, disable, or delete a scheduled task
 - User needs to check when a task last ran or why it failed
-- User wants to create a daily, weekly, or startup-triggered task
+- User explicitly wants a Windows startup-triggered task
 
 ## How to Use
 

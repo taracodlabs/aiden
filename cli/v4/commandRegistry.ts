@@ -125,6 +125,10 @@ export interface SlashCommandContext {
   channelManager?: ChannelManager;
   /** Read-only durable Job projections used by local operator views. */
   jobEngine?: import('../../core/v4/daemon/jobEngine').JobEngine;
+  /** Canonical runtime readiness projection shared with Workbench. */
+  systemReadiness?: () => Promise<import('../../core/v4/workbench/systemReadiness').SystemReadinessProjection>;
+  /** Re-probe the exact active provider/model after an OAuth credential changes. */
+  verifyProviderReadiness?: (providerId: string, modelId: string) => Promise<void>;
   /**
    * Phase 17: prompt-the-user hook used by /plugins install for the
    * permission summary confirmation. Returns true to grant, false to

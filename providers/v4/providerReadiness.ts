@@ -3,6 +3,7 @@ import type { AidenPaths } from '../../core/v4/paths';
 import type { RuntimeResolver } from './runtimeResolver';
 import type { ApiMode } from './types';
 import type { EffectiveCredentialSource } from './credentialAuthority';
+import type { RuntimeResolution } from './types';
 import type { ProviderReadinessErrorCategory } from './readinessErrors';
 import { classifyReadinessError, isRetryableReadinessCategory } from './readinessErrors';
 import { verifyRuntimeReadiness } from './readinessProbe';
@@ -26,6 +27,7 @@ export interface ProviderReadinessRecord {
   provider: string;
   model: string;
   endpointFingerprint: string | null;
+  credentialFingerprint: string | null;
   credentialSource: EffectiveCredentialSource | null;
   transportMode: ApiMode | null;
   plainCompletionStatus: 'not_started' | 'verified' | 'failed';
@@ -43,6 +45,7 @@ export function initialReadiness(provider: string, model: string): ProviderReadi
     provider,
     model,
     endpointFingerprint: null,
+    credentialFingerprint: null,
     credentialSource: null,
     transportMode: null,
     plainCompletionStatus: 'not_started',
@@ -53,6 +56,26 @@ export function initialReadiness(provider: string, model: string): ProviderReadi
     verificationTimestamp: null,
     verificationErrorCategory: null,
   };
+}
+
+/**
+ * A readiness verdict is valid only for the exact runtime identity that was
+ * probed. Older records did not carry a credential fingerprint; those records
+ * are deliberately treated as unverified after upgrade instead of allowing a
+ * stale credential failure (or success) to describe a replacement secret.
+ */
+export function readinessMatchesRuntime(
+  record: ProviderReadinessRecord | undefined,
+  resolution: RuntimeResolution,
+  modelId: string,
+): boolean {
+  if (!record || !Object.prototype.hasOwnProperty.call(record, 'credentialFingerprint')) return false;
+  const effective = resolution.effectiveCredential;
+  return record.provider === resolution.provider
+    && record.model === modelId
+    && record.transportMode === resolution.apiMode
+    && record.endpointFingerprint === (effective?.endpointFingerprint ?? null)
+    && record.credentialFingerprint === (effective?.credentialFingerprint ?? null);
 }
 
 export async function persistProviderReadiness(
@@ -109,6 +132,7 @@ export async function runRuntimeReadinessTransaction(options: {
       ...record,
       state: 'credential_verified',
       endpointFingerprint: resolution.effectiveCredential?.endpointFingerprint ?? null,
+      credentialFingerprint: resolution.effectiveCredential?.credentialFingerprint ?? null,
       credentialSource: resolution.effectiveCredential?.credentialSource ?? null,
       transportMode: resolution.apiMode,
     };

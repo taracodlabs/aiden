@@ -55,4 +55,39 @@ describe('model picker provider access truth', () => {
     await expect(make('complete')).resolves.toBe('readiness_verified');
     await expect(make('failed_requires_user_action')).resolves.toBe('readiness_failed');
   });
+
+  it('does not apply a failed readiness verdict to a replacement OAuth credential', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'aiden-auth-state-'));
+    roots.push(root);
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await saveTokens(paths, {
+      provider: 'chatgpt-plus',
+      accessToken: 'replacement-token',
+      expiresAtMs: Date.now() + 60_000,
+    });
+    const record = {
+      state: 'failed_requires_user_action',
+      provider: 'chatgpt-plus', model: 'gpt-5.5',
+      credentialFingerprint: 'old-fingerprint', endpointFingerprint: 'endpoint',
+      credentialSource: 'oauth_store', transportMode: 'codex_responses',
+      plainCompletionStatus: 'failed', streamingStatus: 'failed', toolCallStatus: 'failed',
+      toolResultReplayStatus: 'failed', structuredArgumentsStatus: 'failed',
+      verificationTimestamp: new Date().toISOString(), verificationErrorCategory: 'credential_invalid',
+    };
+    const access = makeProviderAccessProbe({
+      paths,
+      config: { getValue: () => record, get: () => undefined },
+      resolver: {
+        describe: async () => ({
+          provider: 'chatgpt-plus', apiMode: 'codex_responses', baseUrl: 'https://example.invalid',
+          apiKey: null, source: 'auth.json',
+          effectiveCredential: {
+            credentialFingerprint: 'replacement-fingerprint', endpointFingerprint: 'endpoint',
+          },
+        }),
+      },
+    } as never);
+
+    await expect(access('chatgpt-plus')).resolves.toBe('authentication_valid');
+  });
 });

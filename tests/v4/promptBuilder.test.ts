@@ -117,6 +117,40 @@ describe('PromptBuilder', () => {
     expect(out).not.toContain('Getting to know the user');
   });
 
+  it('omits provenance-tagged compatibility entries when canonical Learning retrieval is active', async () => {
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      memorySnapshot: {
+        memoryMd: '- [said] Prefer pnpm.\n- Untagged legacy note.',
+        userMd: '- [said] Keep answers concise.',
+        loadedAt: Date.now(),
+        isEmpty: false,
+      },
+      canonicalLearningActive: true,
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).not.toContain('Prefer pnpm.');
+    expect(out).not.toContain('Keep answers concise.');
+    expect(out).toContain('Untagged legacy note.');
+    expect(out).not.toContain('Getting to know the user');
+  });
+
+  it('routes ordinary scheduling to Reliable Automations and reserves Task Scheduler for explicit Windows intent', async () => {
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp), platform: 'windows', skipFilesystem: true,
+      toolsetsLoaded: new Set(['automation', 'skills']),
+      skillsList: [{
+        name: 'taskscheduler',
+        description: 'Windows Task Scheduler for explicit scheduled-task administration.',
+      }],
+    });
+    expect(out).toContain('Use Reliable Automations for ordinary recurring, later, daily, and scheduled Aiden work.');
+    expect(out).toContain('Use the taskscheduler skill only when the user explicitly asks for Windows Task Scheduler');
+  });
+
   it('4a. memory section uses identity framing (Phase 16e)', async () => {
     // Locks the parenthetical identity-framing phrasing. Without it,
     // the model treats USER.md as past conversation and refuses to surface it

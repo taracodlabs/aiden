@@ -102,6 +102,15 @@ import {
   type LearningScope,
 } from '../../core/v4/learning';
 import { createWorkbenchBrowserSetupPort } from '../../core/v4/workbench/browserSetupPort';
+import { createWorkbenchAppsPort as createRuntimeAppsPort } from '../../core/v4/workbench/appsPort';
+import { createWorkbenchAutomationPort as createRuntimeAutomationPort } from '../../core/v4/workbench/automationPort';
+import { createWorkbenchPresencePort as createRuntimePresencePort } from '../../core/v4/workbench/presencePort';
+import { createWorkbenchSkillIntelligencePort as createRuntimeSkillIntelligencePort } from '../../core/v4/workbench/skillIntelligencePort';
+import { createAutomationReadinessAuthority } from '../../core/v4/automation/readiness';
+import { createPresenceAuthority as createRuntimePresenceAuthority } from '../../core/v4/presence/presenceAuthority';
+import { createPresenceReadinessAuthority } from '../../core/v4/presence/readiness';
+import { createTriggerBus as createRuntimeTriggerBus } from '../../core/v4/daemon/triggerBus';
+import { createAidenRuntimeStatus } from '../../tools/v4/system/aidenStatus';
 import { SkillLoader } from '../../core/v4/skillLoader';
 import {
   createManagedSkillSource,
@@ -3095,11 +3104,87 @@ export async function buildAgentRuntime(
   // teeth); absent-safe by construction.
   const snapshotLedger = new BoundedSnapshotLedger();
 
+  // Canonical model-facing product state. These are read/write adapters over
+  // the same durable authorities used by Workbench; they do not own lifecycle
+  // truth and they deliberately expose only bounded projections to the model.
+  const runtimeTriggerBus = createRuntimeTriggerBus({ db: replDb });
+  const runtimeAutomation = createRuntimeAutomationPort({
+    db: replDb,
+    triggerBus: runtimeTriggerBus,
+    edition: learningEdition,
+    ownerId: integrationScope.ownerId,
+    workspaceId: integrationScope.workspaceId,
+    workspaceRoot: process.cwd(),
+  });
+  const runtimePresenceAuthority = createRuntimePresenceAuthority({
+    db: replDb,
+    enabled: learningEdition.can('presence.active'),
+  });
+  const runtimePresence = createRuntimePresencePort({
+    db: replDb,
+    authority: runtimePresenceAuthority,
+    edition: learningEdition,
+    workspaceId: integrationScope.workspaceId,
+    ownerId: integrationScope.ownerId,
+  });
+  const runtimeSkills = createRuntimeSkillIntelligencePort({
+    authority: jobEngine.skillIntelligence,
+    edition: learningEdition,
+    scopeId: skillIntelligenceOptions.defaultScopeId,
+    ownerId: skillIntelligenceOptions.ownerId,
+    onPresence: (observation) => { runtimePresenceAuthority.observe(observation); },
+  });
+  const runtimeApps = createRuntimeAppsPort(integrationRuntime);
+  const runtimeBrowser = createWorkbenchBrowserSetupPort(pluginLoader);
+  const runtimeProviderSetup = createWorkbenchProviderSetupAuthority({
+    paths,
+    config,
+    resolver,
+    secrets: providerSecretAuthority,
+    secretScope: integrationScope,
+    sessionStore: store,
+    oauthRegistry,
+    openBrowser: async () => { throw new Error('Browser navigation is unavailable from a read-only status query.'); },
+  });
+  const runtimeAutomationReadiness = createAutomationReadinessAuthority({ db: replDb, edition: learningEdition });
+  const runtimePresenceReadiness = createPresenceReadinessAuthority({ db: replDb, edition: learningEdition });
+  const runtimeReadiness = createSystemReadinessAuthority({
+    providers: (sessionId?: string) => runtimeProviderSetup.snapshot(sessionId),
+    coding: externalCodingHealth,
+    apps: () => runtimeApps.snapshot(),
+    browser: async () => {
+      const snapshot = await runtimeBrowser.snapshot();
+      return { ready: snapshot.ready, detail: snapshot.detail, grantRequired: snapshot.grantRequired };
+    },
+    workspace: async () => {
+      try {
+        const stat = await fs.stat(process.cwd());
+        return { ready: stat.isDirectory(), detail: stat.isDirectory() ? 'Workspace is available.' : 'Workspace path is not a directory.' };
+      } catch {
+        return { ready: false, detail: 'Workspace is unavailable.' };
+      }
+    },
+    evidence: async () => ({ ready: true, detail: 'Durable Evidence storage is available.' }),
+    approvals: async () => ({ ready: true, detail: 'Exact-action approvals are protected.' }),
+    automations: () => runtimeAutomationReadiness.snapshot(),
+    presence: () => runtimePresenceReadiness.snapshot(),
+  });
+  const runtimeStatus = createAidenRuntimeStatus({
+    readiness: () => runtimeReadiness.snapshot(),
+    learning: learningAuthority,
+    learningScopes,
+    presence: runtimePresence,
+    skills: runtimeSkills,
+  });
+
   const toolExecutorContext = {
     cwd: process.cwd(),
     paths,
     sessions: sessionManager,
     memory: memoryManager,
+    learning: { authority: learningAuthority, scopes: learningScopes },
+    automation: runtimeAutomation,
+    runtimeStatus,
     memoryGuard,
     approvalEngine,
     actionAuthority,
@@ -3267,6 +3352,7 @@ export async function buildAgentRuntime(
     memorySnapshot,
     skillsList,
     toolsetsLoaded,
+    canonicalLearningActive: learningEdition.can('learning.enabled'),
     // Phase v4.1.2-followup self-awareness: feed the runtime slot.
     // toolCount comes from the same registry we just walked to build
     // toolsetsLoaded; providerId joins modelId so both halves of the
@@ -4531,6 +4617,16 @@ export async function buildAgentRuntime(
     configureExternalCoding,
     externalCodingRequirement,
     integrationRuntime,
+    systemReadiness: () => runtimeReadiness.snapshot(),
+    verifyProviderReadiness: async (selectedProviderId: string, selectedModelId: string) => {
+      const projection = await runtimeProviderSetup.test({
+        providerId: selectedProviderId,
+        modelId: selectedModelId,
+      });
+      if (!projection.healthy) {
+        throw new Error(projection.detail ?? 'Runtime readiness verification did not complete');
+      }
+    },
     learningAuthority,
     learningContext,
     learningScopes,
@@ -4620,6 +4716,8 @@ export interface AgentRuntime {
   configureExternalCoding: (input: { model: string }) => Promise<ExternalCodingHealthProjection>;
   externalCodingRequirement: NonNullable<import('../../core/v4/aidenAgent').AidenAgentOptions['externalCodingRequirement']>;
   integrationRuntime: import('../../core/v4/integrations/runtime').IntegrationRuntime;
+  systemReadiness: () => Promise<import('../../core/v4/workbench/systemReadiness').SystemReadinessProjection>;
+  verifyProviderReadiness: (providerId: string, modelId: string) => Promise<void>;
   learningAuthority: LearningAuthority;
   learningContext: LearningContextProvider;
   learningScopes: LearningScope[];
@@ -5037,6 +5135,8 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     skin: runtime.skin,
     toolRegistry: runtime.toolRegistry,
     integrationRuntime: runtime.integrationRuntime,
+    systemReadiness: runtime.systemReadiness,
+    verifyProviderReadiness: runtime.verifyProviderReadiness,
     skillLoader: runtime.skillLoader,
     resolver: runtime.resolver,
     config: runtime.config,

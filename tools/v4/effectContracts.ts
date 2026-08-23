@@ -172,6 +172,7 @@ const CONTRACTS: Readonly<Record<string, ToolEffectContract>> = Object.freeze({
   memory_add: INTERNAL_STATE,
   memory_replace: INTERNAL_STATE,
   memory_remove: INTERNAL_STATE,
+  automation_manage: INTERNAL_STATE,
   session_summary: INTERNAL_STATE,
   skill_manage: INTERNAL_STATE,
   aiden_self_update: PACKAGE_INSTALL,

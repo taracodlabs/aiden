@@ -550,13 +550,21 @@ export interface WorkbenchAuthSession {
 
 export interface SystemReadinessItem {
   id: string;
-  category: 'chat' | 'coding' | 'browser' | 'validation' | 'apps' | 'workspace' | 'approvals' | 'evidence';
+  category: 'chat' | 'coding' | 'browser' | 'validation' | 'apps' | 'automations' | 'presence' | 'workspace' | 'approvals' | 'evidence';
   state: 'ready' | 'setup_available' | 'needs_setup' | 'needs_attention' | 'unavailable' | 'checking' | 'degraded';
   title: string;
   detail: string;
   configured: boolean;
   available: boolean;
   healthy: boolean;
+  supported: boolean;
+  authenticated: boolean;
+  runtimeAvailable: boolean;
+  permissionAvailable: boolean;
+  validationAvailable: boolean;
+  ready: boolean;
+  reason: string;
+  recommendedAction: string | null;
   blocking: boolean;
   severity: 'info' | 'warning' | 'error';
   availableActions: string[];

@@ -85,4 +85,24 @@ describe('/doctor slash command', () => {
     expect(src).toContain('setImmediate');
     expect(src).toContain('checkForUpdate');
   });
+
+  it('4. renders the same canonical coding readiness reason as Workbench', async () => {
+    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
+    await ensureAidenDirsExist(paths);
+    const display = captured();
+    const coding = {
+      id: 'coding-provider', category: 'coding' as const, state: 'setup_available' as const,
+      title: 'Coding provider', detail: 'Coding model is not selected.', configured: false,
+      available: true, healthy: false, supported: true, authenticated: true,
+      runtimeAvailable: true, permissionAvailable: true, validationAvailable: false,
+      ready: false, reason: 'Coding model is not selected.',
+      recommendedAction: 'Choose a supported coding model.', blocking: false,
+      severity: 'info' as const, availableActions: ['manage_coding'], checkedAt: 1,
+    };
+    await doctor.handler({
+      args: [], rawArgs: '', display: display as any, registry: new CommandRegistry(), paths,
+      systemReadiness: async () => ({ overall: 'ready', items: [coding], issues: [], checkedAt: 1 }),
+    } as SlashCommandContext);
+    expect(display.out.join('\n')).toContain('Coding model is not selected.');
+  });
 });

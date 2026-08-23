@@ -28,6 +28,13 @@ describe('commercial Workbench onboarding source contract', () => {
     expect(page).toContain("window.localStorage.setItem('aiden:first-run:v1', 'complete')");
   });
 
+  it('temporarily releases onboarding for durable readiness and Apps deep links without marking setup complete', () => {
+    expect(page).toContain('setOnboardingVisible(false)');
+    expect(page).toContain('onOpenSettings={(tab) => { openWorkbenchDestination({ settings: tab }) }}');
+    expect(page).toContain("openWorkbenchDestination({ view: 'apps' })");
+    expect(page).toContain('parseWorkbenchDestination(window.location.search)');
+  });
+
   it('renders the authoritative runtime edition in Workbench chrome', () => {
     expect(page).toContain('runtimeEdition');
     expect(page).toContain("runtimeEdition === 'community' ? 'Community'");

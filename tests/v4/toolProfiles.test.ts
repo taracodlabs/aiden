@@ -173,4 +173,10 @@ describe('toolProfiles — live registry integration', () => {
     expect(std.length).toBeGreaterThanOrEqual(min.length);
     expect(std.length).toBeLessThanOrEqual(full.length);
   });
+
+  it('default profiles expose canonical self-awareness and Reliable Automations', () => {
+    expect(BUILT_IN_PROFILES.minimal.toolsets).toContain('status');
+    expect(BUILT_IN_PROFILES.standard.toolsets).toContain('status');
+    expect(BUILT_IN_PROFILES.standard.toolsets).toContain('automation');
+  });
 });

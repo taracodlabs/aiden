@@ -41,8 +41,13 @@ export const doctor: SlashCommand = {
     ctx.display.info('Running diagnostic checks...');
     const external = ctx.jobEngine?.external;
     const recoverable = external?.listRecoverableRemoteTasks() ?? [];
+    let readinessProjection: Awaited<ReturnType<NonNullable<typeof ctx.systemReadiness>>> | undefined;
+    try {
+      readinessProjection = await ctx.systemReadiness?.();
+    } catch { /* a failed live snapshot must not prevent the remaining diagnostics */ }
     const report = await runDoctor({
       paths: ctx.paths,
+      readinessProjection,
       externalProtocols: {
         mcpServers: (ctx.mcpClient?.list() ?? []).map((server) => ({
           name: server.config.name,

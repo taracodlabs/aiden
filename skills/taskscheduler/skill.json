@@ -1,7 +1,7 @@
 {
   "name": "taskscheduler",
   "version": "1.0.0",
-  "description": "Windows Task Scheduler: create, list, enable, disable, delete (PS)",
+  "description": "Explicit Windows Task Scheduler administration: create, list, enable, disable, delete (PS)",
   "author": "local",
   "license": "MIT",
   "tools": [],
@@ -12,13 +12,10 @@
   "min_agent_version": "3.0.0",
   "tags": [
     "taskscheduler",
-    "scheduled",
-    "task",
-    "automation",
-    "cron",
+    "schtasks",
     "windows",
     "powershell",
-    "trigger"
+    "scheduled-task"
   ],
   "created": "2026-04-27T17:11:40.889Z"
 }

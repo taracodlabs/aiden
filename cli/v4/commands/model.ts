@@ -17,6 +17,10 @@ import { runModelPicker } from './modelPicker';
 import { PROVIDER_REGISTRY } from '../../../providers/v4/registry';
 import { loadTokens, isExpired } from '../../../core/v4/auth/tokenStore';
 import type { ProviderAccessState } from './modelPicker';
+import {
+  readinessMatchesRuntime,
+  type ProviderReadinessRecord,
+} from '../../../providers/v4/providerReadiness';
 
 /**
  * Sync auth-state probe used by the Phase 22 picker. Single source of
@@ -31,27 +35,40 @@ export function makeProviderAccessProbe(ctx: SlashCommandContext): (id: string) 
   return async (providerId: string): Promise<ProviderAccessState> => {
     const entry = PROVIDER_REGISTRY[providerId];
     if (!entry) return 'not_configured';
-    const readiness = ctx.config?.getValue<{ state?: string }>(`providers.${providerId}.readiness`);
-    const readinessState = (): ProviderAccessState | null => {
+    const readiness = ctx.config?.getValue<ProviderReadinessRecord>(`providers.${providerId}.readiness`);
+    const readinessState = async (): Promise<ProviderAccessState | null> => {
+      if (readiness?.provider && readiness.model && ctx.resolver && ctx.config) {
+        try {
+          const resolution = await ctx.resolver.describe({
+            providerId,
+            modelId: readiness.model,
+            config: ctx.config,
+            paths: ctx.paths,
+          });
+          if (!readinessMatchesRuntime(readiness, resolution, readiness.model)) return null;
+        } catch {
+          return null;
+        }
+      }
       if (readiness?.state === 'complete') return 'readiness_verified';
       if (readiness?.state === 'failed_retryable' || readiness?.state === 'failed_requires_user_action') {
         return 'readiness_failed';
       }
       return null;
     };
-    if (entry.tier === 'local') return readinessState() ?? (readiness ? 'authentication_valid' : 'not_configured');
+    if (entry.tier === 'local') return (await readinessState()) ?? (readiness ? 'authentication_valid' : 'not_configured');
     if (entry.oauth) {
       if (!ctx.paths) return 'authentication_missing';
       const tokens = await loadTokens(ctx.paths, entry.oauth.providerId);
       if (!tokens) return 'authentication_missing';
       if (isExpired(tokens)) return 'authentication_expired';
-      return readinessState() ?? 'authentication_valid';
+      return (await readinessState()) ?? 'authentication_valid';
     }
     if (entry.apiKeyEnvVar) {
       const v = process.env[entry.apiKeyEnvVar];
-      if (typeof v === 'string' && v.trim().length > 0) return readinessState() ?? 'authentication_valid';
+      if (typeof v === 'string' && v.trim().length > 0) return (await readinessState()) ?? 'authentication_valid';
       const configured = ctx.config?.get(`providers.${providerId}.apiKey`);
-      return configured?.trim() ? readinessState() ?? 'authentication_valid' : 'authentication_missing';
+      return configured?.trim() ? (await readinessState()) ?? 'authentication_valid' : 'authentication_missing';
     }
     return 'not_configured';
   };

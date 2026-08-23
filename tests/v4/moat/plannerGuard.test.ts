@@ -447,3 +447,43 @@ describe('PlannerGuard — subagent rule (v4.6 Phase 1)', () => {
     expect(decision.reason).toBe('rule_match');
   });
 });
+
+describe('PlannerGuard — product authority routing', () => {
+  const PRODUCT_REGISTRY = new MockRegistry([
+    handler('automation_status', 'automation'),
+    handler('automation_manage', 'automation'),
+    handler('aiden_status', 'status'),
+    handler('memory_add', 'memory'),
+    handler('skill_view', 'skills'),
+    handler('skills_list', 'skills'),
+    handler('lookup_tool_schema', 'meta'),
+    handler('session_search', 'sessions'),
+  ]);
+
+  it('routes ordinary scheduling to Reliable Automations', async () => {
+    const decision = await new PlannerGuard(PRODUCT_REGISTRY, 'rule_based')
+      .decide('Remind me every weekday at 9 AM to review support tickets');
+    expect(decision.selectedTools).toContain('automation_status');
+    expect(decision.selectedTools).toContain('automation_manage');
+  });
+
+  it('keeps explicit Windows Task Scheduler requests on the skill path', async () => {
+    const decision = await new PlannerGuard(PRODUCT_REGISTRY, 'rule_based')
+      .decide('Use Windows Task Scheduler to create a scheduled task');
+    expect(decision.selectedTools).toContain('skill_view');
+  });
+
+  it('routes remembered-preference questions to canonical Learning status', async () => {
+    const decision = await new PlannerGuard(PRODUCT_REGISTRY, 'rule_based')
+      .decide('What preferences do you remember about me?');
+    expect(decision.selectedTools).toContain('aiden_status');
+    expect(decision.selectedTools).toContain('memory_add');
+  });
+
+  it('routes managed Skill Intelligence questions to canonical status', async () => {
+    const decision = await new PlannerGuard(PRODUCT_REGISTRY, 'rule_based')
+      .decide('Which skill candidates need attention?');
+    expect(decision.selectedTools).toContain('aiden_status');
+    expect(decision.selectedTools).toContain('skill_view');
+  });
+});
