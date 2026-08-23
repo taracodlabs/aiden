@@ -76,6 +76,10 @@ import {
   type SkillIntelligenceAuthority,
   type SkillIntelligenceAuthorityOptions,
 } from '../skillIntelligence';
+import {
+  createExternalAuthority,
+  type ExternalAuthority,
+} from '../external/externalAuthority';
 
 export type JobStatus =
   | 'queued' | 'running' | 'waiting' | 'paused' | 'cancelling'
@@ -265,6 +269,8 @@ export interface JobEngine {
   readonly browser: BrowserSessionAuthority;
   /** Durable reviewed SkillVersion learning and runtime attribution. */
   readonly skillIntelligence: SkillIntelligenceAuthority;
+  /** Shared durable trust and remote-task observation authority. */
+  readonly external: ExternalAuthority;
   /** Canonical durable continuity projection for this JobEngine. Optional only
    * for narrow legacy test doubles; production engines always provide it. */
   readonly continuity?: ContinuityCheckpointAuthority;
@@ -2945,6 +2951,40 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     proof,
   });
 
+  const external = createExternalAuthority({
+    db,
+    validateLocalAuthority(binding) {
+      const job = getJobRow(binding.localJobId);
+      const attempt = getAttemptRow(binding.localAttemptId);
+      return Boolean(
+        job
+        && attempt
+        && job.active_attempt_id === binding.localAttemptId
+        && !JOB_TERMINAL.has(job.status)
+        && attempt.task_id === binding.localJobId
+        && !ATTEMPT_TERMINAL.has(attempt.status)
+        && attempt.generation === binding.localGeneration
+        && attempt.fence_token === binding.localFenceToken
+        && attempt.lease_expires_at !== null
+        && attempt.lease_expires_at > Date.now(),
+      );
+    },
+    validateCancelledLocalAuthority(binding) {
+      const job = getJobRow(binding.localJobId);
+      const attempt = getAttemptRow(binding.localAttemptId);
+      return Boolean(
+        job
+        && attempt
+        && job.status === 'cancelled'
+        && job.active_attempt_id === null
+        && attempt.task_id === binding.localJobId
+        && ATTEMPT_TERMINAL.has(attempt.status)
+        && attempt.generation === binding.localGeneration
+        && attempt.fence_token === binding.localFenceToken,
+      );
+    },
+  });
+
   let continuity: ContinuityCheckpointAuthority;
   const engine: JobEngine = {
     graph,
@@ -2964,6 +3004,7 @@ export function createJobEngine(opts: CreateJobEngineOptions): JobEngine {
     understanding,
     browser,
     skillIntelligence,
+    external,
     get continuity() { return continuity; },
     submitJob: submitTx,
     getJob(jobId) {
