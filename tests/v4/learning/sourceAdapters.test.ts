@@ -64,12 +64,21 @@ describe('Learning source adapters preserve existing authorities', () => {
     const evidence = seedEvidence('skill');
     const ledger = createLearningAuthority({ db, enabled: true, now: () => now });
     const entry = captureSkillOutcomeLearning({
-      authority: ledger, scope, skillName: 'systematic-debugging', outcomeIdentity: 'outcome_1',
+      authority: ledger, scope, skillName: 'systematic-debugging', skillId: 'skill_1',
+      skillVersionId: 'skill_version_2', skillVersionDigest: 'digest_v2', outcomeIdentity: 'outcome_1',
       content: 'systematic-debugging succeeded for repository diagnosis.', ...evidence,
     }).entry;
     expect(entry).toMatchObject({ type: 'SKILL_RELIABILITY', confidence: 'OBSERVED' });
-    expect(db.prepare('SELECT source_kind,skill_name FROM learning_sources').get())
-      .toEqual({ source_kind: 'SKILL_OUTCOME', skill_name: 'systematic-debugging' });
+    const source = db.prepare('SELECT source_kind,skill_name,source_revision AS revision,metadata_json FROM learning_sources').get() as {
+      source_kind: string; skill_name: string; revision: string; metadata_json: string;
+    };
+    expect(source).toMatchObject({
+      source_kind: 'SKILL_OUTCOME', skill_name: 'systematic-debugging',
+      revision: 'skill_version_2:digest_v2:job_skill:attempt_skill:1',
+    });
+    expect(JSON.parse(source.metadata_json)).toEqual({
+      skillId: 'skill_1', skillVersionId: 'skill_version_2', skillVersionDigest: 'digest_v2',
+    });
   });
 
   it('requires verified Evidence before projecting a Recovery lesson', () => {

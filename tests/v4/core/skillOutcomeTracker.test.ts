@@ -54,6 +54,22 @@ describe('SkillOutcomeTracker — verdict-graded trust', () => {
     expect(s.reliability.rollingPassRate).toBeNull();
   });
 
+  it('does not duplicate managed exact-version outcomes into the legacy name ledger', async () => {
+    const t = new SkillOutcomeTracker(persistPath);
+    const skillCall = call('skill_view', { name: 'managed-summary' });
+    t.onTool(skillCall, 'before');
+    t.onTool(skillCall, 'after', okResult('skill_view', {
+      success: true,
+      name: 'managed-summary',
+      skillVersionId: 'skill_version_exact_1',
+      skillInvocationId: 'skill_invocation_exact_1',
+    }));
+    t.recordTurnVerdict('completed');
+    await t.flush();
+
+    expect(t.snapshot()).toEqual([]);
+  });
+
   it('recordTurnVerdict(completed) → a PASS folded into the active skill', () => {
     const t = new SkillOutcomeTracker(persistPath);
     view(t, 'foo');

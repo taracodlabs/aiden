@@ -8,7 +8,7 @@
  *   4. Foundation admits work durably but cannot falsely complete it before
  *      the real runner is installed
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -25,6 +25,7 @@ import type {
   DaemonAgentResult,
 } from '../../../core/v4/daemon/dispatcher';
 import type { AidenAgent, AidenAgentResult } from '../../../core/v4/aidenAgent';
+import { SkillIntelligenceAuthority } from '../../../core/v4/skillIntelligence';
 
 let aidenHome: string;
 let prev: Record<string, string | undefined>;
@@ -101,6 +102,25 @@ describe('installDaemonAgentBuilder', () => {
     const ok = installDaemonAgentBuilder(handle, stubAgentBuilder(), { provider: 'ollama', model: 'llama3.2' });
     expect(ok).toBe(true);
     expect(handle.dispatcher!.runnerKind()).toBe('real');
+  });
+
+  it('hands the exact Skill outcome projector to the real daemon JobEngine', () => {
+    const handle = bootstrapDaemonFoundation();
+    const projector = vi.fn();
+    const setProjector = vi.spyOn(SkillIntelligenceAuthority.prototype, 'setOutcomeProjector');
+    try {
+      const ok = installDaemonAgentBuilder(
+        handle,
+        stubAgentBuilder(),
+        { provider: 'ollama', model: 'llama3.2' },
+        undefined,
+        projector,
+      );
+      expect(ok).toBe(true);
+      expect(setProjector).toHaveBeenCalledWith(projector);
+    } finally {
+      setProjector.mockRestore();
+    }
   });
 
   it('returns false when handle inactive (NOOP_HANDLE)', () => {

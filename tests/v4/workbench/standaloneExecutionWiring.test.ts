@@ -40,7 +40,9 @@ describe('standalone Workbench execution wiring', () => {
       value.indexOf('export async function buildAgentRuntime('),
       value.indexOf('export interface AgentRuntime'),
     );
-    expect(runtimeBuild).toContain('opts.jobEngineOverride ?? createJobEngine({ db: replDb })');
+    expect(runtimeBuild).toMatch(
+      /opts\.jobEngineOverride\s*\?\?\s*createJobEngine\(\{\s*db:\s*replDb,\s*skillIntelligence:\s*skillIntelligenceOptions,\s*\}\)/s,
+    );
     expect(runtimeBuild).toContain('opts.actionAuthorityOverride ?? createActionAuthority({ db: replDb, jobEngine })');
 
     const web = webSource();

@@ -87,8 +87,10 @@ describe('renderSkillOutcomesSection', () => {
     const t = new SkillOutcomeTracker(persistPath);
     // v4.14 — trust is graded by the verdict, not tool attribution. One pass +
     // one fail → 50% pass.
-    t.onTool(view('mixed'), 'before'); t.recordTurnVerdict('completed');
-    t.onTool(view('mixed'), 'before'); t.recordTurnVerdict('verification_failed');
+    const first = view('mixed');
+    t.onTool(first, 'before'); t.onTool(first, 'after', ok('skill_view')); t.recordTurnVerdict('completed');
+    const second = view('mixed');
+    t.onTool(second, 'before'); t.onTool(second, 'after', ok('skill_view')); t.recordTurnVerdict('verification_failed');
     const out = renderSkillOutcomesSection(t);
     expect(out).toContain('50% pass');
   });
@@ -104,7 +106,12 @@ describe('renderSkillOutcomesSection', () => {
 
   it('flags a chronically-failing skill as ⚠ flaky', () => {
     const t = new SkillOutcomeTracker(persistPath);
-    for (let i = 0; i < 6; i += 1) { t.onTool(view('bad'), 'before'); t.recordTurnVerdict('verification_failed'); }
+    for (let i = 0; i < 6; i += 1) {
+      const skill = view('bad');
+      t.onTool(skill, 'before');
+      t.onTool(skill, 'after', ok('skill_view'));
+      t.recordTurnVerdict('verification_failed');
+    }
     expect(renderSkillOutcomesSection(t)).toContain('⚠ flaky');
   });
 
