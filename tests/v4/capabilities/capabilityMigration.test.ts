@@ -31,7 +31,7 @@ describe('Capability SDK migration v52', () => {
       .toBeUndefined();
 
     expect(runMigrations(db)).toEqual({ from: 51, to: LATEST_SCHEMA_VERSION });
-    expect(LATEST_SCHEMA_VERSION).toBe(52);
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(52);
     const tables = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'capability_%' ORDER BY name",
     ).all() as Array<{ name: string }>;
@@ -58,6 +58,9 @@ describe('Capability SDK migration v52', () => {
       'idx_capability_invocations_job',
       'idx_capability_version_identity',
     ]));
-    expect(runMigrations(db)).toEqual({ from: 52, to: 52 });
+    expect(runMigrations(db)).toEqual({
+      from: LATEST_SCHEMA_VERSION,
+      to: LATEST_SCHEMA_VERSION,
+    });
   });
 });

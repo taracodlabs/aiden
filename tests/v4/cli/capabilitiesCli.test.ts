@@ -7,7 +7,15 @@ import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('../../../core/v4/capabilities/processHost', () => ({
+  DockerCapabilityProcessHost: class {
+    probe() {
+      return { available: true, mechanism: 'docker' as const, image: 'test-image' };
+    }
+  },
+}));
 
 import { runCapabilitiesCli } from '../../../cli/v4/capabilitiesCli';
 import { runMigrations } from '../../../core/v4/daemon/db/migrations';
