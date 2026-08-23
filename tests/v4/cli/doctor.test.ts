@@ -18,6 +18,8 @@ import {
   runDoctor,
 } from '../../../cli/v4/doctor';
 import type { AidenPaths } from '../../../core/v4/paths';
+import { saveTokens } from '../../../core/v4/auth/tokenStore';
+import { writeProviderDecision } from '../../../core/v4/providerDecision';
 
 function makePaths(root: string): AidenPaths {
   return {
@@ -235,6 +237,98 @@ describe('Doctor — runDoctor aggregator', () => {
     for (const r of failed) {
       if (r.suggestion) expect(r.suggestion.length).toBeGreaterThan(0);
     }
+  });
+
+  it('uses canonical chat readiness instead of reporting a missing environment key', async () => {
+    const checkedAt = Date.now();
+    const fetchImpl = (async () => {
+      throw new Error('ECONNREFUSED');
+    }) as unknown as typeof fetch;
+    const report = await runDoctor({
+      paths,
+      env: {},
+      fetchImpl,
+      spawnImpl: fakeSpawn(0, '1.0.0'),
+      timeoutMs: 200,
+      readinessProjection: {
+        overall: 'ready',
+        checkedAt,
+        issues: [],
+        items: [{
+          id: 'chat-provider', category: 'chat', state: 'ready', title: 'Chat provider',
+          detail: 'ChatGPT Plus (OAuth) · gpt-5.5', configured: true, available: true,
+          healthy: true, supported: true, authenticated: true, runtimeAvailable: true,
+          permissionAvailable: true, validationAvailable: true, ready: true,
+          reason: 'ChatGPT Plus (OAuth) · gpt-5.5', recommendedAction: null,
+          blocking: true, severity: 'info', availableActions: [], checkedAt,
+        }],
+      },
+    });
+
+    expect(report.results.find((entry) => entry.name === 'provider auth')).toMatchObject({
+      passed: true,
+      message: 'ChatGPT Plus (OAuth) · gpt-5.5',
+    });
+    expect(report.results.find((entry) => entry.name === 'ollama reachable')).toMatchObject({
+      passed: true,
+      message: expect.stringContaining('optional'),
+      suggestion: expect.stringContaining('local'),
+    });
+  });
+
+  it('recognizes the durable active OAuth credential in standalone doctor mode', async () => {
+    await saveTokens(paths, {
+      provider: 'chatgpt-plus', accessToken: 'test-access-token',
+      expiresAtMs: Date.now() + 3_600_000,
+    });
+    writeProviderDecision(paths, {
+      provider: 'chatgpt-plus', model: 'gpt-5.5', source: 'persisted-config',
+      requestedExplicit: false, attempts: [{ providerId: 'chatgpt-plus', ok: true }],
+    });
+    const report = await runDoctor({
+      paths,
+      env: {},
+      fetchImpl: (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch,
+      spawnImpl: fakeSpawn(0, '1.0.0'),
+      timeoutMs: 200,
+    });
+
+    expect(report.results.find((entry) => entry.name === 'provider auth')).toMatchObject({
+      passed: true,
+      message: expect.stringMatching(/ChatGPT Plus.*OAuth.*gpt-5\.5/i),
+    });
+    expect(report.results.find((entry) => entry.name === 'ollama reachable')).toMatchObject({
+      passed: true,
+      suggestion: expect.stringContaining('local'),
+    });
+  });
+
+  it('recognizes the configured active provider API key in standalone doctor mode', async () => {
+    await fs.writeFile(paths.configYaml, [
+      'model:',
+      '  provider: custom_openai',
+      '  modelId: custom-default',
+      'providers:',
+      '  custom_openai:',
+      '    baseUrl: http://127.0.0.1:8000/v1',
+    ].join('\n') + '\n', 'utf8');
+
+    const report = await runDoctor({
+      paths,
+      env: { CUSTOM_OPENAI_API_KEY: 'configured-test-key' },
+      fetchImpl: (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch,
+      spawnImpl: fakeSpawn(0, '1.0.0'),
+      timeoutMs: 200,
+    });
+
+    expect(report.results.find((entry) => entry.name === 'provider auth')).toMatchObject({
+      passed: true,
+      message: expect.stringMatching(/Custom OpenAI-compatible.*custom-default/i),
+    });
+    expect(report.results.find((entry) => entry.name === 'ollama reachable')).toMatchObject({
+      passed: true,
+      suggestion: expect.stringContaining('local'),
+    });
   });
 
   it('completes in <5 seconds even when probes hang', async () => {

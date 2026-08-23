@@ -141,6 +141,7 @@ describe.skipIf(process.platform !== 'win32')('built CLI interactive decision ou
       'display:',
       '  streaming: true',
       '  renderer: legacy',
+      '  verbose: verbose',
     ].join('\n') + '\n', 'utf8');
 
     child = pty.spawn(process.execPath, [

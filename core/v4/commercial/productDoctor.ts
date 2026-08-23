@@ -123,7 +123,7 @@ export async function productDoctorResults(input: {
       results.push(result(
         item.title,
         groupByCategory[item.category] ?? 'Workbench',
-        item.ready || (!item.blocking && item.state === 'setup_available'),
+        item.ready || !item.blocking,
         item.reason ?? item.detail,
         item.ready ? undefined : item.recommendedAction ?? nextAction(item.availableActions),
       ));

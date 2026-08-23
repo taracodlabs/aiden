@@ -152,13 +152,19 @@ export function subsectionFor(commandName: string): Subsection {
 }
 
 const DEFAULT_HELP_GROUPS: ReadonlyArray<{ title: string; commands: readonly string[] }> = [
-  { title: 'Start working', commands: ['mode', 'skills', 'tools'] },
+  { title: 'Work', commands: ['mode', 'tools', 'jobs'] },
   { title: 'Models and setup', commands: ['model', 'doctor', 'auth'] },
-  { title: 'Tasks and recovery', commands: ['status', 'queue', 'busy', 'retry'] },
-  { title: 'Memory and skills', commands: ['memory', 'skills', 'history'] },
-  { title: 'Integrations', commands: ['apps', 'mcp', 'a2a', 'plugins', 'channel'] },
-  { title: 'Settings and diagnostics', commands: ['providers', 'usage', 'setup'] },
+  { title: 'Automation and attention', commands: ['cron', 'status', 'queue', 'approvals'] },
+  { title: 'Memory & skills', commands: ['memory', 'skills', 'history'] },
+  { title: 'Connections', commands: ['apps', 'mcp', 'a2a', 'plugins', 'channel'] },
+  { title: 'Diagnostics', commands: ['providers', 'usage', 'setup'] },
 ];
+
+const COMMAND_USAGE: Readonly<Record<string, string>> = {
+  history: '/history [list [N] | clear --yes]',
+  model: '/model [provider:model | model]',
+  skills: '/skills [list [query] [page N] | search <query> | view <name> | health | setup]',
+};
 
 function writeLines(ctx: SlashCommandContext, lines: readonly string[]): void {
   const columns = (ctx.display as typeof ctx.display & { terminalColumns?: () => number }).terminalColumns?.() ?? 80;
@@ -191,7 +197,7 @@ function renderCommandDetail(ctx: SlashCommandContext, requested: string): void 
   writeLines(ctx, [
     `Help: /${command.name}`,
     command.description,
-    `Usage: /${command.name}`,
+    `Usage: ${COMMAND_USAGE[command.name] ?? `/${command.name}`}`,
     ...(aliases.length > 0 ? [`Aliases: ${aliases.map((alias) => `/${alias}`).join(', ')}`] : []),
     'Use /help all to browse every command.',
   ]);

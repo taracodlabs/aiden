@@ -33,13 +33,15 @@ describe('help discovery', () => {
 
     await help.handler({ args: [], rawArgs: '', display, registry } as SlashCommandContext);
 
-    expect(text()).toContain('Start working');
+    expect(text()).toContain('Work');
     expect(text()).toContain('Models and setup');
-    expect(text()).toContain('Tasks and recovery');
+    expect(text()).toContain('Automation and attention');
+    expect(text()).toContain('Memory & skills');
     expect(text()).toContain('/mode');
     expect(text()).toContain('/model');
     expect(text()).toContain('/status');
     expect(text()).toContain('/help all');
+    expect(text().match(/\/skills/g)).toHaveLength(1);
     expect(text()).not.toContain('/debug-prompt');
   });
 

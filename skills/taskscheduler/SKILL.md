@@ -1,6 +1,6 @@
 ---
 name: taskscheduler
-description: "Explicit Windows Task Scheduler administration: create, list, enable, disable, delete (PS)"
+description: "Manage Windows Task Scheduler tasks: create, list, enable, disable, and delete."
 category: windows
 version: 1.0.0
 platform: windows

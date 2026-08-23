@@ -14,6 +14,7 @@ import { promises as fsp, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 
 import type { SlashCommand } from '../commandRegistry';
+import { truncateVisibleAtWord } from '../box';
 import { renderTable } from '../table';
 import { isQuarantineCandidate } from '../../../core/v4/reliability';
 import { computeSkillFreshness, freshnessCell, loadManifestForFreshness } from '../../../core/v4/skillFreshness';
@@ -24,6 +25,80 @@ import { parseSkillContent } from '../../../core/v4/skillSpec';
 // resolve `.ts` files via lazy require — same v4.9.3 Slice 1b lesson).
 import { runCuratedSetupFlow } from '../skills/curatedSetupFlow';
 
+const SKILL_LIST_PAGE_SIZE = 12;
+
+interface SkillListItem {
+  name: string;
+  description?: string;
+  author?: string;
+  trustLevel?: string;
+}
+
+function skillSourceLabel(skill: SkillListItem): string {
+  if (skill.trustLevel === 'builtin') return 'Bundled';
+  if (skill.author?.trim()) return `By ${skill.author.trim()}`;
+  if (skill.trustLevel === 'community') return 'Community';
+  return 'Installed';
+}
+
+function parseSkillListRequest(args: readonly string[]): { query: string; page: number } {
+  const sub = (args[0] ?? 'list').toLowerCase();
+  const tail = sub === 'list' || sub === 'search' ? args.slice(1) : args;
+  const queryParts: string[] = [];
+  let page = 1;
+  for (let index = 0; index < tail.length; index += 1) {
+    const token = tail[index];
+    if ((token === '--page' || token === 'page') && /^\d+$/u.test(tail[index + 1] ?? '')) {
+      page = Math.max(1, Number(tail[index + 1]));
+      index += 1;
+      continue;
+    }
+    if (sub === 'list' && tail.length === 1 && /^\d+$/u.test(token)) {
+      page = Math.max(1, Number(token));
+      continue;
+    }
+    queryParts.push(token);
+  }
+  return { query: queryParts.join(' ').trim(), page };
+}
+
+export function renderCompactSkillList(
+  installed: readonly SkillListItem[],
+  columns: number,
+  request: { query: string; page: number },
+): string {
+  const query = request.query.toLocaleLowerCase();
+  const filtered = query
+    ? installed.filter((skill) => [skill.name, skill.description ?? '', skill.author ?? '', skillSourceLabel(skill)]
+      .some((value) => value.toLocaleLowerCase().includes(query)))
+    : [...installed];
+  const totalPages = Math.max(1, Math.ceil(filtered.length / SKILL_LIST_PAGE_SIZE));
+  const page = Math.min(Math.max(1, request.page), totalPages);
+  const pageItems = filtered.slice((page - 1) * SKILL_LIST_PAGE_SIZE, page * SKILL_LIST_PAGE_SIZE);
+  const width = Math.max(24, columns - 2);
+  const matchLabel = query
+    ? `${filtered.length} ${filtered.length === 1 ? 'match' : 'matches'}`
+    : `${filtered.length} installed`;
+  const lines = [`Skills · ${matchLabel} · page ${page}/${totalPages}`];
+  if (pageItems.length === 0) {
+    lines.push(query ? `  No skills match “${request.query}”.` : '  No skills installed.');
+  } else {
+    for (const skill of pageItems) {
+      const source = skillSourceLabel(skill);
+      const description = (skill.description ?? '').replace(/\s+/gu, ' ').trim();
+      if (columns < 60) {
+        lines.push(truncateVisibleAtWord(`  ${skill.name} · ${source}`, width));
+        if (description) lines.push(truncateVisibleAtWord(`    ${description}`, width));
+      } else {
+        const suffix = description ? ` · ${description}` : '';
+        lines.push(truncateVisibleAtWord(`  ${skill.name} · ${source}${suffix}`, width));
+      }
+    }
+  }
+  lines.push('Use /skills search <text> · /skills list [query] page N · /skills view <name>.');
+  return lines.map((line) => truncateVisibleAtWord(line, width)).join('\n') + '\n';
+}
+
 export const skills: SlashCommand = {
   name: 'skills',
   description: 'List, view, or install skills.',
@@ -31,48 +106,15 @@ export const skills: SlashCommand = {
   icon: '⚡',
   handler: async (ctx) => {
     const sub = (ctx.args[0] ?? 'list').toLowerCase();
-    if (sub === 'list') {
+    if (sub === 'list' || sub === 'search') {
       if (!ctx.skillLoader) {
         ctx.display.warn('Skill loader not wired.');
         return {};
       }
-      const skills = await ctx.skillLoader.list();
-      // v4.9.5 Slice 1 — Author column added between Name and
-      // Description so attribution is visible at-a-glance. The
-      // "(uncredited)" marker fires when a community-trust skill
-      // omits the `author` frontmatter field. Builtin skills (Aiden's
-      // own bundled skills) show "(builtin)" in muted — they're
-      // self-attributed via the package LICENSE so no per-skill author
-      // is meaningful.
-      const authorFor = (s: { author?: string; trustLevel?: string }): string => {
-        if (s.author && s.author.trim().length > 0) return s.author;
-        return s.trustLevel === 'builtin' ? '(builtin)' : '(uncredited)';
-      };
-      ctx.display.write(
-        renderTable(
-          skills.map((s) => ({
-            name:        s.name,
-            author:      authorFor(s),
-            description: s.description ?? '',
-          })),
-          [
-            { key: 'name',        header: 'Name',        align: 'left', minWidth: 16 },
-            { key: 'author',      header: 'Author',      align: 'left', minWidth: 14,
-              color: (_v, row) => {
-                const a = (row as { author: string }).author;
-                if (a === '(uncredited)') return 'warn';
-                if (a === '(builtin)')    return 'muted';
-                return undefined;
-              } },
-            { key: 'description', header: 'Description', align: 'left', flex: true },
-          ],
-          {
-            title:        'Skills',
-            totalCount:   `${skills.length} installed`,
-            emptyMessage: 'no skills installed',
-          },
-        ),
-      );
+      const installed = await ctx.skillLoader.list();
+      const columns = (ctx.display as typeof ctx.display & { terminalColumns?: () => number })
+        .terminalColumns?.() ?? process.stdout.columns ?? 80;
+      ctx.display.write(renderCompactSkillList(installed, columns, parseSkillListRequest(ctx.args)));
       return {};
     }
 

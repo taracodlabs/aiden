@@ -37,6 +37,28 @@ describe('product doctor', () => {
     expect(results.find((entry) => entry.name === 'Browser')?.suggestion).toContain('review browser permission');
   });
 
+  it('reports non-blocking readiness gaps as warnings instead of product failures', async () => {
+    const checkedAt = Date.now();
+    const readiness: SystemReadinessProjection = {
+      overall: 'ready', checkedAt, issues: [],
+      items: [{
+        id: 'validation', category: 'validation', state: 'needs_attention',
+        title: 'Independent validation', detail: 'Docker validation is unavailable.',
+        configured: true, available: false, healthy: false, supported: true,
+        authenticated: true, runtimeAvailable: false, permissionAvailable: true,
+        validationAvailable: false, ready: false, reason: 'Docker validation is unavailable.',
+        recommendedAction: 'Start Docker when independent coding validation is required.',
+        blocking: false, severity: 'warning', availableActions: ['recheck'], checkedAt,
+      }],
+    };
+
+    const results = await productDoctorResults({ paths: await paths(), installedVersion: '4.20.0', readiness });
+    expect(results.find((entry) => entry.name === 'Independent validation')).toMatchObject({
+      passed: true,
+      suggestion: 'Start Docker when independent coding validation is required.',
+    });
+  });
+
   it('emits commercial checks only when commercial context is supplied', async () => {
     const without = await productDoctorResults({ paths: await paths(), installedVersion: '4.20.0' });
     expect(without.some((entry) => entry.group === 'Commercial')).toBe(false);

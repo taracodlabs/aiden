@@ -57,6 +57,7 @@ const FULL_REGISTRY = new MockRegistry([
   handler('execute_code', 'execute'),
   handler('memory_add', 'memory'),
   handler('memory_remove', 'memory'),
+  handler('aiden_status', 'status'),
   handler('skills_list', 'skills'),
   handler('skill_view', 'skills'),
   handler('lookup_tool_schema', 'meta'),
@@ -91,7 +92,7 @@ describe('PlannerGuard — off mode', () => {
     const decision = await guard.decide('anything', []);
     // v4.1.4-media: FULL_REGISTRY grew by 4 (media_sessions,
     // media_transport, media_key, now_playing).
-    expect(decision.selectedTools).toHaveLength(19);
+    expect(decision.selectedTools).toHaveLength(20);
     expect(decision.excludedTools).toEqual([]);
     expect(decision.reason).toBe('no_filter');
   });
@@ -446,6 +447,7 @@ describe('PlannerGuard — subagent rule (v4.6 Phase 1)', () => {
     expect(decision.selectedTools).toContain('file_read');
     expect(decision.reason).toBe('rule_match');
   });
+
 });
 
 describe('PlannerGuard — product authority routing', () => {
@@ -478,6 +480,14 @@ describe('PlannerGuard — product authority routing', () => {
       .decide('What preferences do you remember about me?');
     expect(decision.selectedTools).toContain('aiden_status');
     expect(decision.selectedTools).toContain('memory_add');
+  });
+
+  it('routes natural-language prefer questions to canonical Learning status', async () => {
+    const decision = await new PlannerGuard(PRODUCT_REGISTRY, 'rule_based')
+      .decide('What package manager do I prefer for this workspace?');
+    expect(decision.reason).toBe('rule_match');
+    expect(decision.selectedTools).toContain('aiden_status');
+    expect(decision.excludedTools).not.toContain('aiden_status');
   });
 
   it('routes managed Skill Intelligence questions to canonical status', async () => {

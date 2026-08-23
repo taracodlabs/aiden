@@ -120,13 +120,20 @@ function providerChoice(
   modelCount: number,
   access: boolean | ProviderAccessState,
   isCurrent: boolean,
+  width: number,
 ): { name: string; value: string; description?: string } {
   const badge = TIER_BADGE[entry.tier] ?? entry.tier;
   const ab = authBadge(entry, access);
   const count = `(${modelCount} model${modelCount === 1 ? '' : 's'})`;
   const current = isCurrent ? '  ← current' : '';
+  const available = Math.max(12, width - 4);
+  const wide = `${entry.displayName.padEnd(28)} ${count.padEnd(11)} ${ab.padEnd(24)} ${badge}${current}`;
+  const compactStatus = `${ab}${current}`;
+  const compactNameWidth = Math.max(8, available - compactStatus.length - 2);
   return {
-    name: `${entry.displayName.padEnd(28)} ${count.padEnd(11)} ${ab.padEnd(18)} ${badge}${current}`,
+    name: width >= 84
+      ? truncate(wide, available)
+      : `${truncate(entry.displayName, compactNameWidth).padEnd(compactNameWidth)}  ${compactStatus}`,
     value: entry.id,
     description: entry.description,
   };
@@ -139,23 +146,28 @@ function providerChoice(
 // dropping the price column on medium widths and falling back to a
 // single-line concat on narrow terminals (never wraps into a mess).
 const CTX_W = 8;     // "131K" / "Context"
-const PRICE_W = 13;  // "$0.55/$2.19" / "In/Out $/M"
+const PROVIDER_W = 14;
+const TOOLS_W = 5;
 const NAME_MIN = 16;
 const NAME_MAX = 30;
 
 interface PickerLayout {
-  mode:  'full' | 'noprice' | 'plain';
+  mode:  'full' | 'plain';
   nameW: number;
+  providerW: number;
+  statusW: number;
 }
 
 /** Decide columns + name width from terminal width. Robust at any size. */
 function pickerLayout(width: number): PickerLayout {
-  if (width < 52) return { mode: 'plain', nameW: NAME_MAX };
-  const full = width >= 76;
-  // Reserve: 2-space row indent + gaps + ctx + [price] + tools + slack.
-  const reserve = full ? 32 : 18;
-  const nameW = Math.max(NAME_MIN, Math.min(NAME_MAX, width - reserve));
-  return { mode: full ? 'full' : 'noprice', nameW };
+  if (width < 76) {
+    return { mode: 'plain', nameW: Math.max(10, width - 18), providerW: 0, statusW: 14 };
+  }
+  const providerW = PROVIDER_W;
+  const fixed = 2 + providerW + CTX_W + TOOLS_W + 5;
+  const nameW = Math.max(NAME_MIN, Math.min(NAME_MAX, width - fixed - 12));
+  const statusW = Math.max(8, width - fixed - nameW);
+  return { mode: 'full', nameW, providerW, statusW };
 }
 
 /** Hard-truncate to `n` cols with a trailing ellipsis. */
@@ -171,10 +183,9 @@ function truncate(s: string, n: number): string {
 function modelTableHeader(layout: PickerLayout): string | null {
   if (layout.mode === 'plain') return null;
   const name = 'Name'.padEnd(layout.nameW);
+  const provider = 'Provider'.padEnd(layout.providerW);
   const ctx  = 'Context'.padEnd(CTX_W);
-  const cols = layout.mode === 'full'
-    ? `${name} ${ctx} ${'In/Out $/M'.padEnd(PRICE_W)} Tools`
-    : `${name} ${ctx} Tools`;
+  const cols = `${name} ${provider} ${ctx} ${'Tools'.padEnd(TOOLS_W)} Status`;
   return `  ${cols}`;
 }
 
@@ -202,25 +213,28 @@ function modelChoice(
   const depM = m.displayName.match(/^(.*?)\s*\(deprecating\s+([\d-]+)\)\s*$/);
   const baseName = depM ? depM[1] : m.displayName;
 
-  const flags: string[] = [];
-  if (depM)         flags.push(`⚠ deprecating ${depM[2]}`);
-  // Phase 22 Task 3: ModelEntry.isDefault is the catalog's "recommended" signal.
-  if (m.isDefault)  flags.push('⭐');
-  if (availability === 'installed') flags.push('✓ installed');
-  if (availability === 'not_installed') flags.push(`not installed · ollama pull ${m.id}`);
-  if (isCurrent && availability !== 'not_installed') flags.push('← current');
-  const trail = flags.length ? `  ${flags.join('  ')}` : '';
   const disabled = availability === 'not_installed'
     ? `Run ollama pull ${m.id} first`
     : undefined;
 
+  const status = availability === 'not_installed'
+    ? 'not installed'
+    : isCurrent
+      ? '← current'
+      : availability === 'installed'
+        ? '✓ installed'
+        : depM
+          ? `⚠ deprecating ${depM[2]}`
+          : m.isDefault
+            ? '⭐ recommended'
+            : 'available';
+
   if (layout.mode === 'plain') {
-    // Narrow-terminal fallback — single-line concat (legacy shape) so a
-    // tight terminal never wraps a padded table into a mess.
-    const ctx = ` ${(m.contextLength / 1000).toFixed(0)}K ctx`;
-    const pricing = m.pricing ? ` $${m.pricing.inputPerM}/$${m.pricing.outputPerM} per M` : '';
+    // Narrow-terminal fallback preserves the two highest-priority fields:
+    // full usable model identity (within the physical row) and semantic status.
+    const budget = Math.max(8, layout.nameW);
     return {
-      name: `${baseName}${ctx}${pricing}${trail}`,
+      name: `${truncate(baseName, budget).padEnd(budget)}  ${status}`,
       value: m.id,
       description: m.notes,
       disabled,
@@ -228,6 +242,7 @@ function modelChoice(
   }
 
   const name = truncate(baseName, layout.nameW).padEnd(layout.nameW);
+  const provider = truncate(providerId, layout.providerW).padEnd(layout.providerW);
   const ctx  = `${(m.contextLength / 1000).toFixed(0)}K`.padEnd(CTX_W);
   // Tools: plain ✓/✗ from supportsToolCalling. NOTE (v4.11): this is
   // provider-DECLARED, not live-verified — e.g. deepseek-v4-pro shows ✓
@@ -236,10 +251,8 @@ function modelChoice(
   // ModelEntry.toolCallingVerified field — tracked as a follow-up chip.
   const tools = m.supportsToolCalling ? '✓' : '✗';
 
-  const row = layout.mode === 'full'
-    ? `${name} ${ctx} ${(m.pricing ? `$${m.pricing.inputPerM}/$${m.pricing.outputPerM}` : '—').padEnd(PRICE_W)} ${tools}`
-    : `${name} ${ctx} ${tools}`;
-  return { name: `${row}${trail}`, value: m.id, description: m.notes, disabled };
+  const row = `${name} ${provider} ${ctx} ${tools.padEnd(TOOLS_W)} ${truncate(status, layout.statusW)}`;
+  return { name: row, value: m.id, description: m.notes, disabled };
 }
 
 /** Resolve `@inquirer/prompts` lazily so unit tests can swap it out. */
@@ -332,6 +345,7 @@ export async function runModelPicker(
         localModels?.length ?? listModelsForProvider(e.id).length,
         await isAuthed(e.id),
         e.id === currentProviderId && currentInstalled,
+        termWidth(),
       );
     }));
     providerChoices.push({ name: 'Cancel', value: CANCEL_VALUE });

@@ -190,10 +190,9 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
     expect(task!.status).toBe('verification_failed');
     expect(task!.evidence!.verdict).toBe('verification_failed');
     expect(task!.evidence!.failures[0].tool).toBe('file_write');
-    expect(chunks.join('')).toMatch(/\? Could not verify required outcome/i);
-    expect(chunks.join('').match(/Could not verify required outcome/gi)).toHaveLength(1);
-    expect(chunks.join('')).toContain('Verification unknown');
-    expect(chunks.join('')).not.toMatch(/\u2713 Verified/i);
+    expect(chunks.join('')).toMatch(/\? Incomplete — required outcome could not be verified/i);
+    expect(chunks.join('').match(/required outcome could not be verified/gi)).toHaveLength(1);
+    expect(chunks.join('')).not.toContain('✓ Completed and verified');
   });
 
   it('happy path: evidence-backed mutation (file present on disk) → completed with handles persisted on the row', async () => {
@@ -213,7 +212,7 @@ describe('verify-before-done gate (real runAgentTurn seam)', () => {
     const handles = task!.evidence!.handles;
     expect(handles.some((h) => h.kind === 'path' && h.value === outPath && h.verified)).toBe(true);
     expect(handles.some((h) => h.kind === 'bytes' && h.value === 42)).toBe(true);
-    expect(chunks.join('')).toMatch(/Verified/);
+    expect(chunks.join('')).toContain('✓ Completed and verified');
   });
 
   it('missing artifact: verifier-ok but the claimed file is NOT on disk → verification_failed (part b, through the real seam)', async () => {

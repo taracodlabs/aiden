@@ -30,7 +30,7 @@ const HISTORY_FILENAME = '.aiden_history';
 
 export const history: SlashCommand = {
   name:        'history',
-  description: 'Clears command/prompt recall history. Does not clear the conversation.',
+  description: 'List command/prompt recall history; use clear --yes to erase it.',
   category:    'system',
   handler: async (ctx) => {
     const sub = (ctx.args[0] ?? 'list').toLowerCase();

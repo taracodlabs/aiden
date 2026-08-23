@@ -17,11 +17,9 @@
  * every time the dispatcher invokes it.
  *
  * Scope cuts deliberately deferred (per Phase 7b audit greenlight):
- *   - plannerGuard / honestyEnforcement / skillTeacher / skillMiner
- *     are NOT wired into daemon-mode agents. They add ~3 LLM calls
- *     per turn and the daemon's job is "act on the trigger," not
- *     "improve the agent." Opt-in per-trigger lands in v4.6 if
- *     real-world use surfaces a need.
+ *   - skillTeacher / skillMiner are NOT wired into daemon-mode agents.
+ *     PlannerGuard uses the configured runtime policy so every entry point
+ *     retains the same canonical self-awareness tools.
  *   - REPL-only spinner hooks (onMemoryRefreshStart/onPromptBuilt/
  *     onProviderRequestStart) are omitted; daemon has no display
  *     surface.
@@ -50,6 +48,7 @@ import { HonestyEnforcement, type HonestyMode } from '../../moat/honestyEnforcem
 import type { AidenPaths } from '../../core/v4/paths';
 import { currentJobExecutionContext } from '../../core/v4/daemon/jobExecutionContext';
 import { createAutomationApprovalContinuationRuntime } from '../../core/v4/automation/approvalContinuation';
+import { PlannerGuard, type PlannerGuardMode } from '../../moat/plannerGuard';
 
 // ── Public types ───────────────────────────────────────────────────────────
 
@@ -77,6 +76,8 @@ export interface BuildDaemonAgentBuilderInput {
   externalCodingRequirement?: AidenAgentOptions['externalCodingRequirement'];
   learningContextProvider?: AidenAgentOptions['learningContextProvider'];
   learningScopes?: AidenAgentOptions['learningScopes'];
+  /** Use the same canonical self-awareness/tool-selection policy as the REPL. */
+  plannerGuardMode?: PlannerGuardMode;
   recoverExternalCoding?: AgentBuilder['recoverExternalCoding'];
   /**
    * v4.7.0 Phase 2.4 — honesty-mode plumbed in from the REPL's config
@@ -134,6 +135,12 @@ export function buildDaemonAgentBuilder(
     const toolExecutor = deps.toolContext
       ? deps.toolRegistry.buildExecutor({ ...deps.toolContext, approvalEngine })
       : deps.toolExecutor;
+    const plannerGuardMode = deps.plannerGuardMode ?? 'rule_based';
+    const plannerGuard = new PlannerGuard(
+      deps.toolRegistry,
+      plannerGuardMode,
+      plannerGuardMode === 'llm_classified' ? adapter : undefined,
+    );
 
     // Per-turn promptBuilderOptions — same snapshot the REPL uses,
     // only the providerId/modelId fields overridden to reflect the
@@ -177,6 +184,7 @@ export function buildDaemonAgentBuilder(
       externalCodingRequirement: deps.externalCodingRequirement,
       learningContextProvider: deps.learningContextProvider,
       learningScopes: deps.learningScopes,
+      plannerGuard,
       // Memory snapshot refresh — daemon agent doesn't track dirty
       // bits because each instance is short-lived; we provide the
       // refresh callback so honestyEnforcement (and any future
@@ -189,9 +197,9 @@ export function buildDaemonAgentBuilder(
       // footer appended in enforce mode is captured by the daemon
       // dispatcher's run_events and surfaced in the channel reply.
       honestyEnforcement: new HonestyEnforcement(deps.honestyMode ?? 'enforce'),
-      // Scope cuts (Phase 7b, still deferred): no plannerGuard, no
-      // skillTeacher, no skillMiner. These add LLM calls + state
-      // that don't fit the daemon's "fire and act" pattern.
+      // Scope cuts (Phase 7b, still deferred): no skillTeacher or skillMiner.
+      // The shared PlannerGuard is local in its default mode and keeps
+      // canonical runtime status visible for self-awareness questions.
     });
 
     // Q-P7b-4(b) — minimal per-turn stdout line for tail-friendly

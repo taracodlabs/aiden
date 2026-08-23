@@ -3212,7 +3212,12 @@ export class ChatSession implements ChatSessionLike {
       // Pure conversation stays conversational. Tool/task turns receive one
       // concise post-reply outcome; activity rows remain execution-only.
       if (_taskOutcome && (result.toolCallTrace?.length ?? 0) > 0) {
-        this.opts.display.taskOutcome(_taskOutcome);
+        const verbosity = typeof this.opts.config.getValue === 'function'
+          ? this.opts.config.getValue<string>('display.verbose', 'normal')
+          : 'normal';
+        this.opts.display.taskOutcome(_taskOutcome, {
+          verbose: verbosity === 'verbose',
+        });
       }
 
       // v4.1.6 Polish 2 — post-render skill-proposal handler.
