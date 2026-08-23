@@ -129,6 +129,35 @@ describe('buildDaemonAgentBuilder — construction', () => {
     const agent = await builder(stubInput());
     expect((agent as unknown as { provider: ProviderAdapter }).provider).toBe(fallback);
   });
+
+  it('keeps canonical status available for natural-language preference questions', async () => {
+    const toolRegistry = new ToolRegistry();
+    for (const [name, toolset] of [
+      ['file_list', 'files'],
+      ['memory_add', 'memory'],
+      ['aiden_status', 'status'],
+    ] as const) {
+      toolRegistry.register({
+        schema: { name, description: name, inputSchema: { type: 'object', properties: {} } },
+        category: 'read', mutates: false, toolset,
+        execute: async () => ({}),
+      });
+    }
+    const { deps } = stubDeps({ toolRegistry, plannerGuardMode: 'rule_based' });
+    const agent = await buildDaemonAgentBuilder(deps)(stubInput());
+    const plannerGuard = (agent as unknown as {
+      plannerGuard?: { decide(message: string, history: []): Promise<{ selectedTools: string[]; excludedTools: string[] }> };
+    }).plannerGuard;
+
+    expect(plannerGuard).toBeDefined();
+    const decision = await plannerGuard!.decide(
+      'What package manager do I prefer for this workspace?',
+      [],
+    );
+    expect(decision.selectedTools).toContain('aiden_status');
+    expect(decision.excludedTools).not.toContain('aiden_status');
+    expect(decision.excludedTools).toContain('file_list');
+  });
 });
 
 describe('buildDaemonAgentBuilder — state isolation', () => {

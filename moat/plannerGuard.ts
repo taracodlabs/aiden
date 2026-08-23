@@ -122,7 +122,7 @@ const RULES: KeywordRule[] = [
   // Memory
   {
     keywords:
-      /\b(remember|forget|memory|preference|recall|note that|memorize)\b/i,
+      /\b(remember|forget|memory|prefer(?:s|red|ring)?|preferences?|recall|note that|memorize)\b/i,
     toolsets: ['memory', 'status'],
   },
   // Skills

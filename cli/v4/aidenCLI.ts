@@ -3718,6 +3718,7 @@ export async function buildAgentRuntime(
     externalCodingRequirement,
     learningContextProvider: learningContext,
     learningScopes,
+    plannerGuardMode,
     recoverExternalCoding: (input) => recoverCompletedExternalCodingSession({
       ...input,
       verify: codingVerifier,

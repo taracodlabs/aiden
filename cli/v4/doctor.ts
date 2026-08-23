@@ -52,6 +52,9 @@ import {
 import type { SystemReadinessProjection } from '../../core/v4/workbench/systemReadiness';
 import type { CapabilityDoctorProjection } from '../../core/v4/capabilities/management';
 import type { SkillIntelligenceDoctor } from '../../core/v4/skillIntelligence';
+import { isExpired, loadTokens, PREFLIGHT_REFRESH_WINDOW_MS } from '../../core/v4/auth/tokenStore';
+import { PROVIDER_REGISTRY } from '../../providers/v4/registry';
+import { resolveApiCredential } from '../../providers/v4/credentialAuthority';
 
 /**
  * v4.1.3-essentials doctor-polish: stable group identifiers used by the
@@ -1033,6 +1036,75 @@ export function checkProviderAuth(env: NodeJS.ProcessEnv): CheckResult {
   };
 }
 
+async function checkProviderAuthAuthority(input: {
+  env: NodeJS.ProcessEnv;
+  paths: AidenPaths;
+  readiness?: SystemReadinessProjection;
+}): Promise<CheckResult> {
+  const fallback = checkProviderAuth(input.env);
+  const readyChat = input.readiness?.items.find((item) => item.category === 'chat' && item.ready);
+  if (readyChat) {
+    return {
+      ...fallback,
+      passed: true,
+      message: readyChat.reason || readyChat.detail,
+      suggestion: undefined,
+    };
+  }
+
+  let config: ConfigManager | undefined;
+  try {
+    config = new ConfigManager(input.paths);
+    config.loadSync();
+  } catch {
+    config = undefined;
+  }
+
+  const decision = readProviderDecision(input.paths);
+  const providerId = decision?.provider
+    ?? config?.getValue<string>('model.provider');
+  const modelId = decision?.model
+    ?? config?.getValue<string>('model.modelId');
+  const provider = providerId ? PROVIDER_REGISTRY[providerId] : undefined;
+
+  if (provider?.apiKeyEnvVar) {
+    try {
+      const credential = await resolveApiCredential({
+        providerId: provider.id,
+        envVar: provider.apiKeyEnvVar,
+        registryEndpoint: provider.baseUrl,
+        config,
+        paths: input.paths,
+        env: input.env,
+      });
+      if (credential.effective.configured) {
+        return {
+          ...fallback,
+          passed: true,
+          message: `${provider.displayName} credential is ready${modelId ? ` · ${modelId}` : ''}`,
+          suggestion: undefined,
+        };
+      }
+    } catch {
+      // Preserve the bounded diagnostic fallback when credential inspection fails.
+    }
+  }
+
+  if (provider?.oauth) {
+    const tokens = await loadTokens(input.paths, provider.oauth.providerId);
+    if (tokens?.accessToken && !isExpired(tokens, PREFLIGHT_REFRESH_WINDOW_MS)) {
+      return {
+        ...fallback,
+        passed: true,
+        message: `${provider.displayName} OAuth credential is ready${modelId ? ` · ${modelId}` : ''}`,
+        suggestion: undefined,
+      };
+    }
+  }
+
+  return fallback;
+}
+
 export async function checkOllamaReachable(opts: {
   fetchImpl: typeof fetch;
   timeoutMs: number;
@@ -1491,8 +1563,24 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
 
   const results: CheckResult[] = [];
   results.push(await checkConfigFile(paths));
-  results.push(checkProviderAuth(env));
-  results.push(await checkOllamaReachable({ fetchImpl, timeoutMs }));
+  let providerAuth = await checkProviderAuthAuthority({ env, paths, readiness: opts.readinessProjection });
+  let ollama = await checkOllamaReachable({ fetchImpl, timeoutMs });
+  if (!providerAuth.passed && ollama.passed) {
+    providerAuth = {
+      ...providerAuth,
+      passed: true,
+      message: 'Ollama is ready; no provider credential is required',
+      suggestion: undefined,
+    };
+  }
+  if (!ollama.passed && providerAuth.passed) ollama = {
+    ...ollama,
+    passed: true,
+    message: 'optional local inference is unavailable; another provider is ready',
+    suggestion: 'Start Ollama only if you want local inference.',
+  };
+  results.push(providerAuth);
+  results.push(ollama);
   results.push(await checkPythonAvailable({ spawnImpl, timeoutMs }));
   results.push(await checkDockerAvailable({ spawnImpl, timeoutMs }));
   results.push(await checkNpxAvailable({ spawnImpl, timeoutMs }));

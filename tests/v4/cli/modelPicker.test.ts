@@ -112,7 +112,7 @@ describe('runModelPicker', () => {
     expect(joined).toMatch(/🏠 Local/);
   });
 
-  it('model choice includes context length and pricing when available', async () => {
+  it('wide model choice includes provider, context, tools, and readiness status', async () => {
     let modelChoices: any[] = [];
     const select = vi.fn(async (opts: any) => {
       if (isStage1(opts.message)) return 'anthropic';
@@ -124,8 +124,10 @@ describe('runModelPicker', () => {
       promptModule: { select },
     });
     const opus = modelChoices.find((c) => c.value === 'claude-opus-4-7');
+    expect(opus.name).toMatch(/anthropic/);
     expect(opus.name).toMatch(/200K/);
-    expect(opus.name).toMatch(/\$15/);
+    expect(opus.name).toMatch(/✓/);
+    expect(opus.name).toMatch(/recommended/);
   });
 
   it('model choice omits pricing when undefined', async () => {
@@ -455,9 +457,10 @@ describe('runModelPicker', () => {
     // Header is the second line of the message.
     const header = stage2Message.split('\n')[1] ?? '';
     expect(header).toMatch(/Name/);
+    expect(header).toMatch(/Provider/);
     expect(header).toMatch(/Context/);
-    expect(header).toMatch(/In\/Out \$\/M/);
     expect(header).toMatch(/Tools/);
+    expect(header).toMatch(/Status/);
   });
 
   it('strips "(deprecating …)" from the name cell into a trailing ⚠ flag', async () => {
@@ -490,8 +493,10 @@ describe('runModelPicker', () => {
     await runModelPicker({ resolver: realResolver(), promptModule: { select } });
     // No header line appended in plain mode.
     expect(stage2Message.split('\n').length).toBe(1);
-    // Rows keep the legacy "<N>K ctx" concat shape.
+    // Narrow rows keep only the model identity and semantic status.
     const opus = modelChoices.find((c) => c.value === 'claude-opus-4-7')!;
-    expect(opus.name).toMatch(/200K ctx/);
+    expect(opus.name).toMatch(/recommended/);
+    expect(opus.name).not.toMatch(/ctx|per M/i);
+    expect(opus.name.length).toBeLessThanOrEqual(48);
   });
 });

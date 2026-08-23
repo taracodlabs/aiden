@@ -2668,7 +2668,7 @@ export class Display {
   }
 
   /** Render the single structured outcome owned by turn finalization. */
-  taskOutcome(outcome: TaskOutcomePresentation): void {
+  taskOutcome(outcome: TaskOutcomePresentation, options: { verbose?: boolean } = {}): void {
     const taskId = outcome.taskId && terminalVisibleLength(outcome.taskId) > 13
       ? `${outcome.taskId.slice(0, 8)}…${outcome.taskId.slice(-4)}`
       : outcome.taskId;
@@ -2696,7 +2696,32 @@ export class Display {
       terminalSupportsUnicode() ? projection.glyph : terminalStateSymbol(stateSymbol),
       projection.role,
     );
-    this.writeOutput(`${glyph} ${projection.label} · ${axes.join(' · ')}${summary}${details}\n`);
+    if (options.verbose) {
+      this.writeOutput(`${glyph} ${projection.label} · ${axes.join(' · ')}${summary}${details}\n`);
+      return;
+    }
+
+    const compactLabel = (() => {
+      switch (outcome.kind) {
+        case 'verified': return 'Completed and verified';
+        case 'completed': return 'Completed';
+        case 'completed_limited': return 'Completed — limited evidence';
+        case 'partial': return 'Partially completed';
+        case 'unverified_required': return 'Incomplete — required outcome could not be verified';
+        case 'denied': return 'Denied';
+        case 'cancelled': return 'Cancelled';
+        case 'timed_out': return 'Timed out';
+        case 'failed': {
+          const reason = projection.label.trim();
+          return !reason || /^failed[.!]?$/iu.test(reason) ? 'Failed' : `Failed — ${reason}`;
+        }
+      }
+    })();
+    const diagnosticText = `${outcome.label} ${outcome.summary ?? ''}`;
+    const codingHint = /external coding model is not configured/iu.test(diagnosticText)
+      ? '\n  Fix: Open Workbench → Settings → External Coding.'
+      : '';
+    this.writeOutput(`${glyph} ${compactLabel}${codingHint}\n`);
   }
 
   /** Project canonical durable evidence without manufacturing proof. */

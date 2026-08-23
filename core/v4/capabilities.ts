@@ -105,6 +105,7 @@ export function renderRuntimeSlot(manifest: RuntimeManifest): string {
   lines.push(`Tools loaded: ${manifest.toolCount}`);
   lines.push(`Skills bundled: ${manifest.skillCount}`);
   lines.push(`Active channels: ${manifest.channels.join(', ')}`);
+  lines.push('External agents: A2A delegation is read-only. A2A mutation is disabled.');
   if (manifest.providerId) lines.push(`Provider: ${manifest.providerId}`);
   if (manifest.modelId)    lines.push(`Model: ${manifest.modelId}`);
   return lines.join('\n');

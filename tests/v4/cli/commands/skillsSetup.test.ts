@@ -175,10 +175,10 @@ describe('/skills setup', () => {
   });
 });
 
-// ── /skills list with Author column ──────────────────────────────────
+// ── /skills compact source attribution ──────────────────────────────
 
-describe('/skills list — Author column (v4.9.5)', () => {
-  it('renders the author name when SKILL.md provides one', async () => {
+describe('/skills list — compact source attribution', () => {
+  it('renders the exact author when SKILL.md provides one', async () => {
     // Plant a curated-shaped SKILL.md on disk.
     const dir = path.join(paths.skillsDir, 'pdf-extractor');
     await fs.mkdir(dir, { recursive: true });
@@ -189,12 +189,11 @@ describe('/skills list — Author column (v4.9.5)', () => {
     await skillsCmd.handler(ctx as never);
 
     const out = ctx._writes.join('');
-    expect(out).toContain('Name');
-    expect(out).toContain('Author');
-    expect(out).toContain('Jane Doe');
+    expect(out).toContain('pdf-extractor · By Jane Doe · Extract PDFs');
+    expect(out).not.toContain('(uncredited)');
   });
 
-  it('shows "(uncredited)" for community skills missing author', async () => {
+  it('labels community source truthfully when author metadata is absent', async () => {
     const noAuthor = `---
 name: random-skill
 description: A side-loaded skill
@@ -213,10 +212,11 @@ Body.
     await skillsCmd.handler(ctx as never);
 
     const out = ctx._writes.join('');
-    expect(out).toContain('(uncredited)');
+    expect(out).toContain('random-skill · Community · A side-loaded skill');
+    expect(out).not.toContain('(uncredited)');
   });
 
-  it('shows "(builtin)" for skills with _trustLevel: builtin and no author', async () => {
+  it('labels bundled source truthfully when author metadata is absent', async () => {
     const builtin = `---
 name: bundled-skill
 description: A bundled skill
@@ -234,6 +234,7 @@ Body.
     await skillsCmd.handler(ctx as never);
 
     const out = ctx._writes.join('');
-    expect(out).toContain('(builtin)');
+    expect(out).toContain('bundled-skill · Bundled · A bundled skill');
+    expect(out).not.toContain('(builtin)');
   });
 });

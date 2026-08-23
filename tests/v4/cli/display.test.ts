@@ -224,7 +224,7 @@ describe('Display', () => {
 });
 
 describe('Display Phase 14b helpers', () => {
-  it('renders one concise structured task outcome with an inspectability hint', () => {
+  it('renders one concise structured task outcome without internal axes', () => {
     const chunks: string[] = [];
     const out = new Writable({
       write(chunk, _enc, cb) { chunks.push(chunk.toString()); cb(); },
@@ -244,20 +244,19 @@ describe('Display Phase 14b helpers', () => {
       inspectable: true,
       prominent: true,
     });
-    expect(chunks.join('')).toContain('? Could not verify required outcome');
-    expect(chunks.join('')).toContain('Verification unknown');
-    expect(chunks.join('')).toContain('Task: 7');
+    expect(chunks.join('')).toContain('Incomplete — required outcome could not be verified');
+    expect(chunks.join('')).not.toContain('Verification unknown');
+    expect(chunks.join('')).not.toContain('Task: 7');
     expect(chunks.join('')).not.toContain('Next:');
-    expect(chunks.join('').match(/Could not verify required outcome/g)).toHaveLength(1);
   });
 
   it.each([
-    ['verified', 'success', 'Verified', '✓ Verified · Execution succeeded · Validation not reported · Verification verified · Verdict complete'],
-    ['completed_limited', 'warning', 'Completed · limited evidence', '! Completed · limited evidence · Execution completed · Validation not reported · Verification limited · Verdict complete'],
-    ['failed', 'error', 'Failed', '× Failed · Execution failed · Validation unknown · Verification not completed · Verdict failed'],
-    ['unverified_required', 'error', 'Could not verify required outcome', '? Could not verify required outcome · Execution succeeded · Validation unknown · Verification unknown · Verdict incomplete'],
-    ['cancelled', 'info', 'Cancelled', '■ Cancelled · Execution interrupted · Validation not completed · Verification not completed · Verdict cancelled'],
-  ] as const)('renders the compact %s verdict badge', (kind, severity, label, expected) => {
+    ['verified', 'success', 'Verified', 'Completed and verified'],
+    ['completed_limited', 'warning', 'Completed · limited evidence', 'Completed — limited evidence'],
+    ['failed', 'error', 'Failed', 'Failed'],
+    ['unverified_required', 'error', 'Could not verify required outcome', 'Incomplete — required outcome could not be verified'],
+    ['cancelled', 'info', 'Cancelled', 'Cancelled'],
+  ] as const)('renders the compact %s verdict badge', (kind, severity, label, expectedLabel) => {
     const { d, chunks } = captureDisplay();
     d.taskOutcome({
       kind,
@@ -275,10 +274,12 @@ describe('Display Phase 14b helpers', () => {
       requiredUnresolvedCount: 0,
       optionalDeniedCount: 0,
     });
-    expect(chunks.join('')).toBe(`${expected}\n`);
+    expect(stripAnsi(chunks.join(''))).toContain(expectedLabel);
+    expect(chunks.join('')).not.toContain('Validation not reported');
+    expect(chunks.join('')).not.toContain('Verdict complete');
   });
 
-  it('abbreviates the task identity in the compact verdict row', () => {
+  it('keeps task identity and outcome axes available in verbose mode', () => {
     const { d, chunks } = captureDisplay();
     d.taskOutcome({
       kind: 'verified',
@@ -296,9 +297,10 @@ describe('Display Phase 14b helpers', () => {
       requiredSkippedCount: 0,
       requiredUnresolvedCount: 0,
       optionalDeniedCount: 0,
-    });
+    }, { verbose: true });
     expect(chunks.join('')).toContain('Task: task_012…cdef');
     expect(chunks.join('')).not.toContain('task_0123456789abcdef');
+    expect(chunks.join('')).toContain('Verification verified');
   });
   function captureDisplay() {
     const chunks: string[] = [];
@@ -1728,7 +1730,7 @@ describe('Display v4.8.0 ui_* event renderers', () => {
       requiredCompletedCount: 1, requiredDeniedCount: 0,
       requiredFailedCount: 0, requiredSkippedCount: 0,
       requiredUnresolvedCount: 0, optionalDeniedCount: 0,
-    });
+    }, { verbose: true });
     const rendered = chunks.join('');
     expect(rendered).toContain('Execution succeeded');
     expect(rendered).toContain('Verification unknown');
