@@ -157,19 +157,34 @@ function buildProvider(authHelpers) {
       // the visually-distinct boxed code rendering.
       const startedAtMs = Date.now();
       const deadlineMs = startedAtMs + 15 * 60 * 1000;
+      let awaitingUserCode = false;
       const innerUa = buildPollingUa(
         {
+          // The device flow emits the instruction and user code on separate
+          // lines. Keep enough local state to turn that exact protocol into
+          // one stable, boxed code surface for both terminal and Workbench
+          // consumers.
           log: (line) => {
-            // Detect the flow's "Enter the code: <CODE>" line and replace
-            // it with the boxed rendering. Cleaner than patching the
-            // runDeviceCodeFlow primitive itself.
-            const m = /^\s*2\.\s+Enter the code:\s*(.*)$/.exec(line);
-            if (m) {
+            const renderCode = (code) => {
               ua.log('  2. Enter this code on that page:');
-              for (const boxLine of renderUserCodeBox(m[1].trim())) {
+              for (const boxLine of renderUserCodeBox(code)) {
                 ua.log(`     ${boxLine}`);
               }
+            };
+            const prompt = /^\s*2\.\s+Enter (?:this|the) code:\s*(.*)$/i.exec(line);
+            if (prompt) {
+              const inlineCode = prompt[1].trim();
+              if (inlineCode) renderCode(inlineCode);
+              else awaitingUserCode = true;
               return;
+            }
+            if (awaitingUserCode) {
+              awaitingUserCode = false;
+              const code = line.trim();
+              if (/^[A-Z0-9][A-Z0-9-]{3,}$/i.test(code)) {
+                renderCode(code);
+                return;
+              }
             }
             ua.log(line);
           },

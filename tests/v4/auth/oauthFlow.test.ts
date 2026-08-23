@@ -191,6 +191,8 @@ describe('runDeviceCodeFlow', () => {
     expect(r.accessToken).toBe('A');
     expect(r.expiresInSeconds).toBe(7200);
     expect(ua.log).toHaveBeenCalled();
+    expect(ua.openBrowser).toHaveBeenCalledOnce();
+    expect(ua.openBrowser).toHaveBeenCalledWith('https://issuer.test/codex/device');
     // Poll loop slept once between the 403 and 200.
     expect(ua.sleep).toHaveBeenCalledTimes(2);
     // Final exchange was form-encoded.
