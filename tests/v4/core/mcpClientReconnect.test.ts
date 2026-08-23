@@ -40,7 +40,7 @@ function makeFake(opts: FakeOpts = {}): FakeTransport {
     request: async (method: string) => {
       if (method === 'initialize') {
         if (opts.initError) throw opts.initError;
-        return { capabilities: {} };
+        return { protocolVersion: '2025-11-25', capabilities: {} };
       }
       if (method === 'tools/list') {
         return {

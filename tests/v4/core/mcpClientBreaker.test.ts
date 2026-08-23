@@ -24,7 +24,7 @@ function makeFake() {
   const transport = {
     label: 'fake',
     request: async (method: string) => {
-      if (method === 'initialize') return { capabilities: {} };
+      if (method === 'initialize') return { protocolVersion: '2025-11-25', capabilities: {} };
       if (method === 'tools/list') {
         return { tools: state.tools.map((n) => ({ name: n, description: n, inputSchema: { type: 'object', properties: {} } })) };
       }

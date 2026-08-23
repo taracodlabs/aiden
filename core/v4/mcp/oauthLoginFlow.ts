@@ -30,7 +30,15 @@ import {
   type OAuthFlowResult,
   type OAuthUserAgent,
 } from '../auth/oauthFlow';
-import { mcpTokenId, type McpOAuthConfig } from './oauthDiscovery';
+import {
+  canonicalMcpResource,
+  loadMcpOAuthConfig,
+  mcpTokenId,
+  normalizeMcpScopes,
+  readMcpCredentialBinding,
+  type McpCredentialBinding,
+  type McpOAuthConfig,
+} from './oauthDiscovery';
 
 /**
  * Fixed loopback ports (RFC 8252). The whole range is registered as
@@ -211,7 +219,7 @@ export async function runLoopbackAuthFlow(deps: {
         authorizationEndpoint: deps.config.endpoints.authorizationEndpoint,
         clientId: deps.config.clientId,
         redirectUri: loop.redirectUri,
-        scope: deps.config.endpoints.scopesSupported?.join(' '),
+        scope: normalizeMcpScopes(deps.config.scopes).join(' ') || undefined,
         resource: deps.config.resource,
       },
       pkce.challenge,
@@ -260,9 +268,31 @@ export async function persistMcpTokens(
   paths: AidenPaths,
   server: string,
   result: OAuthFlowResult,
+  suppliedConfig?: McpOAuthConfig,
 ): Promise<void> {
   const id = mcpTokenId(server);
   const existing = await loadTokens(paths, id);
+  const config = suppliedConfig ?? await loadMcpOAuthConfig(paths, server);
+  if (!config) throw new Error(`Cannot persist MCP credential for "${server}" without an OAuth configuration`);
+  const serverUrl = canonicalMcpResource(config.serverUrl ?? config.resource ?? '');
+  const resource = canonicalMcpResource(config.resource ?? serverUrl);
+  if (serverUrl !== resource) throw new Error('MCP OAuth credential resource does not match the configured server endpoint');
+  const requestedScopes = normalizeMcpScopes(config.scopes);
+  const reportedScopes = typeof result.extras?.scope === 'string'
+    ? normalizeMcpScopes(result.extras.scope.split(/\s+/u).filter(Boolean))
+    : [];
+  const priorBinding = readMcpCredentialBinding(existing?.extras?.mcpBinding);
+  const allowedScopes = priorBinding?.scopes.length ? priorBinding.scopes : requestedScopes;
+  if (allowedScopes.length > 0 && reportedScopes.some((scope) => !allowedScopes.includes(scope))) {
+    throw new Error('MCP OAuth token response expanded the authorized scope set');
+  }
+  const binding: McpCredentialBinding = {
+    server,
+    serverUrl,
+    resource,
+    clientId: config.clientId,
+    scopes: reportedScopes.length > 0 ? reportedScopes : allowedScopes,
+  };
   await saveTokens(paths, {
     provider: id,
     accessToken: result.accessToken,
@@ -272,6 +302,6 @@ export async function persistMcpTokens(
     expiresAtMs: Date.now() + result.expiresInSeconds * 1000,
     account: existing?.account,
     models: existing?.models,
-    extras: { ...(existing?.extras ?? {}), ...(result.extras ?? {}) },
+    extras: { ...(existing?.extras ?? {}), ...(result.extras ?? {}), oauth: config, mcpBinding: binding },
   });
 }

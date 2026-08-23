@@ -32,7 +32,7 @@ function res(ok: boolean, status: number, json: unknown) {
 }
 interface Route { match: (url: string) => boolean; reply: () => ReturnType<typeof res>; }
 function mockFetch(routes: Route[]) {
-  const calls: Array<{ url: string; init?: { method?: string; body?: string } }> = [];
+  const calls: Array<{ url: string; init?: { method?: string; body?: string; redirect?: string } }> = [];
   const fn: FetchLike = async (url, init) => {
     calls.push({ url, init });
     for (const r of routes) if (r.match(url)) return r.reply();
@@ -92,6 +92,21 @@ describe('oauthDiscovery — RFC 9728 protected-resource metadata', () => {
       'http://127.0.0.1:3000/.well-known/oauth-protected-resource',     // fallback
     ]);
   });
+
+  it('uses manual redirect handling and rejects oversized metadata bodies', async () => {
+    let redirect: string | undefined;
+    const fn: FetchLike = async (_url, init) => {
+      redirect = init?.redirect;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ authorization_servers: [AS], resource: SRV }),
+        text: async () => JSON.stringify({ authorization_servers: [AS], padding: 'x'.repeat(1_024) }),
+      };
+    };
+    expect(await discoverProtectedResource(SRV, { fetchFn: fn, maxMetadataBytes: 128 })).toBeNull();
+    expect(redirect).toBe('manual');
+  });
 });
 
 describe('oauthDiscovery — RFC 8414 AS metadata', () => {
@@ -140,6 +155,30 @@ describe('oauthDiscovery — discoverMcpOAuth orchestration', () => {
     const out = await discoverMcpOAuth(SRV, { fetchFn: fn });
     expect(out?.endpoints.authorizationEndpoint).toBe(`${AS}/authorize`);
     expect(out?.resource).toBe(SRV);
+  });
+
+  it('does not fetch an authorization server rejected by endpoint policy', async () => {
+    const unsafe = 'http://127.0.0.1:9123';
+    let unsafeFetches = 0;
+    const fn: FetchLike = async (url) => {
+      if (url.includes('oauth-protected-resource')) {
+        return res(true, 200, { authorization_servers: [unsafe], resource: SRV });
+      }
+      if (url.startsWith(unsafe)) unsafeFetches += 1;
+      return res(true, 200, {
+        authorization_endpoint: `${unsafe}/authorize`, token_endpoint: `${unsafe}/token`,
+      });
+    };
+    const out = await discoverMcpOAuth(SRV, {
+      fetchFn: fn,
+      endpointPolicy: {
+        check: async (url) => url.startsWith(unsafe)
+          ? { blocked: true, reason: 'loopback address' }
+          : { blocked: false },
+      },
+    });
+    expect(out).toBeNull();
+    expect(unsafeFetches).toBe(0);
   });
 });
 

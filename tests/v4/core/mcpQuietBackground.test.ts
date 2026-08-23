@@ -34,7 +34,7 @@ function makeFake(opts: { initError?: Error; tools?: string[] } = {}): FakeTrans
   return {
     label: 'fake',
     request: async (method: string) => {
-      if (method === 'initialize') { if (opts.initError) throw opts.initError; return { capabilities: {} }; }
+      if (method === 'initialize') { if (opts.initError) throw opts.initError; return { protocolVersion: '2025-11-25', capabilities: {} }; }
       if (method === 'tools/list') return { tools: (opts.tools ?? ['a']).map((n) => ({ name: n, description: n, inputSchema: { type: 'object', properties: {} } })) };
       return { content: [{ type: 'text', text: 'ok' }] };
     },

@@ -21,12 +21,21 @@
  */
 import type { AidenPaths } from '../paths';
 import { loadTokens, saveTokens, isExpired, type OAuthTokens } from '../auth/tokenStore';
+import { SSRFProtection } from '../../../moat/ssrfProtection';
 
 /** Minimal fetch surface — the global `fetch` satisfies it; tests inject a mock. */
 export type FetchLike = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; redirect?: 'manual' },
 ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown>; text: () => Promise<string> }>;
+
+export interface OAuthDiscoveryDeps {
+  fetchFn: FetchLike;
+  endpointPolicy?: Pick<SSRFProtection, 'check'>;
+  /** Controlled local fixtures only. */
+  allowLoopbackHttp?: boolean;
+  maxMetadataBytes?: number;
+}
 
 export interface DiscoveredOAuth {
   issuer?: string;
@@ -51,6 +60,8 @@ export interface RegisteredClient {
 
 /** Persisted under tokenStore.extras.oauth for id `mcp_<server>`. */
 export interface McpOAuthConfig {
+  /** Exact configured MCP endpoint this OAuth client and credential belong to. */
+  serverUrl?: string;
   /** The MCP server URL (the OAuth `resource` indicator for token requests). */
   resource?: string;
   endpoints: DiscoveredOAuth;
@@ -62,6 +73,81 @@ export interface McpOAuthConfig {
    * device-flow path, which asks for scopes at device-authorization time.
    */
   scopes?: string[];
+}
+
+export interface McpCredentialBinding {
+  server: string;
+  serverUrl: string;
+  resource: string;
+  clientId: string;
+  scopes: string[];
+}
+
+const MAX_MCP_SCOPES = 64;
+const MAX_MCP_SCOPE_LENGTH = 256;
+
+export function canonicalMcpResource(raw: string): string {
+  const parsed = new URL(raw);
+  if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error('MCP OAuth resource must use HTTP or HTTPS');
+  if (parsed.username || parsed.password) throw new Error('MCP OAuth resource must not contain credentials');
+  parsed.hash = '';
+  parsed.hostname = parsed.hostname.toLowerCase();
+  if ((parsed.protocol === 'https:' && parsed.port === '443') || (parsed.protocol === 'http:' && parsed.port === '80')) {
+    parsed.port = '';
+  }
+  const serialized = parsed.toString();
+  const suffix = `${parsed.search}${parsed.hash}`;
+  if (parsed.pathname.endsWith('/') && parsed.pathname !== '/') {
+    return `${serialized.slice(0, serialized.length - suffix.length - 1)}${suffix}`;
+  }
+  return serialized.endsWith('/') ? serialized.slice(0, -1) : serialized;
+}
+
+export function normalizeMcpScopes(scopes: readonly string[] | undefined): string[] {
+  if (!scopes) return [];
+  if (scopes.length > MAX_MCP_SCOPES) throw new Error('MCP OAuth scope set is too large');
+  const out: string[] = [];
+  for (const raw of scopes) {
+    const scope = raw.trim();
+    if (!scope || scope.length > MAX_MCP_SCOPE_LENGTH || /[\s\x00-\x1f\x7f]/u.test(scope)) {
+      throw new Error(`Invalid MCP OAuth scope: ${JSON.stringify(raw)}`);
+    }
+    if (!out.includes(scope)) out.push(scope);
+  }
+  return out;
+}
+
+export function readMcpCredentialBinding(value: unknown): McpCredentialBinding | null {
+  if (!value || typeof value !== 'object') return null;
+  const binding = value as Record<string, unknown>;
+  if (typeof binding.server !== 'string'
+    || typeof binding.serverUrl !== 'string'
+    || typeof binding.resource !== 'string'
+    || typeof binding.clientId !== 'string'
+    || !Array.isArray(binding.scopes)
+    || !binding.scopes.every((scope) => typeof scope === 'string')) return null;
+  try {
+    return {
+      server: binding.server,
+      serverUrl: canonicalMcpResource(binding.serverUrl),
+      resource: canonicalMcpResource(binding.resource),
+      clientId: binding.clientId,
+      scopes: normalizeMcpScopes(binding.scopes as string[]),
+    };
+  } catch { return null; }
+}
+
+function normalizedConfig(config: McpOAuthConfig): McpOAuthConfig {
+  const resource = canonicalMcpResource(config.resource ?? config.serverUrl ?? '');
+  const serverUrl = canonicalMcpResource(config.serverUrl ?? resource);
+  if (resource !== serverUrl) throw new Error('MCP OAuth protected resource does not match the configured server endpoint');
+  const scopes = normalizeMcpScopes(config.scopes);
+  const supported = new Set(normalizeMcpScopes(config.endpoints.scopesSupported));
+  if (supported.size > 0) {
+    const unsupported = scopes.find((scope) => !supported.has(scope));
+    if (unsupported) throw new Error(`MCP OAuth scope is not advertised by the authorization server: ${unsupported}`);
+  }
+  return { ...config, serverUrl, resource, scopes };
 }
 
 /**
@@ -91,11 +177,32 @@ function strArr(v: unknown): string[] | undefined {
   return Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === 'string') : undefined;
 }
 
-async function fetchJson(fetchFn: FetchLike, url: string): Promise<Record<string, unknown> | null> {
+async function endpointAllowed(url: string, deps: Pick<OAuthDiscoveryDeps, 'endpointPolicy' | 'allowLoopbackHttp'>): Promise<boolean> {
+  if (url.length > 2_048) return false;
+  let parsed: URL;
+  try { parsed = new URL(url); } catch { return false; }
+  if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return false;
+  const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  const loopbackFixture = deps.allowLoopbackHttp === true
+    && parsed.protocol === 'http:'
+    && ['localhost', '127.0.0.1', '::1'].includes(hostname);
+  if (loopbackFixture) return true;
+  if (deps.endpointPolicy && parsed.protocol !== 'https:') return false;
+  if (!deps.endpointPolicy) return true;
+  return !(await deps.endpointPolicy.check(parsed.toString())).blocked;
+}
+
+async function fetchJson(deps: OAuthDiscoveryDeps, url: string): Promise<Record<string, unknown> | null> {
   try {
-    const res = await fetchFn(url, { method: 'GET', headers: { Accept: 'application/json' } });
+    if (!(await endpointAllowed(url, deps))) return null;
+    const res = await deps.fetchFn(url, {
+      method: 'GET', headers: { Accept: 'application/json' }, redirect: 'manual',
+    });
     if (!res.ok) return null;
-    const j = await res.json();
+    const text = await res.text();
+    const maxBytes = deps.maxMetadataBytes ?? 512 * 1024;
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || Buffer.byteLength(text, 'utf8') > maxBytes) return null;
+    const j: unknown = JSON.parse(text);
     return j && typeof j === 'object' ? (j as Record<string, unknown>) : null;
   } catch {
     return null;
@@ -125,10 +232,10 @@ function protectedResourceMetadataUrls(serverUrl: string): string[] {
 /** RFC 9728 — the MCP server's protected-resource metadata (which AS protects it). */
 export async function discoverProtectedResource(
   serverUrl: string,
-  deps: { fetchFn: FetchLike },
+  deps: OAuthDiscoveryDeps,
 ): Promise<{ authorizationServers: string[]; resource?: string } | null> {
   for (const url of protectedResourceMetadataUrls(serverUrl)) {
-    const j = await fetchJson(deps.fetchFn, url);
+    const j = await fetchJson(deps, url);
     if (!j) continue;
     const authorizationServers = strArr(j.authorization_servers) ?? [];
     if (authorizationServers.length === 0) continue;
@@ -140,11 +247,11 @@ export async function discoverProtectedResource(
 /** RFC 8414 (with OIDC discovery fallback) — the authorization server's metadata. */
 export async function discoverAuthServer(
   asUrl: string,
-  deps: { fetchFn: FetchLike },
+  deps: OAuthDiscoveryDeps,
 ): Promise<DiscoveredOAuth | null> {
   const j =
-    (await fetchJson(deps.fetchFn, wellKnown(asUrl, 'oauth-authorization-server'))) ??
-    (await fetchJson(deps.fetchFn, wellKnown(asUrl, 'openid-configuration')));
+    (await fetchJson(deps, wellKnown(asUrl, 'oauth-authorization-server'))) ??
+    (await fetchJson(deps, wellKnown(asUrl, 'openid-configuration')));
   if (!j) return null;
 
   const authorizationEndpoint = typeof j.authorization_endpoint === 'string' ? j.authorization_endpoint : undefined;
@@ -168,18 +275,32 @@ export async function discoverAuthServer(
  */
 export async function discoverMcpOAuth(
   serverUrl: string,
-  deps: { fetchFn: FetchLike },
+  deps: OAuthDiscoveryDeps,
 ): Promise<{ endpoints: DiscoveredOAuth; resource?: string } | null> {
+  if (!(await endpointAllowed(serverUrl, deps))) return null;
   const prm = await discoverProtectedResource(serverUrl, deps);
   if (prm) {
     for (const as of prm.authorizationServers) {
+      if (!(await endpointAllowed(as, deps))) continue;
       const ep = await discoverAuthServer(as, deps);
-      if (ep) return { endpoints: ep, resource: prm.resource ?? serverUrl };
+      if (ep && await endpointsAllowed(ep, deps)) return { endpoints: ep, resource: prm.resource ?? serverUrl };
     }
     return null; // PRM advertised AS(es) but none had usable metadata
   }
   const ep = await discoverAuthServer(serverUrl, deps); // fallback: AS metadata at the base
-  return ep ? { endpoints: ep, resource: serverUrl } : null;
+  return ep && await endpointsAllowed(ep, deps) ? { endpoints: ep, resource: serverUrl } : null;
+}
+
+async function endpointsAllowed(endpoints: DiscoveredOAuth, deps: OAuthDiscoveryDeps): Promise<boolean> {
+  const urls = [
+    endpoints.issuer,
+    endpoints.authorizationEndpoint,
+    endpoints.tokenEndpoint,
+    endpoints.registrationEndpoint,
+    endpoints.deviceAuthorizationEndpoint,
+  ].filter((value): value is string => typeof value === 'string');
+  for (const url of urls) if (!(await endpointAllowed(url, deps))) return false;
+  return true;
 }
 
 // ── Dynamic Client Registration (RFC 7591) ──────────────────────────────────
@@ -190,12 +311,18 @@ export interface RegisterClientOptions {
   redirectUris: string[];
   clientName?: string;
   grantTypes?: string[];
+  endpointPolicy?: Pick<SSRFProtection, 'check'>;
+  allowLoopbackHttp?: boolean;
+  maxMetadataBytes?: number;
 }
 
 export async function registerClient(
   registrationEndpoint: string,
   opts: RegisterClientOptions,
 ): Promise<RegisteredClient> {
+  if (!(await endpointAllowed(registrationEndpoint, opts))) {
+    throw new Error('MCP DCR endpoint is blocked by network policy');
+  }
   const body = {
     client_name: opts.clientName ?? 'Aiden',
     redirect_uris: opts.redirectUris,
@@ -207,12 +334,19 @@ export async function registerClient(
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(body),
+    redirect: 'manual',
   });
   if (!res.ok) {
     const detail = await res.text().catch(() => '');
     throw new Error(`MCP DCR failed: HTTP ${res.status} at ${registrationEndpoint}${detail ? `: ${detail.slice(0, 300)}` : ''}`);
   }
-  const j = (await res.json()) as Record<string, unknown>;
+  const responseText = await res.text();
+  const maxBytes = opts.maxMetadataBytes ?? 512 * 1024;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || Buffer.byteLength(responseText, 'utf8') > maxBytes) {
+    throw new Error('MCP DCR response exceeds the bounded metadata limit');
+  }
+  const parsed: unknown = JSON.parse(responseText);
+  const j = parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : {};
   const clientId = typeof j.client_id === 'string' ? j.client_id : undefined;
   if (!clientId) throw new Error('MCP DCR response missing client_id');
   return {
@@ -244,6 +378,7 @@ export async function loadMcpOAuthConfig(paths: AidenPaths, server: string): Pro
  * Until the flow runs, the record is metadata-only (empty accessToken).
  */
 export async function saveMcpOAuthConfig(paths: AidenPaths, server: string, config: McpOAuthConfig): Promise<void> {
+  const bounded = normalizedConfig(config);
   const id = mcpTokenId(server);
   const existing = await loadTokens(paths, id);
   const tokens: OAuthTokens = {
@@ -253,7 +388,7 @@ export async function saveMcpOAuthConfig(paths: AidenPaths, server: string, conf
     expiresAtMs: existing?.expiresAtMs ?? 0,
     account: existing?.account,
     models: existing?.models,
-    extras: { ...(existing?.extras ?? {}), oauth: config },
+    extras: { ...(existing?.extras ?? {}), oauth: bounded },
   };
   await saveTokens(paths, tokens);
 }
@@ -272,15 +407,47 @@ export async function ensureMcpOAuthConfig(
   paths: AidenPaths,
   server: string,
   serverUrl: string,
-  deps: { fetchFn: FetchLike; redirectUris: string[]; clientName?: string; staticClient?: StaticOAuthClient },
+  deps: {
+    fetchFn: FetchLike;
+    redirectUris: string[];
+    clientName?: string;
+    staticClient?: StaticOAuthClient;
+    requestedScopes?: string[];
+    endpointPolicy?: Pick<SSRFProtection, 'check'>;
+    allowLoopbackHttp?: boolean;
+    maxMetadataBytes?: number;
+  },
 ): Promise<McpOAuthConfig> {
   const existing = await loadMcpOAuthConfig(paths, server);
-  if (existing?.clientId) return existing; // idempotent — reuse the registered client
+  const requestedServerUrl = canonicalMcpResource(serverUrl);
+  if (existing?.clientId) {
+    const existingServerUrl = canonicalMcpResource(existing.serverUrl ?? existing.resource ?? '');
+    if (existingServerUrl !== requestedServerUrl) {
+      throw new Error(`MCP server endpoint changed for "${server}"; disconnect and authorize the new endpoint explicitly`);
+    }
+    const requestedScopes = normalizeMcpScopes(deps.requestedScopes ?? deps.staticClient?.scopes);
+    if (requestedScopes.length > 0 && JSON.stringify(normalizeMcpScopes(existing.scopes)) !== JSON.stringify(requestedScopes)) {
+      throw new Error(`MCP OAuth scopes changed for "${server}"; disconnect and authorize the new scope set explicitly`);
+    }
+    return normalizedConfig(existing); // idempotent — reuse only the exact registered client binding
+  }
 
-  const discovered = await discoverMcpOAuth(serverUrl, { fetchFn: deps.fetchFn });
+  const endpointPolicy = deps.endpointPolicy ?? (deps.fetchFn === fetch ? new SSRFProtection() : undefined);
+  const discoveryDeps: OAuthDiscoveryDeps = {
+    fetchFn: deps.fetchFn,
+    endpointPolicy,
+    allowLoopbackHttp: deps.allowLoopbackHttp,
+    maxMetadataBytes: deps.maxMetadataBytes,
+  };
+  const discovered = await discoverMcpOAuth(serverUrl, discoveryDeps);
   if (!discovered) {
     throw new Error(`No OAuth metadata found for MCP server "${server}" (${serverUrl}) — it may not require OAuth.`);
   }
+  const discoveredResource = canonicalMcpResource(discovered.resource ?? serverUrl);
+  if (discoveredResource !== requestedServerUrl) {
+    throw new Error(`MCP protected-resource metadata does not match the configured server endpoint for "${server}"`);
+  }
+  const requestedScopes = normalizeMcpScopes(deps.requestedScopes ?? deps.staticClient?.scopes);
   if (!discovered.endpoints.registrationEndpoint) {
     // v4.14 — no Dynamic Client Registration. If a static device-flow client is
     // configured (RFC 8628), use it (secret-free) instead of failing. Otherwise
@@ -288,12 +455,16 @@ export async function ensureMcpOAuthConfig(
     // back to.
     const sc = deps.staticClient;
     if (sc?.clientId && sc.deviceAuthorizationEndpoint) {
+      if (!(await endpointAllowed(sc.deviceAuthorizationEndpoint, discoveryDeps))) {
+        throw new Error(`MCP device authorization endpoint is blocked by network policy for "${server}"`);
+      }
       const deviceConfig: McpOAuthConfig = {
-        resource: discovered.resource,
+        serverUrl: requestedServerUrl,
+        resource: discoveredResource,
         endpoints: { ...discovered.endpoints, deviceAuthorizationEndpoint: sc.deviceAuthorizationEndpoint },
         clientId: sc.clientId,
         redirectUris: [], // device flow has no redirect
-        scopes: sc.scopes,
+        scopes: requestedScopes,
       };
       await saveMcpOAuthConfig(paths, server, deviceConfig);
       return deviceConfig;
@@ -308,13 +479,18 @@ export async function ensureMcpOAuthConfig(
     fetchFn: deps.fetchFn,
     redirectUris: deps.redirectUris,
     clientName: deps.clientName,
+    endpointPolicy,
+    allowLoopbackHttp: deps.allowLoopbackHttp,
+    maxMetadataBytes: deps.maxMetadataBytes,
   });
   const config: McpOAuthConfig = {
-    resource: discovered.resource,
+    serverUrl: requestedServerUrl,
+    resource: discoveredResource,
     endpoints: discovered.endpoints,
     clientId: client.clientId,
     clientSecret: client.clientSecret,
     redirectUris: client.redirectUris,
+    scopes: requestedScopes,
   };
   await saveMcpOAuthConfig(paths, server, config);
   return config;

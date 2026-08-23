@@ -51,7 +51,10 @@ describe('mcpAuth — proactive refresh + dedup (real tokenStore)', () => {
   afterEach(async () => { await fs.rm(tmp, { recursive: true, force: true }); delete process.env.AIDEN_TOKEN_KEY; });
 
   const storeToken = (accessToken: string, refreshToken: string | null, expiresAtMs: number) =>
-    saveTokens(paths, { provider: mcpTokenId('srv'), accessToken, refreshToken, expiresAtMs, extras: { oauth: CONFIG } });
+    saveTokens(paths, {
+      provider: mcpTokenId('srv'), accessToken, refreshToken, expiresAtMs,
+      extras: { oauth: CONFIG, mcpBinding: { server: 'srv', serverUrl: CONFIG.resource!, resource: CONFIG.resource!, clientId: CONFIG.clientId, scopes: [] } },
+    });
 
   it('refreshes within the pre-flight window and returns the fresh token', async () => {
     await storeToken('OLD', 'R1', Date.now() + 60_000); // 1 min left → inside 5-min preflight
@@ -149,7 +152,7 @@ describe('HttpTransport — reactive 401 → refresh + retry once', () => {
 class AuthFailTransport implements McpTransport {
   readonly label = 'authfail';
   request(method: string): Promise<unknown> {
-    if (method === 'initialize') return Promise.resolve({ capabilities: {} });
+    if (method === 'initialize') return Promise.resolve({ protocolVersion: '2025-11-25', capabilities: {} });
     if (method === 'tools/list') return Promise.resolve({ tools: [{ name: 't' }] });
     return Promise.reject(new Error('HTTP 401 Unauthorized from http:x — token rejected (auth failed)'));
   }

@@ -21,7 +21,13 @@
 import type { AidenPaths } from '../paths';
 import { loadTokens, isExpired, PREFLIGHT_REFRESH_WINDOW_MS } from '../auth/tokenStore';
 import { refreshTokens, type RefreshConfig, type FetchImpl } from '../auth/oauthFlow';
-import { hasValidToken, loadMcpOAuthConfig, mcpTokenId, type McpOAuthConfig } from './oauthDiscovery';
+import {
+  canonicalMcpResource,
+  loadMcpOAuthConfig,
+  mcpTokenId,
+  readMcpCredentialBinding,
+  type McpOAuthConfig,
+} from './oauthDiscovery';
 import { persistMcpTokens } from './oauthLoginFlow';
 
 export type McpAuthResolution =
@@ -37,7 +43,7 @@ export type McpAuthResolution =
 
 export interface McpAuthProvider {
   /** Resolve the OAuth state for a server name. */
-  resolve(server: string): Promise<McpAuthResolution>;
+  resolve(server: string, expected?: { serverUrl: string }): Promise<McpAuthResolution>;
 }
 
 /** Build the default tokenStore-backed auth provider for MCP servers. */
@@ -49,7 +55,13 @@ export function createMcpAuthProvider(
   const inflight = new Map<string, Promise<string | null>>();
 
   function refreshConfigFor(config: McpOAuthConfig): RefreshConfig {
-    const cfg: RefreshConfig = { tokenUrl: config.endpoints.tokenEndpoint, clientId: config.clientId, formEncoded: true };
+    const cfg: RefreshConfig = {
+      tokenUrl: config.endpoints.tokenEndpoint,
+      clientId: config.clientId,
+      formEncoded: true,
+      resource: config.resource,
+      scope: config.scopes?.join(' ') || undefined,
+    };
     // Confidential client (DCR returned a secret) → client_secret_basic.
     if (config.clientSecret) {
       const basic = Buffer.from(`${config.clientId}:${config.clientSecret}`).toString('base64');
@@ -61,7 +73,7 @@ export function createMcpAuthProvider(
   async function doRefresh(server: string, config: McpOAuthConfig, refreshToken: string): Promise<string | null> {
     try {
       const result = await refreshTokens(refreshToken, refreshConfigFor(config), opts.fetchImpl);
-      await persistMcpTokens(paths, server, result); // absolute expiry + preserves extras.oauth + refresh token
+      await persistMcpTokens(paths, server, result, config); // absolute expiry + exact server/resource/scope binding
       return result.accessToken;
     } catch {
       return null; // network / revoked → caller falls back to needs-auth
@@ -80,11 +92,21 @@ export function createMcpAuthProvider(
    * Current access token, refreshing when stale (pre-flight window or expired)
    * and a refresh_token exists. `force` always refreshes (the reactive 401 path).
    */
-  async function getAccessToken(server: string, opts: { force?: boolean } = {}): Promise<string | null> {
+  async function getAccessToken(server: string, expected: { serverUrl?: string } = {}, opts: { force?: boolean } = {}): Promise<string | null> {
     const config = await loadMcpOAuthConfig(paths, server);
     if (!config) return null;
     const tokens = await loadTokens(paths, mcpTokenId(server));
     if (!tokens || !tokens.accessToken) return null;
+    const binding = readMcpCredentialBinding(tokens.extras?.mcpBinding);
+    if (!binding) return null;
+    const configuredServerUrl = canonicalMcpResource(config.serverUrl ?? config.resource ?? '');
+    const configuredResource = canonicalMcpResource(config.resource ?? configuredServerUrl);
+    const expectedServerUrl = canonicalMcpResource(expected.serverUrl ?? configuredServerUrl);
+    if (binding.server !== server
+      || binding.serverUrl !== configuredServerUrl
+      || binding.resource !== configuredResource
+      || binding.clientId !== config.clientId
+      || expectedServerUrl !== configuredServerUrl) return null;
 
     const expired = isExpired(tokens);
     const inPreflight = Date.now() + PREFLIGHT_REFRESH_WINDOW_MS >= tokens.expiresAtMs;
@@ -99,23 +121,24 @@ export function createMcpAuthProvider(
   }
 
   return {
-    async resolve(server: string): Promise<McpAuthResolution> {
+    async resolve(server: string, expected?: { serverUrl: string }): Promise<McpAuthResolution> {
       const config = await loadMcpOAuthConfig(paths, server);
       if (!config) return { state: 'none' }; // no OAuth configured for this server
 
       // Ready if a valid token exists OR an expired one can be refreshed now.
-      if (!(await hasValidToken(paths, server))) {
-        const refreshed = await getAccessToken(server);
+      const current = await getAccessToken(server, expected);
+      if (!current) {
+        const refreshed = await getAccessToken(server, expected, { force: true });
         if (!refreshed) return { state: 'needs-auth' }; // never authed, or expired w/o usable refresh
       }
 
       return {
         state: 'ready',
         authHeader: async () => {
-          const token = await getAccessToken(server);
+          const token = await getAccessToken(server, expected);
           return token ? { Authorization: `Bearer ${token}` } : {};
         },
-        onAuthError: async () => !!(await getAccessToken(server, { force: true })),
+        onAuthError: async () => !!(await getAccessToken(server, expected, { force: true })),
       };
     },
   };

@@ -359,6 +359,10 @@ export interface RefreshConfig {
    */
   formEncoded?:        boolean;
   extraHeaders?:       Record<string, string>;
+  /** RFC 8707 protected-resource binding retained across refresh. */
+  resource?:           string;
+  /** Exact previously granted/requested scope set; refresh may only narrow it. */
+  scope?:              string;
   timeoutMs?:          number;
 }
 
@@ -381,6 +385,8 @@ export async function refreshTokens(
     grant_type:     'refresh_token',
     refresh_token:  refreshToken,
     client_id:      cfg.clientId,
+    ...(cfg.resource ? { resource: cfg.resource } : {}),
+    ...(cfg.scope ? { scope: cfg.scope } : {}),
   };
   const body           = useForm ? urlencode(fields)       : JSON.stringify(fields);
   const contentType    = useForm ? CONTENT_TYPE_FORM       : CONTENT_TYPE_JSON;
