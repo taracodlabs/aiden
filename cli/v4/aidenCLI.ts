@@ -994,15 +994,6 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
         readiness: readiness ? { snapshot: (sessionId?: string) => readiness.snapshot(sessionId) } : undefined,
         browserSetup,
         runtime: () => {
-          if (workbenchRuntime && executionHost) {
-            return {
-              provider: workbenchRuntime.providerId,
-              model: workbenchRuntime.modelId,
-              local: true,
-              edition: productEdition,
-              connection: 'connected' as const,
-            };
-          }
           try {
             const cfg = new ConfigManager(paths).loadSync();
             return {
@@ -1010,10 +1001,14 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
               model: cfg.model?.modelId ?? null,
               local: true,
               edition: productEdition,
-              connection: 'unavailable' as const,
+              connection: executionHost ? 'connected' as const : 'unavailable' as const,
             };
           } catch {
-            return { local: true, edition: productEdition, connection: 'unavailable' as const };
+            return {
+              local: true,
+              edition: productEdition,
+              connection: executionHost ? 'connected' as const : 'unavailable' as const,
+            };
           }
         },
         activeJobs: () => listWorkbenchActiveJobs({
