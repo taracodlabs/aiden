@@ -2013,10 +2013,11 @@ function ModelControl() {
 function NavBar() {
   const {
     isExecuting,
-    setSettingsOpen, historyOpen, setHistoryOpen, startNewChat, clearCurrentView,
-    runtimeConnection, executionQueue, activeJobs, presence, setMainView,
+    setSettingsOpen, setSettingsTab, historyOpen, setHistoryOpen, startNewChat, clearCurrentView,
+    runtimeConnection, executionAvailable, executionQueue, activeJobs, presence, setMainView,
   } = useDevOS()
   const runningCount = foregroundExecutionCount(activeJobs)
+  const runtimeReady = runtimeConnection === 'connected' && executionAvailable
   const attentionCount = presence?.enabled
     ? presence.needsYou.length
     : activeJobs.filter((job) => ['approval_required', 'blocked', 'paused', 'state_unknown'].includes(job.status)).length
@@ -2050,14 +2051,6 @@ function NavBar() {
         </span>
         <span style={{ color: 'var(--muted)', fontSize: 13 }}>·</span>
         <span className="workbench-brand-suffix" style={{ fontSize: 12, color: 'var(--muted2)' }}>Workbench</span>
-        <div className="topbar-connection" style={{ display: 'flex', alignItems: 'center', gap: 5, marginLeft: 4 }}>
-          <span style={{
-            width: 6, height: 6, borderRadius: '50%',
-             background: runtimeConnection === 'connected' ? (isExecuting ? 'var(--orange)' : 'var(--green)') : 'var(--red)',
-            display: 'inline-block', animation: 'pulse-dot 2s infinite',
-          }} />
-          <span style={{ fontSize: 10, color: 'var(--muted)', fontFamily: 'var(--mono)' }}>{runtimeConnection}</span>
-        </div>
       </div>
 
       {attentionCount > 0 ? (
@@ -2071,17 +2064,28 @@ function NavBar() {
           {executionQueue.pending > 0 ? ` · ${executionQueue.pending} queued` : ''}
         </button>
       ) : (
-        <div className="topbar-work-state" style={{ color: runningCount > 0 ? 'var(--blue)' : 'var(--muted3)' }}>
-          {runningCount > 0 ? `In progress · ${runningCount}` : 'Ready'}
+        <button
+          type="button"
+          className="topbar-work-state"
+          aria-label={runtimeReady ? 'Open Active Work' : 'Open readiness settings'}
+          onClick={() => {
+            if (runtimeReady) setMainView('activity')
+            else { setSettingsTab('runtime'); setSettingsOpen(true) }
+          }}
+          style={{ color: runningCount > 0 ? 'var(--blue)' : runtimeReady ? 'var(--muted3)' : 'var(--orange)' }}
+        >
+          {!runtimeReady
+            ? 'Setup needed'
+            : runningCount > 0 ? `In progress · ${runningCount}` : 'Ready'}
           {executionQueue.pending > 0 ? ` · ${executionQueue.pending} queued` : ''}
-        </div>
+        </button>
       )}
 
       {/* Controls */}
       <div className="workbench-topbar-actions" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <ModelControl />
         <button type="button" className="nav-btn topbar-new-chat" onClick={startNewChat} title="New Chat (Ctrl+K)" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>New Chat</button>
-        <button type="button" className="nav-btn topbar-clear-view" onClick={clearCurrentView} title="Clear only the current browser view" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>Clear view</button>
+        <button type="button" className="nav-btn topbar-clear-view" onClick={clearCurrentView} title="Reset only the current browser view" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>Reset view</button>
         <ExportButton />
         <div style={{ width: 1, height: 20, background: 'var(--border2)', margin: '0 4px' }} />
         <NavBtn onClick={() => setSettingsOpen(true)} title="Settings"><ProductIcon name="settings" size={17} /></NavBtn>
@@ -2263,7 +2267,8 @@ function EmptyState() {
             <span className="starter-icon"><ProductIcon name={starterIcons[suggestion.id]} size={19} /></span>
             <span className="starter-copy"><strong>{suggestion.title}</strong><small>{suggestion.detail}</small></span>
             <span className={suggestion.available ? 'starter-state' : 'starter-state needs-setup'}>
-              {suggestion.available ? 'Start' : 'Setup required'}
+              <small>{suggestion.available ? 'Ready' : 'Setup required'}</small>
+              <strong>{suggestion.available ? 'Start' : 'Set up'} <span aria-hidden="true">→</span></strong>
             </span>
           </button>
         ))}
@@ -2282,6 +2287,8 @@ function PlusMenu() {
     kbInputRef, setInput, openWorkbenchDestination,
   } = useDevOS()
   const [readinessItems, setReadinessItems] = useState<aiden.SystemReadinessItem[]>([])
+  const menuRef = useRef<HTMLDivElement>(null)
+  const restoreFocusRef = useRef<HTMLElement | null>(null)
 
   useEffect(() => {
     if (!plusMenuOpen) return
@@ -2291,6 +2298,41 @@ function PlusMenu() {
       .catch(() => { /* unavailable actions remain setup-aware */ })
     return () => { current = false }
   }, [plusMenuOpen])
+
+  useEffect(() => {
+    if (!plusMenuOpen) return
+    restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const focusableItems = () => Array.from(
+      menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"], input, button[type="submit"]') ?? [],
+    ).filter((item) => !item.hasAttribute('disabled'))
+    const focusFrame = window.requestAnimationFrame(() => focusableItems()[0]?.focus())
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        setMiniPrompt(null)
+        setMiniPromptValue('')
+        setPlusMenuOpen(false)
+        return
+      }
+      if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+      const items = focusableItems()
+      if (items.length === 0) return
+      event.preventDefault()
+      const current = items.indexOf(document.activeElement as HTMLElement)
+      const next = event.key === 'Home' ? 0
+        : event.key === 'End' ? items.length - 1
+          : event.key === 'ArrowDown' ? (current + 1 + items.length) % items.length
+            : (current - 1 + items.length) % items.length
+      items[next]?.focus()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.cancelAnimationFrame(focusFrame)
+      document.removeEventListener('keydown', onKeyDown)
+      restoreFocusRef.current?.focus()
+      restoreFocusRef.current = null
+    }
+  }, [plusMenuOpen, setMiniPrompt, setMiniPromptValue, setPlusMenuOpen])
 
   if (!plusMenuOpen) return null
 
@@ -2344,7 +2386,7 @@ function PlusMenu() {
         style={{ position: 'fixed', inset: 0, zIndex: 90 }}
       />
 
-      <div className="composer-action-menu" role="menu" aria-label="Add to this request">
+      <div ref={menuRef} className="composer-action-menu" role="menu" aria-label="Add to this request">
         <div className="composer-action-menu-header"><strong>Add to this request</strong><span>Only available actions can run.</span></div>
         {PLUS_MENU.map((item) => (
           <button key={item.id} type="button" role="menuitem" className="composer-action-item" onClick={item.action}>
@@ -3489,8 +3531,13 @@ function ChatPanel() {
           <div style={{ position: 'relative', flexShrink: 0 }}>
             <PlusMenu />
             <button
+              type="button"
+              className="composer-action-trigger"
               onClick={() => setPlusMenuOpen(!plusMenuOpen)}
               title="Actions"
+              aria-label="Add to request"
+              aria-haspopup="menu"
+              aria-expanded={plusMenuOpen}
               style={{
                 width: 36, height: 36, borderRadius: 6,
                 background: plusMenuOpen ? 'rgba(249,115,22,0.12)' : 'var(--bg2)',
@@ -3509,6 +3556,7 @@ function ChatPanel() {
 
           {/* Textarea */}
           <textarea
+            className="composer-input"
             ref={inputRef}
             value={input}
             onChange={handleInputChange}
@@ -3518,8 +3566,8 @@ function ChatPanel() {
             disabled={isStreaming && hasSelectedWork}
             style={{
               flex: 1, resize: 'none',
-              background: 'var(--bg2)', border: '1px solid var(--border2)',
-              borderRadius: 8, padding: '9px 14px',
+              background: 'transparent', border: 'none',
+              borderRadius: 0, padding: '10px 2px',
               fontFamily: 'var(--sans)', fontSize: 15,
               color: 'var(--text)', outline: 'none',
               minHeight: 38, maxHeight: 120,
@@ -3571,6 +3619,8 @@ function ChatPanel() {
           {/* Stop / Send */}
           {thinking ? (
             <button
+              type="button"
+              className="composer-stop"
               onClick={stopExecution}
               title="Stop"
               style={{
@@ -3586,6 +3636,8 @@ function ChatPanel() {
             </button>
           ) : (
             <button
+              type="button"
+              className="composer-send"
               onClick={() => sendMessage()}
               disabled={(!input.trim() && attachments.length === 0) || (isStreaming && hasSelectedWork) || !executionAvailable || workbenchReadOnly}
               style={{
@@ -3889,8 +3941,16 @@ function LiveViewPanel() {
 // ── StatusBar (replaces ActivityBar + DisclaimerBar) ─────────
 
 function StatusBar() {
-  const { runtimeConnection, activeJobs, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
+  const { activeProvider, activeJobs, executionAvailable, runtimeConnection, updateBanner, setSettingsOpen, setSettingsTab } = useDevOS()
   const activeExecutionCount = foregroundExecutionCount(activeJobs)
+  const providerKey = (activeProvider ?? '').toLowerCase()
+  const localProvider = providerKey.includes('ollama') || providerKey.includes('local')
+  const providerReady = runtimeConnection === 'connected' && executionAvailable && Boolean(activeProvider)
+  const privacyStatus = providerReady
+    ? localProvider ? 'Local workspace · Local model connected' : 'Local workspace · Cloud model connected'
+    : runtimeConnection === 'reconnecting'
+      ? 'Local workspace · Reconnecting'
+      : 'Local workspace · Model setup required'
 
   return (
     <div className="system-awareness-strip" style={{
@@ -3900,12 +3960,13 @@ function StatusBar() {
       fontFamily: 'var(--mono)', fontSize: 9, color: 'var(--muted)',
       userSelect: 'none',
     }}>
-      <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-        <span style={{ width: 5, height: 5, borderRadius: '50%', background: runtimeConnection === 'connected' ? 'var(--green)' : 'var(--orange)', display: 'inline-block' }} />
-         {runtimeConnection === 'connected' ? 'Connected' : 'Reconnecting'}
-      </span>
-      <span style={{ color: 'var(--border2)' }}>·</span>
-      <span>{activeExecutionCount > 0 ? `${activeExecutionCount} active` : 'Private and local'}</span>
+      {activeExecutionCount > 0 && <span>{activeExecutionCount} active</span>}
+      {activeExecutionCount > 0 && <span style={{ color: 'var(--border2)' }}>·</span>}
+      <button
+        type="button"
+        className="status-privacy"
+        onClick={() => { setSettingsTab('privacy'); setSettingsOpen(true) }}
+      >{privacyStatus}</button>
       {updateBanner && (
         <>
           <span style={{ color: 'var(--border2)' }}>·</span>
