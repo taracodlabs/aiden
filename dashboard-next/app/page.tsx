@@ -5,16 +5,13 @@ import {
   type Dispatch, type SetStateAction, type CSSProperties,
   type ReactNode, type RefObject, type ChangeEvent, type FormEvent,
 } from 'react'
-import Onboarding from '../components/Onboarding'
 import { OnboardingModal } from '../components/OnboardingModal'
 import PricingModal from '../components/PricingModal'
-import ChatHeader from '../components/ChatHeader'
-import Sidebar from '../components/Sidebar'
 import WorkflowView from '../components/WorkflowView'
 import LiveExecutionTerminal from '../components/LiveExecutionTerminal'
 import { SafeMarkdown } from '../components/SafeMarkdown'
-import { StatusBadge } from '../components/ProductUI'
-import { skillSourceLabel } from '../lib/skillPresentation'
+import { ProductButton, StatusBadge } from '../components/ProductUI'
+import { ProductIcon, type ProductIconName } from '../components/ProductIcon'
 import * as aiden from '../lib/aidenClient'
 import { PUBLIC_SPONSORS, SPONSOR_URL } from '../lib/publicSponsors'
 import {
@@ -66,13 +63,27 @@ import {
   parseWorkbenchDestination,
   type WorkbenchDestination,
 } from '../lib/workbenchNavigation'
+import {
+  APPEARANCE_OPTIONS,
+  AUTOMATION_TEMPLATES,
+  artifactMeta,
+  artifactUnavailableMessage,
+  buildSanitizedDiagnosticSummary,
+  detectWorkbenchLocale,
+  normalizeAppearance,
+  normalizeDensity,
+  presentReadinessSummary,
+  projectStarterActions,
+  projectWorkbenchSkill,
+  type WorkbenchAppearance,
+  type WorkbenchDensity,
+} from '../lib/workbenchProduct'
 
 // ── Types ─────────────────────────────────────────────────────
 
 type UIMode   = 'focus' | 'execution' | 'power' | 'watch'
 type ExecMode = 'auto'  | 'plan'      | 'chat'  | 'react'
 type MainView = 'chat' | 'activity' | 'artifacts' | 'apps' | 'automations' | 'sponsors'
-type WorkbenchAppearance = 'dark' | 'system'
 
 interface AutomationPattern {
   pattern:        string
@@ -426,9 +437,14 @@ function ActivityView({ logs, jobId, attemptId, runId, onContinued }: {
 
 interface MiniPromptConfig { type: 'websearch' | 'research' | 'stocks'; placeholder: string }
 
-type MenuItem =
-  | { id: string; icon: string; label: string; action: () => void; children?: never }
-  | { id: string; icon: string; label: string; children: { id: string; icon: string; label: string; action: () => void }[]; action?: never }
+type MenuItem = {
+  id: string
+  icon: ProductIconName
+  label: string
+  description: string
+  available: boolean
+  action: () => void
+}
 
 // ── Provider metadata ─────────────────────────────────────────
 
@@ -467,6 +483,8 @@ interface DevOSCtxType {
   openWorkbenchDestination: (destination: WorkbenchDestination) => void
   appearance:     WorkbenchAppearance
   setAppearance:  Dispatch<SetStateAction<WorkbenchAppearance>>
+  density:        WorkbenchDensity
+  setDensity:     Dispatch<SetStateAction<WorkbenchDensity>>
   // Execution
   isExecuting:    boolean
   isStreaming:    boolean
@@ -2019,7 +2037,7 @@ function NavBar() {
           title={historyOpen ? 'Collapse sidebar' : 'Expand sidebar'}
           onClick={() => setHistoryOpen((open) => !open)}
           style={{ width: 28, height: 28, border: '1px solid var(--border)', borderRadius: 7, background: 'transparent', color: 'var(--muted3)', cursor: 'pointer' }}
-        >{historyOpen ? '‹' : '›'}</button>
+        ><ProductIcon name={historyOpen ? 'chevron-left' : 'menu'} size={16} /></button>
         <div style={{
           width: 24, height: 24, borderRadius: 5,
           background: 'var(--orange)',
@@ -2065,9 +2083,8 @@ function NavBar() {
         <button type="button" className="nav-btn topbar-new-chat" onClick={startNewChat} title="New Chat (Ctrl+K)" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>New Chat</button>
         <button type="button" className="nav-btn topbar-clear-view" onClick={clearCurrentView} title="Clear only the current browser view" style={{ background: 'transparent', border: '1px solid var(--border)', borderRadius: 7, color: 'var(--muted3)', padding: '6px 9px', cursor: 'pointer' }}>Clear view</button>
         <ExportButton />
-        <ChatHeader />
         <div style={{ width: 1, height: 20, background: 'var(--border2)', margin: '0 4px' }} />
-        <NavBtn onClick={() => setSettingsOpen(true)} title="Settings">⚙</NavBtn>
+        <NavBtn onClick={() => setSettingsOpen(true)} title="Settings"><ProductIcon name="settings" size={17} /></NavBtn>
       </div>
     </nav>
   )
@@ -2078,7 +2095,7 @@ function NavBar() {
 function HistorySidebar() {
   const {
     conversations, currentConvId, startNewChat, loadConversation, selectActiveJob,
-    runtimeVersion, runtimeEdition, activeJobs, historyOpen, setHistoryOpen, mainView, setMainView,
+    activeJobs, historyOpen, setHistoryOpen, mainView, setMainView,
     setSettingsOpen, setSettingsTab,
   } = useDevOS()
 
@@ -2104,14 +2121,14 @@ function HistorySidebar() {
   if (!historyOpen) return (
     <aside className="history-sidebar sidebar-rail" aria-label="Collapsed navigation">
       <button type="button" className="rail-brand" title="Aiden Workbench" aria-label="Aiden Workbench">A</button>
-      <button type="button" className="rail-action is-primary" title="New Chat" aria-label="New Chat" onClick={startNewChat}>+</button>
-      <button type="button" className={mainView === 'chat' ? 'rail-action is-active' : 'rail-action'} title="Home" aria-label="Home" onClick={() => openView('chat')}>⌂</button>
-      <button type="button" className={mainView === 'activity' ? 'rail-action is-active' : 'rail-action'} title={`Active Work (${activeJobs.length})`} aria-label="Active Work" onClick={() => openView('activity')}>◉</button>
-      <button type="button" className={mainView === 'apps' ? 'rail-action is-active' : 'rail-action'} title="Apps" aria-label="Apps" onClick={() => openView('apps')}>+</button>
-      <button type="button" className={mainView === 'automations' ? 'rail-action is-active' : 'rail-action'} title="Automations" aria-label="Automations" onClick={() => openView('automations')}>↻</button>
-      <button type="button" className={mainView === 'artifacts' ? 'rail-action is-active' : 'rail-action'} title="Artifacts" aria-label="Artifacts" onClick={() => openView('artifacts')}>◇</button>
+      <button type="button" className="rail-action is-primary" title="New Chat" aria-label="New Chat" onClick={startNewChat}><ProductIcon name="plus" /></button>
+      <button type="button" className={mainView === 'chat' ? 'rail-action is-active' : 'rail-action'} title="Home" aria-label="Home" onClick={() => openView('chat')}><ProductIcon name="home" /></button>
+      <button type="button" className={mainView === 'activity' ? 'rail-action is-active' : 'rail-action'} title={`Active Work (${activeJobs.length})`} aria-label="Active Work" onClick={() => openView('activity')}><ProductIcon name="work" /></button>
+      <button type="button" className={mainView === 'apps' ? 'rail-action is-active' : 'rail-action'} title="Apps" aria-label="Apps" onClick={() => openView('apps')}><ProductIcon name="apps" /></button>
+      <button type="button" className={mainView === 'automations' ? 'rail-action is-active' : 'rail-action'} title="Automations" aria-label="Automations" onClick={() => openView('automations')}><ProductIcon name="automation" /></button>
+      <button type="button" className={mainView === 'artifacts' ? 'rail-action is-active' : 'rail-action'} title="Artifacts" aria-label="Artifacts" onClick={() => openView('artifacts')}><ProductIcon name="artifact" /></button>
       <span className="rail-spacer" />
-      <button type="button" className="rail-action" title="Settings" aria-label="Settings" onClick={() => openSettings('runtime')}>⚙</button>
+      <button type="button" className="rail-action" title="Settings" aria-label="Settings" onClick={() => openSettings('runtime')}><ProductIcon name="settings" /></button>
     </aside>
   )
 
@@ -2127,16 +2144,16 @@ function HistorySidebar() {
         cursor: 'pointer', textAlign: 'left', transition: 'all 0.15s',
         display: 'flex', alignItems: 'center', gap: 8,
       }}>
-        + New Chat
+        <ProductIcon name="plus" size={16} /> New Chat
         <span style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--muted)' }}>Ctrl+K</span>
       </button>
 
       <nav className="sidebar-nav" aria-label="Workbench surfaces">
-        <button type="button" className={mainView === 'chat' ? 'is-active' : ''} onClick={() => openView('chat')}><span>⌂</span>Home</button>
-        <button type="button" className={mainView === 'activity' ? 'is-active' : ''} onClick={() => openView('activity')}><span>◉</span>Active Work{activeJobs.length > 0 && <small>{activeJobs.length}</small>}</button>
-        <button type="button" className={mainView === 'apps' ? 'is-active' : ''} onClick={() => openView('apps')}><span>+</span>Apps</button>
-        <button type="button" className={mainView === 'automations' ? 'is-active' : ''} onClick={() => openView('automations')}><span>↻</span>Automations</button>
-        <button type="button" className={mainView === 'artifacts' ? 'is-active' : ''} onClick={() => openView('artifacts')}><span>◇</span>Artifacts</button>
+        <button type="button" className={mainView === 'chat' ? 'is-active' : ''} onClick={() => openView('chat')}><span><ProductIcon name="home" size={16} /></span>Home</button>
+        <button type="button" className={mainView === 'activity' ? 'is-active' : ''} onClick={() => openView('activity')}><span><ProductIcon name="work" size={16} /></span>Active Work{activeJobs.length > 0 && <small>{activeJobs.length}</small>}</button>
+        <button type="button" className={mainView === 'apps' ? 'is-active' : ''} onClick={() => openView('apps')}><span><ProductIcon name="apps" size={16} /></span>Apps</button>
+        <button type="button" className={mainView === 'automations' ? 'is-active' : ''} onClick={() => openView('automations')}><span><ProductIcon name="automation" size={16} /></span>Automations</button>
+        <button type="button" className={mainView === 'artifacts' ? 'is-active' : ''} onClick={() => openView('artifacts')}><span><ProductIcon name="artifact" size={16} /></span>Artifacts</button>
       </nav>
 
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 8px' }}>
@@ -2207,22 +2224,8 @@ function HistorySidebar() {
         )}
       </div>
 
-      <div style={{ padding: '0 8px 8px' }}>
-        <Sidebar />
-      </div>
-
       <div className="sidebar-secondary-nav">
-        <button type="button" onClick={() => openSettings('runtime')}><span>⚙</span>Settings</button>
-      </div>
-
-      <div style={{
-        padding: '12px 16px', borderTop: '1px solid var(--border)',
-        fontSize: 10, color: 'var(--muted)',
-        display: 'flex', alignItems: 'center', gap: 6,
-        fontFamily: 'var(--mono)',
-      }}>
-        <span style={{ width: 5, height: 5, borderRadius: '50%', background: 'var(--green)', display: 'inline-block' }} />
-        Aiden v{runtimeVersion} · {runtimeEdition === 'community' ? 'Community' : runtimeEdition[0].toUpperCase() + runtimeEdition.slice(1)}
+        <button type="button" onClick={() => openSettings('runtime')}><span><ProductIcon name="settings" size={16} /></span>Settings</button>
       </div>
     </aside>
   )
@@ -2231,33 +2234,38 @@ function HistorySidebar() {
 // ── EmptyState ────────────────────────────────────────────────
 
 function EmptyState() {
-  const { setInput } = useDevOS()
-  const suggestions = [
-    'Work on a codebase',
-    'Research and deliver',
-    'Use my browser',
-    'Work with my Apps',
-  ]
+  const { setInput, openWorkbenchDestination } = useDevOS()
+  const [readinessItems, setReadinessItems] = useState<aiden.SystemReadinessItem[]>([])
+  useEffect(() => {
+    let current = true
+    void aiden.loadSystemReadiness()
+      .then((readiness) => { if (current) setReadinessItems(readiness.items) })
+      .catch(() => { /* starters stay honest and route unavailable features to setup */ })
+    return () => { current = false }
+  }, [])
+  const suggestions = projectStarterActions(readinessItems)
+  const starterIcons: Record<string, ProductIconName> = {
+    codebase: 'code', research: 'search', browser: 'browser', apps: 'apps',
+  }
   return (
-    <div style={{
-      flex: 1, display: 'flex', flexDirection: 'column',
-      alignItems: 'center', justifyContent: 'center',
-      padding: 40, gap: 22,
-    }}>
-      <div style={{
-        width: 48, height: 48, borderRadius: 10,
-        background: 'var(--orange)',
-        display: 'flex', alignItems: 'center', justifyContent: 'center',
-        fontSize: 20, fontWeight: 800, color: '#000',
-        fontFamily: 'var(--sans)',
-      }}>A</div>
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ fontSize: 30, fontFamily: 'var(--sans)', fontWeight: 650, color: 'var(--text)', letterSpacing: '-0.02em' }}>What should Aiden take care of?</div>
-        <div style={{ marginTop: 8, fontSize: 15, color: 'var(--muted3)' }}>Private computer work, with proof.</div>
+    <div className="workbench-home">
+      <div className="workbench-home-mark" aria-hidden="true">A</div>
+      <div className="workbench-home-copy">
+        <h1>What should Aiden take care of?</h1>
+        <p>Describe the outcome you want. Aiden will show the work, ask before sensitive actions, and preserve the evidence.</p>
       </div>
       <div className="starter-workflows">
-        {suggestions.map(s => (
-          <button key={s} onClick={() => setInput(s)}>{s}<span>→</span></button>
+        {suggestions.map((suggestion) => (
+          <button key={suggestion.id} onClick={() => {
+            if (suggestion.available) setInput(suggestion.prompt)
+            else if (suggestion.setup) openWorkbenchDestination(suggestion.setup)
+          }}>
+            <span className="starter-icon"><ProductIcon name={starterIcons[suggestion.id]} size={19} /></span>
+            <span className="starter-copy"><strong>{suggestion.title}</strong><small>{suggestion.detail}</small></span>
+            <span className={suggestion.available ? 'starter-state' : 'starter-state needs-setup'}>
+              {suggestion.available ? 'Start' : 'Setup required'}
+            </span>
+          </button>
         ))}
       </div>
     </div>
@@ -2269,30 +2277,62 @@ function EmptyState() {
 function PlusMenu() {
   const {
     plusMenuOpen, setPlusMenuOpen,
-    activeSubmenu, setActiveSubmenu,
     miniPrompt, setMiniPrompt,
     miniPromptValue, setMiniPromptValue, submitMiniPrompt,
-    kbInputRef,
+    kbInputRef, setInput, openWorkbenchDestination,
   } = useDevOS()
+  const [readinessItems, setReadinessItems] = useState<aiden.SystemReadinessItem[]>([])
+
+  useEffect(() => {
+    if (!plusMenuOpen) return
+    let current = true
+    void aiden.loadSystemReadiness()
+      .then((readiness) => { if (current) setReadinessItems(readiness.items) })
+      .catch(() => { /* unavailable actions remain setup-aware */ })
+    return () => { current = false }
+  }, [plusMenuOpen])
 
   if (!plusMenuOpen) return null
+
+  const browserReady = readinessItems.find((item) => item.id === 'browser')?.ready === true
+  const appsReady = readinessItems.find((item) => item.id === 'apps')?.ready === true
 
   const PLUS_MENU: MenuItem[] = [
     {
       id: 'upload',
-      icon: '📎',
+      icon: 'paperclip',
       label: 'Attach files',
+      description: 'Add documents or files to this request.',
+      available: true,
       action: () => { kbInputRef.current?.click(); setPlusMenuOpen(false) },
     },
     {
-      id: 'research',
-      icon: '🔍',
-      label: 'Research',
-      children: [
-        { id: 'websearch',    icon: '🌐', label: 'Web Search',    action: () => { setMiniPrompt({ type: 'websearch',  placeholder: 'Search for...' }) } },
-        { id: 'deepresearch', icon: '🔬', label: 'Deep Research', action: () => { setMiniPrompt({ type: 'research',   placeholder: 'Research topic...' }) } },
-        { id: 'stocks',       icon: '📊', label: 'Stock Data',    action: () => { setMiniPrompt({ type: 'stocks',     placeholder: 'e.g. NSE top gainers...' }) } },
-      ],
+      id: 'websearch', icon: 'search', label: 'Quick web search',
+      description: 'Find current information and return a concise answer.', available: true,
+      action: () => { setMiniPrompt({ type: 'websearch', placeholder: 'What should Aiden search for?' }) },
+    },
+    {
+      id: 'deepresearch', icon: 'sparkles', label: 'Deep research',
+      description: 'Compare sources and produce a structured brief.', available: true,
+      action: () => { setMiniPrompt({ type: 'research', placeholder: 'What should Aiden research?' }) },
+    },
+    {
+      id: 'browser', icon: 'browser', label: 'Use browser',
+      description: browserReady ? 'Work in a browser with visible actions.' : 'Browser setup is required first.',
+      available: browserReady,
+      action: () => {
+        if (browserReady) { setInput('Use my browser to '); setPlusMenuOpen(false) }
+        else openWorkbenchDestination({ settings: 'runtime' })
+      },
+    },
+    {
+      id: 'apps', icon: 'apps', label: 'Use Apps',
+      description: appsReady ? 'Work with a connected account.' : 'Connect an app before using this action.',
+      available: appsReady,
+      action: () => {
+        if (appsReady) { setInput('Use my connected app to '); setPlusMenuOpen(false) }
+        else openWorkbenchDestination({ view: 'apps' })
+      },
     },
   ]
 
@@ -2300,115 +2340,35 @@ function PlusMenu() {
     <>
       {/* Backdrop */}
       <div
-        onClick={() => { setPlusMenuOpen(false); setActiveSubmenu(null); setMiniPrompt(null) }}
+        onClick={() => { setPlusMenuOpen(false); setMiniPrompt(null) }}
         style={{ position: 'fixed', inset: 0, zIndex: 90 }}
       />
 
-      {/* Main menu */}
-      <div style={{
-        position: 'absolute', bottom: 52, left: 0,
-        background: 'var(--bg2)', border: '1px solid var(--border2)',
-        borderRadius: 10, padding: '6px 0', minWidth: 220,
-        zIndex: 91, boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-        animation: 'slideUpFade 0.15s ease-out',
-      }}>
+      <div className="composer-action-menu" role="menu" aria-label="Add to this request">
+        <div className="composer-action-menu-header"><strong>Add to this request</strong><span>Only available actions can run.</span></div>
         {PLUS_MENU.map((item) => (
-          <div key={item.id} style={{ position: 'relative' }}>
-            {/* Divider before Research */}
-            {item.id === 'research' && (
-              <div style={{ height: 1, background: 'var(--border)', margin: '4px 0' }} />
-            )}
-
-            {/* Menu row */}
-            <button
-              onMouseEnter={() => setActiveSubmenu('children' in item && item.children ? item.id : null)}
-              onClick={() => {
-                if ('action' in item && item.action) {
-                  item.action()
-                } else {
-                  setActiveSubmenu(activeSubmenu === item.id ? null : item.id)
-                }
-              }}
-              style={{
-                display: 'flex', alignItems: 'center', gap: 10,
-                width: '100%', padding: '8px 14px',
-                background: activeSubmenu === item.id ? 'var(--bg3)' : 'transparent',
-                border: 'none', color: 'var(--muted2)',
-                fontFamily: 'var(--mono)', fontSize: 12,
-                cursor: 'pointer', textAlign: 'left', transition: 'all 0.1s',
-              }}
-            >
-              <span style={{ fontSize: 14, minWidth: 20 }}>{item.icon}</span>
-              <span style={{ flex: 1 }}>{item.label}</span>
-              {'children' in item && item.children && (
-                <span style={{ fontSize: 10, color: 'var(--muted)', marginLeft: 4 }}>›</span>
-              )}
-            </button>
-
-            {/* Submenu */}
-            {'children' in item && item.children && activeSubmenu === item.id && (
-              <div style={{
-                position: 'absolute', left: '100%', top: 0,
-                marginLeft: 4, background: 'var(--bg2)',
-                border: '1px solid var(--border2)', borderRadius: 10,
-                padding: '6px 0', minWidth: 200, zIndex: 92,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-                animation: 'slideUpFade 0.12s ease-out',
-              }}>
-                {item.children.map(child => (
-                  <button
-                    key={child.id}
-                    onClick={() => {
-                      child.action()
-                      if (!['websearch', 'deepresearch', 'stocks'].includes(child.id)) {
-                        setPlusMenuOpen(false)
-                        setActiveSubmenu(null)
-                      }
-                    }}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 10,
-                      width: '100%', padding: '8px 14px',
-                      background: 'transparent', border: 'none',
-                      color: 'var(--muted2)', fontFamily: 'var(--mono)',
-                      fontSize: 12, cursor: 'pointer', textAlign: 'left',
-                      transition: 'all 0.1s',
-                    }}
-                    onMouseEnter={e => (e.currentTarget.style.background = 'var(--bg3)')}
-                    onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
-                  >
-                    <span style={{ fontSize: 14, minWidth: 20 }}>{child.icon}</span>
-                    <span style={{ flex: 1 }}>{child.label}</span>
-                  </button>
-                ))}
-
-                {/* Inline mini-prompt for Research submenu */}
-                {item.id === 'research' && miniPrompt && (
-                  <div style={{ padding: '8px 10px', borderTop: '1px solid var(--border)' }}>
-                    <input
-                      autoFocus
-                      value={miniPromptValue}
-                      onChange={e => setMiniPromptValue(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') { submitMiniPrompt() }
-                        if (e.key === 'Escape') { setMiniPrompt(null); setMiniPromptValue('') }
-                      }}
-                      placeholder={miniPrompt.placeholder}
-                      style={{
-                        width: '100%', background: 'var(--bg)',
-                        border: '1px solid var(--border2)', borderRadius: 5,
-                        padding: '7px 10px', fontFamily: 'var(--mono)',
-                        fontSize: 12, color: 'var(--text)', outline: 'none',
-                      }}
-                    />
-                    <div style={{ fontSize: 9, color: 'var(--muted)', marginTop: 4, fontFamily: 'var(--mono)' }}>
-                      Enter to run · Esc to cancel
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
+          <button key={item.id} type="button" role="menuitem" className="composer-action-item" onClick={item.action}>
+            <span className="composer-action-icon"><ProductIcon name={item.icon} size={18} /></span>
+            <span><strong>{item.label}</strong><small>{item.description}</small></span>
+            {!item.available ? <em>Setup required</em> : null}
+          </button>
         ))}
+        {miniPrompt && (
+          <form className="composer-action-prompt" onSubmit={(event) => { event.preventDefault(); submitMiniPrompt() }}>
+            <label htmlFor="composer-action-query">{miniPrompt.type === 'research' ? 'Deep research' : 'Quick web search'}</label>
+            <input
+              id="composer-action-query"
+              autoFocus
+              value={miniPromptValue}
+              onChange={event => setMiniPromptValue(event.target.value)}
+              onKeyDown={event => {
+                if (event.key === 'Escape') { setMiniPrompt(null); setMiniPromptValue('') }
+              }}
+              placeholder={miniPrompt.placeholder}
+            />
+            <ProductButton variant="primary" type="submit" disabled={!miniPromptValue.trim()}>Start</ProductButton>
+          </form>
+        )}
       </div>
     </>
   )
@@ -2416,20 +2376,19 @@ function PlusMenu() {
 
 // ── ChatPanel ─────────────────────────────────────────────────
 
-function ArtifactCard({ artifact }: { artifact: aiden.WorkbenchArtifact }) {
+function ArtifactPreviewDrawer({ artifact, onClose }: { artifact: aiden.WorkbenchArtifact; onClose: () => void }) {
   const [preview, setPreview] = useState<{
     url?: string; svg?: string; text?: string; truncated?: boolean; download?: boolean; error?: string
   } | null>(null)
-  const [opening, setOpening] = useState(false)
+  const [opening, setOpening] = useState(true)
 
   useEffect(() => () => { if (preview?.url) URL.revokeObjectURL(preview.url) }, [preview?.url])
-
-  const open = async () => {
-    if (preview) { setPreview(null); return }
-    if (opening) return
+  useEffect(() => {
+    let current = true
     setOpening(true)
-    try {
-      const content = await aiden.loadArtifactContent(artifact.id)
+    setPreview(null)
+    void aiden.loadArtifactContent(artifact.id).then(async (content) => {
+      if (!current) return
       const presentation = artifactPresentationForMime(content.mime)
       if (presentation === 'svg') setPreview({ svg: await content.blob.text() })
       else if (presentation === 'image') setPreview({ url: URL.createObjectURL(content.blob) })
@@ -2438,35 +2397,47 @@ function ArtifactCard({ artifact }: { artifact: aiden.WorkbenchArtifact }) {
         const previewLimit = 200_000
         setPreview({ text: value.slice(0, previewLimit), truncated: value.length > previewLimit })
       } else setPreview({ url: URL.createObjectURL(content.blob), download: true })
-    } catch (error) {
-      setPreview({ error: error instanceof Error ? error.message : String(error) })
-    } finally {
-      setOpening(false)
-    }
-  }
+    }).catch((error) => {
+      if (current) setPreview({ error: artifactUnavailableMessage(error) })
+    }).finally(() => { if (current) setOpening(false) })
+    return () => { current = false }
+  }, [artifact.id])
 
   return (
-    <div className="artifact-card">
-      <button type="button" onClick={() => { void open() }} className="artifact-card-button" aria-expanded={preview !== null} aria-busy={opening} disabled={opening}>
-        <span aria-hidden="true">◇</span>
-        <span style={{ minWidth: 0, flex: 1 }}>
-          <strong>{artifact.name}</strong>
-          <small>{artifact.kind} · {artifact.tool} · {artifact.bytes === null ? 'size unknown' : `${artifact.bytes} bytes`}</small>
-        </span>
-        <span>{opening ? 'Opening…' : preview ? 'Close' : 'Open'}</span>
-      </button>
-      {preview?.url && !preview.download && <img className="artifact-preview" src={preview.url} alt={artifact.name} />}
-      {preview?.svg && <iframe className="artifact-preview" title={`${artifact.name} preview`} sandbox="" srcDoc={preview.svg} />}
-      {preview?.text !== undefined && <pre className="artifact-text-preview"><code>{preview.text}</code>{preview.truncated ? '\n… preview truncated' : ''}</pre>}
-      {preview?.download && preview.url && <a className="artifact-download" href={preview.url} download={artifact.name}>Download {artifact.name}</a>}
-      {preview?.error && <div className="artifact-preview-error">{preview.error}</div>}
-    </div>
+    <aside className="artifact-preview-drawer" aria-label={`${artifact.name} preview`} aria-busy={opening}>
+      <header><div><span className="eyebrow">Artifact preview</span><h3>{artifact.name}</h3></div><ProductButton variant="icon" onClick={onClose} aria-label="Close preview"><ProductIcon name="close" /></ProductButton></header>
+      <div className="artifact-preview-meta">{artifactMeta(artifact).map((value) => <span key={value}>{value}</span>)}</div>
+      <div className="artifact-preview-body">
+        {opening && <div className="workspace-empty-state"><strong>Opening file</strong><span>Reading the durable artifact.</span></div>}
+        {preview?.url && !preview.download && <img className="artifact-preview" src={preview.url} alt={artifact.name} />}
+        {preview?.svg && <iframe className="artifact-preview" title={`${artifact.name} preview`} sandbox="" srcDoc={preview.svg} />}
+        {preview?.text !== undefined && <pre className="artifact-text-preview"><code>{preview.text}</code>{preview.truncated ? '\n… preview truncated' : ''}</pre>}
+        {preview?.download && preview.url && <div className="workspace-empty-state"><strong>Preview is not available for this file type</strong><a className="artifact-download" href={preview.url} download={artifact.name}>Download {artifact.name}</a></div>}
+        {preview?.error && <div className="workspace-empty-state" role="alert"><strong>File is unavailable</strong><span>{preview.error}</span></div>}
+      </div>
+    </aside>
+  )
+}
+
+function ArtifactCard({ artifact, onPreview }: { artifact: aiden.WorkbenchArtifact; onPreview: () => void }) {
+  return (
+    <button type="button" onClick={onPreview} className="artifact-card-button">
+      <span className="artifact-file-icon" aria-hidden="true"><ProductIcon name="file" /></span>
+      <span style={{ minWidth: 0, flex: 1 }}>
+        <strong>{artifact.name}</strong>
+        <small>{artifactMeta(artifact).join(' · ')}</small>
+        {artifact.runId !== null ? <small>Source task · Run {artifact.runId}</small> : null}
+      </span>
+      <span>Preview</span>
+    </button>
   )
 }
 
 function ArtifactsView() {
   const [artifacts, setArtifacts] = useState<aiden.WorkbenchArtifact[]>([])
   const [view, setView] = useState<'recent' | 'job' | 'type'>('recent')
+  const [query, setQuery] = useState('')
+  const [selected, setSelected] = useState<aiden.WorkbenchArtifact | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -2485,10 +2456,15 @@ function ArtifactsView() {
 
   useEffect(() => { void reload() }, [reload])
 
+  const visibleArtifacts = useMemo(() => {
+    const normalized = query.trim().toLowerCase()
+    return normalized ? artifacts.filter((artifact) => [artifact.name, artifact.kind, artifact.tool].some((value) => value.toLowerCase().includes(normalized))) : artifacts
+  }, [artifacts, query])
+
   const grouped = useMemo(() => {
     const group = (keyOf: (artifact: aiden.WorkbenchArtifact) => string) => {
       const result = new Map<string, aiden.WorkbenchArtifact[]>()
-      for (const artifact of artifacts) {
+      for (const artifact of visibleArtifacts) {
         const key = keyOf(artifact)
         result.set(key, [...(result.get(key) ?? []), artifact])
       }
@@ -2498,7 +2474,7 @@ function ArtifactsView() {
       job: group((artifact) => artifact.runId === null ? `session:${artifact.sessionId}` : `run:${artifact.runId}`),
       type: group((artifact) => artifact.kind || 'file'),
     }
-  }, [artifacts])
+  }, [visibleArtifacts])
 
   const renderGroups = (groups: Array<[string, aiden.WorkbenchArtifact[]]>, label: (key: string, index: number) => string) => (
     <div className="artifact-group-list">
@@ -2506,7 +2482,7 @@ function ArtifactsView() {
         <section className="artifact-group" key={key}>
           <h3>{label(key, index)} <span>{rows.length}</span></h3>
           <div className="artifact-gallery">
-            {rows.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+            {rows.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} onPreview={() => setSelected(artifact)} />)}
           </div>
         </section>
       ))}
@@ -2519,7 +2495,7 @@ function ArtifactsView() {
         <div>
           <span className="eyebrow">Durable results</span>
           <h2 id="artifacts-title">Artifacts</h2>
-          <p>Review files Aiden produced, grouped without losing their source work.</p>
+          <p>Artifacts are files and outputs Aiden created for you. Preview them without losing their source task.</p>
         </div>
         <button type="button" className="nav-btn" onClick={() => { void reload() }} disabled={loading}>Refresh</button>
       </header>
@@ -2528,7 +2504,8 @@ function ArtifactsView() {
         {([['recent', 'Recent'], ['job', 'By Job'], ['type', 'Type']] as const).map(([key, label]) => (
           <button key={key} type="button" role="tab" aria-selected={view === key} className={view === key ? 'is-active' : ''} onClick={() => setView(key)}>{label}</button>
         ))}
-        <span>{artifacts.length}</span>
+        <label className="artifact-search"><span className="sr-only">Search artifacts</span><ProductIcon name="search" size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search artifacts" /></label>
+        <span>{visibleArtifacts.length}</span>
       </div>
 
       {error ? (
@@ -2540,15 +2517,18 @@ function ArtifactsView() {
           <strong>No artifacts yet</strong>
           <span>Files produced by completed work will appear here after durable verification.</span>
         </div>
+      ) : visibleArtifacts.length === 0 ? (
+        <div className="workspace-empty-state"><strong>No matching artifacts</strong><span>Try a different file name, type, or source.</span></div>
       ) : view === 'recent' ? (
         <div className="artifact-gallery">
-          {artifacts.slice(0, 24).map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+          {visibleArtifacts.slice(0, 24).map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} onPreview={() => setSelected(artifact)} />)}
         </div>
       ) : view === 'job' ? (
         renderGroups(grouped.job, (_key, index) => `Work ${index + 1}`)
       ) : (
         renderGroups(grouped.type, (key) => key.replace(/_/g, ' '))
       )}
+      {selected ? <ArtifactPreviewDrawer artifact={selected} onClose={() => setSelected(null)} /> : null}
     </section>
   )
 }
@@ -2738,36 +2718,33 @@ function AppsView() {
 
           {setupTarget && (
             <article className="surface-card app-setup-state" role="status">
-              <span className="eyebrow">Provider status</span>
-              <h3>{setupTarget === 'More apps' ? 'Available Apps provider' : `${setupTarget} connection requires the Apps provider`}</h3>
+              <span className="eyebrow">One-time setup</span>
+              <h3>{setupTarget === 'More apps' ? 'Set up integrations' : `Set up integrations to connect ${setupTarget}`}</h3>
               <p>{snapshot.providers.length === 0
-                ? 'Not configured. Configure the local Apps provider, then refresh this page.'
-                : snapshot.providers.map((provider) => `${provider.label}: ${healthLabel(provider.health)}`).join(' · ')}</p>
+                ? 'Add an integrations service key once. After that, connect each supported app from its card.'
+                : `Integrations service: ${snapshot.providers.some((provider) => provider.health === 'healthy') ? 'Ready' : 'Needs attention'}`}</p>
               {snapshot.toolkits.filter((toolkit) => !['github', 'gmail'].includes(toolkit.toolkitId.toLowerCase())).length > 0 && setupTarget === 'More apps' && (
                 <p>{snapshot.toolkits.filter((toolkit) => !['github', 'gmail'].includes(toolkit.toolkitId.toLowerCase())).map((toolkit) => toolkit.label).join(' · ')}</p>
               )}
               {snapshot.configuration.workbench ? (
                 <form onSubmit={(event) => { void configureProvider(event) }} style={{ display: 'grid', gap: 8, marginTop: 12 }}>
-                  <label style={{ color: 'var(--muted2)', fontSize: 12 }}>Apps provider
-                    <select name="providerId" required defaultValue={snapshot.providers[0]?.id ?? 'composio'} style={{ width: '100%', marginTop: 5, padding: 9, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)' }}>
-                      {snapshot.providers.length > 0
-                        ? snapshot.providers.map((provider) => <option key={provider.id} value={provider.id}>{provider.label}</option>)
-                        : <option value="composio">Composio</option>}
-                    </select>
-                  </label>
-                  <input name="credential" type="password" autoComplete="off" required placeholder="Provider API key" style={{ padding: 9, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--bg2)', color: 'var(--text)' }} />
-                  <button type="submit" className="nav-btn" disabled={busy !== null}>{busy?.startsWith('configure:') ? 'Securing and testing…' : 'Save securely and test'}</button>
-                  <p style={{ color: 'var(--muted2)', margin: 0 }}>The credential is sent once to the local backend secret authority and is never retained by the browser.</p>
+                  <input type="hidden" name="providerId" value={snapshot.providers[0]?.id ?? 'composio'} />
+                  <label>Integrations service access key<input name="credential" type="password" autoComplete="off" required placeholder="Paste access key" /></label>
+                  <ProductButton variant="primary" type="submit" disabled={busy !== null}>{busy?.startsWith('configure:') ? 'Checking connection…' : 'Save and continue'}</ProductButton>
+                  <p style={{ color: 'var(--muted2)', margin: 0 }}>Aiden sends this key once to protected local credential storage. The browser does not retain it.</p>
                 </form>
               ) : snapshot.configuration.command ? (
-                <><code>{snapshot.configuration.command}</code><p style={{ color: 'var(--muted2)' }}>Complete provider setup in a private terminal.</p></>
+                <p style={{ color: 'var(--muted2)' }}>This installation cannot configure integrations in Workbench. Apps remain optional and do not block Chat.</p>
               ) : null}
               <button type="button" className="nav-btn" onClick={() => setSetupTarget(null)}>Close setup</button>
+              <details className="apps-provider-diagnostics"><summary>Advanced service details</summary>
+                {snapshot.providers.length === 0 ? <p>Provider: Composio · not configured</p> : snapshot.providers.map((provider) => <p key={provider.id}>{provider.label} · {healthLabel(provider.health)}{provider.detail ? ` · ${provider.detail}` : ''}</p>)}
+              </details>
             </article>
           )}
 
           <details className="apps-provider-diagnostics">
-            <summary>Provider diagnostics</summary>
+            <summary>Advanced service diagnostics</summary>
             {snapshot.providers.length === 0
               ? <p>Apps provider is not configured.</p>
               : snapshot.providers.map((provider) => <p key={provider.id}>{provider.label} · {healthLabel(provider.health)}{provider.detail ? ` · ${provider.detail}` : ''}</p>)}
@@ -2803,6 +2780,9 @@ function AutomationsView() {
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
   const [preview, setPreview] = useState<string[]>([])
+  const [editing, setEditing] = useState<aiden.WorkbenchAutomationSummary | null>(null)
+  const automationFormRef = useRef<HTMLFormElement>(null)
+  const customerLocale = useMemo(() => detectWorkbenchLocale(), [])
 
   const reload = useCallback(async () => {
     try { setError(null); setSnapshot(await aiden.loadAutomations()) }
@@ -2815,7 +2795,7 @@ function AutomationsView() {
     const form = event.currentTarget
     const data = new FormData(form)
     const input = {
-      name: String(data.get('name') ?? '').trim(),
+      name: editing?.name ?? String(data.get('name') ?? '').trim(),
       prompt: String(data.get('prompt') ?? '').trim(),
       expression: String(data.get('expression') ?? '').trim() || String(data.get('schedulePreset') ?? '').trim(),
       timezone: String(data.get('timezone') ?? '').trim(),
@@ -2824,9 +2804,13 @@ function AutomationsView() {
       allowWrite: data.get('allowWrite') === 'on',
     }
     if (!input.name || !input.prompt || !input.expression || !input.timezone) { setError('Every automation field is required'); return }
-    setBusy('create'); setError(null)
-    try { await aiden.createAutomation(input); form.reset(); setPreview([]); await reload() }
-    catch (cause) { setError(cause instanceof Error ? cause.message : 'Automation could not be created') }
+    setBusy(editing ? 'edit' : 'create'); setError(null)
+    try {
+      if (editing) await aiden.reviseAutomation(editing.automationId, input)
+      else await aiden.createAutomation(input)
+      form.reset(); setPreview([]); setEditing(null); await reload()
+    }
+    catch (cause) { setError(cause instanceof Error ? cause.message : `Automation could not be ${editing ? 'updated' : 'created'}`) }
     finally { setBusy(null) }
   }
 
@@ -2852,6 +2836,42 @@ function AutomationsView() {
     finally { setBusy(null) }
   }
 
+  const applyAutomationTemplate = (template: typeof AUTOMATION_TEMPLATES[number]) => {
+    const form = automationFormRef.current
+    if (!form) return
+    const name = form.elements.namedItem('name') as HTMLInputElement | null
+    const prompt = form.elements.namedItem('prompt') as HTMLTextAreaElement | null
+    const preset = form.elements.namedItem('schedulePreset') as HTMLSelectElement | null
+    const expression = form.elements.namedItem('expression') as HTMLInputElement | null
+    if (name) name.value = template.label
+    if (prompt) prompt.value = template.prompt
+    if (preset && Array.from(preset.options).some((option) => option.value === template.expression)) preset.value = template.expression
+    else if (expression) expression.value = template.expression
+    setPreview([])
+  }
+
+  const editAutomation = (automation: aiden.WorkbenchAutomationSummary) => {
+    const form = automationFormRef.current
+    if (!form || automation.action.kind !== 'prompt' || automation.trigger.kind !== 'schedule') return
+    setEditing(automation)
+    const name = form.elements.namedItem('name') as HTMLInputElement | null
+    const prompt = form.elements.namedItem('prompt') as HTMLTextAreaElement | null
+    const expression = form.elements.namedItem('expression') as HTMLInputElement | null
+    const timezone = form.elements.namedItem('timezone') as HTMLInputElement | null
+    const overlap = form.elements.namedItem('overlap') as HTMLSelectElement | null
+    const misfire = form.elements.namedItem('misfire') as HTMLSelectElement | null
+    const allowWrite = form.elements.namedItem('allowWrite') as HTMLInputElement | null
+    if (name) name.value = automation.name
+    if (prompt) prompt.value = automation.action.prompt ?? ''
+    if (expression) expression.value = automation.trigger.expression ?? ''
+    if (timezone) timezone.value = automation.trigger.timezone ?? customerLocale.timeZone
+    if (overlap) overlap.value = automation.policies.overlap
+    if (misfire) misfire.value = automation.policies.misfire.kind === 'catch_up' ? 'catch_up' : automation.policies.misfire.kind
+    if (allowWrite) allowWrite.checked = automation.capabilities.includes('repository.write')
+    setPreview([])
+    form.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   return (
     <section className="workspace-surface automation-surface" aria-labelledby="automations-title">
       <header className="workspace-surface-header">
@@ -2862,26 +2882,28 @@ function AutomationsView() {
       {snapshot && !snapshot.capability.available && <div className="workspace-empty-state"><strong>Pro capability required</strong><span>{snapshot.capability.reason}</span></div>}
       {snapshot?.capability.available && (
         <>
-          <form className="surface-card automation-create" onSubmit={(event) => { void create(event) }}>
-            <span className="eyebrow">Create automation</span>
-            <input name="name" required placeholder="Daily repository summary" />
-            <textarea name="prompt" required placeholder="What should Aiden do?" rows={3} />
+          <form ref={automationFormRef} className="surface-card automation-create" onSubmit={(event) => { void create(event) }}>
+            <div><span className="eyebrow">{editing ? 'Edit automation' : 'Create automation'}</span><h3>{editing ? editing.name : 'Schedule reliable work'}</h3><p className="automation-meta">{editing ? 'Saving creates a new durable revision. Prior runs keep their exact original revision.' : 'Choose a template or describe the task yourself. Nothing runs until you create it.'}</p></div>
+            {!editing && <div className="automation-templates" aria-label="Automation templates">
+              {AUTOMATION_TEMPLATES.map((template) => <button key={template.id} type="button" onClick={() => applyAutomationTemplate(template)}>{template.label}</button>)}
+            </div>}
+            <label><span className="automation-step">1</span><strong>What should Aiden do?</strong><input name="name" required readOnly={editing !== null} placeholder="Automation name" /><textarea name="prompt" required placeholder="Describe the result Aiden should produce" rows={3} /></label>
             <div className="automation-schedule-fields">
-              <label><span>When</span><select name="schedulePreset" defaultValue="0 9 * * 1-5"><option value="0 9 * * 1-5">Every weekday at 9:00 AM</option><option value="0 9 * * *">Every day at 9:00 AM</option><option value="0 * * * *">Every hour</option></select></label>
-              <input name="timezone" required defaultValue="Asia/Kolkata" aria-label="IANA timezone" />
+              <label><span><span className="automation-step">2</span><strong>When?</strong></span><select name="schedulePreset" defaultValue="0 9 * * 1-5"><option value="0 9 * * 1-5">Every weekday at 9:00 AM</option><option value="0 9 * * *">Every day at 9:00 AM</option><option value="0 * * * *">Every hour</option></select></label>
+              <label><span>Timezone</span><input name="timezone" required defaultValue={customerLocale.timeZone} aria-label="IANA timezone" /></label>
             </div>
             <details className="automation-advanced"><summary>Advanced schedule</summary><input name="expression" placeholder="Cron expression, for example 0 9 * * 1-5" aria-label="Advanced cron schedule" /></details>
-            <div className="automation-safety-fields">
+            <div><span className="automation-step">3</span><strong>When runs overlap or Aiden was offline</strong></div><div className="automation-safety-fields">
               <label><span>If a previous run is working</span><select name="overlap" defaultValue="queue"><option value="queue">Wait for it to finish</option><option value="skip">Skip the new run</option><option value="cancel_previous">Stop it, then start the new run</option></select></label>
               <label><span>If Aiden was offline</span><select name="misfire" defaultValue="run_once"><option value="run_once">Run once when Aiden returns</option><option value="skip">Skip missed runs</option><option value="catch_up">Catch up at most 3 runs</option></select></label>
             </div>
             <label className="automation-write-option"><input type="checkbox" name="allowWrite" /><span>Allow workspace changes. Consequential actions still require normal Aiden approval.</span></label>
-            <p className="automation-meta">Scheduling never bypasses approvals. This automation is bound to the workspace where Workbench is running.</p>
-            <div className="automation-actions">
+            <div><span className="automation-step">4</span><strong>Review &amp; Create</strong><p className="automation-meta">Scheduling never bypasses approvals. This automation stays bound to the current workspace.</p></div><div className="automation-actions">
               <button type="button" className="nav-btn" disabled={busy !== null} onClick={(event) => { void previewSchedule(event.currentTarget.form!) }}>Preview next 5</button>
-              <button type="submit" className="nav-btn" disabled={busy !== null}>{busy === 'create' ? 'Creating…' : 'Create'}</button>
+              {editing && <ProductButton type="button" variant="ghost" disabled={busy !== null} onClick={() => { automationFormRef.current?.reset(); setEditing(null); setPreview([]) }}>Cancel edit</ProductButton>}
+              <ProductButton type="submit" variant="primary" disabled={busy !== null}>{busy === 'edit' ? 'Saving…' : busy === 'create' ? 'Creating…' : editing ? 'Save new revision' : 'Create automation'}</ProductButton>
             </div>
-            {preview.length > 0 && <ol className="automation-preview">{preview.map((instant) => <li key={instant}>{new Date(instant).toLocaleString()} <code>{instant}</code></li>)}</ol>}
+            {preview.length > 0 && <ol className="automation-preview">{preview.map((instant) => <li key={instant}>{new Date(instant).toLocaleString(customerLocale.locale)} <code>{instant}</code></li>)}</ol>}
           </form>
           <div className="artifact-gallery automation-grid" aria-label="Automations">
             {snapshot.automations.length === 0 ? <div className="workspace-empty-state"><strong>No automations yet</strong><span>Create a safe schedule above.</span></div> : snapshot.automations.map((automation) => (
@@ -2889,11 +2911,12 @@ function AutomationsView() {
                 <span className="eyebrow">{automation.enabled ? 'Active' : 'Paused'}</span>
                 <h3>{automation.name}</h3>
                 <p>{automation.trigger.kind === 'schedule' ? `${describeAutomationSchedule(automation.trigger.expression)} · ${automation.trigger.timezone}` : automation.trigger.kind}</p>
-                <p className="automation-meta">Next: {automation.nextFireAt ? new Date(automation.nextFireAt).toLocaleString() : 'Not scheduled'}</p>
+                <p className="automation-meta">Next: {automation.nextFireAt ? new Date(automation.nextFireAt).toLocaleString(customerLocale.locale) : 'Not scheduled'}</p>
                 {automation.lastOccurrence && <p className="automation-meta">Last run: {automation.lastOccurrence.state.replaceAll('_', ' ')}</p>}
                 <details className="automation-advanced"><summary>Advanced details</summary><p className="automation-meta">Revision {automation.revisionNumber} · Automation ID {automation.automationId}</p></details>
                 <div className="automation-actions">
                   <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'run') }}>Run now</button>
+                  {automation.action.kind === 'prompt' && automation.trigger.kind === 'schedule' && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => editAutomation(automation)}>Edit</button>}
                   <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'toggle') }}>{automation.enabled ? 'Pause' : 'Resume'}</button>
                   {automation.lastOccurrence && automation.lastOccurrence.state !== 'unknown' && <button type="button" className="nav-btn" disabled={busy !== null} onClick={() => { void action(automation, 'replay') }}>Replay</button>}
                 </div>
@@ -2907,7 +2930,7 @@ function AutomationsView() {
                 {snapshot.history.map((occurrence) => (
                   <article key={occurrence.occurrenceId} className="automation-history-row">
                     <strong>{occurrence.state.replaceAll('_', ' ')}</strong>
-                    <span>{new Date(occurrence.triggeredAt).toLocaleString()}</span>
+                    <span>{new Date(occurrence.triggeredAt).toLocaleString(customerLocale.locale)}</span>
                     <span>{presentAutomationOccurrence({ state: occurrence.state, delivery: occurrence.detail.delivery ?? null }).label}</span>
                     <details className="automation-advanced"><summary>Advanced details</summary><div><code>Occurrence ID {occurrence.occurrenceId}</code>{occurrence.jobId && <code>Job {occurrence.jobId}</code>}{occurrence.replayOfOccurrenceId && <code>Replay of {occurrence.replayOfOccurrenceId}</code>}<code>Trigger {occurrence.triggerKind}</code></div></details>
                   </article>
@@ -3063,6 +3086,7 @@ function LiveActivitySurface() {
   const [codingPending, setCodingPending] = useState<'apply' | 'discard' | 'discard-unknown' | null>(null)
   const [codingReview, setCodingReview] = useState<aiden.WorkbenchCodingReview | null>(null)
   const [codingReviewError, setCodingReviewError] = useState<string | null>(null)
+  const [selectedArtifact, setSelectedArtifact] = useState<aiden.WorkbenchArtifact | null>(null)
   const summary = summarizeCompletedActivity(liveActivity)
   const approvals = runProjection?.receipt.terminal ? [] : pendingApprovalsForProjection(
     runProjection?.approvals ?? [],
@@ -3238,9 +3262,10 @@ function LiveActivitySurface() {
       {runArtifacts.length > 0 && (
         <div className="artifact-list">
           <h4>Artifacts</h4>
-          {runArtifacts.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} />)}
+          {runArtifacts.map((artifact) => <ArtifactCard key={artifact.id} artifact={artifact} onPreview={() => setSelectedArtifact(artifact)} />)}
         </div>
       )}
+      {selectedArtifact ? <ArtifactPreviewDrawer artifact={selectedArtifact} onClose={() => setSelectedArtifact(null)} /> : null}
       {codingSession && (
         <div className={`coding-result-card state-${codingSession.state}`} aria-label="External coding session">
           <div className="coding-result-heading">
@@ -3581,7 +3606,7 @@ function ChatPanel() {
           <div style={{ maxWidth: 800, margin: '6px auto 0', color: 'var(--muted)', fontSize: 10 }}>
             {workbenchReadOnly
               ? 'This Workbench is read-only.'
-              : 'Task execution is unavailable. Configure a provider with the Aiden CLI, then restart Workbench.'}
+              : 'Task execution is unavailable. Open Settings → AI & Models to connect a provider.'}
           </div>
         )}
       </div>
@@ -3936,11 +3961,15 @@ function MemoryView() {
 // ── SkillsManager ─────────────────────────────────────────────
 
 const SOURCE_COLORS: Record<string, string> = {
-  'built-in': 'var(--orange)',
-  'workspace': '#60a5fa',
-  'learned':   '#34d399',
-  'approved':  '#a78bfa',
+  Bundled: 'var(--orange)',
+  Workspace: 'var(--blue)',
+  Learned: 'var(--green)',
+  'Third-party': 'var(--violet)',
+  Installed: 'var(--muted2)',
 }
+
+type PresentedSkill = ReturnType<typeof projectWorkbenchSkill>
+type SkillSourceFilter = 'all' | PresentedSkill['source']
 
 function managedSkillName(version: aiden.WorkbenchSkillVersion): string {
   const frontmatter = version.canonicalSpec.frontmatter
@@ -3951,9 +3980,9 @@ function managedSkillName(version: aiden.WorkbenchSkillVersion): string {
 
 function SkillsManager() {
   const { capabilities } = useDevOS()
-  const [skills, setSkills] = useState<any[]>(capabilities?.skills ?? [])
+  const [skills, setSkills] = useState<PresentedSkill[]>(() => (capabilities?.skills ?? []).map(projectWorkbenchSkill))
   const [loading, setLoading] = useState(capabilities === null)
-  const [filter, setFilter] = useState<'all' | 'built-in' | 'learned' | 'approved' | 'workspace'>('all')
+  const [filter, setFilter] = useState<SkillSourceFilter>('all')
   const [query, setQuery] = useState('')
   const [visibleLimit, setVisibleLimit] = useState(24)
   const [intelligence, setIntelligence] = useState<aiden.WorkbenchSkillIntelligenceSnapshot | null>(null)
@@ -3963,7 +3992,7 @@ function SkillsManager() {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    setSkills((capabilities?.skills ?? []).map((skill) => ({ ...skill, source: skill.category || 'runtime', enabled: true })))
+    setSkills((capabilities?.skills ?? []).map(projectWorkbenchSkill))
     setLoading(capabilities === null)
   }, [capabilities])
 
@@ -4004,7 +4033,7 @@ function SkillsManager() {
   }
 
   const visible = (filter === 'all' ? skills : skills.filter(s => s.source === filter))
-    .filter((skill) => `${skill.name} ${skill.description ?? ''} ${(skill.tags ?? []).join(' ')}`.toLowerCase().includes(query.trim().toLowerCase()))
+    .filter((skill) => `${skill.name} ${skill.description ?? ''}`.toLowerCase().includes(query.trim().toLowerCase()))
   useEffect(() => { setVisibleLimit(24) }, [filter, query])
   const counts  = skills.reduce((acc: Record<string, number>, s) => {
     acc[s.source] = (acc[s.source] || 0) + 1; return acc
@@ -4215,7 +4244,7 @@ function SkillsManager() {
       <div style={sectionTitle}>Existing Skills</div>
       <input className="aiden-field" type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search Skills" aria-label="Search Skills" style={{ marginBottom: 9 }} />
       <div style={{ display: 'flex', gap: 6, marginBottom: 12, flexWrap: 'wrap' }}>
-        {(['all', 'built-in', 'learned', 'approved', 'workspace'] as const).map(f => {
+        {(['all', 'Bundled', 'Learned', 'Workspace', 'Third-party', 'Installed'] as const).map(f => {
           const count = f === 'all' ? skills.length : (counts[f] || 0)
           if (f !== 'all' && count === 0) return null
           return (
@@ -4239,51 +4268,26 @@ function SkillsManager() {
       {!loading && visible.length === 0 && (
         <div style={{ color: 'var(--muted)', textAlign: 'center', padding: 20 }}>No skills found</div>
       )}
-      {visible.slice(0, visibleLimit).map((skill: any) => {
-        const isBuiltIn  = skill.source === 'built-in'
+      {visible.slice(0, visibleLimit).map((skill) => {
         const srcColor   = SOURCE_COLORS[skill.source] || 'var(--muted)'
-        const isToggling = false
         return (
           <div key={skill.name} style={{
             padding: '10px 12px', marginBottom: 6,
-            background: skill.enabled ? 'var(--bg)' : 'rgba(0,0,0,0.3)',
-            border: `1px solid ${skill.enabled ? 'var(--border)' : 'rgba(255,255,255,0.06)'}`,
-            borderRadius: 6, opacity: skill.enabled ? 1 : 0.55,
+            background: 'var(--bg)',
+            border: '1px solid var(--border)',
+            borderRadius: 6, opacity: skill.usable ? 1 : 0.72,
             transition: 'opacity 0.2s',
           }}>
             <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
                   <span style={{ color: 'var(--text)', fontWeight: 600 }}>{skill.name}</span>
-                  <span style={{ fontSize: 9, color: srcColor, border: `1px solid ${srcColor}`, borderRadius: 3, padding: '0 4px', opacity: 0.8 }}>{skillSourceLabel(skill.source)}</span>
+                  <span style={{ fontSize: 9, color: srcColor, border: `1px solid ${srcColor}`, borderRadius: 3, padding: '0 4px', opacity: 0.8 }}>{skill.source}</span>
                   {skill.version && <span style={{ fontSize: 9, color: 'var(--muted)', opacity: 0.6 }}>v{skill.version}</span>}
                 </div>
                 <div style={{ color: 'var(--muted2)', fontSize: 11, lineHeight: 1.4 }}>{skill.description || '—'}</div>
-                {skill.tags?.length > 0 && (
-                  <div style={{ marginTop: 4, display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-                    {skill.tags.map((tag: string) => (
-                      <span key={tag} style={{ fontSize: 9, color: 'var(--muted)', background: 'var(--bg2)', borderRadius: 3, padding: '1px 5px' }}>{tag}</span>
-                    ))}
-                  </div>
-                )}
               </div>
-              <div style={{ display: 'flex', gap: 4, flexShrink: 0 }}>
-                {/* Toggle */}
-                <button type="button" disabled title="Managed by the Aiden runtime" style={{
-                  padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
-                  border: `1px solid ${skill.enabled ? 'rgba(52,211,153,0.4)' : 'var(--border)'}`,
-                  background: skill.enabled ? 'rgba(52,211,153,0.08)' : 'transparent',
-                  color: skill.enabled ? '#34d399' : 'var(--muted)', fontSize: 10,
-                }}>{isToggling ? '…' : skill.enabled ? 'ON' : 'OFF'}</button>
-                {/* Delete — only for non built-in */}
-                {false && !isBuiltIn && (
-                  <button type="button" disabled title="Managed by the Aiden runtime" style={{
-                    padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
-                    border: '1px solid rgba(239,68,68,0.3)', background: 'transparent',
-                    color: 'var(--red)', fontSize: 10,
-                  }}>✕</button>
-                )}
-              </div>
+              <StatusBadge tone={skill.status === 'Enabled' ? 'ready' : skill.status === 'Needs review' || skill.status === 'Needs setup' ? 'attention' : 'disabled'}>{skill.status}</StatusBadge>
             </div>
           </div>
         )
@@ -4428,7 +4432,7 @@ const CHANNEL_CONFIG: Record<string, any> = {
       { id: 'token', label: 'SMTP Password / App Password', placeholder: 'App password...', type: 'password' },
       { id: 'channel', label: 'Email Address', placeholder: 'your@email.com', type: 'text' },
     ],
-    help: 'Use a Gmail App Password (2FA required). DevOS sends and receives email on your behalf.',
+    help: 'Use a Gmail App Password (2FA required). Aiden sends and receives email only when you ask.',
   },
   memory: { title: '🧠 Memory', renderContent: () => <MemoryView />, fields: [], help: '' },
   skills: { title: '📚 Skills', renderContent: () => <SkillsManager />, fields: [], help: '' },
@@ -4508,7 +4512,7 @@ function ChannelModal() {
                   <div style={{ fontSize: 40, marginBottom: 12 }}>📱</div>
                   <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted2)', lineHeight: 1.8 }}>
                     WhatsApp connects via QR code.<br />
-                    Open your DevOS terminal and<br />
+                    Open the Aiden terminal and<br />
                     scan the QR code that appears.
                   </div>
                   <div style={{ marginTop: 12, padding: '8px 12px', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 6, fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)' }}>
@@ -4593,7 +4597,7 @@ function DisclaimerBar() {
         <a href="https://taracod.com" target="_blank" rel="noopener" style={{ color: 'var(--muted2)', textDecoration: 'none' }}>
           Shiva Deore
         </a>
-        {' '}at Taracod · White Lotus · © 2026
+        {' '}· TARACOD
       </span>
     </div>
   )
@@ -4888,7 +4892,7 @@ function UpdatesTab() {
             <div>
               <div style={{ ...mono12, color: 'var(--text)', fontWeight: 600 }}>Aiden v{runtimeVersion}</div>
               <div style={{ ...mono10, color: 'var(--muted)', marginTop: 2 }}>
-                Installed · Local AI OS{!isElectron ? ' · browser mode' : ''}
+                Installed build{!isElectron ? ' · Workbench mode' : ''}
               </div>
             </div>
           </div>
@@ -5324,7 +5328,7 @@ function TelegramSettingsTab() {
       <SettingsSection title="Other Channels">
         {['WhatsApp', 'Discord', 'Slack'].map(ch => (
           <p key={ch} style={{ ...settingsTextStyle, marginBottom: 8 }}>
-            <b>{ch}</b> — configure in your .env or DevOS config.
+            <b>{ch}</b> — configure this connection in Aiden Settings.
           </p>
         ))}
       </SettingsSection>
@@ -5427,7 +5431,7 @@ function CalendarGmailSettings() {
           Gmail (App Password)
         </div>
         <p style={{ ...settingsTextStyle, marginBottom: 8 }}>
-          Go to <b>Google Account → Security → App Passwords → Generate for "DevOS"</b>. Paste the 16-character password below.
+          Go to <b>Google Account → Security → App Passwords → Generate for "Aiden"</b>. Paste the 16-character password below.
         </p>
         <input
           type="email"
@@ -5885,18 +5889,21 @@ function LearningSettingsTab() {
 }
 
 const SETTINGS_TABS = [
-  { id: 'runtime',  label: '◆ Readiness', section: 'General' },
-  { id: 'model',    label: '◈ AI & Models', section: 'General' },
-  { id: 'conversation', label: '◇ Conversation', section: 'General' },
-  { id: 'appearance', label: '◐ Appearance', section: 'General' },
-  { id: 'skills',   label: '◇ Skills', section: 'Advanced' },
-  { id: 'capabilities', label: '◇ Capabilities', section: 'Advanced' },
-  { id: 'plugins',  label: '◇ Plugins', section: 'Advanced' },
-  { id: 'sponsor',  label: '♥ Sponsor', section: 'About' },
-  { id: 'guide',    label: '📖 User Guide', section: 'About' },
-  { id: 'privacy',  label: '📜 Privacy', section: 'About' },
-  { id: 'legal',    label: '⚖️ Legal', section: 'About' },
-  { id: 'about',    label: 'ℹ️ About', section: 'About' },
+  { id: 'runtime', label: 'Readiness', section: 'General' },
+  { id: 'model', label: 'AI & Models', section: 'General' },
+  { id: 'coding', label: 'Coding', section: 'General' },
+  { id: 'conversation', label: 'Conversation', section: 'General' },
+  { id: 'appearance', label: 'Appearance', section: 'General' },
+  { id: 'skills', label: 'Skills', section: 'Tools & connections' },
+  { id: 'capabilities', label: 'Capabilities', section: 'Tools & connections' },
+  { id: 'apps', label: 'Apps', section: 'Tools & connections' },
+  { id: 'automations', label: 'Automations', section: 'Tools & connections' },
+  { id: 'updates', label: 'Updates', section: 'About' },
+  { id: 'support', label: 'Support & diagnostics', section: 'About' },
+  { id: 'sponsor', label: 'Sponsor', section: 'About' },
+  { id: 'privacy', label: 'Privacy', section: 'About' },
+  { id: 'legal', label: 'Legal', section: 'About' },
+  { id: 'about', label: 'About', section: 'About' },
 ]
 
 function CapabilitiesSettings() {
@@ -6002,9 +6009,10 @@ function ReadinessSettings({ sessionId, onOpenModels, onOpenApps }: {
   }
   if (error) return <p style={{ ...settingsTextStyle, color: 'var(--red)' }}>{error}</p>
   if (!snapshot) return <p style={settingsTextStyle}>Checking system readiness…</p>
+  const summary = presentReadinessSummary(snapshot)
   return (
     <div style={{ display: 'grid', gap: 8 }}>
-      <p style={settingsTextStyle}>Overall: <strong style={{ color: snapshot.overall === 'ready' ? 'var(--green)' : 'var(--orange)' }}>{snapshot.overall.replace(/_/g, ' ')}</strong></p>
+      <div className={`readiness-summary is-${summary.tone}`}><strong>{summary.title}</strong><span>{summary.detail}</span></div>
       {snapshot.items.map((item) => (
         <div key={item.id} style={{ padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 8, background: 'var(--bg2)' }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10 }}>
@@ -6133,17 +6141,54 @@ function SettingsDrawer() {
   const {
     settingsTab, setSettingsTab, setSettingsOpen, setConversations, setMessages,
     licenseStatus, licenseKey, setLicenseKey, activatingKey, licenseMsg, setLicenseMsg,
-    validateKey, clearProLicense, setPricingOpen, runtimeVersion,
+    validateKey, clearProLicense, setPricingOpen, runtimeVersion, runtimeEdition,
     activeProvider, activeModel, runtimeConnection, executionAvailable,
     executionQueue, workbenchReadOnly, capabilities, startNewChat, clearCurrentView,
-    appearance, setAppearance, setMainView, openWorkbenchDestination, sessionId,
+    appearance, setAppearance, density, setDensity, setMainView, openWorkbenchDestination, sessionId,
   } = useDevOS()
   const [codingHealth, setCodingHealth] = useState<aiden.ExternalCodingHealth | null>(null)
   const [codingHealthError, setCodingHealthError] = useState<string | null>(null)
   const [codingSaving, setCodingSaving] = useState(false)
+  const [diagnosticSummary, setDiagnosticSummary] = useState('')
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false)
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null)
+  const [diagnosticCopied, setDiagnosticCopied] = useState(false)
+
+  const runDiagnostics = async () => {
+    setDiagnosticBusy(true)
+    setDiagnosticError(null)
+    setDiagnosticCopied(false)
+    try {
+      const readiness = await aiden.loadSystemReadiness(sessionId)
+      setDiagnosticSummary(buildSanitizedDiagnosticSummary({
+        runtimeVersion,
+        connection: runtimeConnection,
+        provider: activeProvider,
+        model: activeModel,
+        executionAvailable,
+        queue: executionQueue,
+        readiness,
+      }))
+    } catch (cause) {
+      setDiagnosticSummary('')
+      setDiagnosticError(cause instanceof Error ? cause.message : 'Diagnostics could not be completed')
+    } finally {
+      setDiagnosticBusy(false)
+    }
+  }
+
+  const copyDiagnostics = async () => {
+    if (!diagnosticSummary) return
+    try {
+      await navigator.clipboard.writeText(diagnosticSummary)
+      setDiagnosticCopied(true)
+    } catch {
+      setDiagnosticError('The diagnostic summary could not be copied. Select the text below and copy it manually.')
+    }
+  }
 
   useEffect(() => {
-    if (settingsTab !== 'runtime') return
+    if (settingsTab !== 'coding') return
     let current = true
     setCodingHealthError(null)
     void aiden.loadExternalCodingHealth()
@@ -6174,14 +6219,15 @@ function SettingsDrawer() {
           justifyContent: 'space-between', padding: '0 20px',
           borderBottom: '1px solid var(--border)', flexShrink: 0,
         }}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: 13, color: 'var(--text)' }}>⚙ Settings</span>
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, fontFamily: 'var(--sans)', fontSize: 14, fontWeight: 650, color: 'var(--text)' }}><ProductIcon name="settings" size={17} />Settings</span>
           <button onClick={() => setSettingsOpen(false)} style={{
             background: 'none', border: 'none', color: 'var(--muted)',
             cursor: 'pointer', fontSize: 18, padding: '0 4px',
-          }}>✕</button>
+          }} aria-label="Close settings"><ProductIcon name="close" size={18} /></button>
         </div>
 
         <div className="settings-body">
+        <label className="settings-mobile-navigation"><span>Settings section</span><select value={settingsTab} onChange={(event) => setSettingsTab(event.target.value)}>{SETTINGS_TABS.map((tab) => <option key={tab.id} value={tab.id}>{tab.label}</option>)}</select></label>
         {/* Tabs */}
         <nav className="settings-navigation" aria-label="Settings sections">
           {SETTINGS_TABS.map((tab, index) => (
@@ -6220,19 +6266,14 @@ function SettingsDrawer() {
                   onOpenApps={() => openWorkbenchDestination({ view: 'apps' })}
                 />
               </SettingsSection>
-              <SettingsSection title="External Coding">
+            </>
+          )}
+
+          {settingsTab === 'coding' && (
+              <SettingsSection title="Coding model">
                 {codingHealth ? (
                   <>
-                    <p style={settingsTextStyle}>Status: <strong style={{ color: codingHealth.ready ? 'var(--green)' : 'var(--red)' }}>{codingHealth.ready ? 'Ready' : 'Needs attention'}</strong></p>
-                    <p style={settingsTextStyle}>Provider: <strong style={{ color: 'var(--text)' }}>{codingHealth.provider}</strong></p>
-                    <p style={settingsTextStyle}>Version: <strong style={{ color: 'var(--text)' }}>{codingHealth.version}</strong></p>
-                    <p style={settingsTextStyle}>Model: <strong style={{ color: 'var(--text)' }}>{codingHealth.model || 'Not configured'}</strong></p>
-                    <p style={settingsTextStyle}>Exact model check: <strong style={{ color: codingHealth.modelValidation === 'ready' ? 'var(--green)' : 'var(--red)' }}>{codingHealth.modelValidation.replace(/_/g, ' ')}</strong></p>
-                    <p style={settingsTextStyle}>Authentication: <strong style={{ color: 'var(--text)' }}>{codingHealth.authenticationMode.replace(/_/g, ' ')} · {codingHealth.authentication}</strong></p>
-                    <p style={settingsTextStyle}>Isolation: <strong style={{ color: codingHealth.isolation === 'available' ? 'var(--green)' : 'var(--red)' }}>{codingHealth.isolation}</strong></p>
-                    <p style={settingsTextStyle}>Validation: <strong style={{ color: codingHealth.isolation === 'available' ? 'var(--green)' : 'var(--red)' }}>{codingHealth.isolation === 'available' ? 'Docker ready' : 'Docker unavailable'}</strong></p>
-                    <p style={settingsTextStyle}>Network: Disabled by default</p>
-                    <p style={settingsTextStyle}>{codingHealth.reason}</p>
+                    <div className="readiness-summary"><strong>{codingHealth.ready ? 'Ready for codebase work' : 'Needs setup'}</strong><span>{codingHealth.model || 'Choose a compatible coding model to continue.'}</span></div>
                     <form onSubmit={(event) => {
                       event.preventDefault()
                       const model = String(new FormData(event.currentTarget).get('codingModel') ?? '').trim()
@@ -6243,17 +6284,16 @@ function SettingsDrawer() {
                         .catch((error) => setCodingHealthError(error instanceof Error ? error.message : 'Coding setup failed'))
                         .finally(() => setCodingSaving(false))
                     }} style={{ display: 'grid', gap: 7, marginTop: 10 }}>
-                      <label style={settingsTextStyle}>Exact compatible model
+                      <label style={settingsTextStyle}>Coding model
                         <input name="codingModel" defaultValue={codingHealth.model ?? ''} autoComplete="off" placeholder="Model ID" style={{ width: '100%', marginTop: 5, padding: 8, background: 'var(--bg2)', color: 'var(--text)', border: '1px solid var(--border)', borderRadius: 6 }} />
                       </label>
-                      <button type="submit" className="nav-btn" disabled={codingSaving}>{codingSaving ? 'Validating…' : 'Validate and save model'}</button>
+                      <ProductButton type="submit" variant="primary" disabled={codingSaving}>{codingSaving ? 'Checking…' : 'Choose coding model'}</ProductButton>
                     </form>
-                    <p style={settingsTextStyle}>Aiden uses the bounded detected executable shown above. Environment variables remain advanced process-level overrides.</p>
+                    <details><summary>Advanced coding details</summary><p style={settingsTextStyle}>Provider: {codingHealth.provider} · Version: {codingHealth.version}</p><p style={settingsTextStyle}>Model check: {codingHealth.modelValidation.replace(/_/g, ' ')} · Authentication: {codingHealth.authenticationMode.replace(/_/g, ' ')}</p><p style={settingsTextStyle}>Isolation: {codingHealth.isolation} · Network is disabled by default.</p><p style={settingsTextStyle}>{codingHealth.reason}</p></details>
                   </>
                 ) : <p style={settingsTextStyle}>{codingHealthError || 'Checking external coding health…'}</p>}
                 {codingHealth && codingHealthError && <p role="alert" style={{ ...settingsTextStyle, color: 'var(--red)' }}>{codingHealthError}</p>}
               </SettingsSection>
-            </>
           )}
           {settingsTab === 'profile'   && <UserProfileTab />}
           {settingsTab === 'api'       && <ApiKeysTab />}
@@ -6282,13 +6322,9 @@ function SettingsDrawer() {
             <SettingsSection title="Appearance">
               <p style={settingsTextStyle}>Appearance is a local Workbench preference and does not change durable runtime state.</p>
               <div className="appearance-options" role="group" aria-label="Appearance">
-                <button type="button" className={appearance === 'dark' ? 'is-selected' : ''} onClick={() => setAppearance('dark')}>
-                  <strong>Dark</strong><small>Always use Aiden’s designed dark workspace.</small>
-                </button>
-                <button type="button" className={appearance === 'system' ? 'is-selected' : ''} onClick={() => setAppearance('system')}>
-                  <strong>System</strong><small>Follow the operating-system appearance.</small>
-                </button>
+                {APPEARANCE_OPTIONS.map((option) => <button key={option.id} type="button" className={appearance === option.id ? 'is-selected' : ''} onClick={() => setAppearance(option.id)}><strong>{option.label}</strong><small>{option.detail}</small></button>)}
               </div>
+              <div className="density-options" role="group" aria-label="Interface density"><span>Interface density</span><button type="button" className={density === 'comfortable' ? 'is-selected' : ''} onClick={() => setDensity('comfortable')}>Comfortable</button><button type="button" className={density === 'compact' ? 'is-selected' : ''} onClick={() => setDensity('compact')}>Compact</button></div>
             </SettingsSection>
           )}
 
@@ -6315,14 +6351,31 @@ function SettingsDrawer() {
           {settingsTab === 'capabilities' && (
             <SettingsSection title="Capabilities">
               <CapabilitiesSettings />
+              <details style={{ marginTop: 16 }}><summary>Advanced protocols and extensions</summary><PluginsList /><MCPView /></details>
             </SettingsSection>
           )}
 
-          {settingsTab === 'plugins' && (
-            <SettingsSection title="Plugins">
-              <PluginsList />
-              <div style={{ marginTop: 18, paddingTop: 16, borderTop: '1px solid var(--border)' }}>
-                <MCPView />
+          {settingsTab === 'apps' && (
+            <SettingsSection title="Apps"><p style={settingsTextStyle}>Connect and manage the accounts Aiden can use when you ask.</p><ProductButton variant="primary" onClick={() => { setMainView('apps'); setSettingsOpen(false) }}>Open Apps</ProductButton></SettingsSection>
+          )}
+
+          {settingsTab === 'automations' && (
+            <SettingsSection title="Automations"><p style={settingsTextStyle}>Create and manage reliable scheduled work.</p><ProductButton variant="primary" onClick={() => { setMainView('automations'); setSettingsOpen(false) }}>Open Automations</ProductButton></SettingsSection>
+          )}
+
+          {settingsTab === 'support' && (
+            <SettingsSection title="Support & diagnostics">
+              <p style={settingsTextStyle}>Run a local readiness check and create an allowlisted summary that excludes credentials, prompts, files and account data.</p>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                <ProductButton type="button" variant="primary" loading={diagnosticBusy} onClick={() => { void runDiagnostics() }}>Run diagnostics</ProductButton>
+                <ProductButton type="button" variant="secondary" disabled={!diagnosticSummary} onClick={() => { void copyDiagnostics() }}><ProductIcon name="copy" size={15} /> {diagnosticCopied ? 'Copied' : 'Copy sanitized summary'}</ProductButton>
+              </div>
+              {diagnosticError ? <p role="alert" style={{ ...settingsTextStyle, color: 'var(--red)' }}>{diagnosticError}</p> : null}
+              {diagnosticSummary ? <pre className="support-diagnostic-summary"><code>{diagnosticSummary}</code></pre> : null}
+              <div className="support-links">
+                <a href="https://github.com/taracodlabs/aiden" target="_blank" rel="noopener noreferrer">Documentation and source</a>
+                <a href="https://github.com/taracodlabs/aiden/issues" target="_blank" rel="noopener noreferrer">Report a bug</a>
+                <a href="mailto:contact@taracod.com">Contact support</a>
               </div>
             </SettingsSection>
           )}
@@ -6515,7 +6568,7 @@ function SettingsDrawer() {
             <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted2)', lineHeight: 1.8 }}>
               <SettingsSection title="Quick Start">
                 <ol style={{ paddingLeft: 16, color: 'var(--muted2)' }}>
-                  <li>Start DevOS: <code style={codeStyle}>npx ts-node index.ts serve</code></li>
+                  <li>Start Aiden and open Workbench.</li>
                   <li>Open <code style={codeStyle}>http://localhost:3000</code></li>
                   <li>Add an API key in Settings → API Keys (Groq is free)</li>
                   <li>Ask Aiden anything in the chat</li>
@@ -6564,7 +6617,7 @@ function SettingsDrawer() {
                   <div style={{ marginTop: 12, marginBottom: 8, color: 'var(--muted3)' }}>Voice output (edge-tts) — natural Aria voice:</div>
                   <code style={codeStyle}>pip install edge-tts</code>
                   <div style={{ marginTop: 12, padding: '8px 10px', background: 'var(--bg2)', borderRadius: 6, border: '1px solid var(--border)' }}>
-                    <div style={{ color: 'var(--muted)' }}>Once installed, restart DevOS. The 🎤 and 🔊 buttons appear automatically in chat — no config needed.</div>
+                    <div style={{ color: 'var(--muted)' }}>Once installed, restart Aiden. Voice controls appear automatically in chat.</div>
                     <div style={{ marginTop: 6, color: 'var(--muted)' }}>Without edge-tts, Windows SAPI (built-in) is used as fallback.</div>
                   </div>
                 </div>
@@ -6581,46 +6634,27 @@ function SettingsDrawer() {
           )}
 
           {settingsTab === 'privacy' && (
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted2)', lineHeight: 1.8 }}>
+            <div style={{ fontSize: 13, color: 'var(--muted2)', lineHeight: 1.7 }}>
               <LearningSettingsTab />
-              <SettingsSection title="Privacy Policy">
-                <p style={settingsTextStyle}><strong style={{ color: 'var(--text)' }}>DevOS runs entirely on your machine.</strong></p>
-                <br />
-                <strong style={{ color: 'var(--muted3)' }}>Stays on your device:</strong>
-                <ul style={{ paddingLeft: 16, marginTop: 6 }}>
-                  <li>All conversations and chat history</li>
-                  <li>Knowledge base files and embeddings (stored in <code style={codeStyle}>workspace/knowledge/</code>)</li>
-                  <li>PDF, EPUB, and document files you upload — text is extracted locally, no cloud OCR</li>
-                  <li>Task history and execution logs</li>
-                  <li>Memory, entity graph, semantic index</li>
-                  <li>Screenshots and workspace files</li>
-                  <li>Your API keys (stored locally)</li>
-                </ul>
-                <br />
-                <strong style={{ color: 'var(--muted3)' }}>Leaves your device:</strong>
-                <ul style={{ paddingLeft: 16, marginTop: 6 }}>
-                  <li>Only message text sent to your configured AI provider</li>
-                  <li>Zero telemetry or analytics collected</li>
-                </ul>
-                <br />
+              <SettingsSection title="Privacy">
+                <p style={settingsTextStyle}>Aiden stores durable work, settings and local artifacts in the runtime you control.</p>
+                <p style={settingsTextStyle}>Configured providers and connected services receive only the data needed for the action you request.</p>
+                <p style={settingsTextStyle}>Approval, Evidence and Proof remain visible so consequential work can be reviewed.</p>
+                <details><summary>Advanced data details</summary><p style={settingsTextStyle}>The exact data sent depends on the provider, tool or connected App you choose. Review their policies before connecting sensitive accounts.</p></details>
                 <p style={settingsTextStyle}>Contact: <a href="mailto:contact@taracod.com" style={{ color: 'var(--orange)' }}>contact@taracod.com</a></p>
-                <p style={{ ...settingsTextStyle, marginTop: 4 }}>Last updated: March 2026</p>
               </SettingsSection>
             </div>
           )}
 
           {settingsTab === 'legal' && (
-            <div style={{ fontFamily: 'var(--mono)', fontSize: 12, color: 'var(--muted2)', lineHeight: 1.8 }}>
-              <SettingsSection title="License & Copyright">
+            <div style={{ fontSize: 13, color: 'var(--muted2)', lineHeight: 1.7 }}>
+              <SettingsSection title="License">
                 <div style={{ background: 'var(--bg2)', border: '1px solid var(--border)', borderRadius: 8, padding: 16, marginBottom: 16 }}>
-                  <div style={{ fontSize: 13, color: 'var(--text)', fontWeight: 600, marginBottom: 8 }}>DevOS · Aiden</div>
-                  <div>Built by <strong style={{ color: 'var(--text)' }}>Shiva Deore</strong></div>
-                  <div>
-                    <a href="https://taracod.com" target="_blank" rel="noopener" style={{ color: 'var(--orange)', textDecoration: 'none' }}>Taracod</a>
-                    {' · '}<strong style={{ color: 'var(--muted3)' }}>White Lotus</strong>
-                  </div>
-                  <div style={{ marginTop: 8, color: 'var(--muted)' }}>© 2026 All rights reserved</div>
+                  <div style={{ fontSize: 14, color: 'var(--text)', fontWeight: 650, marginBottom: 8 }}>Aiden</div>
+                  <div>Licensed under AGPL-3.0-only.</div>
+                  <div>Copyright © Shiva Deore and contributors.</div>
                 </div>
+                <p style={{ ...settingsTextStyle, color: 'var(--orange)' }}>Legal review is required before commercial distribution.</p>
                 <p style={settingsTextStyle}>
                   <a href="mailto:contact@taracod.com" style={{ color: 'var(--orange)' }}>contact@taracod.com</a>
                   {' · '}
@@ -6638,16 +6672,16 @@ function SettingsDrawer() {
                   display: 'flex', alignItems: 'center', justifyContent: 'center',
                   fontSize: 18, fontWeight: 800, color: '#000', margin: '0 auto 12px',
                   fontFamily: 'var(--sans)',
-                }}>D/</div>
-                <div style={{ fontFamily: 'var(--sans)', fontSize: 16, fontWeight: 700, color: 'var(--text)' }}>DevOS · Aiden</div>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>v{runtimeVersion} · Local AI OS</div>
+                }}>A</div>
+                <div style={{ fontFamily: 'var(--sans)', fontSize: 18, fontWeight: 700, color: 'var(--text)' }}>Aiden {runtimeEdition === 'community' ? 'Community' : runtimeEdition === 'pro' ? 'Pro' : runtimeEdition === 'team' ? 'Team' : 'Enterprise'}</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: 11, color: 'var(--muted)', marginTop: 4 }}>Workbench · runtime compatibility v{runtimeVersion}</div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {[
-                  { label: 'Discord',          href: 'https://discord.gg/8mBwwBcp' },
-                  { label: 'Follow @shivafpx', href: 'https://x.com/shivafpx' },
-                  { label: 'Visit taracod.com',href: 'https://taracod.com' },
-                  { label: 'Report a bug',     href: 'mailto:contact@taracod.com' },
+                  { label: 'Aiden website', href: 'https://aiden.taracod.com' },
+                  { label: 'Documentation and source', href: 'https://github.com/taracodlabs/aiden' },
+                  { label: 'Report a bug', href: 'https://github.com/taracodlabs/aiden/issues' },
+                  { label: 'Contact support', href: 'mailto:contact@taracod.com' },
                 ].map(link => (
                   <a key={link.label} href={link.href} target="_blank" rel="noopener" style={{
                     display: 'block', padding: '10px 14px', borderRadius: 6,
@@ -6766,7 +6800,8 @@ export default function Home() {
   const [activityOpen,   setActivityOpen]   = useState(false)
   const [settingsOpen,   setSettingsOpen]   = useState(false)
   const [settingsTab,    setSettingsTab]    = useState('runtime')
-  const [appearance,     setAppearance]     = useState<WorkbenchAppearance>('dark')
+  const [appearance,     setAppearance]     = useState<WorkbenchAppearance>('system')
+  const [density,        setDensity]        = useState<WorkbenchDensity>('comfortable')
   const [isExecuting,    setIsExecuting]    = useState(false)
   const [isStreaming,    setIsStreaming]    = useState(false)
   const [thinking,       setThinking]       = useState<{ stage: string; message: string; tool?: string } | null>(null)
@@ -6966,14 +7001,19 @@ export default function Home() {
   }, [historyOpen])
   useEffect(() => {
     if (typeof window === 'undefined') return
-    const saved = window.localStorage.getItem('aiden.workbench.appearance.v1')
-    if (saved === 'system' || saved === 'dark') setAppearance(saved)
+    setAppearance(normalizeAppearance(window.localStorage.getItem('aiden.workbench.appearance.v1')))
+    setDensity(normalizeDensity(window.localStorage.getItem('aiden.workbench.density.v1')))
   }, [])
   useEffect(() => {
     if (typeof document === 'undefined' || typeof window === 'undefined') return
     document.documentElement.dataset.appearance = appearance
     window.localStorage.setItem('aiden.workbench.appearance.v1', appearance)
   }, [appearance])
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return
+    document.documentElement.dataset.density = density
+    window.localStorage.setItem('aiden.workbench.density.v1', density)
+  }, [density])
   useEffect(() => {
     if (typeof window === 'undefined') return
     const narrow = window.matchMedia('(max-width: 980px)')
@@ -7749,7 +7789,7 @@ export default function Home() {
         role: 'assistant',
         content: workbenchReadOnly
           ? 'This Workbench is read-only.'
-          : 'Task execution is unavailable. Configure a provider with the Aiden CLI, then restart Workbench.',
+          : 'Task execution is unavailable. Open Settings → AI & Models to connect a provider.',
         timestamp: Date.now(),
         isStreaming: false,
       }])
@@ -8117,7 +8157,7 @@ export default function Home() {
     uiMode, setUIMode, execMode, setExecMode,
     historyOpen, setHistoryOpen, liveViewOpen, setLiveViewOpen, collapseLiveExecution, reopenLiveExecution,
     activityOpen, setActivityOpen, settingsOpen, setSettingsOpen,
-    settingsTab, setSettingsTab, mainView, setMainView, openWorkbenchDestination, appearance, setAppearance,
+    settingsTab, setSettingsTab, mainView, setMainView, openWorkbenchDestination, appearance, setAppearance, density, setDensity,
     isExecuting, isStreaming, thinking, budget, activeModel, activeProvider, runtimeConnection, runtimeVersion, runtimeEdition,
     executionAvailable, executionQueue, workbenchReadOnly,
     runProjection, runArtifacts, capabilities, browserSession, controlBrowser,
@@ -8270,7 +8310,8 @@ export default function Home() {
             onComplete={(choice) => {
               window.localStorage.setItem('aiden:first-run:v1', 'complete')
               window.localStorage.removeItem('aiden:first-run:step:v1')
-              if (choice === 'Work with Apps') setMainView('apps')
+              setMainView('chat')
+              setInput(choice)
               setOnboardingDone(true)
             }}
           />

@@ -2,7 +2,10 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import * as aiden from '../lib/aidenClient'
+import { projectStarterActions } from '../lib/workbenchProduct'
 import { ProductButton, StatusBadge } from './ProductUI'
+import { ProductIcon, type ProductIconName } from './ProductIcon'
+import type { WorkbenchSettingsSection } from '../lib/workbenchNavigation'
 
 type StepId = 'welcome' | 'computer' | 'ai' | 'browser' | 'coding' | 'apps' | 'ready'
 
@@ -16,13 +19,6 @@ const STEP_ORDER: Array<{ id: StepId; title: string; readinessId?: string; optio
   { id: 'ready', title: 'Ready' },
 ]
 
-const FIRST_SUCCESS = [
-  'Work on a codebase',
-  'Research using browser',
-  'Work with Apps',
-  'Create something',
-] as const
-
 const STEP_STORAGE_KEY = 'aiden:first-run:step:v1'
 
 export function OnboardingModal({
@@ -31,7 +27,7 @@ export function OnboardingModal({
   onOpenApps,
 }: {
   onComplete: (choice: string) => void
-  onOpenSettings: (tab: 'runtime' | 'model') => void
+  onOpenSettings: (tab: WorkbenchSettingsSection) => void
   onOpenApps: () => void
 }) {
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -61,6 +57,8 @@ export function OnboardingModal({
     [current.readinessId, readiness],
   )
   const complete = readinessItem?.ready ?? readinessItem?.healthy === true
+  const starterActions = useMemo(() => projectStarterActions(readiness?.items ?? []), [readiness])
+  const chatReady = readiness?.items.find((item) => item.id === 'chat-provider')?.ready === true
   const optionalNotConfigured = current.optional === true && !complete
     && ['setup_available', 'needs_setup', 'unavailable'].includes(readinessItem?.state ?? '')
   const next = () => setIndex((value) => Math.min(STEP_ORDER.length - 1, value + 1))
@@ -74,6 +72,20 @@ export function OnboardingModal({
       if (event.key === 'Escape' && index > 0) {
         event.preventDefault()
         back()
+        return
+      }
+      if (event.key === 'Tab' && dialog) {
+        const controls = Array.from(dialog.querySelectorAll<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])'))
+        if (controls.length === 0) return
+        const first = controls[0]
+        const last = controls[controls.length - 1]
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault()
+          last.focus()
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault()
+          first.focus()
+        }
       }
     }
     dialog?.addEventListener('keydown', onKeyDown)
@@ -109,23 +121,27 @@ export function OnboardingModal({
             <p id="onboarding-detail">
               Aiden will check this computer, show what is ready, and explain the next action. Browser, coding, and Apps setup can be skipped.
             </p>
-            <ProductButton variant="primary" onClick={next}>Check this computer →</ProductButton>
+            <ProductButton variant="primary" onClick={next}>Check this computer</ProductButton>
           </div>
         ) : current.id === 'ready' ? (
           <div>
-            <span className="onboarding-icon" aria-hidden="true">✓</span>
+            <span className="onboarding-icon" aria-hidden="true"><ProductIcon name="check" size={20} /></span>
             <h2 id="onboarding-title">{readiness?.overall === 'ready' ? 'Aiden is ready' : 'Setup can continue later'}</h2>
             <p id="onboarding-detail">
               {readiness?.overall === 'ready' ? 'Choose what you want to accomplish first.' : 'Required issues remain visible in Settings → Readiness. Optional capabilities do not block Chat.'}
             </p>
-            <div style={{ display: 'grid', gap: 8, marginTop: 20 }}>
-              {FIRST_SUCCESS.map((choice, choiceIndex) => <ProductButton key={choice} variant={choiceIndex === 0 ? 'primary' : 'secondary'} onClick={() => onComplete(choice)}>{choice}</ProductButton>)}
-            </div>
+            {!chatReady ? <ProductButton variant="primary" onClick={() => onOpenSettings('model')}>Connect AI for Chat</ProductButton> : <div className="onboarding-starters">
+              {starterActions.map((starter, starterIndex) => <button key={starter.id} type="button" onClick={() => {
+                if (starter.available) onComplete(starter.prompt)
+                else if (starter.setup && 'settings' in starter.setup) onOpenSettings(starter.setup.settings)
+                else if (starter.setup && 'view' in starter.setup) onOpenApps()
+              }}><ProductIcon name={starter.id === 'codebase' ? 'code' : starter.id === 'browser' ? 'browser' : starter.id === 'apps' ? 'apps' : 'search'} /><span><strong>{starter.title}</strong><small>{starter.available ? starter.detail : 'Setup required · open setup'}</small></span>{starterIndex === 0 && starter.available ? <span className="onboarding-recommended">Recommended</span> : null}</button>)}
+            </div>}
           </div>
         ) : (
           <div>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'baseline' }}>
-              <div><span className="onboarding-icon" aria-hidden="true">{current.id === 'computer' ? '⌁' : current.id === 'ai' ? '◆' : current.id === 'browser' ? '◎' : current.id === 'coding' ? '</>' : '+'}</span><h2 id="onboarding-title">{current.title}</h2></div>
+              <div><span className="onboarding-icon" aria-hidden="true"><ProductIcon name={({ computer: 'check', ai: 'model', browser: 'browser', coding: 'code', apps: 'apps' } as Record<string, ProductIconName>)[current.id] ?? 'check'} size={18} /></span><h2 id="onboarding-title">{current.title}</h2></div>
               {current.optional ? <span className="onboarding-optional">Optional</span> : null}
             </div>
             {checking ? <p id="onboarding-detail">Checking…</p> : error ? (
@@ -142,8 +158,8 @@ export function OnboardingModal({
               </div>
             ) : <p id="onboarding-detail" className="onboarding-warning">Readiness information is unavailable. Open Settings → Readiness and recheck.</p>}
             <div className="onboarding-actions">
-              <ProductButton variant="ghost" onClick={back}>← Back</ProductButton>
-              <ProductButton variant="secondary" onClick={next}>{complete ? 'Continue →' : current.optional ? 'Skip for now →' : 'Continue and recheck later →'}</ProductButton>
+              <ProductButton variant="ghost" onClick={back}>Back</ProductButton>
+              <ProductButton variant="secondary" onClick={next}>{complete ? 'Continue' : current.optional ? 'Skip for now' : 'Continue and recheck later'}</ProductButton>
             </div>
           </div>
         )}

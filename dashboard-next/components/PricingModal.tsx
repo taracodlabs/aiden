@@ -1,8 +1,8 @@
 'use client'
 
 // ============================================================
-// DevOS — Autonomous AI Execution System
-// Copyright (c) 2026 Shiva Deore. All rights reserved.
+// Aiden — autonomous execution system
+// Copyright (c) 2026 Shiva Deore.
 // ============================================================
 
 // dashboard-next/components/PricingModal.tsx
@@ -207,7 +207,7 @@ export default function PricingModal({ onClose, onActivate, currentStatus }: Pri
         <div style={{ padding: '24px 24px 0', display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
             <div style={{ fontSize: '11px', fontWeight: 700, letterSpacing: '2px', color: '#a78bfa', textTransform: 'uppercase', marginBottom: '4px' }}>
-              DevOS Pro
+              Aiden Pro
             </div>
             <h2 style={{ margin: 0, fontSize: '22px', fontWeight: 700, color: '#f1f5f9' }}>
               Unlock the full AI OS
