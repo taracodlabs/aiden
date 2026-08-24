@@ -12,6 +12,7 @@ const root = path.resolve(__dirname, '../../..');
 const page = fs.readFileSync(path.join(root, 'dashboard-next/app/page.tsx'), 'utf8');
 const styles = fs.readFileSync(path.join(root, 'dashboard-next/app/globals.css'), 'utf8');
 const onboarding = fs.readFileSync(path.join(root, 'dashboard-next/components/OnboardingModal.tsx'), 'utf8');
+const product = fs.readFileSync(path.join(root, 'dashboard-next/lib/workbenchProduct.ts'), 'utf8');
 
 describe('Workbench product-polish source contracts', () => {
   it('uses one reusable button and status component system', () => {
@@ -64,7 +65,9 @@ describe('Workbench product-polish source contracts', () => {
   it('keeps dense Skill inventory searchable, bounded, and source-truthful', () => {
     const skills = page.slice(page.indexOf('function SkillsManager()'), page.indexOf('// ── MCPView'));
     expect(skills).toContain('placeholder="Search Skills"');
-    expect(skills).toContain('skillSourceLabel(');
+    expect(skills).toContain('(capabilities?.skills ?? []).map(projectWorkbenchSkill)');
+    expect(product).toContain('projectWorkbenchSkill');
+    expect(product).toContain("status: 'Needs review'");
     expect(skills).toContain('visible.slice(0, visibleLimit)');
     expect(skills).toContain('Show more');
     expect(skills).not.toContain('(uncredited)');
