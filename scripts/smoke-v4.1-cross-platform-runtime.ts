@@ -24,6 +24,10 @@ for (const k of ['TELEGRAM_BOT_TOKEN', 'AIDEN_TELEGRAM_BOT_TOKEN', 'TELEGRAM_USE
 
 const REPO_ROOT = path.resolve(__dirname, '..');
 const ENTRY     = path.join(REPO_ROOT, 'dist', 'cli', 'v4', 'aidenCLI.js');
+// Doctor can run five independently bounded 3 s probes before filesystem and
+// capability checks. Leave cold Windows runners enough margin without changing
+// any production timeout or the surrounding smoke budget.
+const DOCTOR_SMOKE_TIMEOUT_MS = 30_000;
 
 let pass = 0;
 let fail = 0;
@@ -98,7 +102,7 @@ function stripAnsi(s: string): string {
   );
   const r2 = spawnSync('node', [ENTRY, 'doctor'], {
     encoding: 'utf8',
-    timeout:  20_000,
+    timeout:  DOCTOR_SMOKE_TIMEOUT_MS,
     killSignal: 'SIGKILL',
     env: {
       ...process.env,
