@@ -315,6 +315,25 @@ describe('PromptBuilder', () => {
     expect(idxNudge).toBeGreaterThan(idxClose);
   });
 
+  it('7d. injects only bounded skill metadata, never full skill bodies for every installed skill', async () => {
+    const bodyMarker = 'FULL-SKILL-BODY-SHOULD-REQUIRE-SKILL-VIEW';
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      skillsList: [{
+        name: 'bounded-skill',
+        description: `Routes this task safely. ${bodyMarker}\n# Workflow\n1. private full instructions`,
+      }],
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+
+    expect(out).toContain('- bounded-skill: Routes this task safely');
+    expect(out).not.toContain(bodyMarker);
+    expect(out).not.toContain('# Workflow');
+    expect(out).toContain('`skills_list`');
+  });
+
   it('7c. nudge omitted entirely when no skills supplied', async () => {
     const pb = new PromptBuilder();
     const out = await pb.build({
