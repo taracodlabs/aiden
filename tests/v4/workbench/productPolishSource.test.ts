@@ -85,7 +85,10 @@ describe('Workbench product-polish source contracts', () => {
 
   it('keeps only useful runtime state in the persistent footer', () => {
     const footer = page.slice(page.indexOf('function StatusBar()'), page.indexOf('// ── MemoryView'));
-    expect(footer).toContain('Private and local');
+    expect(footer).not.toContain('Private and local');
+    expect(footer).toContain("runtimeConnection === 'connected' && executionAvailable");
+    expect(footer).toContain('Local workspace');
+    expect(footer).toContain('Model setup required');
     expect(footer).not.toContain('runtimeVersion');
     expect(footer).not.toContain('taracod.com');
   });
