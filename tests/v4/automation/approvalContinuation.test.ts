@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { createActionAuthority, normalizeExecutionPlan } from '../../../core/v4/actionAuthority';
 import {
@@ -43,16 +43,33 @@ const approvalPolicy = {
 
 describe('durable Automation approval continuation', () => {
   const roots: string[] = [];
+  let suiteRoot = '';
+  let templateDbPath = '';
+
+  beforeAll(() => {
+    suiteRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-automation-approval-suite-'));
+    templateDbPath = path.join(suiteRoot, 'template.db');
+    const templateDb = new Database(templateDbPath);
+    try {
+      runMigrations(templateDb);
+    } finally {
+      templateDb.close();
+    }
+  });
+
   afterEach(() => {
     for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
   });
+  afterAll(() => {
+    if (suiteRoot) fs.rmSync(suiteRoot, { recursive: true, force: true });
+  });
 
   function openFixture() {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'aiden-automation-approval-'));
+    const root = fs.mkdtempSync(path.join(suiteRoot, 'case-'));
     roots.push(root);
     const dbPath = path.join(root, 'automation.db');
+    fs.copyFileSync(templateDbPath, dbPath);
     const db = new Database(dbPath);
-    runMigrations(db);
     const now = Date.now();
     db.prepare(`INSERT INTO daemon_instances
       (instance_id,pid,hostname,started_at,last_heartbeat,version)
