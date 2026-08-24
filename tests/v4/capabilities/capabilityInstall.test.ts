@@ -90,6 +90,28 @@ describe('Capability immutable installation and activation', () => {
     expect((await fs.readdir(path.join(root, 'capabilities', '.staging')))).toEqual([]);
   });
 
+  it('keeps POSIX package directories movable while protecting installed file bytes', async () => {
+    const source = await sourcePackage('1.0.0');
+    const installer = new CapabilityInstaller({
+      aidenRoot: root,
+      store: createCapabilityStore(db),
+      aidenVersion: '4.20.0',
+    });
+
+    const installed = await installer.install(source);
+
+    if (process.platform !== 'win32') {
+      const directoryMode = (await fs.stat(installed.record.installPath)).mode & 0o777;
+      const entrypointMode = (await fs.stat(path.join(
+        installed.record.installPath,
+        installed.record.manifest.entrypoint,
+      ))).mode & 0o777;
+      expect(directoryMode & 0o200).toBe(0o200);
+      expect(entrypointMode).toBe(0o444);
+    }
+    expect(await fs.readdir(path.join(root, 'capabilities', '.staging'))).toEqual([]);
+  });
+
   it('is idempotent for exact bytes and rejects same id/version with changed bytes', async () => {
     const source = await sourcePackage('1.0.0');
     const installer = new CapabilityInstaller({ aidenRoot: root, store: createCapabilityStore(db), aidenVersion: '4.20.0' });

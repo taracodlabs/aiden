@@ -113,12 +113,9 @@ async function copyPackage(files: PackageFile[], source: string, target: string)
     await fs.copyFile(file.absolute, destination);
     if (process.platform !== 'win32') await fs.chmod(destination, 0o444);
   }
-  if (process.platform !== 'win32') {
-    const directories = new Set(files.map((file) => path.dirname(path.join(target, ...file.relative.split('/')))));
-    for (const directory of [...directories].sort((left, right) => right.length - left.length)) {
-      await fs.chmod(directory, 0o555).catch(() => undefined);
-    }
-  }
+  // Directories remain owner-writable so the staged tree can be atomically
+  // moved and later removed through the managed lifecycle. Package file bytes
+  // remain read-only and every execution revalidates the immutable digest.
   const sourceRoot = path.resolve(source);
   const targetRoot = path.resolve(target);
   if (sourceRoot === targetRoot) throw new Error('Capability source and target must differ');
