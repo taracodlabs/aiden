@@ -46,6 +46,7 @@ import { AIDEN_UI_BUILD } from './uiBuild';
 export { AIDEN_UI_BUILD };
 import { runSetupWizard, isFreshInstall, setupRequiresRecoveryMode } from './setupWizard';
 import { runDoctorCli } from './doctor';
+import { flushStandardStreams } from './processOutput';
 import { runModelPicker } from './commands/modelPicker';
 import { allCommands } from './commands';
 import { runAppsCli } from './appsCli';
@@ -1195,6 +1196,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       // lingering handle. runDoctorCli already set process.exitCode honestly
       // (0 when healthy, 1 on failure) so scripts/CI can detect a failing
       // doctor. Mirrors the explicit exit trigger/cron/mcp/artifacts use.
+      await flushStandardStreams();
       process.exit();
     });
 
