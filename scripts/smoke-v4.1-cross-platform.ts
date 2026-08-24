@@ -80,13 +80,19 @@ function header(title: string): void {
   }
 
   // A2: shipped tree contains no hardcoded /home/<user>/ or /Users/<user>/.
-  const a2 = spawnSync('git', ['grep', '-lE', '/home/[a-z]|/Users/[a-zA-Z]', '--', 'core', 'cli', 'moat', 'providers', 'tools'], {
+  const a2 = spawnSync('git', ['grep', '-nE', '/home/[a-z]|/Users/[a-zA-Z]', '--', 'core', 'cli', 'moat', 'providers', 'tools'], {
     cwd: REPO_ROOT, encoding: 'utf8',
   });
-  if (!a2.stdout || a2.stdout.trim().length === 0) {
+  const hostUserPathHits = (a2.stdout ?? '')
+    .split(/\r?\n/u)
+    .filter(Boolean)
+    // This is the unprivileged HOME inside the isolated capability
+    // container, never a host filesystem or user-specific path.
+    .filter((line) => !/^core\/v4\/capabilities\/processHost\.ts:\d+:.*\/home\/capability(?:[:'",]|$)/u.test(line));
+  if (hostUserPathHits.length === 0) {
     ok('A2 no hardcoded /home/<user>/ or /Users/<user>/ paths');
   } else {
-    notOk('A2 no hardcoded /home or /Users user paths', a2.stdout.slice(0, 200));
+    notOk('A2 no hardcoded /home or /Users user paths', hostUserPathHits.join('\n').slice(0, 200));
   }
 
   // A3: powershell EXEC/SPAWN calls in shipped tree are all gated

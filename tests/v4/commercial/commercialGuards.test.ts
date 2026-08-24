@@ -1,47 +1,32 @@
-import { describe, expect, it } from 'vitest';
-import { spawnSync } from 'node:child_process';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import { describe, expect, it } from 'vitest';
 
 const root = path.resolve(__dirname, '../../..');
 
-function run(script: string, args: string[] = [], env: NodeJS.ProcessEnv = {}) {
-  return spawnSync(process.execPath, [path.join(root, 'scripts', script), ...args], {
-    cwd: root,
-    env: { ...process.env, ...env },
-    encoding: 'utf8',
-  });
-}
-
-describe('commercial repository guards', () => {
-  it('allows the private commercial origin', () => {
-    const result = run('verify-commercial-remote.mjs', ['origin', 'https://github.com/taracodlabs/aiden-pro.git']);
-    expect(result.status).toBe(0);
-  });
-
-  it('rejects HTTPS and SSH pushes to the public Community repository', () => {
-    for (const url of ['https://github.com/taracodlabs/aiden.git', 'git@github.com:taracodlabs/aiden.git']) {
-      const result = run('verify-commercial-remote.mjs', ['community', url]);
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('push rejected');
-    }
+describe('unified public release boundary', () => {
+  it('keeps the public runtime publishable without disabling the complete edition', () => {
+    const manifest = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8')) as {
+      name?: string;
+      private?: boolean;
+      publishConfig?: { access?: string };
+      aiden?: { edition?: string };
+    };
+    expect(manifest.name).toBe('aiden-runtime');
+    expect(manifest.private).not.toBe(true);
+    expect(manifest.publishConfig?.access).toBe('public');
+    expect(manifest.aiden?.edition).toBe('pro');
   });
 
-  it('requires the exact deliberate Community-maintenance override', () => {
-    const denied = run('verify-commercial-remote.mjs', ['community', 'https://github.com/taracodlabs/aiden.git'], {
-      AIDEN_COMMUNITY_MAINTENANCE_PUSH: 'yes',
-    });
-    expect(denied.status).toBe(1);
-    const allowed = run('verify-commercial-remote.mjs', ['community', 'https://github.com/taracodlabs/aiden.git'], {
-      AIDEN_COMMUNITY_MAINTENANCE_PUSH: 'I_UNDERSTAND_THIS_PUSH_TARGETS_COMMUNITY',
-    });
-    expect(allowed.status).toBe(0);
+  it('does not retain obsolete private-distribution guards', () => {
+    expect(existsSync(path.join(root, 'scripts', 'verify-commercial-publish.mjs'))).toBe(false);
+    expect(existsSync(path.join(root, 'scripts', 'verify-commercial-remote.mjs'))).toBe(false);
+    expect(existsSync(path.join(root, '.githooks', 'pre-push'))).toBe(false);
   });
 
-  it('rejects normal publication from the commercial workspace', () => {
-    const result = run('verify-commercial-publish.mjs');
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('publication rejected');
-    expect(result.stderr).toContain('aiden-runtime');
+  it('keeps private development audit material out of the public tree', () => {
+    const privateDocs = path.join(root, 'docs', 'private');
+    expect(existsSync(privateDocs) ? readdirSync(privateDocs) : []).toEqual([]);
   });
 });
 

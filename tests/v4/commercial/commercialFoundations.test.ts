@@ -54,14 +54,27 @@ function signedClaim(overrides: Partial<EntitlementClaim> = {}): SignedEntitleme
 }
 
 describe('commercial edition authority', () => {
-  it('derives Community or Pro from the installed package manifest', async () => {
+  it('derives the installed edition from explicit package metadata', async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-edition-'));
     roots.push(root);
     const nested = path.join(root, 'dist', 'core', 'v4');
     await fs.mkdir(nested, { recursive: true });
-    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'aiden-runtime', private: true }));
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({
+      name: 'aiden-runtime',
+      private: false,
+      aiden: { edition: 'pro' },
+    }));
     expect(detectProductEdition(nested)).toBe('pro');
-    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({ name: 'aiden-runtime', private: false }));
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({
+      name: 'aiden-runtime',
+      private: true,
+      aiden: { edition: 'community' },
+    }));
+    expect(detectProductEdition(nested)).toBe('community');
+    await fs.writeFile(path.join(root, 'package.json'), JSON.stringify({
+      name: 'aiden-runtime',
+      aiden: { edition: 'unknown' },
+    }));
     expect(detectProductEdition(nested)).toBe('community');
   });
 

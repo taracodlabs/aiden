@@ -63,6 +63,12 @@ afterEach(async () => {
 });
 
 describe('Capability immutable installation and activation', () => {
+  it('keeps digest-bound sample package text byte-stable across checkouts', async () => {
+    const attributes = await fs.readFile(path.resolve('.gitattributes'), 'utf8');
+    expect(attributes).toContain('capabilities/samples/**/*.json text eol=lf');
+    expect(attributes).toContain('capabilities/samples/**/*.js text eol=lf');
+  });
+
   it('stages, verifies and atomically installs one immutable package', async () => {
     const source = await sourcePackage('1.0.0');
     const store = createCapabilityStore(db);

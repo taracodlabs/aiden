@@ -1,3 +1,58 @@
+## v4.21.0 — 2026-08-24
+
+### Unified public runtime
+
+- The current Aiden execution runtime and Premium Workbench v2 now ship
+  together as `aiden-runtime` under AGPL-3.0.
+- `aiden` starts the interactive CLI and `aiden web` starts the browser
+  Workbench from the same installed package.
+- Runtime edition identity is explicit package metadata and no longer depends
+  on npm's private-package flag.
+
+### Durable product capabilities
+
+- Reliable Automations add durable schedules, occurrence identity, overlap
+  control, approval continuation, and restart recovery.
+- Agentic Presence adds bounded observation, durable proposals, feedback, and
+  readiness projection.
+- Evidence-linked Learning records verified scoped sources and injects bounded
+  context.
+- Skill Intelligence adds immutable skill versions, compatibility checks,
+  exact invocation identity, outcome tracking, and management surfaces.
+- The Capability runtime adds permission declarations, immutable package
+  identity, process isolation, recovery, and explicit activation.
+- MCP and A2A add modern protocol negotiation, authentication, reconnects,
+  durable read-only remote tasks, artifact quarantine, and local verification.
+
+### Workbench and execution
+
+- Premium Workbench v2 improves responsive navigation, task admission, live
+  execution, continuity, approvals, files, artifacts, and safe Markdown.
+- Browser Operator, Apps, external coding workflows, Workers, Evidence,
+  Verification, and recovery remain bound to authoritative Job and Attempt
+  identity.
+- Mutations remain approval-gated, stale and late results are fenced, and
+  unknown outcomes remain explicit.
+
+### Runtime support
+
+- Node 20 and Node 22 are supported.
+- Unsupported Node versions are rejected by the dependency-light launcher
+  before native modules load.
+- A2A mutation remains disabled. Some optional isolated Capability validation
+  requires Docker.
+
+### Install
+
+```bash
+npm install -g aiden-runtime@4.21.0
+aiden
+```
+
+Use `aiden web` to open the Workbench.
+
+---
+
 ## v4.19.1 — 2026-08-06
 
 ### Startup and update reliability

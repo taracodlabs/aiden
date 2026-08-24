@@ -10,7 +10,7 @@
 
 Autonomous Work Engine — plans, acts, recovers, and proves the result
 
-76 skills · 121 tools · 19 providers · 9 channels · AGPL-3.0
+Bundled Skills · durable tools · multiple providers · connected channels · AGPL-3.0
 
 Windows · Linux · WSL · macOS (API Mode)
 ```
@@ -23,7 +23,7 @@ Windows · Linux · WSL · macOS (API Mode)
 
 Give Aiden a goal. It can work across your files, terminal, browser, supported applications, APIs, repositories, and connected services to get the job done.
 
-*76 skills · 121 tools · 19 providers · 9 channels · AGPL-3.0*
+*Bundled Skills · durable tools · multiple providers · connected channels · AGPL-3.0*
 
 **Windows · Linux · WSL · macOS API mode**
 
@@ -90,7 +90,7 @@ Give Aiden a goal. It can work across your files, terminal, browser, supported a
 ![OpenAI](https://img.shields.io/badge/OpenAI-GPT-412991?style=flat-square&logo=openai&logoColor=white)
 ![Gemini](https://img.shields.io/badge/Google-Gemini-4285F4?style=flat-square&logo=google&logoColor=white)
 ![Ollama](https://img.shields.io/badge/Ollama-local-000000?style=flat-square&logo=ollama&logoColor=white)
-![+14 more](https://img.shields.io/badge/+14_more-providers-B8A893?style=flat-square)
+![Multiple providers](https://img.shields.io/badge/Multiple-providers-B8A893?style=flat-square)
 
 <!-- Channels -->
 ![Discord channel](https://img.shields.io/badge/Channel-Discord-5865F2?style=flat-square&logo=discord&logoColor=white)
@@ -98,13 +98,13 @@ Give Aiden a goal. It can work across your files, terminal, browser, supported a
 ![Telegram channel](https://img.shields.io/badge/Channel-Telegram-26A5E4?style=flat-square&logo=telegram&logoColor=white)
 ![Email channel](https://img.shields.io/badge/Channel-Email-EA4335?style=flat-square&logo=gmail&logoColor=white)
 ![Webhook channel](https://img.shields.io/badge/Channel-Webhook-FF6B35?style=flat-square)
-![+4 more](https://img.shields.io/badge/+4_more-channels-B8A893?style=flat-square)
+![More channels](https://img.shields.io/badge/More-channels-B8A893?style=flat-square)
 
 <!-- Quality + identity -->
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![Stable](https://img.shields.io/badge/Stable-v4.19.1-4ADE80?style=flat-square)
+![Stable](https://img.shields.io/badge/Stable-v4.21.0-4ADE80?style=flat-square)
 
 </details>
 
@@ -148,7 +148,7 @@ Aiden does not treat a successful command or a model saying “done” as proof.
 - **Let it use real tools.** It can work with files, shell commands, code, browser workflows, APIs, MCP servers, applications, repositories, and channels.
 - **Stay in control.** Risk-tiered approvals, trust levels, budgets, interruption, scoped permissions, leases, and generation fencing keep consequential actions visible.
 - **See what happened.** Jobs, Attempts, Effects, Evidence, tests, artifacts, diagnostics, Verification, Verdicts, and Proof make the work inspectable.
-- **Use the models you prefer.** Choose among 19 providers, subscription-backed sign-in where supported, custom endpoints, or Ollama.
+- **Use the models you prefer.** Choose among multiple providers, subscription-backed sign-in where supported, custom endpoints, or Ollama.
 - **Run it across your setup.** Aiden supports Windows, Linux, WSL, and macOS API mode.
 
 ### What you can use it for
@@ -183,14 +183,20 @@ Research this topic, compare the strongest findings, and save a structured Markd
 > [!IMPORTANT]
 > **Release channels**
 >
-> - **Stable:** `v4.19.1` through npm `latest`
+> - **Stable:** `v4.21.0` through npm `latest`
 > - **Archived RC:** [`v4.19.0-rc.1`](https://github.com/taracodlabs/aiden/releases/tag/v4.19.0-rc.1)
 
-### Stable — v4.19.1
+### Stable — v4.21.0
 
 ```bash
 npm install -g aiden-runtime
 aiden
+```
+
+Open the browser Workbench instead:
+
+```bash
+aiden web
 ```
 
 That’s it. The first launch opens Aiden’s current setup flow, checks the selected connection, and then hands control to the Operator TUI.
@@ -198,7 +204,7 @@ That’s it. The first launch opens Aiden’s current setup flow, checks the sel
 Stable channel:
 
 ```text
-npm latest → 4.19.1
+npm latest → 4.21.0
 ```
 
 Without permanent installation:
@@ -218,7 +224,7 @@ aiden --version
 Expected output:
 
 ```text
-4.19.1
+4.21.0
 ```
 
 Both public commands, `aiden` and `aiden-runtime`, start the same standalone
@@ -447,9 +453,9 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/).
 
 | Category | What Aiden does |
 |---|---|
-| **Inference & providers** | 19 providers: Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama, Nous Portal, custom OpenAI-compatible endpoints, and additional configured routes. OAuth subscription routing for ChatGPT Plus where supported. |
-| **121 built-in tools** | Web search and fetch, deep research, YouTube search, browser automation, file operations, process control, shell execution, code execution, system information, screenshots, clipboard, app launch, media controls, MCP bridge, memory operations, session search and recall, skill management, and self-update workflows. |
-| **76 bundled skills** | Composable workflows with a `SKILL.md`, optional helper scripts, and tool requirements. Includes GitHub workflows, trading tools, security lookups, Windows administration, Docker management, research, and content workflows. |
+| **Inference & providers** | Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama, Nous Portal, custom OpenAI-compatible endpoints, and additional configured routes. OAuth subscription routing for ChatGPT Plus where supported. |
+| **Built-in tools** | Web search and fetch, deep research, YouTube search, browser automation, file operations, process control, shell execution, code execution, system information, screenshots, clipboard, app launch, media controls, MCP bridge, memory operations, session search and recall, skill management, and self-update workflows. |
+| **Bundled skills** | Composable workflows with a `SKILL.md`, optional helper scripts, and tool requirements. Includes GitHub workflows, trading tools, security lookups, Windows administration, Docker management, research, and content workflows. |
 | **v4.18 Codebase Mode** | Durable repository snapshots, conflict-safe file changes, fresh readback, structured TestRun / BuildRun / Diagnostic records, Git Effects, repository understanding, code claims, Evidence, Verification, and execution-graph projection. |
 | **v4.18 Operator TUI** | Semantic activity phases, summary/full activity modes, compact Evidence, responsive borderless multiline input, native terminal scrollback, provider/model identity preservation, and stable draft, queue, activity, approval, and cursor restoration during resize. |
 | **Self-promoting memory** | `USER.md` + `SOUL.md` identity, plus durable and recent-session memory. Sessions end with structured summaries, while semantic recall can retrieve relevant earlier work. |
@@ -509,6 +515,12 @@ npm install -g aiden-runtime
 aiden
 ```
 
+Or launch the Workbench:
+
+```bash
+aiden web
+```
+
 ### Windows
 
 ```powershell
@@ -537,7 +549,7 @@ When an update is available, choose Update, Later, or Skip. You can also use:
 aiden update --check
 aiden update
 aiden update --yes
-aiden update --version 4.19.1
+aiden update --version 4.21.0
 ```
 
 The default channel is npm `latest`. Set `AIDEN_UPDATE_CHANNEL=beta` to follow
@@ -654,7 +666,7 @@ export AIDEN_DEFAULT_MODEL=llama-3.3-70b-versatile
 
 ## Skills
 
-Aiden ships with 76 bundled skills and supports installing more from the community registry.
+Aiden ships with bundled skills and supports installing more from the community registry.
 
 ### What are skills?
 

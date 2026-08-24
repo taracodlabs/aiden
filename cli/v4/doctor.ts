@@ -49,6 +49,7 @@ import {
   type CommercialDoctorContext,
   type ExternalProtocolDoctorContext,
 } from '../../core/v4/commercial/productDoctor';
+import { detectProductEdition } from '../../core/v4/commercial/edition';
 import type { SystemReadinessProjection } from '../../core/v4/workbench/systemReadiness';
 import type { CapabilityDoctorProjection } from '../../core/v4/capabilities/management';
 import type { SkillIntelligenceDoctor } from '../../core/v4/skillIntelligence';
@@ -1546,14 +1547,12 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   // candidate is missing — which would imply a packaging bug worth
   // surfacing rather than masking.
   let installedVersion = '0.0.0';
-  let commercialDevelopment = false;
   for (const rel of ['../../package.json', '../../../package.json']) {
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const pkg = require(rel) as { version: string; private?: boolean };
+      const pkg = require(rel) as { version: string };
       if (pkg && typeof pkg.version === 'string' && pkg.version) {
         installedVersion = pkg.version;
-        commercialDevelopment = pkg.private === true;
         break;
       }
     } catch {
@@ -1592,14 +1591,15 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
   // Phase 20 Task 7: license + update health.
   results.push(await checkLicense({ paths, fetchImpl, timeoutMs }));
   results.push(await checkUpdate({ paths, installedVersion, timeoutMs }));
+  const productEdition = detectProductEdition();
   results.push(...await productDoctorResults({
     paths,
     installedVersion,
     readiness: opts.readinessProjection,
-    commercial: opts.commercial ?? (commercialDevelopment ? {
-      edition: 'pro',
-      entitlementState: 'unavailable',
-      updateChannel: 'pro-preview',
+    commercial: opts.commercial ?? (productEdition !== 'community' ? {
+      edition: productEdition,
+      entitlementState: 'bundled',
+      updateChannel: 'community-stable',
     } : undefined),
     externalProtocols: opts.externalProtocols,
   }));
