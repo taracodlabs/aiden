@@ -101,7 +101,7 @@ import {
   projectCommittedRepositoryChange,
   projectCompletedRepositoryValidation,
 } from './codebase/runtimePlanProjection';
-import { isWithin } from './sandboxFs';
+import { isWithin, realpathWithFallback } from './sandboxFs';
 
 /**
  * Risk profile for a tool. Used by the Phase 9 approval engine to decide
@@ -815,11 +815,15 @@ export class ToolRegistry {
             context.repositoryChange.rootPath,
             priorIntent?.operation,
           );
+          const canonicalRepositoryRoot = realpathWithFallback(context.repositoryChange.rootPath);
           const planBelongsToRepository = !plan || (
-            isWithin(resolvePath(context.repositoryChange.rootPath, plan.path), context.repositoryChange.rootPath)
+            isWithin(
+              realpathWithFallback(resolvePath(canonicalRepositoryRoot, plan.path)),
+              canonicalRepositoryRoot,
+            )
             && (!plan.destinationPath || isWithin(
-              resolvePath(context.repositoryChange.rootPath, plan.destinationPath),
-              context.repositoryChange.rootPath,
+              realpathWithFallback(resolvePath(canonicalRepositoryRoot, plan.destinationPath)),
+              canonicalRepositoryRoot,
             ))
           );
           if (repositoryChangeAutoBound && !planBelongsToRepository) {

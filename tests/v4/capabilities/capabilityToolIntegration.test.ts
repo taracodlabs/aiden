@@ -90,6 +90,7 @@ function setup(
   beforeBroker?: () => void,
   failAfterBroker = false,
   terminalAfterBroker?: 'failed' | 'cancelled' | 'timed_out' | 'protocol_error',
+  workspaceRoot = root,
 ) {
   const processHost = {
     probe: () => ({ available: true, mechanism: 'docker' as const, image: 'test' }),
@@ -121,9 +122,9 @@ function setup(
   const runtime = new CapabilityRuntime({
     store, processHost, canExecute: () => true, integrityVerifier: async () => true,
   });
-  runtime.registerActiveTools({ registry, scopeId: 'workspace_1', ownerId: 'owner_1', workspaceId: 'workspace_1', workspaceRoot: root });
+  runtime.registerActiveTools({ registry, scopeId: 'workspace_1', ownerId: 'owner_1', workspaceId: 'workspace_1', workspaceRoot });
   const execute = registry.buildExecutor({
-    cwd: root,
+    cwd: workspaceRoot,
     paths: resolveAidenPaths({ rootOverride: path.join(root, '.aiden') }),
     actionAuthority: createActionAuthority({ db, jobEngine: engine }),
     approvalEngine: new ApprovalEngine('manual', { promptUser: async () => decision }),
@@ -172,6 +173,37 @@ describe('Capability ToolRegistry integration', () => {
       expect.objectContaining({ source: 'repository.change.readback', verificationResult: 'verified', coverage: 'full' }),
     ]);
     expect(store.listInvocations()[0]).toMatchObject({ state: 'completed', effectRefs: [expect.any(String)], evidenceRefs: [expect.any(String)] });
+  });
+
+  it('preserves source-fenced readback Evidence through a canonical workspace alias', async () => {
+    const alias = `${root}-alias`;
+    await fs.symlink(root, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      const subject = setup('allow', undefined, false, undefined, alias);
+      const active = await job();
+      const target = path.join(root, 'allowed', 'alias-marker.txt');
+      const result = await runWithJobExecutionContext({
+        engine,
+        jobId: active.admitted.jobId,
+        attemptId: active.admitted.attemptId,
+        generation: active.lease.generation!,
+        fenceToken: active.lease.fenceToken!,
+        producer: 'test',
+        workspacePath: alias,
+      }, () => subject.execute({
+        id: 'provider_cap_write_alias',
+        name: capabilityToolName(capabilityIdentity(writeManifest), 'write_marker'),
+        arguments: { path: 'allowed/alias-marker.txt', content: 'alias-marker' },
+      }));
+
+      expect(result.result).toMatchObject({ success: true, output: { written: true } });
+      await expect(fs.readFile(target, 'utf8')).resolves.toBe('alias-marker');
+      expect(engine.proof.listEvidence(active.admitted.jobId)).toEqual([
+        expect.objectContaining({ source: 'repository.change.readback', verificationResult: 'verified' }),
+      ]);
+    } finally {
+      await fs.unlink(alias).catch(() => undefined);
+    }
   });
 
   it('rejects a brokered mutation after fence loss and cannot accept a late success', async () => {
