@@ -5,11 +5,11 @@
 
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import {
   createActionAuthority,
@@ -49,8 +49,6 @@ function open(path: string): Database.Database {
   const db = new Database(path);
   db.pragma('foreign_keys = ON');
   db.pragma('busy_timeout = 100');
-  runMigrations(db);
-  seedInstance(db);
   return db;
 }
 
@@ -89,12 +87,30 @@ function mutatingEffect(target: string, content = 'external result') {
 
 describe('kernel deterministic failure boundaries', () => {
   const directories: string[] = [];
+  let suiteDirectory = '';
+  let templateDatabasePath = '';
   let db: Database.Database | null = null;
 
+  beforeAll(() => {
+    suiteDirectory = mkdtempSync(join(tmpdir(), 'aiden-kernel-failure-suite-'));
+    templateDatabasePath = join(suiteDirectory, 'template.db');
+    const templateDb = new Database(templateDatabasePath);
+    try {
+      templateDb.pragma('foreign_keys = ON');
+      templateDb.pragma('busy_timeout = 100');
+      runMigrations(templateDb);
+      seedInstance(templateDb);
+    } finally {
+      templateDb.close();
+    }
+  });
+
   const databasePath = (): string => {
-    const directory = mkdtempSync(join(tmpdir(), 'aiden-kernel-failure-'));
+    const directory = mkdtempSync(join(suiteDirectory, 'case-'));
     directories.push(directory);
-    return join(directory, 'daemon.db');
+    const path = join(directory, 'daemon.db');
+    copyFileSync(templateDatabasePath, path);
+    return path;
   };
 
   const reopen = (path: string): Database.Database => {
@@ -107,6 +123,10 @@ describe('kernel deterministic failure boundaries', () => {
     try { db?.close(); } catch { /* already closed */ }
     db = null;
     for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
+  });
+
+  afterAll(() => {
+    if (suiteDirectory) rmSync(suiteDirectory, { recursive: true, force: true });
   });
 
   it('boundaries 1-3: admission is atomic and a committed queued Attempt survives reopen before claim', () => {
