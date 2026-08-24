@@ -507,7 +507,8 @@ function formatSkillsSection(
   // teaser. v4.14 — a non-ready skill appends its readiness note so the model
   // knows it must be set up before it can be used.
   const lines = skills.map((s) => {
-    const base = shouldDemoteSkill(s, loadedToolsets) ? `- ${s.name}` : `- ${s.name}: ${s.description}`;
+    const description = narrowSkillDesc(s.description);
+    const base = shouldDemoteSkill(s, loadedToolsets) || !description ? `- ${s.name}` : `- ${s.name}: ${description}`;
     return s.readinessNote ? `${base}  [${s.readinessNote}]` : base;
   });
   return [
