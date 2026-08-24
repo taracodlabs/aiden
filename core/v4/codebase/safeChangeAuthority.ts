@@ -400,16 +400,13 @@ export function createSafeChangeAuthority(deps: Deps, io: SafeChangeIo = {}): Sa
 
   const resolveTarget = (root: string, requested: string): { canonical: string; relative: string } => {
     const lexical = path.resolve(root, requested);
-    if (!isWithin(lexical, root) || lexical === root) {
-      throw new SafeChangeAuthorityError('PATH_OUTSIDE_WORKSPACE', 'Change target is outside the repository workspace');
-    }
     const canonical = realpathWithFallback(lexical);
-    if (!isWithin(canonical, root)) {
+    if (sameCanonicalPath(canonical, root) || !isWithin(canonical, root)) {
       throw new SafeChangeAuthorityError('PATH_OUTSIDE_WORKSPACE', 'Change target resolves outside the repository workspace');
     }
     const sandbox = isPathAllowed(canonical, 'write', root);
     if (!sandbox.allowed) throw new SafeChangeAuthorityError('PATH_NOT_ALLOWED', sandbox.violation?.message ?? 'Path is not allowed');
-    return { canonical, relative: normalizeRelative(path.relative(root, lexical)) };
+    return { canonical, relative: normalizeRelative(path.relative(root, canonical)) };
   };
 
   const failRecord = (
