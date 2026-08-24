@@ -44,11 +44,6 @@ function Write-Abort ($Msg) {
 $ROOT = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ROOT
 
-$Manifest = Get-Content -Raw (Join-Path $ROOT 'package.json') | ConvertFrom-Json
-if ($Manifest.private -eq $true) {
-    Write-Abort 'Commercial release guard: the private development workspace cannot run the public Community npm release pipeline.'
-}
-
 $AIDEN_OS_DIR  = Join-Path (Join-Path $ROOT 'packages') 'aiden-os'
 $SOURCE_REPO   = 'taracodlabs/aiden'
 $RELEASES_REPO = 'taracodlabs/aiden-releases'

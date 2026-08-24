@@ -24,6 +24,7 @@ import { ChatSession } from './chatSession';
 import type { ChatSessionOptions, ChatPromptApi } from './chatSession';
 import type { CommandRegistry } from './commandRegistry';
 import { buildToolPreview, summarizeToolArguments } from './toolPreview';
+import { VERSION } from '../../core/version';
 
 export interface TuiOptions {
   /** Pre-built ChatSessionOptions (same shape Phase 14c hands ChatSession). */
@@ -149,7 +150,7 @@ export class AidenTUI {
 
     this.screen = blessed.screen({
       smartCSR: true,
-      title: 'Aiden v4.0.0',
+      title: `Aiden v${VERSION}`,
       mouse: true,
       cursor: { artificial: true, blink: true, shape: 'line' },
       fullUnicode: true,
@@ -271,7 +272,7 @@ export class AidenTUI {
       // Direct methods the chat engine calls.
       printBanner: () => {
         // Banner replaced with chrome — the box border IS the chrome.
-        append('{#ff6b35-fg}Aiden v4.0.0 — TUI mode{/}');
+        append(`{#ff6b35-fg}Aiden v${VERSION} — TUI mode{/}`);
       },
       info: (msg: string) => append(`{cyan-fg}› ${msg}{/cyan-fg}`),
       success: (msg: string) => append(`{green-fg}✓ ${msg}{/green-fg}`),

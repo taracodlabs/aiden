@@ -5,6 +5,7 @@ import {
   isTuiInitFailure,
   type TuiOptions,
 } from '../../../cli/v4/aidenTUI';
+import { VERSION } from '../../../core/version';
 
 // ───────────────────────────────────────────────────────────────────
 // blessed mock — captures construction args, exposes destroy hooks,
@@ -177,6 +178,15 @@ describe('AidenTUI', () => {
     // via captured factory closure. Since our fake stores in .screen array
     // is internal, rely on the constructor not throwing as primary signal.
     expect(screens === null || true).toBe(true);
+  });
+
+  it('uses the authoritative runtime version in user-visible TUI identity', () => {
+    const opts = makeOpts();
+    const tui = new AidenTUI(opts);
+    expect(tui.screen.config.title).toBe(`Aiden v${VERSION}`);
+    const display = (tui as any).session.opts.display;
+    display.printBanner();
+    expect(tui.historyBox.logged).toContain(`{#ff6b35-fg}Aiden v${VERSION} — TUI mode{/}`);
   });
 
   it('builds historyBox, statusLine, inputBox', () => {

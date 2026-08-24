@@ -8,6 +8,8 @@ import { dirname, join } from 'node:path';
 
 export type ProductEdition = 'community' | 'pro' | 'team' | 'enterprise';
 
+const PRODUCT_EDITIONS: readonly ProductEdition[] = ['community', 'pro', 'team', 'enterprise'];
+
 export const COMMERCIAL_CAPABILITIES = [
   'automation.create',
   'automation.unlimited',
@@ -73,8 +75,16 @@ export function detectProductEdition(startDirectory: string = __dirname): Produc
     const manifest = join(directory, 'package.json');
     if (existsSync(manifest)) {
       try {
-        const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as { name?: string; private?: boolean };
-        if (parsed.name === 'aiden-runtime') return parsed.private === true ? 'pro' : 'community';
+        const parsed = JSON.parse(readFileSync(manifest, 'utf8')) as {
+          name?: string;
+          aiden?: { edition?: unknown };
+        };
+        if (parsed.name === 'aiden-runtime') {
+          const edition = parsed.aiden?.edition;
+          return typeof edition === 'string' && PRODUCT_EDITIONS.includes(edition as ProductEdition)
+            ? edition as ProductEdition
+            : 'community';
+        }
       } catch {
         // Keep walking until the installed Aiden manifest is found.
       }

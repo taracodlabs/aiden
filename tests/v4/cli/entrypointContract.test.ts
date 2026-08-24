@@ -29,6 +29,17 @@ describe('CLI entrypoint contract', () => {
     expect(manifest.files).not.toContain('release-notes-v4.16.0.md');
   });
 
+  it('routes interactive CLI and Workbench through the same installed launcher', () => {
+    const bootstrap = readFileSync(path.join(root, 'bin', 'aiden-bootstrap.cjs'), 'utf8');
+    const cli = readFileSync(path.join(root, 'cli', 'v4', 'aidenCLI.ts'), 'utf8');
+    expect(bootstrap).toContain("const REAL_CLI = path.join('dist', 'cli', 'v4', 'aidenCLI.js')");
+    expect(bootstrap).toContain('SUPPORTED_NODE_MAJORS = Object.freeze([20, 22])');
+    expect(cli).toContain(".command('web')");
+    expect(cli).toContain(".alias('workbench')");
+    expect(cli).toContain('await startWorkbenchBridge({');
+    expect(cli).toContain('await executionHost.stop()');
+  });
+
   it('answers desktop/API client version and help without a server', () => {
     expect(resolveDesktopApiClientLocalCommand(['--version'], '4.19.0')).toBe('4.19.0\n');
     expect(resolveDesktopApiClientLocalCommand(['-v'], '4.19.0')).toBe('4.19.0\n');

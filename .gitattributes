@@ -1,0 +1,2 @@
+capabilities/samples/**/*.json text eol=lf
+capabilities/samples/**/*.js text eol=lf
