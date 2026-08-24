@@ -1,13 +1,22 @@
 export type WorkbenchDestination =
   | { view: 'apps'; settings?: never }
-  | { settings: 'runtime' | 'model'; view?: never }
+  | { settings: WorkbenchSettingsSection; view?: never }
   | Record<string, never>
+
+export type WorkbenchSettingsSection =
+  | 'runtime' | 'model' | 'coding' | 'appearance' | 'skills' | 'capabilities'
+  | 'apps' | 'automations' | 'updates' | 'support' | 'about' | 'privacy' | 'legal'
+
+const SETTINGS_SECTIONS = new Set<WorkbenchSettingsSection>([
+  'runtime', 'model', 'coding', 'appearance', 'skills', 'capabilities',
+  'apps', 'automations', 'updates', 'support', 'about', 'privacy', 'legal',
+])
 
 export function parseWorkbenchDestination(search: string): WorkbenchDestination {
   const params = new URLSearchParams(search)
   if (params.get('view') === 'apps') return { view: 'apps' }
   const settings = params.get('settings')
-  if (settings === 'runtime' || settings === 'model') return { settings }
+  if (settings && SETTINGS_SECTIONS.has(settings as WorkbenchSettingsSection)) return { settings: settings as WorkbenchSettingsSection }
   return {}
 }
 

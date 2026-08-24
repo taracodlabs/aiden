@@ -1,6 +1,6 @@
 // ============================================================
-// DevOS — Autonomous AI Execution System
-// Copyright (c) 2026 Shiva Deore. All rights reserved.
+// Aiden — autonomous execution system
+// Copyright (c) 2026 Shiva Deore.
 // ============================================================
 
 // dashboard-next/lib/theme.ts — Phase 1 of Prompt 9.
