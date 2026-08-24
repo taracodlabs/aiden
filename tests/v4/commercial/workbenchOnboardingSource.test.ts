@@ -5,6 +5,7 @@ import path from 'node:path';
 describe('commercial Workbench onboarding source contract', () => {
   const component = readFileSync(path.resolve(__dirname, '../../../dashboard-next/components/OnboardingModal.tsx'), 'utf8');
   const page = readFileSync(path.resolve(__dirname, '../../../dashboard-next/app/page.tsx'), 'utf8');
+  const product = readFileSync(path.resolve(__dirname, '../../../dashboard-next/lib/workbenchProduct.ts'), 'utf8');
   const bridge = readFileSync(path.resolve(__dirname, '../../../core/v4/workbench/bridgeServer.ts'), 'utf8');
 
   it('uses the existing Workbench readiness endpoint rather than a second readiness implementation', () => {
@@ -17,8 +18,9 @@ describe('commercial Workbench onboarding source contract', () => {
     expect(component).toContain("{ id: 'browser', title: 'Browser access', readinessId: 'browser', optional: true }");
     expect(component).toContain("{ id: 'coding', title: 'Coding setup', readinessId: 'coding-provider', optional: true }");
     expect(component).toContain("{ id: 'apps', title: 'Apps', readinessId: 'apps', optional: true }");
-    expect(component).toContain('Work on a codebase');
-    expect(component).toContain('Research using browser');
+    expect(component).toContain('projectStarterActions(readiness?.items ?? [])');
+    expect(product).toContain("title: 'Work on a codebase'");
+    expect(product).toContain("title: 'Use my browser'");
   });
 
   it('shows actionable recovery and persists only a local completion marker', () => {
@@ -38,6 +40,7 @@ describe('commercial Workbench onboarding source contract', () => {
   it('renders the authoritative runtime edition in Workbench chrome', () => {
     expect(page).toContain('runtimeEdition');
     expect(page).toContain("runtimeEdition === 'community' ? 'Community'");
+    expect(page).not.toContain('>Aiden Pro</div>');
     expect(bridge).toContain("edition: runtime.edition ?? 'community'");
   });
 });

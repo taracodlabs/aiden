@@ -36,11 +36,12 @@ describe('Workbench external protocol product surface', () => {
 
   it('mounts the external protocol projection on a reachable Workbench settings surface', async () => {
     const page = await fs.readFile(path.resolve(__dirname, '../../../dashboard-next/app/page.tsx'), 'utf8');
-    const pluginsSurface = page.match(
-      /\{settingsTab === 'plugins'[\s\S]*?<SettingsSection title="Plugins">([\s\S]*?)<\/SettingsSection>/,
+    const capabilitiesSurface = page.match(
+      /\{settingsTab === 'capabilities'[\s\S]*?<SettingsSection title="Capabilities">([\s\S]*?)<\/SettingsSection>/,
     )?.[1] ?? '';
 
-    expect(pluginsSurface).toContain('<PluginsList />');
-    expect(pluginsSurface).toContain('<MCPView />');
+    expect(capabilitiesSurface).toContain('<PluginsList />');
+    expect(capabilitiesSurface).toContain('<MCPView />');
+    expect(capabilitiesSurface).toContain('Advanced protocols and extensions');
   });
 });

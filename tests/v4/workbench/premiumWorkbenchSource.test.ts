@@ -13,6 +13,7 @@ const page = fs.readFileSync(path.join(root, 'dashboard-next/app/page.tsx'), 'ut
 const styles = fs.readFileSync(path.join(root, 'dashboard-next/app/globals.css'), 'utf8');
 const layout = fs.readFileSync(path.join(root, 'dashboard-next/app/layout.tsx'), 'utf8');
 const assets = fs.readFileSync(path.join(root, 'dashboard-next/scripts/copy-standalone-assets.js'), 'utf8');
+const product = fs.readFileSync(path.join(root, 'dashboard-next/lib/workbenchProduct.ts'), 'utf8');
 
 describe('premium Workbench source contracts', () => {
   it('keeps browser identity and copies the existing Aiden icon into the production dashboard', () => {
@@ -71,11 +72,13 @@ describe('premium Workbench source contracts', () => {
 
   it('gives artifact opening immediate, accessible feedback on every Workbench surface', () => {
     const card = page.slice(page.indexOf('function ArtifactCard('), page.indexOf('function ArtifactsView()'));
-    expect(card).toContain('const [opening, setOpening] = useState(false)');
-    expect(card).toContain('aria-expanded={preview !== null}');
-    expect(card).toContain('aria-busy={opening}');
-    expect(card).toContain("opening ? 'Opening…' : preview ? 'Close' : 'Open'");
-    expect(card).toContain('setOpening(false)');
+    const drawer = page.slice(page.indexOf('function ArtifactPreviewDrawer('), page.indexOf('function ArtifactCard('));
+    expect(card).toContain('onClick={onPreview}');
+    expect(card).toContain('<span>Preview</span>');
+    expect(drawer).toContain('const [opening, setOpening] = useState(true)');
+    expect(drawer).toContain('aria-busy={opening}');
+    expect(drawer).toContain('Opening file');
+    expect(drawer).toContain('setOpening(false)');
   });
 
   it('removes settled execution telemetry from Chat while retaining artifacts', () => {
@@ -113,12 +116,13 @@ describe('premium Workbench source contracts', () => {
   });
 
   it('persists Dark or System appearance without moving it into runtime authority', () => {
-    expect(page).toContain("type WorkbenchAppearance = 'dark' | 'system'");
+    expect(product).toContain("export type WorkbenchAppearance = 'system' | 'light' | 'dark' | 'midnight' | 'warm'");
     expect(page).toContain("aiden.workbench.appearance.v1");
     expect(page).toContain("document.documentElement.dataset.appearance = appearance");
     expect(page).toContain("settingsTab === 'appearance'");
-    expect(page).toContain("setAppearance('dark')");
-    expect(page).toContain("setAppearance('system')");
+    expect(page).toContain('setAppearance(option.id)');
+    expect(product).toContain("{ id: 'dark'");
+    expect(product).toContain("{ id: 'system'");
   });
 
   it('provides a compact runtime-truthful model control and navigation surfaces', () => {
@@ -135,16 +139,17 @@ describe('premium Workbench source contracts', () => {
     for (const hiddenLabel of ['>Skills<', '>Plugins<', '>Sponsors<', '>Activity<']) {
       expect(navigation).not.toContain(hiddenLabel);
     }
-    expect(page).toContain("section: 'Advanced'");
+    expect(page).toContain("section: 'Tools & connections'");
+    expect(page).toContain("section: 'About'");
     expect(page).toContain('settings-section-label');
   });
 
   it('uses an outcome-first home and editorial conversation surface', () => {
     expect(page).toContain('What should Aiden take care of?');
-    expect(page).toContain('Private computer work, with proof.');
+    expect(page).toContain('Describe the outcome you want. Aiden will show the work, ask before sensitive actions, and preserve the evidence.');
     expect(page).toContain('className="starter-workflows"');
     for (const workflow of ['Work on a codebase', 'Research and deliver', 'Use my browser', 'Work with my Apps']) {
-      expect(page).toContain(workflow);
+      expect(product).toContain(workflow);
     }
     expect(page).toContain('className="conversation-column"');
     expect(page).toContain('className="workbench-composer"');
@@ -188,12 +193,12 @@ describe('premium Workbench source contracts', () => {
   it('projects external coding health without moving credentials into browser state', () => {
     const settings = page.slice(page.indexOf('function SettingsDrawer()'), page.indexOf('// ── Main component'));
     expect(settings).toContain('aiden.loadExternalCodingHealth()');
-    expect(settings).toContain('External Coding');
+    expect(settings).toContain('Coding model');
     expect(settings).toContain('Authentication:');
     expect(settings).toContain('Isolation:');
-    expect(settings).toContain('Network: Disabled by default');
+    expect(settings).toContain('Network is disabled by default.');
     expect(settings).toContain('aiden.configureExternalCoding(model)');
-    expect(settings).toContain('Validate and save model');
+    expect(settings).toContain('Choose coding model');
     expect(settings).not.toContain('AIDEN_CODING_OPENAI_API_KEY');
     expect(settings).not.toContain('auth.json');
   });
@@ -213,14 +218,14 @@ describe('premium Workbench source contracts', () => {
     expect(apps).not.toContain('secretHandle');
     expect(apps).toContain('new FormData(form)');
     expect(apps).toContain('type="password"');
-    expect(apps).toContain('never retained by the browser');
+    expect(apps).toContain('The browser does not retain it.');
     expect(apps).not.toContain('Account label');
     expect(apps).not.toContain('accountLabels');
     expect(apps).toContain('projectRecommendedApps(snapshot)');
     expect(apps).toContain('Connect GitHub');
     expect(apps).toContain('Connect Gmail');
     expect(apps).toContain('More apps');
-    expect(apps).toContain('Provider status');
+    expect(apps).toContain('Advanced service details');
     expect(apps).toContain('Add another account');
   });
 

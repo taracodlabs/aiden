@@ -31,6 +31,15 @@ describe('Workbench product deep links', () => {
     expect(cleared).not.toContain('settings=');
   });
 
+  it('deep-links every customer-facing settings section without disturbing run identity', () => {
+    const settings = ['runtime', 'model', 'coding', 'appearance', 'skills', 'capabilities', 'apps', 'automations', 'updates', 'support', 'about', 'privacy', 'legal'] as const;
+    for (const tab of settings) {
+      const url = applyWorkbenchDestination('http://127.0.0.1:4280/?job=job-1&run=7', { settings: tab });
+      expect(parseWorkbenchDestination(new URL(url).search)).toEqual({ settings: tab });
+      expect(url).toContain('job=job-1');
+    }
+  });
+
   it('preserves an explicit Apps or Settings destination while runtime identity reconciles', () => {
     const apps = applyWorkbenchSelection(
       'http://127.0.0.1:4280/?view=apps',
