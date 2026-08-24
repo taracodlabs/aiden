@@ -59,4 +59,30 @@ describe('Workbench reliable automation port', () => {
     ).get(created.automationId) as { spec_json: string };
     expect(JSON.parse(row.spec_json)).toMatchObject({ workspace: { rootPath: process.cwd() } });
   });
+
+  it('edits through a new immutable revision while preserving the automation identity', () => {
+    const port = createWorkbenchAutomationPort({
+      db, triggerBus: createTriggerBus({ db }), edition: buildEditionAuthority('pro'),
+      workspaceRoot: process.cwd(),
+    });
+    const created = port.create({
+      name: 'Morning brief', createdBy: 'test',
+      action: { kind: 'prompt', prompt: 'Original prompt' },
+      trigger: { kind: 'schedule', expression: '0 9 * * *', timezone: 'UTC' },
+      policies: { misfire: { kind: 'run_once' }, overlap: 'queue', retry: { maxAttempts: 2 } },
+      capabilities: ['repository.read'], credentialRefs: [],
+    });
+
+    const revised = port.revise(created.automationId, {
+      createdBy: 'workbench', action: { kind: 'prompt', prompt: 'Updated prompt' },
+      trigger: { kind: 'schedule', expression: '0 10 * * *', timezone: 'Europe/Tallinn' },
+      policies: { misfire: { kind: 'skip' }, overlap: 'skip', retry: { maxAttempts: 2 } },
+      capabilities: ['repository.read'], credentialRefs: [],
+    });
+
+    expect(revised).toMatchObject({ automationId: created.automationId, revisionNumber: 2 });
+    expect(revised.revisionId).not.toBe(created.revisionId);
+    expect(revised.action).toEqual({ kind: 'prompt', prompt: 'Updated prompt' });
+    expect(db.prepare('SELECT COUNT(*) AS count FROM automation_revisions WHERE automation_id = ?').get(created.automationId)).toEqual({ count: 2 });
+  });
 });

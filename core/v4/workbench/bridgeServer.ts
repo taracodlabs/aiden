@@ -612,6 +612,10 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
     if (req.method === 'POST' && url.pathname === '/api/automations/preview') {
       handleAutomationPreview(req, res); return;
     }
+    const automationEditMatch = url.pathname.match(/^\/api\/automations\/([^/]+)$/);
+    if (req.method === 'PUT' && automationEditMatch) {
+      handleAutomationEdit(req, res, automationEditMatch[1]); return;
+    }
     const automationActionMatch = url.pathname.match(/^\/api\/automations\/([^/]+)\/(run|enable|disable)$/);
     if (req.method === 'POST' && automationActionMatch) {
       handleAutomationAction(req, res, automationActionMatch[1], automationActionMatch[2] as 'run' | 'enable' | 'disable'); return;
@@ -1128,7 +1132,7 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
 
     sendJson(res, 404, {
       error: 'not found',
-    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/presence', 'GET /api/learning', 'GET /api/learning/export', 'GET /api/learning/:id', 'GET /api/skill-intelligence', 'GET /api/skill-intelligence/candidates/:id', 'GET /api/presence/proposals', 'GET /api/presence/preferences', 'GET /api/presence/briefing', 'GET /api/presence/:id/explain', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay', 'POST /api/presence/preferences', 'POST /api/presence/:id/snooze', 'POST /api/presence/:id/dismiss', 'POST /api/presence/:id/feedback', 'POST /api/presence/:id/proposals', 'POST /api/presence/proposals/:id/accept', 'POST /api/learning/remember', 'POST /api/learning/:id/edit', 'POST /api/learning/:id/rollback', 'POST /api/learning/:id/demote', 'POST /api/learning/:id/archive', 'POST /api/learning/:id/delete', 'POST /api/learning/rebuild', 'POST /api/skill-intelligence/candidates/:id/dismiss', 'POST /api/skill-intelligence/drafts', 'POST /api/skill-intelligence/drafts/:id/edit', 'POST /api/skill-intelligence/drafts/:id/evaluate', 'POST /api/skill-intelligence/drafts/:id/approval', 'POST /api/skill-intelligence/approvals/:id/decision', 'POST /api/skill-intelligence/approvals/:id/activate', 'POST /api/skill-intelligence/skills/:id/disable', 'POST /api/skill-intelligence/skills/:id/rollback'],
+    endpoints: ['GET /', 'GET /plain', 'GET /api/health', 'GET /api/workbench/bootstrap', 'GET /api/workbench/capabilities', 'GET /api/workbench/readiness', 'GET /api/providers', 'GET /api/apps', 'GET /api/automations', 'GET /api/presence', 'GET /api/learning', 'GET /api/learning/export', 'GET /api/learning/:id', 'GET /api/skill-intelligence', 'GET /api/skill-intelligence/candidates/:id', 'GET /api/presence/proposals', 'GET /api/presence/preferences', 'GET /api/presence/briefing', 'GET /api/presence/:id/explain', 'GET /api/browser/setup', 'GET /api/sessions', 'GET /api/events', 'GET /api/runs/:runId/events', 'GET /api/sessions/:sessionId/events', 'GET /api/jobs/:jobId/projection', 'GET /api/jobs/:jobId/live-execution', 'GET /api/jobs/:jobId/coding', 'GET /api/coding/promotions/:promotionId/review', 'GET /api/jobs/:jobId/continuity', 'GET /api/artifacts', 'GET /api/artifacts/:artifactId/content', 'GET /api/workspaces/:workspaceId/continuity', 'GET /api/checkpoints/:checkpointId', 'POST /api/tasks', 'POST /api/attachments', 'POST /api/tasks/:runId/cancel', 'POST /api/tasks/:runId/input', 'POST /api/tasks/:runId/pause', 'POST /api/tasks/:runId/resume', 'POST /api/approvals/:approvalId/decision', 'POST /api/coding/configure', 'POST /api/coding/promotions/:promotionId/apply', 'POST /api/coding/promotions/:promotionId/discard', 'POST /api/coding/sessions/:codingSessionId/discard', 'POST /api/checkpoints/:checkpointId/continue', 'POST /api/providers/:id/connect', 'POST /api/providers/:id/test', 'POST /api/providers/model/session', 'POST /api/providers/model/default', 'POST /api/apps/providers/:id/configure', 'POST /api/apps/connect', 'POST /api/automations', 'PUT /api/automations/:id', 'POST /api/automations/preview', 'POST /api/automations/:id/run', 'POST /api/automations/:id/enable', 'POST /api/automations/:id/disable', 'POST /api/automation-occurrences/:id/replay', 'POST /api/presence/preferences', 'POST /api/presence/:id/snooze', 'POST /api/presence/:id/dismiss', 'POST /api/presence/:id/feedback', 'POST /api/presence/:id/proposals', 'POST /api/presence/proposals/:id/accept', 'POST /api/learning/remember', 'POST /api/learning/:id/edit', 'POST /api/learning/:id/rollback', 'POST /api/learning/:id/demote', 'POST /api/learning/:id/archive', 'POST /api/learning/:id/delete', 'POST /api/learning/rebuild', 'POST /api/skill-intelligence/candidates/:id/dismiss', 'POST /api/skill-intelligence/drafts', 'POST /api/skill-intelligence/drafts/:id/edit', 'POST /api/skill-intelligence/drafts/:id/evaluate', 'POST /api/skill-intelligence/drafts/:id/approval', 'POST /api/skill-intelligence/approvals/:id/decision', 'POST /api/skill-intelligence/approvals/:id/activate', 'POST /api/skill-intelligence/skills/:id/disable', 'POST /api/skill-intelligence/skills/:id/rollback'],
     });
   });
 
@@ -1599,6 +1603,29 @@ export function startWorkbenchBridge(opts: WorkbenchBridgeOptions): Promise<Work
           createdBy: 'workbench',
         });
         sendJson(res, 201, result);
+      } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
+    }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
+  }
+
+  function handleAutomationEdit(req: http.IncomingMessage, res: http.ServerResponse, rawId: string): void {
+    if (!passesWriteGate(req, res)) return;
+    if (!opts.automations) { sendJson(res, 503, { error: 'Automations are unavailable' }); return; }
+    readJsonBody(req, 64 * 1024).then((body) => {
+      if (!body.action || !body.trigger || !body.policies) {
+        sendJson(res, 400, { error: 'action, trigger and policies are required' }); return;
+      }
+      try {
+        sendJson(res, 200, opts.automations!.revise(decodeURIComponent(rawId), {
+          action: body.action as never,
+          trigger: body.trigger as never,
+          policies: body.policies as never,
+          capabilities: Array.isArray(body.capabilities) ? body.capabilities.filter((value): value is string => typeof value === 'string') : [],
+          credentialRefs: Array.isArray(body.credentialRefs) ? body.credentialRefs.filter((value): value is string => typeof value === 'string') : [],
+          ...(body.budget && typeof body.budget === 'object' && !Array.isArray(body.budget) ? { budget: body.budget as never } : {}),
+          ...(body.approval && typeof body.approval === 'object' && !Array.isArray(body.approval) ? { approval: body.approval as never } : {}),
+          ...(body.delivery && typeof body.delivery === 'object' && !Array.isArray(body.delivery) ? { delivery: body.delivery as never } : {}),
+          createdBy: 'workbench',
+        }));
       } catch (error) { sendJson(res, 400, { error: managementError(error) }); }
     }).catch(() => sendJson(res, 400, { error: 'invalid JSON body' }));
   }

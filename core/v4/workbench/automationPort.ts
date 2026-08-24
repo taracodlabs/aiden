@@ -18,7 +18,10 @@ export interface WorkbenchAutomationSummary {
   enabled: boolean;
   revisionId: string;
   revisionNumber: number;
+  action: AutomationRevisionSpec['action'];
   trigger: AutomationRevisionSpec['trigger'];
+  policies: AutomationRevisionSpec['policies'];
+  capabilities: readonly string[];
   nextFireAt: string | null;
   lastOccurrence: { occurrenceId: string; state: string; jobId: string | null; createdAt: number } | null;
 }
@@ -53,6 +56,7 @@ export interface WorkbenchAutomationOccurrence {
 export interface WorkbenchAutomationPort {
   snapshot(): WorkbenchAutomationSnapshot;
   create(input: AutomationRevisionSpec & { name: string; createdBy: string }): WorkbenchAutomationSummary;
+  revise(automationId: string, input: Omit<AutomationRevisionSpec, 'workspace'> & { createdBy: string }): WorkbenchAutomationSummary;
   setEnabled(automationId: string, enabled: boolean): WorkbenchAutomationSummary;
   runNow(automationId: string): { triggerEventId: number };
   replay(occurrenceId: string): { triggerEventId: number };
@@ -95,7 +99,8 @@ export function createWorkbenchAutomationPort(options: {
     return {
       automationId: row.automation_id, name: row.name, enabled: row.enabled === 1,
       revisionId: row.current_revision_id, revisionNumber: row.revision_number,
-      trigger: spec.trigger, nextFireAt: row.next_fire_at,
+      action: spec.action, trigger: spec.trigger, policies: spec.policies,
+      capabilities: [...spec.capabilities], nextFireAt: row.next_fire_at,
       lastOccurrence: occurrence ? {
         occurrenceId: occurrence.occurrence_id, state: occurrence.state,
         jobId: occurrence.job_id, createdAt: occurrence.created_at,
@@ -158,6 +163,15 @@ export function createWorkbenchAutomationPort(options: {
         commercialContext: 'pro',
       });
       return project(created.definition.id);
+    },
+    revise(automationId, input) {
+      requireCapability();
+      const { createdBy, ...spec } = input;
+      authority.revise(automationId, {
+        ...spec,
+        workspace: { rootPath: options.workspaceRoot ?? process.cwd() },
+      }, { createdBy });
+      return project(automationId);
     },
     setEnabled(automationId, enabled) {
       requireCapability(); authority.setEnabled(automationId, enabled); return project(automationId);

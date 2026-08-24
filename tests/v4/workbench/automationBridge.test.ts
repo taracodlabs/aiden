@@ -22,8 +22,15 @@ function stub(): WorkbenchAutomationPort {
     })),
     create: vi.fn((input) => ({
       automationId: 'automation-1', name: input.name, enabled: true,
-      revisionId: 'revision-1', revisionNumber: 1, trigger: input.trigger,
+      revisionId: 'revision-1', revisionNumber: 1, action: input.action, trigger: input.trigger,
+      policies: input.policies, capabilities: input.capabilities,
       nextFireAt: '2026-08-22T03:30:00.000Z', lastOccurrence: null,
+    })),
+    revise: vi.fn((automationId, input) => ({
+      automationId, name: 'Daily', enabled: true,
+      revisionId: 'revision-2', revisionNumber: 2, action: input.action, trigger: input.trigger,
+      policies: input.policies, capabilities: input.capabilities,
+      nextFireAt: '2026-08-22T04:30:00.000Z', lastOccurrence: null,
     })),
     setEnabled: vi.fn(), runNow: vi.fn(() => ({ triggerEventId: 42 })),
     replay: vi.fn(() => ({ triggerEventId: 43 })),
@@ -75,5 +82,23 @@ describe('Workbench Automations bridge', () => {
     await request('/api/automation-occurrences/occurrence-1/replay', { method: 'POST', headers });
     expect(automations.setEnabled).toHaveBeenCalledWith('automation-1', false);
     expect(automations.replay).toHaveBeenCalledWith('occurrence-1');
+  });
+
+  it('revises an automation through the token-gated immutable revision authority', async () => {
+    const automations = stub();
+    bridge = await startWorkbenchBridge({ reader, automations, token: TOKEN, port: 0 });
+    const response = await request('/api/automations/automation-1', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'x-workbench-token': TOKEN },
+      body: JSON.stringify({
+        action: { kind: 'prompt', prompt: 'Updated brief' },
+        trigger: { kind: 'schedule', expression: '0 10 * * *', timezone: 'Europe/Tallinn' },
+        policies: { misfire: { kind: 'skip' }, overlap: 'skip', retry: { maxAttempts: 2 } },
+        capabilities: ['repository.read'], credentialRefs: [],
+      }),
+    });
+    expect(response.status).toBe(200);
+    expect(automations.revise).toHaveBeenCalledWith('automation-1', expect.objectContaining({
+      createdBy: 'workbench', action: { kind: 'prompt', prompt: 'Updated brief' },
+    }));
   });
 });

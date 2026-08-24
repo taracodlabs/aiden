@@ -461,7 +461,14 @@ export interface WorkbenchAutomationSummary {
   enabled: boolean;
   revisionId: string;
   revisionNumber: number;
+  action: { kind: string; prompt?: string };
   trigger: { kind: string; expression?: string; timezone?: string };
+  policies: {
+    misfire: { kind: string; maxOccurrences?: number; maxAgeMs?: number };
+    overlap: 'queue' | 'skip' | 'cancel_previous';
+    retry: { maxAttempts: number };
+  };
+  capabilities: string[];
   nextFireAt: string | null;
   lastOccurrence: { occurrenceId: string; state: string; jobId: string | null; createdAt: number } | null;
 }
@@ -1407,6 +1414,32 @@ export function createAutomation(input: {
     method: 'POST',
     body: JSON.stringify({
       name: input.name,
+      action: { kind: 'prompt', prompt: input.prompt },
+      trigger: { kind: 'schedule', expression: input.expression, timezone: input.timezone },
+      policies: {
+        misfire: input.misfire === 'catch_up'
+          ? { kind: 'catch_up', maxOccurrences: 3, maxAgeMs: 86400000 }
+          : { kind: input.misfire, maxAgeMs: input.misfire === 'run_once' ? 86400000 : undefined },
+        overlap: input.overlap,
+        retry: { maxAttempts: 2 },
+      },
+      capabilities: input.allowWrite ? ['repository.read', 'repository.write'] : ['repository.read'],
+      credentialRefs: [],
+      budget: { runtimeMs: 300000, modelCalls: 8, toolCalls: 40, effects: input.allowWrite ? 10 : 0 },
+      approval: { mode: 'policy' },
+    }),
+  });
+}
+
+export function reviseAutomation(automationId: string, input: {
+  prompt: string; expression: string; timezone: string;
+  overlap: 'queue' | 'skip' | 'cancel_previous';
+  misfire: 'run_once' | 'skip' | 'catch_up';
+  allowWrite: boolean;
+}): Promise<WorkbenchAutomationSummary> {
+  return appsRequest(`/api/automations/${encodeURIComponent(automationId)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
       action: { kind: 'prompt', prompt: input.prompt },
       trigger: { kind: 'schedule', expression: input.expression, timezone: input.timezone },
       policies: {
