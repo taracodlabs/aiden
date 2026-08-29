@@ -1,0 +1,26 @@
+{
+  "name": "git-summary",
+  "version": "1.0.0",
+  "description": "Summarize recent git activity grouped by day in plain English",
+  "author": "SpencerJung",
+  "license": "Apache-2.0",
+  "tools": ["shell_exec", "run_python"],
+  "trigger_phrases": [
+    "summarize my recent commits",
+    "what did I work on this week",
+    "git activity summary",
+    "recent git commits",
+    "generate standup update"
+  ],
+  "compatible_agents": ["aiden"],
+  "min_agent_version": "3.0.0",
+  "tags": [
+    "git",
+    "productivity",
+    "development",
+    "commits",
+    "summary",
+    "standup"
+  ],
+  "created": "2026-05-27T00:00:00.000Z"
+}
