@@ -357,8 +357,7 @@ describe('SetupWizard', () => {
       display,
       prompts: scriptedPrompts({
         choose: [customIdx],
-        input: ['', 'https://api.example.com/v1', 'custom-key'],
-        // first input is the model id (provider has no defaultModel)
+        input: ['https://api.example.com/v1', 'custom-key', ''],
       }),
       skipValidation: true,
     });
