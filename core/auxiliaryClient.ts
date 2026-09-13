@@ -21,6 +21,7 @@ const AUX_ENDPOINTS: Record<string, string> = {
   groq:       'https://api.groq.com/openai/v1/chat/completions',
   cerebras:   'https://api.cerebras.ai/v1/chat/completions',
   openrouter: 'https://openrouter.ai/api/v1/chat/completions',
+  requesty:   'https://router.requesty.ai/v1/chat/completions',
   nvidia:     'https://integrate.api.nvidia.com/v1/chat/completions',
   github:     'https://models.inference.ai.azure.com/chat/completions',
   boa:        'https://api.boa.ai/v1/chat/completions',
