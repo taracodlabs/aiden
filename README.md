@@ -230,12 +230,14 @@ Research this topic, compare the strongest findings, and save a structured Markd
 
 ### Stable — v4.21.2
 
+**Aiden CLI (terminal)** — start the interactive command-line workspace:
+
 ```bash
 npm install -g aiden-runtime
 aiden
 ```
 
-Open the browser Workbench instead:
+**Aiden Web (browser Workbench)** — open the visual workspace:
 
 ```bash
 aiden web
