@@ -1,0 +1,324 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Aiden — Workbench visual tour</title>
+<meta name="description" content="A screenshot-based tour of the Aiden Workbench development preview.">
+<style>
+:root{color-scheme:dark;font-family:Inter,Segoe UI,system-ui,sans-serif;color:#f3f1ed;background:#11110f}
+*{box-sizing:border-box}
+body{margin:0}
+main{max-width:1500px;margin:auto;padding:24px}
+header{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap}
+h1{margin:0;font-size:25px;letter-spacing:-.6px}
+.kicker{color:#ff9a59;font-size:11px;font-weight:700;letter-spacing:1.6px;text-transform:uppercase;margin:0 0 8px}
+.notice{color:#b8b6af;font-size:13px;max-width:820px;line-height:1.6;margin:14px 0 22px}
+a{color:#ffb078}
+a:focus-visible,button:focus-visible,select:focus-visible{outline:3px solid #ff9a59;outline-offset:4px}
+.controls{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+button,select{font:inherit;font-size:13px;border:1px solid #45423c;background:#24231f;color:#f3f1ed;border-radius:9px;min-height:42px;padding:10px 14px}
+button{cursor:pointer}
+button:hover{background:#34312a}
+button:disabled{opacity:.45;cursor:default}
+#play{background:#ff813e;color:#1b110a;border-color:#ff813e;font-weight:650}
+select{max-width:340px;flex:1}
+figure{margin:18px 0 0;border:1px solid #39362f;border-radius:14px;overflow:hidden;background:#191815}
+img{width:100%;height:auto;display:block;aspect-ratio:1440/1000;object-fit:contain;background:#11110f}
+figcaption{padding:16px 20px;border-top:1px solid #39362f}
+h2{font-size:18px;margin:0 0 6px}
+#caption{margin:0;line-height:1.6;font-size:14px;color:#c2beb5}
+footer{display:flex;justify-content:space-between;gap:14px;flex-wrap:wrap;color:#99978f;font-size:12px;line-height:1.6;margin-top:16px}
+#counter{font-variant-numeric:tabular-nums;min-width:60px;text-align:center;font-size:13px;color:#c2beb5}
+@media(min-width:1100px){img{max-height:calc(100vh - 300px)}}
+@media(max-width:600px){main{padding:16px}h1{font-size:21px}select{max-width:100%;flex-basis:100%}figcaption{padding:14px}}
+</style>
+</head>
+<body>
+<main>
+<header>
+<div><p class="kicker">Actual screenshots · development preview</p><h1>Aiden Workbench, at a glance.</h1></div>
+<a href="../../workbench-ui-gallery.md">Full screenshot gallery</a>
+</header>
+<p class="notice">A visual tour captured on 13 September 2026. This is a slideshow of the real interface, not a live app or an execution recording. The isolated profile has no connected accounts or configured provider. Nothing here sends requests, changes settings, or starts work.</p>
+<nav class="controls" aria-label="Screenshot tour controls">
+<button id="prev" type="button" aria-label="Previous screenshot">← Previous</button>
+<select id="pages" aria-label="Choose a screenshot"></select>
+<button id="next" type="button" aria-label="Next screenshot">Next →</button>
+<button id="play" type="button" aria-pressed="false">Play highlights</button>
+<span id="counter"></span>
+</nav>
+<figure>
+<img id="screen" src="02-home.png" width="1440" height="1000" alt="Aiden Home in an isolated demo profile">
+<figcaption aria-live="polite" aria-atomic="true"><h2 id="title">Home</h2><p id="caption">Start with an outcome. This isolated profile has no configured provider.</p></figcaption>
+</figure>
+<footer><span>34 views · 1440 × 1000 · Dark mode · Runtime 4.21.2 with local development changes</span><a id="original" href="02-home.png" target="_blank" rel="noopener">Open original screenshot ↗</a></footer>
+<noscript><p>The interactive controls need JavaScript. <a href="../../workbench-ui-gallery.md">Use the Markdown gallery instead.</a></p></noscript>
+</main>
+<script>
+"use strict";
+const pages=[
+  {
+    "file": "01-onboarding.png",
+    "title": "Welcome",
+    "group": "onboarding",
+    "caption": "Choose a model connection path or continue to Workbench."
+  },
+  {
+    "file": "02-home.png",
+    "title": "Home",
+    "group": "main",
+    "caption": "Start with an outcome. This isolated profile has no configured provider."
+  },
+  {
+    "file": "03-work.png",
+    "title": "Work",
+    "group": "main",
+    "caption": "The clean profile has no jobs or attempts."
+  },
+  {
+    "file": "04-connections.png",
+    "title": "Connections",
+    "group": "main",
+    "caption": "Browse the current connection categories and setup entry points."
+  },
+  {
+    "file": "05-apps.png",
+    "title": "Apps",
+    "group": "main",
+    "caption": "GitHub and Gmail discovery; neither account is connected."
+  },
+  {
+    "file": "06-skills.png",
+    "title": "Skills & Tools",
+    "group": "main",
+    "caption": "The real installed-skill list, filtered with the search term browser."
+  },
+  {
+    "file": "07-brain.png",
+    "title": "Brain",
+    "group": "main",
+    "caption": "An empty memory graph in the isolated workspace; no personal memories are loaded."
+  },
+  {
+    "file": "08-automations.png",
+    "title": "Automations",
+    "group": "main",
+    "caption": "Built-in starting points for recurring work; no workflows have been saved."
+  },
+  {
+    "file": "09-artifacts.png",
+    "title": "Artifacts",
+    "group": "main",
+    "caption": "The empty artifact collection in this profile."
+  },
+  {
+    "file": "10-support.png",
+    "title": "Support Aiden",
+    "group": "main",
+    "caption": "The current support page; no payment was initiated."
+  },
+  {
+    "file": "11-readiness.png",
+    "title": "Setup & readiness",
+    "group": "settings",
+    "caption": "Readiness information for an unconfigured demo profile."
+  },
+  {
+    "file": "12-account.png",
+    "title": "Your account",
+    "group": "settings",
+    "caption": "The optional account setup surface."
+  },
+  {
+    "file": "13-models.png",
+    "title": "Models & providers",
+    "group": "settings",
+    "caption": "Local, API-key and subscription setup. Astra is selected, but authentication is not configured."
+  },
+  {
+    "file": "14-coding.png",
+    "title": "Coding agents",
+    "group": "settings",
+    "caption": "Current coding-agent setup and its readiness requirements."
+  },
+  {
+    "file": "15-conversation.png",
+    "title": "Conversation",
+    "group": "settings",
+    "caption": "Conversation preferences."
+  },
+  {
+    "file": "16-appearance.png",
+    "title": "Appearance & sound",
+    "group": "settings",
+    "caption": "Appearance and optional sensory preferences."
+  },
+  {
+    "file": "17-settings-skills.png",
+    "title": "Skills",
+    "group": "settings",
+    "caption": "Skills Manager filtered with the search term browser."
+  },
+  {
+    "file": "18-permissions.png",
+    "title": "Tools & permissions",
+    "group": "settings",
+    "caption": "The existing capability and permission controls."
+  },
+  {
+    "file": "19-settings-apps.png",
+    "title": "Apps settings",
+    "group": "settings",
+    "caption": "The Apps setup entry point within Settings."
+  },
+  {
+    "file": "20-messaging.png",
+    "title": "Messaging",
+    "group": "settings",
+    "caption": "Messaging adapters and their actual setup requirements."
+  },
+  {
+    "file": "21-mcp.png",
+    "title": "MCP & external agents",
+    "group": "settings",
+    "caption": "No MCP servers or A2A agents are configured in this profile."
+  },
+  {
+    "file": "22-editors.png",
+    "title": "Editor connections",
+    "group": "settings",
+    "caption": "The current editor connection instructions; these captures do not validate the integrations."
+  },
+  {
+    "file": "23-settings-automations.png",
+    "title": "Automations settings",
+    "group": "settings",
+    "caption": "The entry point to the Automations workspace."
+  },
+  {
+    "file": "24-plans.png",
+    "title": "Plans & billing",
+    "group": "settings",
+    "caption": "Free access and optional contributions. Paid checkout is unavailable in this build."
+  },
+  {
+    "file": "25-updates.png",
+    "title": "Software updates",
+    "group": "settings",
+    "caption": "Update guidance; no update was installed."
+  },
+  {
+    "file": "26-diagnostics.png",
+    "title": "Help & diagnostics",
+    "group": "settings",
+    "caption": "Diagnostic controls without a personal diagnostic report."
+  },
+  {
+    "file": "27-settings-support.png",
+    "title": "Support settings",
+    "group": "settings",
+    "caption": "The support entry point within Settings."
+  },
+  {
+    "file": "28-privacy.png",
+    "title": "Privacy & data",
+    "group": "settings",
+    "caption": "Data controls and links to Brain and saved artifacts."
+  },
+  {
+    "file": "29-legal.png",
+    "title": "Legal",
+    "group": "settings",
+    "caption": "The current in-app legal information."
+  },
+  {
+    "file": "30-about.png",
+    "title": "About",
+    "group": "settings",
+    "caption": "The current About screen, including its existing Aiden Pro label."
+  },
+  {
+    "file": "31-workflow-builder.png",
+    "title": "Visual workflow builder",
+    "group": "detail",
+    "caption": "The built-in Repository file review starting template, unsaved and not executed."
+  },
+  {
+    "file": "32-create-workflow.png",
+    "title": "Create workflow",
+    "group": "detail",
+    "caption": "The schedule form before any automation is created."
+  },
+  {
+    "file": "33-connected-accounts.png",
+    "title": "Connected accounts",
+    "group": "detail",
+    "caption": "The empty connected-account list."
+  },
+  {
+    "file": "34-app-workflows.png",
+    "title": "App workflows",
+    "group": "detail",
+    "caption": "The account-required state; no app action is simulated."
+  }
+];
+const highlights=["02-home.png","04-connections.png","05-apps.png","31-workflow-builder.png","07-brain.png","13-models.png","21-mcp.png","24-plans.png"];
+const picker=document.getElementById("pages");
+const play=document.getElementById("play");
+let current=1;
+let timer=null;
+let highlight=0;
+for(const [index,page] of pages.entries()){
+  const option=document.createElement("option");
+  option.value=String(index);
+  option.textContent=String(index+1).padStart(2,"0")+" · "+page.title;
+  picker.appendChild(option);
+}
+function show(index){
+  current=Math.max(0,Math.min(pages.length-1,index));
+  const page=pages[current];
+  document.getElementById("screen").src=page.file;
+  document.getElementById("screen").alt="Aiden — "+page.title+". "+page.caption;
+  document.getElementById("title").textContent=page.title;
+  document.getElementById("caption").textContent=page.caption;
+  document.getElementById("counter").textContent=(current+1)+" / "+pages.length;
+  document.getElementById("original").href=page.file;
+  document.getElementById("prev").disabled=current===0;
+  document.getElementById("next").disabled=current===pages.length-1;
+  picker.value=String(current);
+}
+function stop(){
+  if(timer!==null)clearInterval(timer);
+  timer=null;
+  play.textContent="Play highlights";
+  play.setAttribute("aria-pressed","false");
+}
+document.getElementById("prev").addEventListener("click",()=>{stop();show(current-1)});
+document.getElementById("next").addEventListener("click",()=>{stop();show(current+1)});
+picker.addEventListener("change",()=>{stop();show(Number(picker.value))});
+play.addEventListener("click",()=>{
+  if(timer!==null){stop();return}
+  highlight=0;
+  show(pages.findIndex(page=>page.file===highlights[highlight]));
+  play.textContent="Pause tour";
+  play.setAttribute("aria-pressed","true");
+  timer=setInterval(()=>{
+    highlight++;
+    if(highlight>=highlights.length){stop();return}
+    show(pages.findIndex(page=>page.file===highlights[highlight]));
+  },5000);
+});
+document.addEventListener("visibilitychange",()=>{if(document.hidden)stop()});
+document.addEventListener("keydown",event=>{
+  if(event.target instanceof HTMLSelectElement)return;
+  if(event.key==="ArrowLeft"){event.preventDefault();stop();show(current-1)}
+  if(event.key==="ArrowRight"){event.preventDefault();stop();show(current+1)}
+  if(event.key==="Escape")stop();
+});
+window.addEventListener("pagehide",stop);
+show(current);
+</script>
+</body>
+</html>
+

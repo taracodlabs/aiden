@@ -103,7 +103,7 @@ Give Aiden a goal. It can work across your files, terminal, browser, supported a
 <!-- Quality + identity -->
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
-![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
+![Taracod](https://img.shields.io/badge/Brand-Taracod-FFB088?style=flat-square)
 ![Stable](https://img.shields.io/badge/Stable-v4.21.2-4ADE80?style=flat-square)
 
 </details>
@@ -123,6 +123,47 @@ https://github.com/user-attachments/assets/1081e5c5-f1ec-4980-b710-1640981ec58b
 > **Aiden is an autonomous AI engine for real computer work.** It can plan multi-step jobs, use your files, terminal, browser, supported applications, APIs, repositories, and connected services, remember what matters, recover from failures, and verify whether the requested result was actually produced. Built solo. Open source. Actively developed.
 
 <br>
+
+## Aiden Web preview
+
+One workspace for work, connections, memory, automations, and artifacts.
+
+![Aiden Web Home in an isolated demo profile](docs/media/workbench-2026-09/02-home.png)
+
+**[Browse all 34 screenshots](docs/workbench-ui-gallery.md)** · **[Interactive screenshot tour](docs/media/workbench-2026-09/tour.html)**
+
+The tour opens locally in a browser after downloading or cloning this repository; GitHub shows its HTML source. It includes manual navigation and an optional guided slideshow.
+
+<details>
+<summary>Preview Apps and the visual workflow builder</summary>
+
+![GitHub and Gmail setup in Aiden Apps](docs/media/workbench-2026-09/05-apps.png)
+
+![An unsaved starting template in the Aiden visual workflow builder](docs/media/workbench-2026-09/31-workflow-builder.png)
+
+</details>
+
+<details>
+<summary>See the rest of the Workbench</summary>
+
+<table>
+  <tr>
+    <td align="center"><img src="docs/media/workbench-2026-09/01-onboarding.png" width="300" alt="Aiden onboarding and model connection choices"><br><sub>Onboarding</sub></td>
+    <td align="center"><img src="docs/media/workbench-2026-09/03-work.png" width="300" alt="Aiden Work view for jobs and attempts"><br><sub>Work and Jobs</sub></td>
+    <td align="center"><img src="docs/media/workbench-2026-09/13-models.png" width="300" alt="Aiden model and provider setup with GPT-6 Astra"><br><sub>Models and providers</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/media/workbench-2026-09/07-brain.png" width="300" alt="Aiden Brain memory graph"><br><sub>Brain and memory</sub></td>
+    <td align="center"><img src="docs/media/workbench-2026-09/08-automations.png" width="300" alt="Aiden Automations view"><br><sub>Automations</sub></td>
+    <td align="center"><img src="docs/media/workbench-2026-09/21-mcp.png" width="300" alt="Aiden MCP and external agents settings"><br><sub>MCP and external agents</sub></td>
+  </tr>
+</table>
+
+These captures cover the main product surfaces without implying that a provider, account, MCP server, or workflow is already connected. For every page and its intentional setup/empty states, use the [full screenshot gallery](docs/workbench-ui-gallery.md).
+
+</details>
+
+*Development preview captured on 13 September 2026. These are actual UI captures from a separate, unconfigured profile—not simulated task results or proof of a published release. Account connections, paid checkout, and task execution are not demonstrated. See the gallery for coverage and limitations.*
 
 ## Why Aiden is useful
 
@@ -262,6 +303,9 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 Discover existing capabilities from Connections in Workbench or `/discover` in the CLI. Choose a local, API-key or supported subscription model. Apps and remote MCP require provider setup and your consent; account linking remains optional. The package includes updated HTTP/IMAP dependencies and safer rapid input in the optional terminal renderer. See the release notes for limitations and deferred platform acceptance.
 
 - **Workbench control.** A one-click Auto mode follows the saved autonomy policy and keeps required approvals enforced.
+- **Connections surface.** Apps, messaging channels, MCP servers, coding tools, and provider setup are discoverable from dedicated Workbench pages and their CLI commands, with explicit status and reconnect paths.
+- **Model choice.** ChatGPT OAuth exposes GPT-6 Astra, GPT-5.6 Sol/Terra/Luna, GPT-5.5, and supported Codex models when the connected plan entitles them; Aiden keeps provider and model identity visible.
+- **Reasoning effort.** Supported models expose the levels they accept: `low`, `medium`, `high`, and, for the strongest OAuth models, `xhigh` or `max`. Unsupported levels stay hidden rather than being silently substituted.
 - **Completed work.** Jobs, Artifacts, Evidence and Verification remain discoverable after restart and reopen.
 - **Reliable Automations.** Required child outcomes stay linked to their parent, with truthful success and failure visibility.
 - **Visual workflows.** The Workbench can design bounded, typed, workspace-safe workflows that compile to the existing Automation contract.
@@ -473,7 +517,7 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/).
 
 | Category | What Aiden does |
 |---|---|
-| **Inference & providers** | Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama, Nous Portal, custom OpenAI-compatible endpoints, and additional configured routes. OAuth subscription routing for ChatGPT Plus where supported. |
+| **Inference & providers** | Anthropic, OpenAI, Groq, Gemini, OpenRouter, Together, NVIDIA NIM, DeepSeek, Mistral, Z.ai, Kimi, MiniMax, Hugging Face, Ollama, Nous Portal, custom OpenAI-compatible endpoints, and additional configured routes. ChatGPT Plus OAuth includes GPT-6 Astra, GPT-5.6 variants, GPT-5.5, and supported Codex models where entitled. |
 | **Built-in tools** | Web search and fetch, deep research, YouTube search, browser automation, file operations, process control, shell execution, code execution, system information, screenshots, clipboard, app launch, media controls, MCP bridge, memory operations, session search and recall, skill management, and self-update workflows. |
 | **Bundled skills** | Composable workflows with a `SKILL.md`, optional helper scripts, and tool requirements. Includes GitHub workflows, trading tools, security lookups, Windows administration, Docker management, research, and content workflows. |
 | **v4.18 Codebase Mode** | Durable repository snapshots, conflict-safe file changes, fresh readback, structured TestRun / BuildRun / Diagnostic records, Git Effects, repository understanding, code claims, Evidence, Verification, and execution-graph projection. |
@@ -569,7 +613,7 @@ When an update is available, choose Update, Later, or Skip. You can also use:
 aiden update --check
 aiden update
 aiden update --yes
-aiden update --version 4.21.0
+aiden update --version 4.21.2
 ```
 
 The default channel is npm `latest`. Set `AIDEN_UPDATE_CHANNEL=beta` to follow
@@ -940,7 +984,7 @@ Aiden is actively developed, and some capabilities remain experimental or platfo
 
 <div align="center">
 
-**By Taracod · White Lotus**
+**By Taracod**
 
 </div>
 
