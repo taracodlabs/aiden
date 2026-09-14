@@ -1092,13 +1092,7 @@ async function runSetupWizardWithLedger(opts: SetupOptions): Promise<SetupResult
   // when the live endpoint is unreachable.
 
   // Step 2: credentials (moved up from old step 3 for key/subscription).
-  //
-  // `custom` keeps the legacy "model id first, then baseUrl + apiKey"
-  // order — it has no live-fetch endpoint we could call with the key
-  // anyway, so the reorder bought nothing there. Existing test
-  // fixtures provide inputs in legacy order; preserving custom's
-  // order keeps them green.
-  if (provider.kind === 'key' || provider.kind === 'subscription' || provider.kind === 'local') {
+  if (provider.kind === 'key' || provider.kind === 'subscription' || provider.kind === 'local' || provider.kind === 'custom') {
     display.write(stepHeader(2));
   }
   let apiKey: string | undefined;
@@ -1163,8 +1157,15 @@ async function runSetupWizardWithLedger(opts: SetupOptions): Promise<SetupResult
       await persistCurrentCredential();
     }
   }
-  // provider.kind === 'custom' — defer credential prompts until AFTER
-  // the model picker below.
+  if (provider.kind === 'custom') {
+    const burl = await prompts.input('Base URL (e.g. https://api.example.com/v1)');
+    if (burl === BACK) continue outer;
+    baseUrl = burl;
+    const akey = await collectRequiredCredential('API key');
+    if (akey === BACK) continue outer;
+    apiKey = akey;
+    await persistCurrentCredential();
+  }
 
   display.write(stepHeader(3));
   // Step 3: live model fetch + pick.
@@ -1251,7 +1252,7 @@ async function runSetupWizardWithLedger(opts: SetupOptions): Promise<SetupResult
         modelId = ans;
         modelVerification = 'unverified';
       }
-    } else if (fetchResult.models.length === 1 && fetchResult.source === 'fallback') {
+    } else if (fetchResult.models.length === 1) {
       modelId = fetchResult.models[0].id;
       modelVerification = fetchResult.source === 'live'
         ? 'live'
@@ -1332,18 +1333,6 @@ async function runSetupWizardWithLedger(opts: SetupOptions): Promise<SetupResult
         }
       }
     }
-  }
-
-  // Custom-provider credentials: deferred from step 2 above so the
-  // legacy input order (model → baseUrl → apiKey) is preserved.
-  if (provider.kind === 'custom') {
-    const burl = await prompts.input('Base URL (e.g. https://api.example.com/v1)');
-    if (burl === BACK) continue outer;
-    baseUrl = burl;
-    const akey = await collectRequiredCredential('API key');
-    if (akey === BACK) continue outer;
-    apiKey = akey;
-    await persistCurrentCredential();
   }
 
   // Step 3.5: validate the API key against the provider endpoint.

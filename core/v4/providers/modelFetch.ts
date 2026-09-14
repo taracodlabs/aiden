@@ -400,6 +400,16 @@ export async function fetchModels(opts: FetchOptions): Promise<FetchModelsResult
       case 'ollama':
         raws = await fetchLocalRuntimeModels(opts.baseUrl ?? 'http://localhost:11434', { timeoutMs, fetchImpl });
         break;
+      case 'custom_openai': {
+        const root = (opts.baseUrl ?? '').replace(/\/+$/, '');
+        if (!root || !apiKey) return fallbackFor('custom_openai', 'no base URL or API key');
+        const { response, body } = await fetchJson('custom_openai', `${root}/models`, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        }, timeoutMs, fetchImpl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        raws = Array.isArray(body) ? body as RawModel[] : ((body as { data?: RawModel[] }).data ?? []);
+        break;
+      }
       default:
         // Every other provider — together, nvidia, deepseek, mistral, custom,
         // chatgpt-plus, etc. — uses the curated catalog.
