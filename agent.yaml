@@ -1,0 +1,47 @@
+spec_version: "0.1.0"
+name: aiden
+version: 4.10.0
+description: >
+  Aiden is a local-first autonomous AI OS for Windows/Linux/WSL. It chains 72+
+  built-in tools across browser automation, desktop control, file management,
+  code execution, voice I/O, multi-agent coordination, and real-time data
+  (stocks, email, calendar) — all running on-device. LLM inference is handled
+  by 19 swappable providers (Groq, Anthropic, OpenAI, Gemini, Ollama, and more)
+  with local Ollama as an offline fallback. Memory, skills, and tool execution
+  never leave the machine.
+author: taracodlabs
+license: AGPL-3.0-only
+
+model:
+  preferred: groq:llama-3.3-70b
+  fallback:
+    - anthropic:claude-sonnet-4-6
+    - ollama:llama3
+  constraints:
+    max_tokens: 8192
+
+skills:
+  - web-search
+  - browser-automation
+  - desktop-control
+  - code-interpreter
+  - voice-io
+  - multi-agent
+  - semantic-memory
+  - skill-teacher
+  - pattern-detector
+  - file-management
+  - security-scanner
+  - git-tools
+
+runtime:
+  max_turns: 100
+  timeout: 600
+
+compliance:
+  risk_tier: standard
+  supervision:
+    human_in_the_loop: destructive
+    kill_switch: true
+  data_governance:
+    pii_handling: local-only
