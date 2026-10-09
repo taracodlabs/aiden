@@ -56,6 +56,12 @@ import {
   type SnapshotSink,
 } from './fsSnapshot';
 import type { SnapshotObservation } from './temporalEvidence';
+import {
+  PathConflictError,
+  lockRequestsForTool,
+  normalizeLockPath,
+  processPathLocks,
+} from './pathLockRegistry';
 import type { SSRFProtection } from '../../moat/ssrfProtection';
 import type { TirithScanner } from '../../moat/tirithScanner';
 import type { MemoryGuard } from '../../moat/memoryGuard';
@@ -1533,7 +1539,7 @@ export class ToolRegistry {
         return typeof record.error === 'string' && record.error.trim()
           ? record.error : 'Tool reported unsuccessful execution';
       };
-      const dispatch = async (a: Record<string, unknown>): Promise<unknown> =>
+      const dispatchInner = async (a: Record<string, unknown>): Promise<unknown> =>
         executeWithDurableToolCall({
           toolCallId: call.id,
           toolName: call.name,
@@ -1686,6 +1692,28 @@ export class ToolRegistry {
             }
           },
         });
+
+      // Path-overlap guard (#41). Claim the file paths this call touches
+      // immediately before the handler boundary, so a conflicting call from a
+      // sibling subagent fails fast instead of silently overwriting. Released
+      // in `finally` whether the handler succeeds, throws, or times out.
+      const dispatch = async (a: Record<string, unknown>): Promise<unknown> => {
+        const requests = lockRequestsForTool(call.name, a);
+        if (requests.length === 0) return dispatchInner(a);
+        const cwd = context.cwd ?? process.cwd();
+        const release = processPathLocks.acquire(
+          requests.map((r) => ({ path: normalizeLockPath(r.path, cwd), mode: r.mode })),
+          {
+            owner: call.id,
+            label: `tool call ${call.name}${context.sessionId ? ` (session ${context.sessionId})` : ''}`,
+          },
+        );
+        try {
+          return await dispatchInner(a);
+        } finally {
+          release();
+        }
+      };
 
       // ── P1B-2B — FAIL-SAFE pre-state snapshot (shadow, non-authoritative) ──
       // Post-approval, pre-spawn. In its OWN try/catch, independent of the
@@ -1897,6 +1925,10 @@ export class ToolRegistry {
             result: null,
             error: err.modelMessage ?? err.message,
           }, 'blocked');
+        }
+        if (err instanceof PathConflictError) {
+          // Rejected before the handler ran — nothing was written.
+          return finish({ id: call.id, name: call.name, result: null, error: err.message }, 'blocked');
         }
         if (err instanceof DockerCancellationUnverifiedError) {
           return finish({
