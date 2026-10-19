@@ -258,6 +258,11 @@ export interface ExternalAuthority {
     expectedIdentityKeyDigest?: string | null;
     now?: number;
   }): ExternalIdentityRecord;
+  /** In-process invalidation signal for transports sharing this authority. */
+  subscribeIdentityChanges(
+    externalIdentityId: string,
+    listener: (identity: ExternalIdentityRecord) => void,
+  ): () => void;
   recordCapabilities(input: {
     externalIdentityId: string;
     protocol: ExternalKind;
@@ -538,6 +543,12 @@ function mapRemoteTaskEvent(row: RemoteTaskEventRow): RemoteTaskEventRecord {
 
 export function createExternalAuthority(opts: CreateExternalAuthorityOptions): ExternalAuthority {
   const { db } = opts;
+  const identityListeners = new Map<string, Set<(identity: ExternalIdentityRecord) => void>>();
+  const notifyIdentity = (identity: ExternalIdentityRecord): void => {
+    for (const listener of identityListeners.get(identity.externalIdentityId) ?? []) {
+      try { listener(identity); } catch { /* a subscriber cannot roll back durable trust */ }
+    }
+  };
 
   const identityRow = (id: string): IdentityRow | undefined => db.prepare(
     'SELECT * FROM external_identities WHERE external_identity_id = ?',
@@ -708,7 +719,18 @@ export function createExternalAuthority(opts: CreateExternalAuthorityOptions): E
         input.expectedStateVersion,
       );
       if (changed.changes !== 1) throw new Error('External identity state version conflict');
-      return mapIdentity(identityRow(input.externalIdentityId)!);
+      const updated = mapIdentity(identityRow(input.externalIdentityId)!);
+      notifyIdentity(updated);
+      return updated;
+    },
+    subscribeIdentityChanges(externalIdentityId, listener) {
+      let listeners = identityListeners.get(externalIdentityId);
+      if (!listeners) identityListeners.set(externalIdentityId, listeners = new Set());
+      listeners.add(listener);
+      return () => {
+        listeners!.delete(listener);
+        if (listeners!.size === 0) identityListeners.delete(externalIdentityId);
+      };
     },
     recordCapabilities(input) {
       const capabilityIdentity = identityRow(input.externalIdentityId);

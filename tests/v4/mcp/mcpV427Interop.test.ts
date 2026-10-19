@@ -1,3 +1,4 @@
+import { withLocalAccess } from '../helpers/localAccess';
 /**
  * Copyright (c) 2026 Shiva Deore (Taracod).
  * Licensed under AGPL-3.0. See LICENSE for details.
@@ -126,6 +127,7 @@ describe('MCP 2025-11-25 controlled wire interoperability', () => {
       endpointPolicy: { check: async () => ({ blocked: false }) },
       reconnect: { maxStartupAttempts: 0 },
     });
+    await withLocalAccess(`http://127.0.0.1:${address.port}`, ['mcp:initialize', 'mcp:notifications/initialized', 'mcp:tools/list', 'mcp:tools/call:read_fixture', 'mcp:resources/read', 'mcp:http:GET:/mcp', 'mcp:http:DELETE:/mcp'], async () => {
     await client.connect({
       name: 'controlled_http',
       type: 'http',
@@ -141,5 +143,6 @@ describe('MCP 2025-11-25 controlled wire interoperability', () => {
     } finally {
       await client.closeAll();
     }
+    });
   });
 });

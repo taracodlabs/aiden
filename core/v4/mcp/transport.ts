@@ -21,6 +21,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { readTextBounded, secureFetch } from '../../../moat/secureFetch';
 import { spawnCommand, killProcessTree } from '../util/spawnCommand';
 
 export type McpNotificationHandler = (method: string, params: unknown) => void;
@@ -373,7 +374,9 @@ async function parseBoundedJson(
     throw new Error(`MCP response exceeds ${maxBytes} bytes`);
   }
   if (typeof (res as FetchResponse & { text?: () => Promise<string> }).text === 'function') {
-    const text = await (res as FetchResponse & { text: () => Promise<string> }).text();
+    const text = res instanceof Response
+      ? await readTextBounded(res, maxBytes)
+      : await (res as FetchResponse & { text: () => Promise<string> }).text();
     if (Buffer.byteLength(text, 'utf8') > maxBytes) throw new Error(`MCP response exceeds ${maxBytes} bytes`);
     return JSON.parse(text);
   }
@@ -396,7 +399,10 @@ async function sendWithAuthRetry(
 ): Promise<FetchResponse> {
   let res = await send();
   if (res.status === 401 && onAuthError) {
-    if (await onAuthError()) res = await send();
+    if (await onAuthError()) {
+      await res.body?.cancel().catch(() => undefined);
+      res = await send();
+    }
   }
   return res;
 }
@@ -454,6 +460,7 @@ async function* parseSseFrames(
     const last = flush();
     if (last !== null) yield last;
   } finally {
+    await reader.cancel().catch(() => undefined);
     reader.releaseLock();
   }
 }
@@ -522,7 +529,7 @@ export class HttpTransport implements McpTransport {
     this.onAuthError = opts.onAuthError;
     this.defaultTimeout = opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.log = opts.log;
-    this.fetchImpl = opts.fetchFn ?? fetch;
+    this.fetchImpl = opts.fetchFn && opts.fetchFn !== fetch ? opts.fetchFn : secureFetch;
     this.eventSourceFactory = opts.eventSourceFactory;
     this.disableSse = opts.disableSse ?? false;
 
@@ -629,6 +636,7 @@ export class HttpTransport implements McpTransport {
     // 3b — reactive 401: force a refresh and retry ONCE with a fresh bearer.
     const res = await sendWithAuthRetry(() => this.sendOnce(id, method, params, timeoutMs, opts?.signal), this.onAuthError);
     if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
       if (res.status === 401) {
         throw new Error(`HTTP 401 Unauthorized from ${this.label} — token rejected (auth failed)`);
       }
@@ -645,11 +653,12 @@ export class HttpTransport implements McpTransport {
     if (this.closed) return;
     void (async () => {
       try {
-        await this.fetchImpl(`${this.baseUrl}/messages`, {
+        const res = await this.fetchImpl(`${this.baseUrl}/messages`, {
           method: 'POST',
           headers: await this.mergedHeaders(),
           body: JSON.stringify({ jsonrpc: '2.0', method, params }),
         });
+        await res.body?.cancel().catch(() => undefined);
       } catch (err) {
         this.log?.('warn', `[${this.label}] notify ${method} failed: ${(err as Error).message}`);
       }
@@ -760,7 +769,7 @@ export class StreamableHttpTransport implements McpTransport {
     this.onAuthError = opts.onAuthError;
     this.defaultTimeout = opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.log = opts.log;
-    this.fetchImpl = opts.fetchFn ?? fetch;
+    this.fetchImpl = opts.fetchFn && opts.fetchFn !== fetch ? opts.fetchFn : secureFetch;
     // Default backoff sleep; unref so a pending reconnect never holds the process.
     this.sleep = opts.sleepFn ?? ((ms) => new Promise<void>((r) => {
       const t = setTimeout(r, ms);
@@ -832,8 +841,12 @@ export class StreamableHttpTransport implements McpTransport {
       this.onAuthError,
     );
     this.captureSession(res);
-    if (res.status === 404) throw new SessionExpiredError(`session expired (404) from ${this.label}`);
+    if (res.status === 404) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new SessionExpiredError(`session expired (404) from ${this.label}`);
+    }
     if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
       if (res.status === 401) throw new Error(`HTTP 401 Unauthorized from ${this.label} — token rejected (auth failed)`);
       throw new Error(`HTTP ${res.status} ${res.statusText} from ${this.label}`);
     }
@@ -895,10 +908,11 @@ export class StreamableHttpTransport implements McpTransport {
     if (this.closed) return;
     void (async () => {
       try {
-        await sendWithAuthRetry(
+        const response = await sendWithAuthRetry(
           () => this.doPost(JSON.stringify({ jsonrpc: '2.0', method, params }), this.defaultTimeout),
           this.onAuthError,
         );
+        await response.body?.cancel().catch(() => undefined);
       } catch (err) {
         this.log?.('warn', `[${this.label}] notify ${method} failed: ${(err as Error).message}`);
       }
@@ -934,10 +948,10 @@ export class StreamableHttpTransport implements McpTransport {
 
     const res = await this.fetchImpl(this.baseUrl, { method: 'GET', headers, signal: this.pushAbort.signal });
     this.captureSession(res);
-    if (res.status === 401) return 'unauthorized';
-    if (res.status === 404) return this.everInitialized ? 'expired' : 'unsupported';
-    if (res.status >= 400 && res.status < 500) return 'unsupported'; // 405 etc. — POST-only server
-    if (!res.ok || !res.body) return 'drop';
+    if (res.status === 401) { await res.body?.cancel().catch(() => undefined); return 'unauthorized'; }
+    if (res.status === 404) { await res.body?.cancel().catch(() => undefined); return this.everInitialized ? 'expired' : 'unsupported'; }
+    if (res.status >= 400 && res.status < 500) { await res.body?.cancel().catch(() => undefined); return 'unsupported'; }
+    if (!res.ok || !res.body) { await res.body?.cancel().catch(() => undefined); return 'drop'; }
 
     this.pushAttempt = 0; // connected — reset backoff
     for await (const frame of parseSseFrames(res.body, DEFAULT_MAX_RESPONSE_BYTES)) {

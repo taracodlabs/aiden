@@ -32,6 +32,7 @@
 import { createHash } from 'node:crypto';
 
 import { SSRFProtection } from '../../moat/ssrfProtection';
+import { secureFetch } from '../../moat/secureFetch';
 
 import type {
   ToolSchema,
@@ -293,6 +294,16 @@ function configuredExternalEndpoint(config: McpServerConfig): string {
   return `stdio://local/${digest}`;
 }
 
+function canonicalMcpIdentityEndpoint(raw: string): string {
+  const endpoint = new URL(raw);
+  endpoint.hash = '';
+  endpoint.search = '';
+  endpoint.hostname = endpoint.hostname.toLowerCase();
+  if ((endpoint.protocol === 'https:' && endpoint.port === '443')
+    || (endpoint.protocol === 'http:' && endpoint.port === '80')) endpoint.port = '';
+  return endpoint.toString().replace(/\/$/, '');
+}
+
 // ─── McpClient ──────────────────────────────────────────────────────────
 
 /**
@@ -323,6 +334,9 @@ export class McpClient {
   private readonly breakerCfg: BreakerCfg;
   private readonly now: () => number;
   private readonly externalAuthority?: ExternalAuthority;
+  private readonly injectedHttpTransport: boolean;
+  private readonly externalIdentitySignals = new Map<string, AbortController>();
+  private readonly externalIdentityUnsubscribers = new Map<string, () => void>();
   private readonly endpointPolicy?: Pick<SSRFProtection, 'check'>;
   /** v4.12 Slice 3a.3 — injected OAuth resolver + the resolved per-server bearer hooks. */
   private readonly authProvider?: McpAuthProvider;
@@ -352,6 +366,7 @@ export class McpClient {
     };
     this.now = opts.now ?? (() => Date.now());
     this.externalAuthority = opts.externalAuthority;
+    this.injectedHttpTransport = Boolean(opts.httpFactory || opts.streamableFactory || opts.eventSourceFactory);
     this.endpointPolicy = opts.endpointPolicy
       ?? (opts.httpFactory || opts.streamableFactory ? undefined : new SSRFProtection());
     this.authProvider = opts.authProvider;
@@ -371,6 +386,11 @@ export class McpClient {
       log: (lvl, m) => this.log(lvl, `[${label}] ${this.credentialFilter.redact(m)}`),
       eventSourceFactory,
       disableSse: !eventSourceFactory,
+      fetchFn: (input, init) => secureFetch(input, init, {
+        allowLoopbackOrigin: cfg.allowLoopbackHttp === true ? new URL(cfg.baseUrl).origin : undefined,
+        localProtocol: 'mcp',
+        ...this.externalFetchAuthority(cfg),
+      }),
     }));
     this.streamableFactory = opts.streamableFactory ?? ((cfg, label, authHeader, onAuthError) => new StreamableHttpTransport({
       baseUrl: cfg.baseUrl,
@@ -378,6 +398,11 @@ export class McpClient {
       authHeader,
       onAuthError,
       log: (lvl, m) => this.log(lvl, `[${label}] ${this.credentialFilter.redact(m)}`),
+      fetchFn: (input, init) => secureFetch(input, init, {
+        allowLoopbackOrigin: cfg.allowLoopbackHttp === true ? new URL(cfg.baseUrl).origin : undefined,
+        localProtocol: 'mcp',
+        ...this.externalFetchAuthority(cfg),
+      }),
     }));
   }
 
@@ -404,6 +429,7 @@ export class McpClient {
     const configuredIdentity = this.externalAuthority?.observeIdentity({
       kind: 'mcp', endpoint: configuredExternalEndpoint(config), displayName: config.name,
     });
+    if (configuredIdentity) this.watchExternalIdentity(configuredIdentity.externalIdentityId);
     if (configuredIdentity && ['revoked', 'changed'].includes(configuredIdentity.trustState)) {
       throw new Error(`MCP server "${config.name}" external identity is ${configuredIdentity.trustState}`);
     }
@@ -445,7 +471,7 @@ export class McpClient {
 
     const server: McpServer = {
       config,
-      transport: this.buildTransport(config),
+      transport: this.buildTransport(config, configuredIdentity?.externalIdentityId),
       capabilities: {},
       tools: [],
       status: 'initializing',
@@ -497,7 +523,7 @@ export class McpClient {
     if (server.reconnectTimer) { clearTimeout(server.reconnectTimer); server.reconnectTimer = undefined; }
     try { await server.transport.close(); } catch { /* inert/stale transport */ }
 
-    server.transport = this.buildTransport(server.config);
+    server.transport = this.buildTransport(server.config, server.externalIdentityId);
     server.status = 'initializing';
     server.lastError = undefined;
     server.breaker = this.freshBreaker();
@@ -599,7 +625,10 @@ export class McpClient {
   private async attemptReconnect(server: McpServer, maxAttempts: number): Promise<void> {
     if (server.status === 'closed') return;
     // Fresh transport — the previous one is dead after a crash.
-    server.transport = this.buildTransport(server.config);
+    if (server.externalIdentityId && server.config.type === 'http' && server.config.http) {
+      this.assertExternalIdentityUsable(server.externalIdentityId, server.config.http);
+    }
+    server.transport = this.buildTransport(server.config, server.externalIdentityId);
     try {
       await this.establish(server);
       this.log('info', `[${server.config.name}] reconnected (${server.tools.length} tools)`);
@@ -843,6 +872,9 @@ export class McpClient {
   async closeAll(): Promise<void> {
     const names = [...this.servers.keys()];
     for (const n of names) await this.disconnect(n);
+    for (const unsubscribe of this.externalIdentityUnsubscribers.values()) unsubscribe();
+    this.externalIdentityUnsubscribers.clear();
+    this.externalIdentitySignals.clear();
   }
 
   /** Revoke the exact durable identity before disconnecting its local projection. */
@@ -930,7 +962,7 @@ export class McpClient {
 
   // ─── Internals ───────────────────────────────────────────────────────
 
-  private buildTransport(config: McpServerConfig): McpTransport {
+  private buildTransport(config: McpServerConfig, externalIdentityId?: string): McpTransport {
     if (config.type === 'stdio') {
       if (!config.stdio) throw new Error(`MCP server "${config.name}" missing stdio config`);
       const env = this.credentialFilter.buildEnv({
@@ -945,9 +977,53 @@ export class McpClient {
       const onAuthError = this.authErrorHooks.get(config.name);
       // 3c — default to Streamable HTTP (modern); 'sse' selects the legacy shape.
       const factory = config.http.transport === 'sse' ? this.httpFactory : this.streamableFactory;
+      if (externalIdentityId) this.watchExternalIdentity(externalIdentityId);
       return factory(config.http, config.name, authHeader, onAuthError);
     }
     throw new Error(`MCP server "${config.name}" has unsupported type "${(config as McpServerConfig).type}"`);
+  }
+
+  private externalFetchAuthority(config: McpHttpConfig): {
+    authorizeRequest?: () => void;
+    authorizationSignal?: AbortSignal;
+  } {
+    if (!this.externalAuthority) return {};
+    const server = [...this.servers.values()].find((candidate) => candidate.config.type === 'http'
+      && candidate.config.http?.baseUrl === config.baseUrl);
+    const externalIdentityId = server?.externalIdentityId;
+    if (!externalIdentityId) throw new Error('MCP external authorization is unavailable');
+    this.watchExternalIdentity(externalIdentityId);
+    return {
+      authorizeRequest: () => this.assertExternalIdentityUsable(externalIdentityId, config),
+      authorizationSignal: this.externalIdentitySignals.get(externalIdentityId)?.signal,
+    };
+  }
+
+  private watchExternalIdentity(externalIdentityId: string): void {
+    if (!this.externalAuthority || this.externalIdentitySignals.has(externalIdentityId)) return;
+    const controller = new AbortController();
+    this.externalIdentitySignals.set(externalIdentityId, controller);
+    const unsubscribe = this.externalAuthority.subscribeIdentityChanges(externalIdentityId, (identity) => {
+      if (identity.trustState === 'revoked' || identity.trustState === 'changed') {
+        controller.abort(new Error(`MCP external identity is ${identity.trustState}`));
+      }
+    });
+    this.externalIdentityUnsubscribers.set(externalIdentityId, unsubscribe);
+    const current = this.externalAuthority.getIdentity(externalIdentityId);
+    if (!current || current.trustState === 'revoked' || current.trustState === 'changed') {
+      controller.abort(new Error(`MCP external identity is ${current?.trustState ?? 'unavailable'}`));
+    }
+  }
+
+  private assertExternalIdentityUsable(externalIdentityId: string, config: McpHttpConfig): void {
+    const identity = this.externalAuthority?.getIdentity(externalIdentityId);
+    const server = [...this.servers.values()].find((candidate) => candidate.externalIdentityId === externalIdentityId);
+    if (!identity || identity.kind !== 'mcp' || !server || server.config.type !== 'http'
+      || server.config.http?.baseUrl !== config.baseUrl
+      || identity.canonicalEndpoint !== canonicalMcpIdentityEndpoint(config.baseUrl)
+      || identity.trustState === 'revoked' || identity.trustState === 'changed') {
+      throw new Error('MCP external authorization is revoked, stale, or mismatched');
+    }
   }
 
   private async assertEndpointAllowed(config: McpServerConfig): Promise<void> {
@@ -963,6 +1039,9 @@ export class McpClient {
     const explicitLoopback = config.http?.allowLoopbackHttp === true
       && endpoint.protocol === 'http:'
       && ['localhost', '127.0.0.1', '::1'].includes(hostname);
+    if (explicitLoopback && this.injectedHttpTransport) {
+      throw new Error('Local network access requires the connection-bound default MCP transport');
+    }
     if (explicitLoopback || !this.endpointPolicy) return;
     const result = await this.endpointPolicy.check(endpoint.toString());
     if (result.blocked) {

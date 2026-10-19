@@ -16,6 +16,7 @@
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { secureWebFetch, readTextBounded } from '../../../moat/secureFetch';
 
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36';
@@ -46,11 +47,11 @@ export const webPageTool: ToolHandler = {
     const url = String(args.url ?? '').trim();
     if (!url) return { success: false, error: 'No URL provided' };
     try {
-      const res = await fetch(url, {
+      const res = await secureWebFetch(url, {
         headers: { 'User-Agent': USER_AGENT },
         signal: AbortSignal.timeout(TIMEOUT_MS),
       });
-      const text = await res.text();
+      const text = await readTextBounded(res, 64 * 1024);
       const clean = text
         .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
         .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')

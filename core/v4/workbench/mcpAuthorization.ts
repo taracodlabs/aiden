@@ -2,6 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { SSRFProtection } from '../../../moat/ssrfProtection';
+import { secureFetch } from '../../../moat/secureFetch';
 import type { ConfigManager } from '../config';
 import type { AidenPaths } from '../paths';
 import type { McpClient, McpServerConfig } from '../mcpClient';
@@ -57,7 +58,7 @@ export function createWorkbenchMcpAuthorization(input: {
     };
     const fetchFn: typeof fetch = async (resource, init) => {
       const url = String(resource); await safeUrl(url);
-      return fetch(url, { ...init, redirect: 'manual', signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]) });
+      return secureFetch(url, { ...init, redirect: 'manual', signal: AbortSignal.any([request.signal, AbortSignal.timeout(15000)]) });
     };
     const oauth = request.entry.http?.oauth;
     const clientId = (oauth?.clientId || process.env[`AIDEN_MCP_${request.name.toUpperCase()}_CLIENT_ID`] || '').trim();

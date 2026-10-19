@@ -33,6 +33,7 @@
  */
 
 import type { FetchImpl, OAuthFlowResult, OAuthUserAgent } from '../auth/oauthFlow';
+import { secureFetch, readTextBounded } from '../../../moat/secureFetch';
 import { CONTENT_TYPE_FORM } from '../auth/oauthFlow';
 
 /** RFC 8628 §3.4 — the device-code token grant type. */
@@ -120,8 +121,10 @@ export async function requestDeviceAuthorization(
     method: 'POST',
     headers: { 'Content-Type': CONTENT_TYPE_FORM, Accept: CONTENT_TYPE_JSON },
     body: body.toString(),
+    signal: AbortSignal.timeout(15_000),
+    redirect: 'manual',
   });
-  const text = await res.text();
+  const text = res instanceof Response ? await readTextBounded(res, 256 * 1024) : await res.text();
   if (res.status !== 200) {
     throw new Error(`Device authorization request failed: HTTP ${res.status} at ${cfg.deviceAuthorizationEndpoint}: ${text.slice(0, 200)}`);
   }
@@ -163,8 +166,10 @@ export async function pollDeviceTokenOnce(
     method: 'POST',
     headers: { 'Content-Type': CONTENT_TYPE_FORM, Accept: CONTENT_TYPE_JSON },
     body: body.toString(),
+    signal: AbortSignal.timeout(15_000),
+    redirect: 'manual',
   });
-  const text = await res.text();
+  const text = res instanceof Response ? await readTextBounded(res, 256 * 1024) : await res.text();
   const j = asObj(text);
   if (j && str(j.access_token)) return { kind: 'success', result: toResult(j) };
 
@@ -200,7 +205,7 @@ export interface RunDeviceFlowDeps {
  */
 export async function runMcpDeviceFlow(deps: RunDeviceFlowDeps): Promise<OAuthFlowResult> {
   if (deps.signal?.aborted) throw new Error(`Cancelled device authorization for "${deps.server}".`);
-  const fetchImpl = deps.fetchImpl ?? (fetch as unknown as FetchImpl);
+  const fetchImpl = deps.fetchImpl ?? (secureFetch as unknown as FetchImpl);
   const now = deps.now ?? Date.now;
 
   const auth = await requestDeviceAuthorization(deps.config, fetchImpl);

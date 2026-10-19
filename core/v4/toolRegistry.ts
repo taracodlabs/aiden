@@ -885,8 +885,11 @@ export class ToolRegistry {
           }) !== undefined;
         }
       }
-      const approvalGated = effectiveMutates
-        && (preliminaryEffect.approvalRequirement !== 'none' || browserApprovalRequired) && (
+      const localAccessScope = (context.policySnapshot?.networkPolicy as {
+        localAccess?: { origin: string; action: string; capabilities: string[]; expiresAt: number };
+      } | undefined)?.localAccess;
+      const approvalGated = (Boolean(localAccessScope) || (effectiveMutates
+        && (preliminaryEffect.approvalRequirement !== 'none' || browserApprovalRequired))) && (
         context.approvalEngine !== undefined || (context.actionAuthority !== undefined && durableJobContext !== undefined)
       );
       effectDescriptor = preliminaryEffect;
@@ -979,14 +982,14 @@ export class ToolRegistry {
           error: 'Source-fenced repository changes require exact interactive approval',
         }, 'blocked');
       }
-      if (effectiveMutates && durableJobContext) {
+      if ((effectiveMutates || localAccessScope) && durableJobContext) {
         try {
           preparedToolCall = prepareDurableToolCall({
             toolCallId: call.id,
             toolName: call.name,
             args,
             riskTier: shellIntent?.tier ?? handler.riskTier ?? 'caution',
-            mutates: true,
+            mutates: effectiveMutates,
             effect: effectDescriptor,
             approvalState: approvalGated ? 'pending' : 'not_required',
             allowExactMutationRecovery: context.automationApprovalContinuation !== undefined,
@@ -1098,13 +1101,15 @@ export class ToolRegistry {
           toolName: call.name,
           category: handler.category,
           args,
-          approvalRequirement: effectDescriptor.approvalRequirement,
+          approvalRequirement: localAccessScope ? 'always' : effectDescriptor.approvalRequirement,
           // v4.12.1 Pillar 2 — pass the EFFECTIVE tier (handler-declared floor
           // OR classifier escalation) so the autonomy gate + smart mode see a
           // tool's real risk (e.g. file_delete → 'dangerous' always asks),
           // not just classifier-flagged shell/browser tiers.
           riskTier: effectiveTier,
-          reason,
+          reason: localAccessScope
+            ? `Local network access to ${localAccessScope.origin}; action ${localAccessScope.action}; capabilities ${localAccessScope.capabilities.join(', ')}; expires ${new Date(localAccessScope.expiresAt).toISOString()}`
+            : reason,
           preview,
           // v4.10 Slice 10.6 — pass through fine-grained effects when
           // the tool declares them. The approval-prompt renderer
@@ -1152,6 +1157,7 @@ export class ToolRegistry {
               riskTier: effectiveTier ?? 'caution',
               riskReasons: reason ? [reason] : [],
               normalized,
+              expiresAt: (context.policySnapshot?.networkPolicy as { localAccess?: { expiresAt: number } } | undefined)?.localAccess?.expiresAt,
             });
             if (continuation) context.automationApprovalContinuation?.bindApproval(record);
           } catch (error) {
@@ -1760,6 +1766,20 @@ export class ToolRegistry {
         }
       }
 
+      const dispatchApproved = async (a: Record<string, unknown>): Promise<unknown> => {
+        const jobContext = currentJobExecutionContext();
+        const scope = (context.policySnapshot?.networkPolicy as {
+          localAccess?: { workspaceId: string; sessionId: string; accountId: string | null };
+        } | undefined)?.localAccess;
+        if (!scope || !durableApproval || !context.actionAuthority || !jobContext) return dispatch(a);
+        return context.actionAuthority.runWithLocalAccess({
+          ...durableApproval,
+          jobId: jobContext.jobId, attemptId: jobContext.attemptId,
+          generation: jobContext.generation, fenceToken: jobContext.fenceToken,
+          workspaceId: scope.workspaceId, sessionId: scope.sessionId, accountId: scope.accountId,
+          action: call.name,
+        }, () => dispatch(a));
+      };
       let result: unknown;
       const executionAttempt = {
         attempt: context.attempt ?? 1,
@@ -1789,12 +1809,12 @@ export class ToolRegistry {
                   parentSpanId: childCtx.parentSpanId,
                 },
               };
-              const raw = await dispatch(args);
+              const raw = await dispatchApproved(args);
               return sliced.runToolPostHooks(hookOptions, args, raw);
             },
           );
         } else {
-          result = await dispatch(args);
+          result = await dispatchApproved(args);
         }
         const projectionContext = currentJobExecutionContext();
         if (projectionContext && (committedRepositoryChange || completedRepositoryValidation)) {

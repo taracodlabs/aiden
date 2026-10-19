@@ -1,61 +1,31 @@
-# Security Policy
+# Security policy
 
-## Reporting a Vulnerability
+## Private reports
 
-**Preferred:** Use GitHub Private Vulnerability Reporting:
-https://github.com/taracodlabs/aiden/security/advisories/new
+Please report suspected vulnerabilities privately to **contact@taracod.com**.
+Do not open a public issue or include exploit details in a public pull request.
+The repository's GitHub private vulnerability reporting feature is currently
+disabled; this email is the reporting route until the maintainer enables and
+verifies that feature.
 
-This gives us a private thread, attachment support, and proper tracking.
+Include the Aiden version, operating system and Node version, a minimal
+reproduction on systems you own, and the impact you observed. Please do not
+send secrets, customer data, or credentials. If sensitive evidence is needed,
+first ask for a suitable private transfer method.
 
-**Email backup:** contact@taracod.com (monitored daily)
+We aim to acknowledge reports and coordinate a fix and disclosure with the
+reporter. Timing depends on the issue and available maintainer capacity; this
+policy does not promise a fixed response or publication date. Reporter credit
+will be offered with consent. No bounty or payment program is promised here.
 
-**Please do not open a public GitHub issue for security vulnerabilities.**
+## Security updates
 
-Email **contact@taracod.com** with:
+Security fixes are prepared for the latest maintained published release line.
+Older versions may need to upgrade; a listed version is not a guarantee that
+it has no vulnerabilities. Check the published package and release notes for
+the exact fixed version of a particular issue. The current published release
+line at the time of this policy update is 4.21.x.
 
-- **Affected version** (from `aiden --version` or the About dialog)
-- **Reproduction steps** — the minimal sequence of actions to trigger the issue
-- **Potential impact** — what an attacker could achieve by exploiting this
-
-You will receive an acknowledgment within **7 business days**. We prefer **coordinated disclosure**: please allow us reasonable time to patch before public disclosure. We will credit researchers in the release notes unless you prefer to remain anonymous.
-
----
-
-## Supported Versions
-
-Only the **latest minor version** receives security fixes. Older versions are not patched.
-
-| Version | Supported |
-|---------|-----------|
-| v4.0.x  | ✅ Yes    |
-| < v4.0  | ❌ No     |
-
-If you are on an older version, upgrade first to confirm the issue is still present before reporting.
-
----
-
-## Out of Scope
-
-The following are **not** considered security vulnerabilities in Aiden:
-
-- Vulnerabilities in **third-party dependencies** — please report these directly upstream (npm, GitHub advisories, etc.)
-- Issues that require **physical access** to the machine running Aiden
-- **Denial of service via resource exhaustion** on the user's own machine (Aiden runs locally with full trust)
-- Behaviour that requires the attacker to already have **local admin rights** on the same machine
-- Issues in **skills contributed by third parties** (report to the skill author)
-
----
-
-## Security Design Notes
-
-Aiden runs entirely on your local machine. By default:
-
-- No telemetry is sent without explicit configuration
-- API keys are stored in your local `.env` file, never transmitted to Taracod servers
-- The API server and dashboard (`localhost:4200`) are bound to loopback only and not exposed to the network unless you explicitly bind to `0.0.0.0`
-- The OpenAI-compatible API at `localhost:4200/v1` accepts unauthenticated requests by default (loopback-only); set `AIDEN_API_KEY` to require Bearer-token auth
-- Shell execution and browser automation require explicit user commands — Aiden does not run arbitrary code autonomously without a user prompt
-- A 10-module security moat (`moat/`) gates every tool call: tiered approval engine (safe / caution / dangerous), dangerous-command pattern classifier, SSRF-safe URL fetcher, secret/PII pre-write scanner, honesty enforcement post-loop scan, memory guard, planner-guard tool narrowing
-- OAuth tokens for the ChatGPT Plus subscription are stored at `<aiden-home>/auth/<provider>.json` with 0600 file mode; never transmitted to Taracod servers
-
-If you configure cloud provider API keys (OpenAI, Anthropic, Groq, etc.), requests to those providers are subject to their respective privacy policies.
+This policy applies to Aiden's own code and to dependency behavior that can
+affect Aiden users. Reports involving local access, extensions, or third-party
+services are assessed on their actual impact rather than excluded by category.

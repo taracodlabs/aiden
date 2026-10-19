@@ -20,6 +20,7 @@
  * seam + `needs-auth` status are 3a.3.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { secureFetch } from '../../../moat/secureFetch';
 import type { AidenPaths } from '../paths';
 import { loadTokens, saveTokens } from '../auth/tokenStore';
 import {
@@ -218,7 +219,7 @@ export async function runLoopbackAuthFlow(deps: {
 }): Promise<OAuthFlowResult> {
   const checkCancelled = () => { if (deps.signal?.aborted) throw new Error('OAuth authorization cancelled'); };
   checkCancelled();
-  const fetchImpl = deps.fetchImpl ?? (fetch as unknown as FetchImpl);
+  const fetchImpl = deps.fetchImpl ?? (secureFetch as unknown as FetchImpl);
   const pkce = generatePkce();
   const state = (deps.makeState ?? (() => generatePkce().verifier))();
 

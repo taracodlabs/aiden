@@ -26,6 +26,7 @@
  */
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import type { McpServer, McpServerConfig } from '../../../core/v4/mcpClient';
+import { secureFetch } from '../../../moat/secureFetch';
 import { promises as fs } from 'node:fs';
 import { mapStandardMcpServers } from '../../../tools/v4/mcpImport';
 import { ensureMcpOAuthConfig, type StaticOAuthClient } from '../../../core/v4/mcp/oauthDiscovery';
@@ -569,7 +570,7 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
 
   try {
     const config = await ensureMcpOAuthConfig(ctx.paths, name, serverUrl, {
-      fetchFn: fetch,
+      fetchFn: secureFetch,
       redirectUris: loopbackRedirectUris(),
       staticClient,
       requestedScopes: oauthCfg?.scopes,
@@ -588,8 +589,9 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
           },
           server: name,
           ua: buildMcpUserAgent(ctx),
+          fetchImpl: secureFetch,
         })
-      : await runLoopbackAuthFlow({ config, server: name, ua: buildMcpUserAgent(ctx) });
+      : await runLoopbackAuthFlow({ config, server: name, ua: buildMcpUserAgent(ctx), fetchImpl: secureFetch });
     await persistMcpTokens(ctx.paths, name, result, config);
 
     // Handoff: token persisted → (re)connect so the tools register immediately.

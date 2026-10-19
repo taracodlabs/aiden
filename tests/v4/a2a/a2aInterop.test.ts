@@ -1,3 +1,5 @@
+import { withLocalAccess, withRuntimeLocalAccess } from '../helpers/localAccess';
+import { secureFetch } from '../../../moat/secureFetch';
 /**
  * Copyright (c) 2026 Shiva Deore (Taracod).
  * Licensed under AGPL-3.0. See LICENSE for details.
@@ -139,7 +141,7 @@ describe('A2A v1.0 controlled wire fixture', () => {
       VALUES ('a2a-interop',1,'localhost',1,1,'4.20.0')`).run();
     const engine = createJobEngine({ db });
     const parentJobId = engine.submitJob({
-      entryPoint: 'test', source: 'a2a-interop', sessionId: 'session-interop', instanceId: 'a2a-interop',
+      entryPoint: 'test', source: 'a2a-interop', sessionId: 'session-interop', workspaceId: 'interop-workspace', instanceId: 'a2a-interop',
       idempotencyNamespace: 'a2a-interop-parent', idempotencyKey: 'parent', goal: 'Use the controlled reader.',
     }).jobId;
     const runtime = createA2aRuntime({
@@ -148,13 +150,26 @@ describe('A2A v1.0 controlled wire fixture', () => {
       instanceId: 'a2a-interop',
       allowLoopbackHttp: true,
       agentCardDiscovery: { fetchImpl: fetch, ssrfProtection: { check: async () => ({ blocked: false }) } },
-      clientFactory: (normalized) => createSdkA2aRemoteClient(normalized, {
-        fetchImpl: fetch, allowLoopbackHttp: true,
-        ssrfProtection: { check: async () => ({ blocked: false }) },
-      }),
+      clientFactory: async (normalized) => {
+        const client = await createSdkA2aRemoteClient(normalized, { allowLoopbackHttp: true });
+        const caps = ['a2a:SendMessage:repository-analysis', 'a2a:SendStreamingMessage:repository-analysis', 'a2a:GetTask', 'a2a:CancelTask'];
+        return {
+          sendReadOnly: input => withRuntimeLocalAccess(db, baseUrl, caps, () => client.sendReadOnly(input)),
+          getTask: input => withRuntimeLocalAccess(db, baseUrl, caps, () => client.getTask(input)),
+          cancelTask: input => withRuntimeLocalAccess(db, baseUrl, caps, () => client.cancelTask(input)),
+          async *sendReadOnlyStream(input) {
+            const stream = client.sendReadOnlyStream!(input)[Symbol.asyncIterator]();
+            try { for (;;) {
+              const next = await withRuntimeLocalAccess(db, baseUrl, caps, () => stream.next());
+              if (next.done) break;
+              yield next.value;
+            } } finally { await stream.return?.(); }
+          },
+        };
+      },
       quarantine: createA2aArtifactQuarantine(path.join(root, 'quarantine')),
     });
-    const discovered = await runtime.discoverAgentFromUrl(baseUrl);
+    const discovered = await withLocalAccess(baseUrl, ['a2a:http:GET:/.well-known/agent-card.json'], () => runtime.discoverAgentFromUrl(baseUrl));
     const trusted = runtime.trustAgentEndpoint(discovered.externalIdentityId);
     const delegated = await runtime.delegateReadOnly({
       parentJobId,
@@ -310,22 +325,35 @@ describe('A2A v1.0 controlled wire fixture', () => {
       VALUES ('a2a-stream',1,'localhost',1,1,'4.20.0')`).run();
     const engine = createJobEngine({ db });
     const parentJobId = engine.submitJob({
-      entryPoint: 'test', source: 'a2a-stream', sessionId: 'session-stream', instanceId: 'a2a-stream',
+      entryPoint: 'test', source: 'a2a-stream', sessionId: 'session-stream', workspaceId: 'interop-workspace', instanceId: 'a2a-stream',
       idempotencyNamespace: 'a2a-stream-parent', idempotencyKey: 'parent', goal: 'Use the streaming reader.',
     }).jobId;
     const runtime = createA2aRuntime({
       engine, ownerId: 'a2a-stream-owner', instanceId: 'a2a-stream', allowLoopbackHttp: true,
       agentCardDiscovery: { fetchImpl: fetch, ssrfProtection: { check: async () => ({ blocked: false }) } },
-      clientFactory: (normalized) => createSdkA2aRemoteClient(normalized, {
-        fetchImpl: fetch, allowLoopbackHttp: true,
-        ssrfProtection: { check: async () => ({ blocked: false }) },
-      }),
+      clientFactory: async (normalized) => {
+        const client = await createSdkA2aRemoteClient(normalized, { allowLoopbackHttp: true });
+        const caps = ['a2a:SendMessage:repository-analysis', 'a2a:SendStreamingMessage:repository-analysis', 'a2a:GetTask', 'a2a:CancelTask'];
+        return {
+          sendReadOnly: input => withRuntimeLocalAccess(db, baseUrl, caps, () => client.sendReadOnly(input)),
+          getTask: input => withRuntimeLocalAccess(db, baseUrl, caps, () => client.getTask(input)),
+          cancelTask: input => withRuntimeLocalAccess(db, baseUrl, caps, () => client.cancelTask(input)),
+          async *sendReadOnlyStream(input) {
+            const stream = client.sendReadOnlyStream!(input)[Symbol.asyncIterator]();
+            try { for (;;) {
+              const next = await withRuntimeLocalAccess(db, baseUrl, caps, () => stream.next());
+              if (next.done) break;
+              yield next.value;
+            } } finally { await stream.return?.(); }
+          },
+        };
+      },
       quarantine: createA2aArtifactQuarantine(path.join(root, 'quarantine')),
     });
-    const discovered = await runtime.discoverAgentFromUrl(baseUrl);
+    const discovered = await withLocalAccess(baseUrl, ['a2a:http:GET:/.well-known/agent-card.json'], () => runtime.discoverAgentFromUrl(baseUrl));
     runtime.trustAgentEndpoint(discovered.externalIdentityId);
     const delegated = await runtime.delegateReadOnly({
-      parentJobId, sessionId: 'session-stream', instanceId: 'a2a-stream',
+      parentJobId, sessionId: 'session-stream', workspaceId: 'interop-workspace', instanceId: 'a2a-stream',
       externalIdentityId: discovered.externalIdentityId, skillId: 'repository-analysis',
       objective: 'Analyze streamed package facts.', data: {}, idempotencyKey: 'stream-delegation',
       verify: ({ artifacts }) => ({
@@ -344,7 +372,7 @@ describe('A2A v1.0 controlled wire fixture', () => {
     expect(engine.getJob(delegated.childJobId)?.status).toBe('completed');
 
     const pending = runtime.delegateReadOnly({
-      parentJobId, sessionId: 'session-stream', instanceId: 'a2a-stream',
+      parentJobId, sessionId: 'session-stream', workspaceId: 'interop-workspace', instanceId: 'a2a-stream',
       externalIdentityId: discovered.externalIdentityId, skillId: 'repository-analysis',
       objective: 'Hold a read-only task until cancellation.', data: { mode: 'hold' },
       idempotencyKey: 'stream-cancel-delegation',

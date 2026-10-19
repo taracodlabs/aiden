@@ -35,6 +35,9 @@ import type {
   A2aRemoteTaskObservation,
 } from './runtime';
 import { SSRFProtection } from '../../../moat/ssrfProtection';
+import { secureFetch } from '../../../moat/secureFetch';
+import { networkRequestCapability, networkPrincipalDigest } from '../localNetworkContext';
+import { assertLocalNetworkAccess } from '../actionAuthority';
 
 function stateOf(task: Task): A2aRemoteTaskObservation['state'] {
   return stateFromTaskState(task.status?.state);
@@ -232,7 +235,12 @@ function createBoundedEndpointFetch(
   maxResponseBytes: number,
 ): typeof fetch {
   const base = new URL(baseEndpoint);
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl: typeof fetch = options.fetchImpl && options.fetchImpl !== fetch
+    ? options.fetchImpl
+    : ((input, init) => secureFetch(input, init, {
+    allowLoopbackOrigin: options.allowLoopbackHttp === true ? base.origin : undefined,
+    localProtocol: 'a2a',
+  }));
   const ssrf = options.ssrfProtection ?? new SSRFProtection();
   return async (input, init) => {
     const target = new URL(
@@ -247,12 +255,19 @@ function createBoundedEndpointFetch(
       const check = await ssrf.check(target.toString());
       if (check.blocked) throw new Error(`A2A endpoint blocked by network policy: ${check.reason ?? 'unsafe endpoint'}`);
     }
+    if (loopbackFixture) {
+      // Injected adapters must not turn the local destination hint into consent.
+      const request = new Request(input, init);
+      assertLocalNetworkAccess(target.href, await networkRequestCapability(request, 'a2a'), networkPrincipalDigest(request.headers));
+    }
     const response = await fetchImpl(input, { ...init, redirect: 'manual' });
     if (response.status >= 300 && response.status < 400) {
+      await response.body?.cancel().catch(() => undefined);
       throw new Error('A2A transport redirect was blocked; endpoint changes require explicit review');
     }
     const declaredLength = Number(response.headers.get('content-length') ?? '0');
     if (Number.isFinite(declaredLength) && declaredLength > maxResponseBytes) {
+      await response.body?.cancel().catch(() => undefined);
       throw new Error('A2A response exceeds the bounded response limit');
     }
     return boundedResponse(response, maxResponseBytes);

@@ -9,6 +9,43 @@ import path from 'node:path';
 
 import type { Db } from './daemon/db/connection';
 import type { JobEngine } from './daemon/jobEngine';
+import type { LocalAccessBinding } from './localNetworkContext';
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { currentJobExecutionContext, currentPreparedDurableToolCall } from './daemon/jobExecutionContext';
+
+const storage = new AsyncLocalStorage<{
+  binding: Readonly<LocalAccessBinding>;
+  check: (binding: LocalAccessBinding, url: string, capability: string, principalDigest: string | null) => void;
+  active: boolean;
+}>();
+
+async function runWithLocalNetworkContext<T>(
+  binding: LocalAccessBinding,
+  check: (binding: LocalAccessBinding, url: string, capability: string, principalDigest: string | null) => void,
+  operation: () => T | Promise<T>,
+): Promise<T> {
+  const context = { binding: Object.freeze({ ...binding }), check, active: true };
+  try { return await storage.run(context, operation); }
+  finally { context.active = false; }
+}
+
+export function assertLocalNetworkAccess(url: string, capability: string, principalDigest: string | null = null): void {
+  const context = storage.getStore();
+  if (!context?.active) throw new Error('Local network access requires a live durable approval');
+  const current = currentJobExecutionContext();
+  const binding = context.binding;
+  if (current && (current.jobId !== binding.jobId || current.attemptId !== binding.attemptId
+    || current.generation !== binding.generation || current.fenceToken !== binding.fenceToken)) {
+    throw new Error('Local network approval belongs to another Job or Attempt');
+  }
+  const toolCall = currentPreparedDurableToolCall();
+  if (toolCall && toolCall.toolCallId !== binding.toolCallId) {
+    throw new Error('Local network approval belongs to another ToolCall');
+  }
+  context.check(binding, url, capability, principalDigest);
+}
+
+
 
 export interface PolicySnapshotInput {
   trustLevel: string;
@@ -76,6 +113,8 @@ export interface ApprovalRecord {
 }
 
 export interface ActionAuthority {
+  /** Use an explicitly approved network scope for this operation only. */
+  runWithLocalAccess<T>(binding: LocalAccessBinding, operation: () => T | Promise<T>): Promise<T>;
   request(command: {
     jobId: string;
     attemptId: string;
@@ -399,6 +438,62 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
   };
 
   return {
+    runWithLocalAccess(binding, operation) {
+      return runWithLocalNetworkContext(binding, (bound, rawUrl, capability, principalDigest) => {
+        // Re-read durable state at every dispatch. Neither the caller's copy of
+        // an Approval nor a connected transport is a source of permission.
+        const record = get(bound.approvalId);
+        const job = jobEngine.getJob(bound.jobId);
+        const attempt = jobEngine.getAttempt(bound.attemptId);
+        const now = Date.now();
+        if (!record || !job || !attempt || !['approved', 'executed'].includes(record.state)
+          || record.decision !== 'approved' || record.expiresAt === null || record.expiresAt <= now
+          || record.jobId !== bound.jobId || record.attemptId !== bound.attemptId
+          || record.generation !== bound.generation || record.fenceDigest !== sha(bound.fenceToken)
+          || record.toolCallId !== bound.toolCallId || record.effectId !== bound.effectId
+          || record.actionDigest !== bound.actionDigest || record.policySnapshotId !== bound.policySnapshotId
+          || record.toolName !== bound.action || job.workspaceId !== bound.workspaceId
+          || !bound.workspaceId || job.sessionId !== bound.sessionId
+          || job.activeAttemptId !== bound.attemptId || attempt.jobId !== bound.jobId
+          || attempt.generation !== bound.generation || attempt.fenceToken !== bound.fenceToken
+          || attempt.leaseExpiresAt === null || attempt.leaseExpiresAt <= now
+          || !['running', 'waiting'].includes(job.status)
+          || !['running', 'waiting', 'leased'].includes(attempt.status)) {
+          throw new Error('Local network approval is missing, revoked, expired, or bound to another action');
+        }
+        const policy = db.prepare('SELECT network_policy_json FROM policy_snapshots WHERE policy_snapshot_id = ?')
+          .get(record.policySnapshotId) as { network_policy_json: string } | undefined;
+        const scope = policy ? JSON.parse(policy.network_policy_json).localAccess : null;
+        const target = new URL(rawUrl);
+        if (!scope || target.username || target.password || !['http:', 'https:'].includes(target.protocol)
+          || scope.origin !== target.origin || scope.action !== bound.action
+          || scope.workspaceId !== bound.workspaceId || scope.sessionId !== bound.sessionId
+          || scope.accountId !== bound.accountId || (scope.principalDigest ?? null) !== principalDigest
+          || !Number.isSafeInteger(scope.expiresAt)
+          || scope.expiresAt <= now || !Array.isArray(scope.capabilities)
+          || !scope.capabilities.includes(capability)) {
+          throw new Error('Local network approval scope does not match dispatch');
+        }
+        if (record.effectId) {
+          const effect = db.prepare(`SELECT se.key FROM side_effect_ledger se
+            JOIN tool_calls tc ON tc.tool_call_id = se.tool_call_id
+            WHERE se.key=? AND se.job_id=? AND se.attempt_id=? AND se.generation=?
+              AND tc.tool_call_id=? AND tc.side_effect_id=se.key`)
+            .get(record.effectId, bound.jobId, bound.attemptId, bound.generation, bound.toolCallId);
+          if (!effect) throw new Error('Local network approval Effect binding changed');
+        }
+        if (bound.accountId !== null) {
+          const account = db.prepare(`SELECT a.account_id FROM connected_accounts a
+            JOIN integration_job_account_bindings b ON b.account_id=a.account_id
+            WHERE a.account_id=? AND a.workspace_id=? AND a.status='active'
+              AND a.health='healthy' AND a.revoked_at IS NULL
+              AND b.job_id=? AND b.workspace_id=a.workspace_id AND b.owner_id=a.owner_id
+              AND b.bound_attempt_id=? AND b.bound_generation=?`)
+            .get(bound.accountId, bound.workspaceId, bound.jobId, bound.attemptId, bound.generation);
+          if (!account) throw new Error('Local network account authority is stale or revoked');
+        }
+      }, operation);
+    },
     request(command) {
       const now = command.now ?? Date.now();
       const job = jobEngine.getJob(command.jobId);
@@ -712,7 +807,11 @@ export function createActionAuthority(options: { db: Db; jobEngine: JobEngine })
         db.prepare(
           `UPDATE approvals
               SET state = 'invalidated', invalidated_at = ?, invalidation_reason = ?
-            WHERE approval_id = ? AND state IN ('created','displayed','approved')`,
+            WHERE approval_id = ? AND (state IN ('created','displayed','approved')
+              OR (state = 'executed' AND EXISTS (
+                SELECT 1 FROM policy_snapshots p WHERE p.policy_snapshot_id = approvals.policy_snapshot_id
+                  AND json_type(p.network_policy_json, '$.localAccess') = 'object'
+              )))`,
         ).run(now, reason, approvalId);
         const record = get(approvalId);
         if (!record) throw new Error('Approval not found');

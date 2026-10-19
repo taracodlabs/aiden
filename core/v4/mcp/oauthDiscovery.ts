@@ -16,17 +16,19 @@
  *     absolute-expiry token store.
  *
  * Scope: protocol + persistence ONLY. No browser flow, no loopback callback,
- * no transport/command wiring (that's 3a.2 / 3a.3). All HTTP goes through an
- * injected `fetchFn` — this module never touches the real network.
+ * no transport/command wiring (that's 3a.2 / 3a.3). Production HTTP uses a
+ * connection-bound fetch; tests may inject a synthetic transport.
  */
 import type { AidenPaths } from '../paths';
 import { loadTokens, saveTokens, isExpired, type OAuthTokens } from '../auth/tokenStore';
 import { SSRFProtection } from '../../../moat/ssrfProtection';
+import { secureFetch, readTextBounded } from '../../../moat/secureFetch';
+import { assertLocalNetworkAccess } from '../actionAuthority';
 
 /** Minimal fetch surface — the global `fetch` satisfies it; tests inject a mock. */
 export type FetchLike = (
   url: string,
-  init?: { method?: string; headers?: Record<string, string>; body?: string; redirect?: 'manual' },
+  init?: { method?: string; headers?: Record<string, string>; body?: string; redirect?: 'manual'; signal?: AbortSignal },
 ) => Promise<{ ok: boolean; status: number; json: () => Promise<unknown>; text: () => Promise<string> }>;
 
 export interface OAuthDiscoveryDeps {
@@ -34,6 +36,8 @@ export interface OAuthDiscoveryDeps {
   endpointPolicy?: Pick<SSRFProtection, 'check'>;
   /** Controlled local fixtures only. */
   allowLoopbackHttp?: boolean;
+  /** Exact owner-configured local server origin, never an advertised origin. */
+  approvedLocalOrigin?: string;
   maxMetadataBytes?: number;
 }
 
@@ -177,16 +181,17 @@ function strArr(v: unknown): string[] | undefined {
   return Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === 'string') : undefined;
 }
 
-async function endpointAllowed(url: string, deps: Pick<OAuthDiscoveryDeps, 'endpointPolicy' | 'allowLoopbackHttp'>): Promise<boolean> {
+async function endpointAllowed(url: string, deps: Pick<OAuthDiscoveryDeps, 'endpointPolicy' | 'allowLoopbackHttp' | 'approvedLocalOrigin'>): Promise<boolean> {
   if (url.length > 2_048) return false;
   let parsed: URL;
   try { parsed = new URL(url); } catch { return false; }
   if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return false;
   const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   const loopbackFixture = deps.allowLoopbackHttp === true
+    && deps.approvedLocalOrigin === parsed.origin
     && parsed.protocol === 'http:'
     && ['localhost', '127.0.0.1', '::1'].includes(hostname);
-  if (loopbackFixture) return true;
+  if (loopbackFixture) return true; // Dispatch below still requires durable approval.
   if (deps.endpointPolicy && parsed.protocol !== 'https:') return false;
   if (!deps.endpointPolicy) return true;
   return !(await deps.endpointPolicy.check(parsed.toString())).blocked;
@@ -195,11 +200,20 @@ async function endpointAllowed(url: string, deps: Pick<OAuthDiscoveryDeps, 'endp
 async function fetchJson(deps: OAuthDiscoveryDeps, url: string): Promise<Record<string, unknown> | null> {
   try {
     if (!(await endpointAllowed(url, deps))) return null;
-    const res = await deps.fetchFn(url, {
-      method: 'GET', headers: { Accept: 'application/json' }, redirect: 'manual',
+    if (deps.approvedLocalOrigin) assertLocalNetworkAccess(url, 'http:GET');
+    const fetchFn: FetchLike = deps.fetchFn === fetch
+      ? (input, init) => secureFetch(input, init, { allowLoopbackOrigin: deps.approvedLocalOrigin })
+      : deps.fetchFn;
+    const res = await fetchFn(url, {
+      method: 'GET', headers: { Accept: 'application/json' }, redirect: 'manual', signal: AbortSignal.timeout(15_000),
     });
-    if (!res.ok) return null;
-    const text = await res.text();
+    if (!res.ok) {
+      if (res instanceof Response) await res.body?.cancel().catch(() => undefined);
+      return null;
+    }
+    const text = res instanceof Response
+      ? await readTextBounded(res, deps.maxMetadataBytes ?? 512 * 1024)
+      : await res.text();
     const maxBytes = deps.maxMetadataBytes ?? 512 * 1024;
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || Buffer.byteLength(text, 'utf8') > maxBytes) return null;
     const j: unknown = JSON.parse(text);
@@ -277,18 +291,26 @@ export async function discoverMcpOAuth(
   serverUrl: string,
   deps: OAuthDiscoveryDeps,
 ): Promise<{ endpoints: DiscoveredOAuth; resource?: string } | null> {
-  if (!(await endpointAllowed(serverUrl, deps))) return null;
-  const prm = await discoverProtectedResource(serverUrl, deps);
+  let approvedLocalOrigin: string | undefined;
+  if (deps.allowLoopbackHttp === true) {
+    try { approvedLocalOrigin = new URL(serverUrl).origin; } catch { return null; }
+  }
+  const scoped: OAuthDiscoveryDeps = {
+    ...deps,
+    approvedLocalOrigin,
+  };
+  if (!(await endpointAllowed(serverUrl, scoped))) return null;
+  const prm = await discoverProtectedResource(serverUrl, scoped);
   if (prm) {
     for (const as of prm.authorizationServers) {
-      if (!(await endpointAllowed(as, deps))) continue;
-      const ep = await discoverAuthServer(as, deps);
-      if (ep && await endpointsAllowed(ep, deps)) return { endpoints: ep, resource: prm.resource ?? serverUrl };
+      if (!(await endpointAllowed(as, scoped))) continue;
+      const ep = await discoverAuthServer(as, scoped);
+      if (ep && await endpointsAllowed(ep, scoped)) return { endpoints: ep, resource: prm.resource ?? serverUrl };
     }
     return null; // PRM advertised AS(es) but none had usable metadata
   }
-  const ep = await discoverAuthServer(serverUrl, deps); // fallback: AS metadata at the base
-  return ep && await endpointsAllowed(ep, deps) ? { endpoints: ep, resource: serverUrl } : null;
+  const ep = await discoverAuthServer(serverUrl, scoped); // fallback: AS metadata at the base
+  return ep && await endpointsAllowed(ep, scoped) ? { endpoints: ep, resource: serverUrl } : null;
 }
 
 async function endpointsAllowed(endpoints: DiscoveredOAuth, deps: OAuthDiscoveryDeps): Promise<boolean> {
@@ -313,6 +335,7 @@ export interface RegisterClientOptions {
   grantTypes?: string[];
   endpointPolicy?: Pick<SSRFProtection, 'check'>;
   allowLoopbackHttp?: boolean;
+  approvedLocalOrigin?: string;
   maxMetadataBytes?: number;
 }
 
@@ -330,17 +353,24 @@ export async function registerClient(
     response_types: ['code'],
     token_endpoint_auth_method: 'none', // public client — PKCE, no secret
   };
-  const res = await opts.fetchFn(registrationEndpoint, {
+  const fetchFn: FetchLike = opts.fetchFn === fetch
+    ? (input, init) => secureFetch(input, init, { allowLoopbackOrigin: opts.approvedLocalOrigin })
+    : opts.fetchFn;
+  if (opts.approvedLocalOrigin) assertLocalNetworkAccess(registrationEndpoint, 'http:POST');
+  const res = await fetchFn(registrationEndpoint, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
     body: JSON.stringify(body),
     redirect: 'manual',
+    signal: AbortSignal.timeout(15_000),
   });
   if (!res.ok) {
-    const detail = await res.text().catch(() => '');
+    const detail = await (res instanceof Response ? readTextBounded(res, 512) : res.text()).catch(() => '');
     throw new Error(`MCP DCR failed: HTTP ${res.status} at ${registrationEndpoint}${detail ? `: ${detail.slice(0, 300)}` : ''}`);
   }
-  const responseText = await res.text();
+  const responseText = res instanceof Response
+    ? await readTextBounded(res, opts.maxMetadataBytes ?? 512 * 1024)
+    : await res.text();
   const maxBytes = opts.maxMetadataBytes ?? 512 * 1024;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || Buffer.byteLength(responseText, 'utf8') > maxBytes) {
     throw new Error('MCP DCR response exceeds the bounded metadata limit');
@@ -437,6 +467,7 @@ export async function ensureMcpOAuthConfig(
     fetchFn: deps.fetchFn,
     endpointPolicy,
     allowLoopbackHttp: deps.allowLoopbackHttp,
+    approvedLocalOrigin: deps.allowLoopbackHttp === true ? new URL(serverUrl).origin : undefined,
     maxMetadataBytes: deps.maxMetadataBytes,
   };
   const discovered = await discoverMcpOAuth(serverUrl, discoveryDeps);
@@ -481,6 +512,7 @@ export async function ensureMcpOAuthConfig(
     clientName: deps.clientName,
     endpointPolicy,
     allowLoopbackHttp: deps.allowLoopbackHttp,
+    approvedLocalOrigin: discoveryDeps.approvedLocalOrigin,
     maxMetadataBytes: deps.maxMetadataBytes,
   });
   const config: McpOAuthConfig = {

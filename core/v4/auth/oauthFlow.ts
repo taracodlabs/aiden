@@ -38,6 +38,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
+import { readTextBounded } from '../../../moat/secureFetch';
 
 // ── Public types ──────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ export interface OAuthFlowResult {
 /** Tight subset of the global fetch API — easy to stub in tests. */
 export type FetchImpl = (
   input: string,
-  init:  { method: string; headers: Record<string, string>; body?: string },
+  init:  { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal; redirect?: 'manual' },
 ) => Promise<{ status: number; text: () => Promise<string> }>;
 
 /** UI surface the flow uses to talk to the user. */
@@ -448,8 +449,10 @@ async function postWithTimeout(
   const ac    = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const resp = await fetchImpl(url, { method: 'POST', headers, body });
-    return { status: resp.status, text: await resp.text() };
+    const resp = await fetchImpl(url, { method: 'POST', headers, body, signal: ac.signal, redirect: 'manual' });
+    const text = resp instanceof Response ? await readTextBounded(resp, 256 * 1024) : await resp.text();
+    if (Buffer.byteLength(text) > 256 * 1024) throw new Error('Token response exceeds byte limit');
+    return { status: resp.status, text };
   } finally {
     clearTimeout(timer);
   }

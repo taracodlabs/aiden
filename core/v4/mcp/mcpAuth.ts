@@ -29,6 +29,7 @@ import {
   type McpOAuthConfig,
 } from './oauthDiscovery';
 import { persistMcpTokens } from './oauthLoginFlow';
+import { secureFetch } from '../../../moat/secureFetch';
 
 export type McpAuthResolution =
   | { state: 'none' }
@@ -72,7 +73,7 @@ export function createMcpAuthProvider(
 
   async function doRefresh(server: string, config: McpOAuthConfig, refreshToken: string): Promise<string | null> {
     try {
-      const result = await refreshTokens(refreshToken, refreshConfigFor(config), opts.fetchImpl);
+      const result = await refreshTokens(refreshToken, refreshConfigFor(config), opts.fetchImpl ?? (secureFetch as unknown as FetchImpl));
       await persistMcpTokens(paths, server, result, config); // absolute expiry + exact server/resource/scope binding
       return result.accessToken;
     } catch {

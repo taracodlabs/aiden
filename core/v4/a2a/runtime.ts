@@ -483,6 +483,7 @@ export function createA2aRuntime(options: A2aRuntimeOptions) {
       entryPoint: 'a2a',
       source: 'a2a.read_only',
       sessionId: input.sessionId,
+      workspaceId: engine.getJob(input.parentJobId)?.workspaceId,
       instanceId: input.instanceId,
       idempotencyNamespace: `a2a:${input.externalIdentityId}`,
       idempotencyKey: input.idempotencyKey,

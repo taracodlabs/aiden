@@ -122,4 +122,76 @@ describe('SSRFProtection', () => {
     const r = await ssrf.check('http://8.8.8.8/');
     expect(r.blocked).toBe(false);
   });
+
+  it('blocks mapped IPv4 private and metadata destinations in every accepted spelling', async () => {
+    const ssrf = new SSRFProtection();
+    for (const input of [
+      'http://[::ffff:169.254.169.254]/latest/meta-data/',
+      'http://[::ffff:a9fe:a9fe]/latest/meta-data/',
+      'http://[0:0:0:0:0:ffff:7f00:1]/',
+      'http://[::ffff:127.0.0.1]/',
+      'http://[::ffff:10.0.0.5]/',
+      'http://0.0.0.0/',
+      'http://[::]/',
+    ]) {
+      expect((await ssrf.check(input)).blocked, input).toBe(true);
+    }
+    expect((await ssrf.check('http://[::ffff:8.8.8.8]/')).blocked).toBe(false);
+  });
+
+  it('rejects mapped private DNS, empty answers, invalid records and URL userinfo', async () => {
+    const mapped = new SSRFProtection(fakeLookup({ 'mapped.example': ['::ffff:7f00:1'] }));
+    expect((await mapped.check('https://mapped.example/')).blocked).toBe(true);
+    const empty = new SSRFProtection(fakeLookup({ 'empty.example': [] }));
+    expect((await empty.check('https://empty.example/')).blocked).toBe(true);
+    const malformed = new SSRFProtection(async () => [{ address: 'not-an-ip', family: 4 }]);
+    expect((await malformed.check('https://bad.example/')).blocked).toBe(true);
+    expect((await mapped.check('https://user:pass@8.8.8.8/')).blocked).toBe(true);
+  });
+
+  it('uses the request parser for alternate numeric IPv4 and normalized hostnames', async () => {
+    const ssrf = new SSRFProtection(fakeLookup({ 'public.example': ['8.8.8.8'] }));
+    for (const input of [
+      'http://2130706433/', 'http://0x7f000001/', 'http://0177.0.0.1/',
+      'http://127.1/', 'http://0x0/', 'http://METADATA.GOOGLE.INTERNAL./',
+    ]) expect((await ssrf.check(input)).blocked, input).toBe(true);
+    expect((await ssrf.check('https://PUBLIC.EXAMPLE./')).blocked).toBe(false);
+    expect((await ssrf.check('https://[2606:4700:4700::1111]/')).blocked).toBe(false);
+  });
+
+  it('rejects translation, multicast, unspecified, invalid family and mixed DNS sets', async () => {
+    const ssrf = new SSRFProtection();
+    for (const input of [
+      'http://[64:ff9b::a9fe:a9fe]/',
+      'http://[64:ff9b:1::1]/',
+      'http://[2002:a9fe:a9fe::]/',
+      'http://[ff02::1]/',
+      'http://224.0.0.1/',
+    ]) expect((await ssrf.check(input)).blocked, input).toBe(true);
+    const wrongFamily = new SSRFProtection(async () => [{ address: '127.0.0.1', family: 6 }]);
+    expect((await wrongFamily.check('https://wrong.example/')).blocked).toBe(true);
+    const mixed = new SSRFProtection(fakeLookup({ 'mixed.example': ['8.8.8.8', '::ffff:127.0.0.1'] }));
+    expect((await mixed.check('https://mixed.example/')).blocked).toBe(true);
+  });
+
+  it('rejects non-global destinations but preserves public service exceptions', async () => {
+    const ssrf = new SSRFProtection();
+    for (const host of ['192.0.2.1', '198.51.100.1', '203.0.113.1', '192.88.99.2',
+      '[100::1]', '[100:0:0:1::1]', '[2001:2::1]', '[2001:db8::1]', '[3fff::1]',
+      '[5f00::1]', '[fec0::1]', '[::127.0.0.1]', '[2001:20::1]']) {
+      expect((await ssrf.check(`http://${host}/`)).blocked, host).toBe(true);
+    }
+    for (const host of ['192.0.0.9', '192.0.0.10', '192.31.196.1', '[2001:1::1]',
+      '[2001:3::1]', '[2001:4:112::1]', '[2620:4f:8000::1]']) {
+      expect((await ssrf.check(`https://${host}/`)).blocked, host).toBe(false);
+    }
+  });
+
+  it('fails closed on resolver rejection and malformed URL separators', async () => {
+    const ssrf = new SSRFProtection(async () => { throw new Error('synthetic DNS failure'); });
+    expect((await ssrf.check('https://missing.example/')).category).toBe('invalid');
+    for (const url of ['http://[fe80::1%25eth0]/', 'http://127.0.0.1%2f.example/', 'http://[::gggg]/']) {
+      expect((await ssrf.check(url)).blocked).toBe(true);
+    }
+  });
 });
